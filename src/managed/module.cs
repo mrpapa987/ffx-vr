@@ -26,7 +26,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint _game_device;
     private nint _game_context;
 
-    private delegate* unmanaged[Cdecl]<nint, int> _fn_init;
+    private delegate* unmanaged[Cdecl]<nint, nint, int> _fn_init;
     private delegate* unmanaged[Cdecl]<int>       _fn_buffer_count;
     private delegate* unmanaged[Cdecl]<int>       _fn_dump_count;
     private delegate* unmanaged[Cdecl]<int>       _fn_hook_calls;
@@ -59,7 +59,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         try {
             _native_handle = NativeLibrary.Load(path);
 
-            _fn_init         = (delegate* unmanaged[Cdecl]<nint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
+            _fn_init         = (delegate* unmanaged[Cdecl]<nint, nint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
             _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
             _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
             _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
@@ -104,7 +104,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             return;
         }
 
-        int rc = _fn_init(_game_context);
+        int rc = _fn_init(_game_device, _game_context);
 
         _native_status = rc switch {
              0 => "hooked",

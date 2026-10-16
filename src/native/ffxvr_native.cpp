@@ -48,12 +48,12 @@ enum : int {
 
 enum CounterId {
     C_VSSETCB = 0, C_DRAWINDEXED, C_DRAW, C_MAP, C_UNMAP, C_UPDATESUB,
-    C_CB_CAPTURED, C_COUNT
+    C_CREATEBUF, C_CB_CAPTURED, C_COUNT
 };
 
 const char* const kCounterName[C_COUNT] = {
     "VSSetConstantBuffers", "DrawIndexed", "Draw", "Map", "Unmap",
-    "UpdateSubresource", "constant buffer captures"
+    "UpdateSubresource", "CreateBuffer (const, w/ data)", "constant buffer captures"
 };
 
 volatile LONG g_counters[C_COUNT] = {};
@@ -68,6 +68,7 @@ using PFN_Draw                 = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*,
 using PFN_Map                  = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 using PFN_Unmap                = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 using PFN_UpdateSubresource    = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+using PFN_CreateBuffer         = HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_BUFFER_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
 
 PFN_VSSetConstantBuffers g_orig_vssetcb        = nullptr;
 PFN_DrawIndexed          g_orig_drawindexed    = nullptr;
@@ -75,6 +76,7 @@ PFN_Draw                 g_orig_draw           = nullptr;
 PFN_Map                  g_orig_map            = nullptr;
 PFN_Unmap                g_orig_unmap          = nullptr;
 PFN_UpdateSubresource    g_orig_updatesub      = nullptr;
+PFN_CreateBuffer         g_orig_createbuffer   = nullptr;
 
 // ---------------------------------------------------------------- state
 
@@ -114,6 +116,11 @@ bool               g_arm_next      = false;   // F9 pressed; start at the next f
 uint32_t           g_seq           = 0;
 uint32_t           g_frames        = 0;
 uint32_t           g_frame_writes  = 0;       // writes seen in the frame just finished
+
+// Which buffers actually get bound to the vertex shader during a captured
+// frame. The game binds far more often than it writes, so this census shows
+// whether the bound buffers are ones we ever saw filled.
+std::map<ID3D11Buffer*, int> g_bound;
 
 bool    g_installed   = false;
 void*   g_patched_context = nullptr;
@@ -234,6 +241,14 @@ void dump_capture() {
 
     fprintf(f, "FFX VR constant buffer capture #%d\n", g_dump_index - 1);
     fprintf(f, "writes recorded: %zu (limit %zu) - one full frame\n\n", g_capture.size(), kCaptureLimit);
+    fprintf(f, "Buffers BOUND to the vertex shader during this frame: %zu\n", g_bound.size());
+    for (const auto& [buf, n] : g_bound) {
+        auto it = g_buffers.find(buf);
+        fprintf(f, "   %p  bound %4d x   %s\n", static_cast<void*>(buf), n,
+                it == g_buffers.end() ? "NEVER SEEN FILLED"
+                                      : "contents known");
+    }
+    fprintf(f, "\n");
     fprintf(f, "Every constant buffer write, in order. Blocks flagged PROJ look like\n");
     fprintf(f, "a projection matrix; AFFINE like a view or world matrix. Compare two\n");
     fprintf(f, "captures from different camera positions.\n");
@@ -283,7 +298,30 @@ void tick() {
 
 void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) {
     bump(C_VSSETCB);
+
+    if (g_capturing && b != nullptr) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (UINT i = 0; i < n && i < 8; ++i) {
+            if (b[i] != nullptr) g_bound[b[i]] += 1;
+        }
+    }
+
     g_orig_vssetcb(c, s, n, b);
+}
+
+// The game creates constant buffers already populated, which is why so little
+// shows up through Map/Unmap. This catches the contents at creation time.
+HRESULT STDMETHODCALLTYPE hk_CreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc,
+                                          const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
+    const HRESULT hr = g_orig_createbuffer(dev, desc, init, out);
+
+    if (SUCCEEDED(hr) && desc != nullptr && init != nullptr && init->pSysMem != nullptr
+        && (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER) && out != nullptr && *out != nullptr) {
+        bump(C_CREATEBUF);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        record_buffer(*out, desc->ByteWidth, init->pSysMem, "CreateBuffer");
+    }
+    return hr;
 }
 
 void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT i, INT v) {
@@ -358,7 +396,7 @@ bool patch(void** vtable, int index, void* replacement, void** out_original) {
 
 // ---------------------------------------------------------------------------
 
-extern "C" __declspec(dllexport) int ffxvr_init(void* game_context) {
+extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_context) {
     if (g_installed) return 0;
     if (game_context == nullptr) return -1;
 
@@ -378,6 +416,16 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_context) {
     ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map));
     ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap));
     ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub));
+
+    // Patch CreateBuffer on the device: ID3D11Device vtable index 3.
+    if (game_device != nullptr) {
+        ID3D11Device* dev = reinterpret_cast<ID3D11Device*>(game_device);
+        void** dvt = *reinterpret_cast<void***>(dev);
+        if (dvt != nullptr && !IsBadReadPtr(dvt, sizeof(void*) * 8)) {
+            patch(dvt, 3, reinterpret_cast<void*>(&hk_CreateBuffer),
+                  reinterpret_cast<void**>(&g_orig_createbuffer));
+        }
+    }
 
     if (!ok) return -2;
 
@@ -404,6 +452,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         else if (g_arm_next) {
             g_arm_next  = false;
             g_capture.clear();
+            g_bound.clear();
             g_seq       = 0;
             g_capturing = true;
         }
