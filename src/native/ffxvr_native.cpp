@@ -476,14 +476,39 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
 }
 
 /// For buffers with no view of their own: replace any block equal to this
-/// frame's known proj*view with the override's. Returns the number replaced.
+/// frame's known proj*view with the override's -- and any block equal to
+/// proj*view*X, where X is some other block in the same buffer (an object's
+/// world matrix), with the override's proj*view*X. Returns the number replaced.
 static int replace_known_products(uint8_t* p, UINT size) {
     if (!g_have_PV) return 0;
     int n = 0;
+    const UINT nblocks = size / 16;
+
+    // Pass 1: bare proj*view.
     for (UINT off = 0; off + 64 <= size; off += 16) {
         if (same4(reinterpret_cast<const float*>(p + off), g_last_PV)) {
             memcpy(p + off, g_last_PVn, 64);
             n++;
+        }
+    }
+
+    // Pass 2: proj*view*X for each affine-looking block X in the buffer.
+    // Buffers of this kind are small, so the quadratic search is cheap.
+    if (nblocks > 64) return n;
+    for (UINT xo = 0; xo + 64 <= size; xo += 16) {
+        const float* X = reinterpret_cast<const float*>(p + xo);
+        if (X[12] != 0.f || X[13] != 0.f || X[14] != 0.f || fabsf(X[15] - 1.f) > 1e-4f) continue;   // not affine
+        if (same4(X, g_last_PV)) continue;
+        float PVX[16], PVnX[16];
+        mul4(g_last_PV, X, PVX);
+        bool used = false;
+        for (UINT off = 0; off + 64 <= size; off += 16) {
+            if (off == xo) continue;
+            if (same4(reinterpret_cast<const float*>(p + off), PVX)) {
+                if (!used) { mul4(g_last_PVn, X, PVnX); used = true; }
+                memcpy(p + off, PVnX, 64);
+                n++;
+            }
         }
     }
     return n;
