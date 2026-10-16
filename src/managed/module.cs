@@ -28,6 +28,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private delegate* unmanaged[Cdecl]<int> _fn_buffer_count;
     private delegate* unmanaged[Cdecl]<int> _fn_dump_count;
+    private delegate* unmanaged[Cdecl]<int> _fn_hook_calls;
 
     public FFXVRModule() { }
 
@@ -56,6 +57,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             var fn_init      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
             _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
             _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
+            _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
 
             int rc = fn_init();
 
@@ -88,12 +90,23 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Text($"Native helper: {_native_status}");
 
             if (_fn_buffer_count != null) {
+                int calls = _fn_hook_calls != null ? _fn_hook_calls() : -1;
+
+                ImGui.Text($"Hooked calls seen:     {calls}");
                 ImGui.Text($"Constant buffers seen: {_fn_buffer_count()}");
                 ImGui.Text($"Dumps written:         {_fn_dump_count()}");
                 ImGui.Separator();
-                ImGui.TextWrapped("Press F9 to dump every constant buffer. Take one "
-                                + "dump standing still, move somewhere else, take "
-                                + "another, then diff them to find the camera.");
+
+                if (calls == 0) {
+                    ImGui.TextWrapped("No hooked call has fired. The vtable patch did not "
+                                    + "reach the game's device context, so the hooking "
+                                    + "approach needs changing.");
+                }
+                else {
+                    ImGui.TextWrapped("Press F9 to dump every constant buffer. Take one "
+                                    + "dump standing still, move somewhere else, take "
+                                    + "another, then diff them to find the camera.");
+                }
             }
         }
 

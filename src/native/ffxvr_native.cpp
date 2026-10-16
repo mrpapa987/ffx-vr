@@ -2,18 +2,23 @@
 //
 // FFX VR - native helper.
 //
-// Stage one is pure diagnostics. The game uploads its view and projection
-// matrices to the GPU through D3D11 constant buffers; if we can identify which
-// buffer and which 64-byte slot holds them, we have the camera without needing
-// any of PhyreEngine's internals.
+// Stage one is diagnostics. The game uploads its view and projection matrices to
+// the GPU through D3D11 constant buffers; identifying which buffer and which
+// 64-byte slot holds them gives us the camera without needing any of
+// PhyreEngine's internals.
 //
-// Method: patch ID3D11DeviceContext's vtable entries for Map and Unmap, keep the
-// most recent contents of every constant buffer, and write them all to a file
-// when F9 is pressed. Take one dump standing still, move, take another, and diff:
-// the matrix that changed in a camera-like way is the one we want.
+// We patch several ID3D11DeviceContext vtable entries. The vtable normally lives
+// in d3d11.dll and is shared by every context, so patching it should cover the
+// one the game already created.
 //
-// Vtable patching rather than a hooking library keeps this dependency-free, and
-// the vtable lives in d3d11.dll so patching it covers every context instance.
+// "Should" is doing work in that sentence, so this build is instrumented: it
+// counts calls to every hooked entry point and writes a heartbeat log beside the
+// DLL every few seconds. If the counters stay at zero, the vtable patch did not
+// reach the game's context and the approach needs changing. If Draw fires but
+// Map does not, the game simply uses a different upload path - and we hook
+// UpdateSubresource as well for exactly that case.
+//
+// F9 writes a full dump of every constant buffer seen.
 
 #include <windows.h>
 #include <d3d11.h>
@@ -29,38 +34,67 @@
 namespace {
 
 // ID3D11DeviceContext vtable indices.
-//   0-2  IUnknown
-//   3-6  ID3D11DeviceChild
-//   7+   ID3D11DeviceContext
-constexpr int VT_MAP   = 14;
-constexpr int VT_UNMAP = 15;
+//   0-2 IUnknown, 3-6 ID3D11DeviceChild, 7+ ID3D11DeviceContext
+enum : int {
+    VT_VSSETCONSTANTBUFFERS = 7,
+    VT_DRAWINDEXED          = 12,
+    VT_DRAW                 = 13,
+    VT_MAP                  = 14,
+    VT_UNMAP                = 15,
+    VT_UPDATESUBRESOURCE    = 48,
+};
 
-using PFN_Map = HRESULT (STDMETHODCALLTYPE*)(
-    ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT,
-    D3D11_MAPPED_SUBRESOURCE*);
+enum CounterId {
+    C_VSSETCB = 0, C_DRAWINDEXED, C_DRAW, C_MAP, C_UNMAP, C_UPDATESUB,
+    C_CB_CAPTURED, C_COUNT
+};
 
-using PFN_Unmap = void (STDMETHODCALLTYPE*)(
-    ID3D11DeviceContext*, ID3D11Resource*, UINT);
+const char* const kCounterName[C_COUNT] = {
+    "VSSetConstantBuffers", "DrawIndexed", "Draw", "Map", "Unmap",
+    "UpdateSubresource", "constant buffer captures"
+};
 
-PFN_Map   g_orig_map   = nullptr;
-PFN_Unmap g_orig_unmap = nullptr;
+volatile LONG g_counters[C_COUNT] = {};
+
+inline void bump(CounterId id) { InterlockedIncrement(&g_counters[id]); }
+
+// ---------------------------------------------------------------- originals
+
+using PFN_VSSetConstantBuffers = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
+using PFN_DrawIndexed          = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
+using PFN_Draw                 = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
+using PFN_Map                  = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
+using PFN_Unmap                = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
+using PFN_UpdateSubresource    = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
+
+PFN_VSSetConstantBuffers g_orig_vssetcb        = nullptr;
+PFN_DrawIndexed          g_orig_drawindexed    = nullptr;
+PFN_Draw                 g_orig_draw           = nullptr;
+PFN_Map                  g_orig_map            = nullptr;
+PFN_Unmap                g_orig_unmap          = nullptr;
+PFN_UpdateSubresource    g_orig_updatesub      = nullptr;
+
+// ---------------------------------------------------------------- state
 
 struct CbRecord {
     UINT                 size    = 0;
     uint64_t             updates = 0;
+    const char*          via     = "?";
     std::vector<uint8_t> data;
 };
 
-std::mutex                              g_mutex;
-std::map<ID3D11Buffer*, CbRecord>       g_buffers;      // every constant buffer seen
-std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_in_flight;  // pData -> (buffer, size)
+std::mutex                                      g_mutex;
+std::map<ID3D11Buffer*, CbRecord>               g_buffers;
+std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_in_flight;
 
-bool     g_installed  = false;
-int      g_dump_index = 0;
-bool     g_f9_was_down = false;
-wchar_t  g_dll_dir[MAX_PATH] = {};
+bool    g_installed   = false;
+int     g_dump_index  = 0;
+bool    g_f9_was_down = false;
+DWORD   g_last_beat   = 0;
+wchar_t g_dir[MAX_PATH] = {};
 
-// Returns the buffer and its byte size if the resource is a constant buffer.
+// ---------------------------------------------------------------- helpers
+
 bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_size) {
     if (res == nullptr) return false;
 
@@ -74,7 +108,7 @@ bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_s
 
     D3D11_BUFFER_DESC desc = {};
     buf->GetDesc(&desc);
-    buf->Release();   // QueryInterface addref'd; we only use the pointer as an identity key
+    buf->Release();   // identity key only
 
     if ((desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) == 0) return false;
 
@@ -83,11 +117,56 @@ bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_s
     return true;
 }
 
-// Writes every recorded constant buffer to a numbered file beside this DLL.
-// run-ffx.ps1 collects *.txt from the game folder automatically.
+void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
+    if (size == 0 || size > 65536 || src == nullptr) return;
+
+    CbRecord& rec = g_buffers[buf];
+    rec.size    = size;
+    rec.via     = via;
+    rec.updates += 1;
+    rec.data.resize(size);
+    memcpy(rec.data.data(), src, size);
+    bump(C_CB_CAPTURED);
+}
+
+// Heartbeat: proves whether the hooks fire at all, without needing a keypress.
+void heartbeat(bool force) {
+    const DWORD now = GetTickCount();
+    if (!force && (now - g_last_beat) < 5000) return;
+    g_last_beat = now;
+
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"w") != 0 || f == nullptr) return;
+
+    fprintf(f, "FFX VR native helper - hook activity\n");
+    fprintf(f, "hooks installed: %s\n\n", g_installed ? "yes" : "no");
+
+    for (int i = 0; i < C_COUNT; ++i) {
+        fprintf(f, "  %-26s %ld\n", kCounterName[i], g_counters[i]);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        fprintf(f, "\n  distinct constant buffers:  %zu\n", g_buffers.size());
+        for (const auto& [buf, rec] : g_buffers) {
+            fprintf(f, "      %p  %5u bytes  %8llu updates  via %s\n",
+                    static_cast<void*>(buf), rec.size,
+                    static_cast<unsigned long long>(rec.updates), rec.via);
+        }
+    }
+
+    fprintf(f, "\n  dumps written: %d\n", g_dump_index);
+    fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
+    fprintf(f, "game's device context and the hooking approach must change.\n");
+    fclose(f);
+}
+
 void dump_all() {
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_cbdump_%02d.txt", g_dll_dir, g_dump_index++);
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_cbdump_%02d.txt", g_dir, g_dump_index++);
 
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"w") != 0 || f == nullptr) return;
@@ -95,99 +174,109 @@ void dump_all() {
     std::lock_guard<std::mutex> lock(g_mutex);
 
     fprintf(f, "FFX VR constant buffer dump #%d\n", g_dump_index - 1);
-    fprintf(f, "distinct constant buffers seen: %zu\n", g_buffers.size());
-    fprintf(f, "\nEach buffer is printed as 4-float rows. A 4x4 matrix occupies four\n");
-    fprintf(f, "consecutive rows (64 bytes). Diff two dumps taken from different\n");
-    fprintf(f, "camera positions to find the view matrix.\n");
+    fprintf(f, "distinct constant buffers: %zu\n\n", g_buffers.size());
+    fprintf(f, "Printed as 4-float rows; a 4x4 matrix is four consecutive rows.\n");
+    fprintf(f, "Diff two dumps from different camera positions to find the view matrix.\n");
 
     for (const auto& [buf, rec] : g_buffers) {
         fprintf(f, "\n================================================================\n");
-        fprintf(f, "buffer %p   size %u bytes (%u floats)   updates %llu\n",
-                static_cast<void*>(buf), rec.size, rec.size / 4,
-                static_cast<unsigned long long>(rec.updates));
+        fprintf(f, "buffer %p   %u bytes   %llu updates   via %s\n",
+                static_cast<void*>(buf), rec.size,
+                static_cast<unsigned long long>(rec.updates), rec.via);
         fprintf(f, "----------------------------------------------------------------\n");
 
-        const size_t floats = rec.data.size() / sizeof(float);
+        const size_t n  = rec.data.size() / sizeof(float);
         const float* fp = reinterpret_cast<const float*>(rec.data.data());
 
-        for (size_t i = 0; i < floats; i += 4) {
-            fprintf(f, "  [%04zu] ", i * 4);   // byte offset
-            for (size_t j = 0; j < 4 && (i + j) < floats; ++j) {
-                fprintf(f, "%14.6f ", fp[i + j]);
-            }
-            if ((i % 16) == 12) fprintf(f, "   <- end of a 64-byte block");
+        for (size_t i = 0; i < n; i += 4) {
+            fprintf(f, "  [%04zu] ", i * 4);
+            for (size_t j = 0; j < 4 && (i + j) < n; ++j) fprintf(f, "%14.6f ", fp[i + j]);
+            if ((i % 16) == 12) fprintf(f, "   <- 64-byte block end");
             fprintf(f, "\n");
         }
     }
-
     fclose(f);
 }
 
-void poll_hotkey() {
+void tick() {
     const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
     if (down && !g_f9_was_down) dump_all();
     g_f9_was_down = down;
+    heartbeat(false);
 }
 
-HRESULT STDMETHODCALLTYPE hk_Map(
-    ID3D11DeviceContext*      ctx,
-    ID3D11Resource*           res,
-    UINT                      subresource,
-    D3D11_MAP                 map_type,
-    UINT                      flags,
-    D3D11_MAPPED_SUBRESOURCE* mapped) {
+// ---------------------------------------------------------------- hooks
 
-    const HRESULT hr = g_orig_map(ctx, res, subresource, map_type, flags, mapped);
-    if (FAILED(hr) || mapped == nullptr || mapped->pData == nullptr) return hr;
+void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) {
+    bump(C_VSSETCB);
+    g_orig_vssetcb(c, s, n, b);
+}
 
-    ID3D11Buffer* buf  = nullptr;
-    UINT          size = 0;
-    if (as_constant_buffer(res, &buf, &size)) {
+void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT i, INT v) {
+    bump(C_DRAWINDEXED);
+    tick();
+    g_orig_drawindexed(c, n, i, v);
+}
+
+void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* c, UINT n, UINT s) {
+    bump(C_DRAW);
+    tick();
+    g_orig_draw(c, n, s);
+}
+
+HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT fl, D3D11_MAPPED_SUBRESOURCE* m) {
+    bump(C_MAP);
+    const HRESULT hr = g_orig_map(c, r, sub, t, fl, m);
+    if (FAILED(hr) || m == nullptr || m->pData == nullptr) return hr;
+
+    ID3D11Buffer* buf = nullptr; UINT size = 0;
+    if (as_constant_buffer(r, &buf, &size)) {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_in_flight[mapped->pData] = { buf, size };
+        g_in_flight[m->pData] = { buf, size };
     }
-
     return hr;
 }
 
-void STDMETHODCALLTYPE hk_Unmap(
-    ID3D11DeviceContext* ctx,
-    ID3D11Resource*      res,
-    UINT                 subresource) {
+void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub) {
+    bump(C_UNMAP);
 
-    // Snapshot the data the game just wrote, before the pointer goes away.
-    ID3D11Buffer* buf  = nullptr;
-    UINT          size = 0;
-    if (as_constant_buffer(res, &buf, &size)) {
+    ID3D11Buffer* buf = nullptr; UINT size = 0;
+    if (as_constant_buffer(r, &buf, &size)) {
         std::lock_guard<std::mutex> lock(g_mutex);
-
         for (auto it = g_in_flight.begin(); it != g_in_flight.end(); ++it) {
             if (it->second.first != buf) continue;
-
-            CbRecord& rec = g_buffers[buf];
-            rec.size    = size;
-            rec.updates += 1;
-            rec.data.resize(size);
-            memcpy(rec.data.data(), it->first, size);
-
+            record_buffer(buf, size, it->first, "Map/Unmap");
             g_in_flight.erase(it);
             break;
         }
     }
 
-    g_orig_unmap(ctx, res, subresource);
-    poll_hotkey();
+    g_orig_unmap(c, r, sub);
+    tick();
 }
 
-bool patch_vtable_entry(void** vtable, int index, void* replacement, void** out_original) {
-    DWORD old_protect = 0;
-    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old_protect))
-        return false;
+void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub,
+                                            const D3D11_BOX* box, const void* src, UINT rp, UINT dp) {
+    bump(C_UPDATESUB);
 
-    *out_original  = vtable[index];
-    vtable[index]  = replacement;
+    ID3D11Buffer* buf = nullptr; UINT size = 0;
+    if (box == nullptr && as_constant_buffer(r, &buf, &size)) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        record_buffer(buf, size, src, "UpdateSubresource");
+    }
 
-    VirtualProtect(&vtable[index], sizeof(void*), old_protect, &old_protect);
+    g_orig_updatesub(c, r, sub, box, src, rp, dp);
+    tick();
+}
+
+// ---------------------------------------------------------------- install
+
+bool patch(void** vtable, int index, void* replacement, void** out_original) {
+    DWORD old = 0;
+    if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
+    *out_original = vtable[index];
+    vtable[index] = replacement;
+    VirtualProtect(&vtable[index], sizeof(void*), old, &old);
     return true;
 }
 
@@ -198,33 +287,36 @@ bool patch_vtable_entry(void** vtable, int index, void* replacement, void** out_
 extern "C" __declspec(dllexport) int ffxvr_init() {
     if (g_installed) return 0;
 
-    // A throwaway device is enough: the vtable lives in d3d11.dll and is shared
-    // by every context, including the one the game already created.
     ID3D11Device*        device  = nullptr;
     ID3D11DeviceContext* context = nullptr;
     D3D_FEATURE_LEVEL    level   = D3D_FEATURE_LEVEL_11_0;
 
     const HRESULT hr = D3D11CreateDevice(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &device, &level, &context);
+        nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
 
     if (FAILED(hr) || context == nullptr) {
         if (device) device->Release();
         return -1;
     }
 
-    void** vtable = *reinterpret_cast<void***>(context);
+    void** vt = *reinterpret_cast<void***>(context);
 
-    const bool ok_map   = patch_vtable_entry(vtable, VT_MAP,   reinterpret_cast<void*>(&hk_Map),   reinterpret_cast<void**>(&g_orig_map));
-    const bool ok_unmap = patch_vtable_entry(vtable, VT_UNMAP, reinterpret_cast<void*>(&hk_Unmap), reinterpret_cast<void**>(&g_orig_unmap));
+    bool ok = true;
+    ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb));
+    ok &= patch(vt, VT_DRAWINDEXED,          reinterpret_cast<void*>(&hk_DrawIndexed),          reinterpret_cast<void**>(&g_orig_drawindexed));
+    ok &= patch(vt, VT_DRAW,                 reinterpret_cast<void*>(&hk_Draw),                 reinterpret_cast<void**>(&g_orig_draw));
+    ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map));
+    ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap));
+    ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub));
 
     context->Release();
     device->Release();
 
-    if (!ok_map || !ok_unmap) return -2;
+    if (!ok) return -2;
 
     g_installed = true;
+    heartbeat(true);   // write immediately, so the file exists even if nothing ever fires
     return 0;
 }
 
@@ -233,17 +325,20 @@ extern "C" __declspec(dllexport) int ffxvr_buffer_count() {
     return static_cast<int>(g_buffers.size());
 }
 
-extern "C" __declspec(dllexport) int ffxvr_dump_count() {
-    return g_dump_index;
+extern "C" __declspec(dllexport) int ffxvr_dump_count() { return g_dump_index; }
+
+// Total hooked calls observed, so the overlay can show whether anything fires.
+extern "C" __declspec(dllexport) int ffxvr_hook_calls() {
+    long total = 0;
+    for (int i = 0; i < C_CB_CAPTURED; ++i) total += g_counters[i];
+    return static_cast<int>(total);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
-
-        // Remember our own directory so dumps land beside the DLL.
-        GetModuleFileNameW(module, g_dll_dir, MAX_PATH);
-        wchar_t* slash = wcsrchr(g_dll_dir, L'\\');
+        GetModuleFileNameW(module, g_dir, MAX_PATH);
+        wchar_t* slash = wcsrchr(g_dir, L'\\');
         if (slash) *slash = L'\0';
     }
     return TRUE;
