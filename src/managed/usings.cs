@@ -2,6 +2,7 @@
 
 global using System;
 global using System.IO;
+global using System.Runtime.InteropServices;
 
 global using Fahrenheit;
 global using Fahrenheit.FFX;

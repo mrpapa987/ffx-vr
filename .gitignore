@@ -35,3 +35,7 @@ _staging/
 
 # External sources cloned for building
 _ext/
+
+# Native build output
+src/native/bin/
+src/native/obj/
