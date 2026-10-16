@@ -374,7 +374,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
                  + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
                  + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
-                 + ((mask & 64) != 0 ? " IVW" : ""));
+                 + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
         ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
     }
 

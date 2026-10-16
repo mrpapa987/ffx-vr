@@ -405,80 +405,125 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     In[12] = In[13] = In[14] = 0.f; In[15] = 1.f;
 }
 
+// Last known camera products from a fully-laid-out buffer this frame, so
+// buffers that carry only the product (e.g. the 336-byte ones) can be patched
+// by recognising it.
+float g_last_PV[16]  = {};
+float g_last_PVn[16] = {};
+bool  g_have_PV      = false;
+
 /// Rewrites every camera-derived block in a buffer image. `orig` is the
-/// untouched original (to read the world matrix and to validate each derived
-/// block before replacing it), `p` the copy being patched, `v` the 3x4 view
-/// to base the override on. Returns a bitmask of what was patched.
-static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, const float v[12]) {
+/// untouched original, `p` the copy being patched, `base` the byte offset of
+/// the view matrix (64 in the common layout, 48 in the shifted one), `v` the
+/// 3x4 view to base the override on. Each derived block is replaced only if
+/// the original equals the product it is expected to be. Returns a bitmask.
+static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT base, const float v[12]) {
     float Vn[16], In[16], Pn[3];
     build_override_view(v, Vn, In, Pn);
 
-    const float* V  = reinterpret_cast<const float*>(orig + CAM_VIEW_OFFSET);
-    const float* Pj = reinterpret_cast<const float*>(orig + CAM_PROJN_OFFSET);
+    // Layout relative to the view block.
+    const UINT o_pos = base - 16, o_view = base, o_projn = base + 64, o_vp = base + 128,
+               o_inv = base + 256, o_w = base + 416, o_vw = base + 480, o_wi = base + 544,
+               o_pvw = base + 608, o_ivw = base + 672;
+
+    const float* V  = reinterpret_cast<const float*>(orig + o_view);
+    const float* Pj = reinterpret_cast<const float*>(orig + o_projn);
     unsigned mask = 0;
 
-    memcpy(p + CAM_VIEW_OFFSET, Vn, 64);  mask |= 1;
-    memcpy(p + CAM_INV_OFFSET,  In, 64);  mask |= 2;
-    memcpy(p + CAM_POS_OFFSET,  Pn, 12);  mask |= 4;
+    memcpy(p + o_view, Vn, 64);  mask |= 1;
+    memcpy(p + o_pos,  Pn, 12);  mask |= 4;
+    if (size >= o_inv + 64) { memcpy(p + o_inv, In, 64);  mask |= 2; }
 
     float PV[16], PVn[16];
     mul4(Pj, V, PV);
-    if (size >= CAM_VP_OFFSET + 64 && same4(reinterpret_cast<const float*>(orig + CAM_VP_OFFSET), PV)) {
-        mul4(Pj, Vn, PVn);
-        memcpy(p + CAM_VP_OFFSET, PVn, 64);  mask |= 8;
-    }
-    else {
-        mul4(Pj, Vn, PVn);   // still needed below if the world blocks validate
+    mul4(Pj, Vn, PVn);
+    if (size >= o_vp + 64 && same4(reinterpret_cast<const float*>(orig + o_vp), PV)) {
+        memcpy(p + o_vp, PVn, 64);  mask |= 8;
+        memcpy(g_last_PV,  PV,  sizeof(PV));
+        memcpy(g_last_PVn, PVn, sizeof(PVn));
+        g_have_PV = true;
     }
 
-    if (size >= CAM_IVW_OFFSET + 64) {
-        const float* W  = reinterpret_cast<const float*>(orig + CAM_W_OFFSET);
-        const float* Wi = reinterpret_cast<const float*>(orig + CAM_WI_OFFSET);
-        const float* I  = reinterpret_cast<const float*>(orig + CAM_INV_OFFSET);
+    if (size >= o_ivw + 64) {
+        const float* W  = reinterpret_cast<const float*>(orig + o_w);
+        const float* Wi = reinterpret_cast<const float*>(orig + o_wi);
+        const float* I  = reinterpret_cast<const float*>(orig + o_inv);
         float VW[16], PVW[16], IVW[16], tmp[16];
 
         mul4(V, W, VW);
-        if (same4(reinterpret_cast<const float*>(orig + CAM_VW_OFFSET), VW)) {
-            mul4(Vn, W, tmp); memcpy(p + CAM_VW_OFFSET, tmp, 64);  mask |= 16;
+        if (same4(reinterpret_cast<const float*>(orig + o_vw), VW)) {
+            mul4(Vn, W, tmp); memcpy(p + o_vw, tmp, 64);  mask |= 16;
         }
         mul4(PV, W, PVW);
-        if (same4(reinterpret_cast<const float*>(orig + CAM_PVW_OFFSET), PVW)) {
-            mul4(PVn, W, tmp); memcpy(p + CAM_PVW_OFFSET, tmp, 64);  mask |= 32;
+        if (same4(reinterpret_cast<const float*>(orig + o_pvw), PVW)) {
+            mul4(PVn, W, tmp); memcpy(p + o_pvw, tmp, 64);  mask |= 32;
         }
         mul4(Wi, I, IVW);
-        if (same4(reinterpret_cast<const float*>(orig + CAM_IVW_OFFSET), IVW)) {
-            mul4(Wi, In, tmp); memcpy(p + CAM_IVW_OFFSET, tmp, 64);  mask |= 64;
+        if (same4(reinterpret_cast<const float*>(orig + o_ivw), IVW)) {
+            mul4(Wi, In, tmp); memcpy(p + o_ivw, tmp, 64);  mask |= 64;
         }
     }
     return mask;
 }
 
+/// For buffers with no view of their own: replace any block equal to this
+/// frame's known proj*view with the override's. Returns the number replaced.
+static int replace_known_products(uint8_t* p, UINT size) {
+    if (!g_have_PV) return 0;
+    int n = 0;
+    for (UINT off = 0; off + 64 <= size; off += 16) {
+        if (same4(reinterpret_cast<const float*>(p + off), g_last_PV)) {
+            memcpy(p + off, g_last_PVn, 64);
+            n++;
+        }
+    }
+    return n;
+}
+
 /// If the override is on and this write carries a camera, returns a patched
 /// private copy of the bytes to upload instead; otherwise returns src.
 static const void* maybe_override(const void* src, UINT size) {
-    if (!g_ovr_enabled || size < CAM_MIN_SIZE) return src;
+    if (!g_ovr_enabled || size < 64) return src;
 
     const uint8_t* p = static_cast<const uint8_t*>(src);
+
+    // Where is the view? Common layout has it at +64, the shifted one at +48.
+    UINT base = 0;
     float v[12], pos[3];
-    memcpy(v, p + CAM_VIEW_OFFSET, sizeof(v));
-    if (!looks_like_view(v, pos)) return src;
-
-    // Sanity: the inverse view's translation must agree with -R^T t, or this
-    // is not the layout we think it is.
-    const float* inv = reinterpret_cast<const float*>(p + CAM_INV_OFFSET);
-    if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) return src;
-
-    if (g_ovr_freeze) {
-        if (!g_ovr_have_base) { memcpy(g_ovr_base, v, sizeof(v)); g_ovr_have_base = true; }
-        memcpy(v, g_ovr_base, sizeof(v));
-    }
-    else {
-        g_ovr_have_base = false;
+    for (UINT cand : { 64u, 48u }) {
+        if (size < cand + 64) continue;
+        memcpy(v, p + cand, sizeof(v));
+        if (!looks_like_view(v, pos)) continue;
+        // If an inverse view is present it must agree, or this is a look-alike.
+        const UINT o_inv = cand + 256;
+        if (size >= o_inv + 64) {
+            const float* inv = reinterpret_cast<const float*>(p + o_inv);
+            if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) continue;
+        }
+        base = cand;
+        break;
     }
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
-    const unsigned mask = write_camera(p, g_scratch.data(), size, v);
+
+    unsigned mask = 0;
+    if (base != 0) {
+        if (g_ovr_freeze) {
+            if (!g_ovr_have_base) { memcpy(g_ovr_base, v, sizeof(v)); g_ovr_have_base = true; }
+            memcpy(v, g_ovr_base, sizeof(v));
+        }
+        else {
+            g_ovr_have_base = false;
+        }
+        mask = write_camera(p, g_scratch.data(), size, base, v);
+        if (base == 48) mask |= 128;
+    }
+    else {
+        if (replace_known_products(g_scratch.data(), size) == 0) return src;   // nothing of ours in here
+        mask = 256;
+    }
+
     g_ovr_mask |= mask;
     g_ovr_applied++;
     auto it = g_ovr_stats.find(size);
@@ -664,12 +709,12 @@ void heartbeat(bool force) {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_ovr_stats.empty()) {
             fprintf(f, "\n  camera override, by buffer size (blocks patched in ALL writes / in ANY write):\n");
-            static const char* const names[7] = { "view", "inv", "pos", "VP", "VW", "PVW", "IVW" };
+            static const char* const names[9] = { "view", "inv", "pos", "VP", "VW", "PVW", "IVW", "shifted", "product-only" };
             for (const auto& [size, st] : g_ovr_stats) {
                 fprintf(f, "    %6u B  %8u writes   all:", size, st.count);
-                for (int i = 0; i < 7; ++i) if (st.mask_all & (1u << i)) fprintf(f, " %s", names[i]);
+                for (int i = 0; i < 9; ++i) if (st.mask_all & (1u << i)) fprintf(f, " %s", names[i]);
                 fprintf(f, "   any:");
-                for (int i = 0; i < 7; ++i) if (st.mask_any & (1u << i)) fprintf(f, " %s", names[i]);
+                for (int i = 0; i < 9; ++i) if (st.mask_any & (1u << i)) fprintf(f, " %s", names[i]);
                 fprintf(f, "\n");
             }
         }
@@ -1012,6 +1057,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     read_camera();
     g_latched      = false;
     g_draw_in_frame = 0;
+    g_have_PV       = false;
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
 
