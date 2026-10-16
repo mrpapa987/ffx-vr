@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -88,6 +89,26 @@ std::mutex                                      g_mutex;
 std::map<ID3D11Buffer*, CbRecord>               g_buffers;
 std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_in_flight;
 
+// A full-frame capture. Keeping only the latest value per buffer was useless:
+// the game recycles a handful of constant buffers for every draw, so by the time
+// F9 fires during the overlay render, the camera matrices written early in the
+// frame are long gone. Instead F9 arms a capture that records every write in
+// sequence until the buffer fills.
+struct Write {
+    uint32_t             seq;
+    ID3D11Buffer*        buf;
+    UINT                 size;
+    const char*          via;
+    std::vector<uint8_t> data;
+};
+
+constexpr size_t kCaptureLimit = 1200;
+
+std::vector<Write> g_capture;
+bool               g_capturing    = false;
+bool               g_capture_done = false;
+uint32_t           g_seq          = 0;
+
 bool    g_installed   = false;
 void*   g_patched_context = nullptr;
 int     g_dump_index  = 0;
@@ -129,6 +150,35 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
     rec.data.resize(size);
     memcpy(rec.data.data(), src, size);
     bump(C_CB_CAPTURED);
+
+    if (g_capturing && g_capture.size() < kCaptureLimit) {
+        Write w;
+        w.seq  = ++g_seq;
+        w.buf  = buf;
+        w.size = size;
+        w.via  = via;
+        w.data.assign(static_cast<const uint8_t*>(src), static_cast<const uint8_t*>(src) + size);
+        g_capture.push_back(std::move(w));
+
+        // Dumping here would deadlock: we already hold the lock. Flag it and let
+        // tick() write the file once the lock is released.
+        if (g_capture.size() >= kCaptureLimit) {
+            g_capturing    = false;
+            g_capture_done = true;
+        }
+    }
+}
+
+// Does this 64-byte block look like a projection matrix? Perspective projections
+// put +/-1 in m[2][3] and 0 in m[3][3]; that pattern is rare in other data.
+bool looks_like_projection(const float* m) {
+    return (fabsf(fabsf(m[11]) - 1.0f) < 0.001f) && (fabsf(m[15]) < 0.001f);
+}
+
+// A view or world matrix: affine, so the last column is 0,0,0,1.
+bool looks_like_affine(const float* m) {
+    return fabsf(m[3]) < 1e-6f && fabsf(m[7]) < 1e-6f
+        && fabsf(m[11]) < 1e-6f && fabsf(m[15] - 1.0f) < 1e-6f;
 }
 
 // Heartbeat: proves whether the hooks fire at all, without needing a keypress.
@@ -167,7 +217,7 @@ void heartbeat(bool force) {
     fclose(f);
 }
 
-void dump_all() {
+void dump_capture() {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_cbdump_%02d.txt", g_dir, g_dump_index++);
 
@@ -176,26 +226,31 @@ void dump_all() {
 
     std::lock_guard<std::mutex> lock(g_mutex);
 
-    fprintf(f, "FFX VR constant buffer dump #%d\n", g_dump_index - 1);
-    fprintf(f, "distinct constant buffers: %zu\n\n", g_buffers.size());
-    fprintf(f, "Printed as 4-float rows; a 4x4 matrix is four consecutive rows.\n");
-    fprintf(f, "Diff two dumps from different camera positions to find the view matrix.\n");
+    fprintf(f, "FFX VR constant buffer capture #%d\n", g_dump_index - 1);
+    fprintf(f, "writes recorded: %zu (limit %zu)\n\n", g_capture.size(), kCaptureLimit);
+    fprintf(f, "Every constant buffer write, in order. Blocks flagged PROJ look like\n");
+    fprintf(f, "a projection matrix; AFFINE like a view or world matrix. Compare two\n");
+    fprintf(f, "captures from different camera positions.\n");
 
-    for (const auto& [buf, rec] : g_buffers) {
-        fprintf(f, "\n================================================================\n");
-        fprintf(f, "buffer %p   %u bytes   %llu updates   via %s\n",
-                static_cast<void*>(buf), rec.size,
-                static_cast<unsigned long long>(rec.updates), rec.via);
-        fprintf(f, "----------------------------------------------------------------\n");
+    for (const Write& w : g_capture) {
+        const size_t n  = w.data.size() / sizeof(float);
+        const float* fp = reinterpret_cast<const float*>(w.data.data());
 
-        const size_t n  = rec.data.size() / sizeof(float);
-        const float* fp = reinterpret_cast<const float*>(rec.data.data());
+        // Only print writes big enough to hold a matrix; skip the noise.
+        if (n < 16) continue;
 
-        for (size_t i = 0; i < n; i += 4) {
-            fprintf(f, "  [%04zu] ", i * 4);
-            for (size_t j = 0; j < 4 && (i + j) < n; ++j) fprintf(f, "%14.6f ", fp[i + j]);
-            if ((i % 16) == 12) fprintf(f, "   <- 64-byte block end");
-            fprintf(f, "\n");
+        fprintf(f, "\n--- seq %u   buffer %p   %u bytes   via %s ---\n",
+                w.seq, static_cast<void*>(w.buf), w.size, w.via);
+
+        for (size_t blk = 0; blk * 16 + 16 <= n; ++blk) {
+            const float* m = fp + blk * 16;
+            const char* tag = looks_like_projection(m) ? "  [PROJ]"
+                            : looks_like_affine(m)     ? "  [AFFINE]" : "";
+            fprintf(f, "  block %zu (byte %zu)%s\n", blk, blk * 64, tag);
+            for (int r = 0; r < 4; ++r) {
+                fprintf(f, "     %12.5f %12.5f %12.5f %12.5f\n",
+                        m[r*4+0], m[r*4+1], m[r*4+2], m[r*4+3]);
+            }
         }
     }
     fclose(f);
@@ -203,8 +258,21 @@ void dump_all() {
 
 void tick() {
     const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-    if (down && !g_f9_was_down) dump_all();
+
+    if (down && !g_f9_was_down) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_capture.clear();
+        g_seq          = 0;
+        g_capturing    = true;
+        g_capture_done = false;
+    }
     g_f9_was_down = down;
+
+    if (g_capture_done) {
+        g_capture_done = false;
+        dump_capture();
+    }
+
     heartbeat(false);
 }
 
