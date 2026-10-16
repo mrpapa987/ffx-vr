@@ -40,7 +40,14 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
-    private delegate* unmanaged[Cdecl]<nint, nint, nint, void> _fn_on_updatesub;
+    private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
+    private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void> _fn_override_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_override_applied;
+
+    // -- camera override state (owned here, pushed to native every frame) ----
+    private bool  _ovr_enabled, _ovr_freeze;
+    private float _ovr_yaw, _ovr_pitch;
+    private float _ovr_right, _ovr_up, _ovr_forward;
 
     // -- inline detours on d3d11.dll's draw functions ------------------------
     //
@@ -109,7 +116,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
-            _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
+            _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
+            _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
+            _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -220,7 +229,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     }
 
     private void h_updatesub(nint ctx, nint resource, uint sub, nint box, nint src, uint row_pitch, uint depth_pitch) {
-        if (_fn_on_updatesub != null) _fn_on_updatesub(resource, box, src);
+        // The native side records the game's camera and, when the override is
+        // on, hands back a patched private copy to upload in its place.
+        if (_fn_on_updatesub != null) src = _fn_on_updatesub(resource, box, src);
         _o_updatesub ??= new FhCallHandle<d_UpdateSubresource>(new FhCallLocation((void*)_a_updatesub)).chain_from(_h_updatesub!).fnptr;
         _o_updatesub!(ctx, resource, sub, box, src, row_pitch, depth_pitch);
     }
@@ -318,6 +329,49 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
     }
 
+
+    /// <summary>
+    ///     Camera override controls. Numpad works without focusing the overlay:
+    ///     4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.
+    /// </summary>
+    private void draw_override() {
+        if (_fn_override_set == null) return;
+
+        ImGui.Separator();
+        ImGui.Text("Camera override");
+        ImGui.Checkbox("Enable", ref _ovr_enabled);
+        ImGui.SameLine();
+        ImGui.Checkbox("Freeze game camera", ref _ovr_freeze);
+        ImGui.SameLine();
+        if (ImGui.Button("Reset")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+
+        ImGui.SliderFloat("yaw",     ref _ovr_yaw,     -180f, 180f);
+        ImGui.SliderFloat("pitch",   ref _ovr_pitch,    -89f,  89f);
+        ImGui.SliderFloat("right",   ref _ovr_right,  -2000f, 2000f);
+        ImGui.SliderFloat("up",      ref _ovr_up,     -2000f, 2000f);
+        ImGui.SliderFloat("forward", ref _ovr_forward, -2000f, 2000f);
+
+        // numpad nudges, scaled by frame time so they feel the same at any fps
+        float dt   = ImGui.GetIO().DeltaTime;
+        float rot  = 60f  * dt;     // deg/s
+        float move = 400f * dt;     // units/s
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad4))        _ovr_yaw     -= rot;
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad6))        _ovr_yaw     += rot;
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad8))        _ovr_pitch   += rot;
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad2))        _ovr_pitch   -= rot;
+        if (ImGui.IsKeyDown(ImGuiKey.KeypadAdd))      _ovr_forward += move;
+        if (ImGui.IsKeyDown(ImGuiKey.KeypadSubtract)) _ovr_forward -= move;
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad9))        _ovr_up      += move;
+        if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
+        if (ImGui.IsKeyPressed(ImGuiKey.Keypad0))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+        _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
+
+        _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
+
+        ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}");
+        ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
+    }
+
     private void draw_scan() {
         if (_fn_scan == null) return;
 
@@ -386,6 +440,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.Separator();
 
                 draw_camera();
+                draw_override();
                 draw_scan();
 
                 if (calls == 0) {

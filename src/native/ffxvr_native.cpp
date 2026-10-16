@@ -311,6 +311,107 @@ static void scan_for_camera(const void* data, UINT size, const char* via) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Camera override
+//
+// Every per-object constant buffer (the ~1 KB ones and the ~7 KB skinned ones
+// alike) carries the camera three ways: a position float3 at +48, the view
+// matrix at +64 and the inverse view at +320. UpdateSubresource hands us those
+// bytes before upload, so rewriting all three in a private copy moves the
+// camera for everything drawn with that buffer -- no shader work needed.
+//
+// The override is expressed relative to the game's camera: a yaw/pitch
+// rotation about the camera's own axes, then a translation along the (new)
+// camera's right/up/forward. "Freeze" swaps the live base for the one captured
+// when freezing was turned on, so the authored camera motion stops.
+// ---------------------------------------------------------------------------
+
+constexpr UINT CAM_POS_OFFSET = 48;
+
+bool  g_ovr_enabled = false;
+bool  g_ovr_freeze  = false;
+float g_ovr_yaw = 0.f, g_ovr_pitch = 0.f;          // degrees
+float g_ovr_move[3] = { 0.f, 0.f, 0.f };           // right, up, forward (world units)
+float g_ovr_base[12] = {};                         // frozen view (3x4), valid when g_ovr_have_base
+bool  g_ovr_have_base = false;
+uint32_t g_ovr_applied = 0;
+
+std::vector<uint8_t> g_scratch;
+
+static void mul3(const float a[9], const float b[9], float out[9]) {
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            out[r*3+c] = a[r*3+0]*b[0*3+c] + a[r*3+1]*b[1*3+c] + a[r*3+2]*b[2*3+c];
+}
+
+/// Rewrites the camera in a buffer image. `v` is the 3x4 view to base on.
+static void write_camera(uint8_t* p, const float v[12]) {
+    // Base rotation R (rows) and camera position P = -R^T t.
+    float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
+    const float t[3] = { v[3], v[7], v[11] };
+    float P[3];
+    for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
+
+    // Rotate in view space: R' = Rx(pitch) * Ry(yaw) * R.
+    const float yaw = g_ovr_yaw * 0.0174533f, pit = g_ovr_pitch * 0.0174533f;
+    const float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pit), sp = sinf(pit);
+    const float Ry[9] = {  cy, 0.f,  sy,   0.f, 1.f, 0.f,   -sy, 0.f,  cy };
+    const float Rx[9] = { 1.f, 0.f, 0.f,   0.f,  cp, -sp,   0.f,  sp,  cp };
+    float tmp[9], Rn[9];
+    mul3(Ry, R, tmp);
+    mul3(Rx, tmp, Rn);
+
+    // Move along the new camera's axes: world right/up/forward are the rows of
+    // R' (right = row 0, up = row 1, forward = -row 2 in this -z convention).
+    float Pn[3];
+    for (int i = 0; i < 3; ++i) {
+        Pn[i] = P[i] + Rn[0*3+i]*g_ovr_move[0] + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2];
+    }
+
+    // t' = -R' P'
+    float tn[3];
+    for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
+
+    float* view = reinterpret_cast<float*>(p + CAM_VIEW_OFFSET);
+    float* inv  = reinterpret_cast<float*>(p + CAM_INV_OFFSET);
+    float* pos  = reinterpret_cast<float*>(p + CAM_POS_OFFSET);
+    for (int r = 0; r < 3; ++r) {
+        view[r*4+0] = Rn[r*3+0]; view[r*4+1] = Rn[r*3+1]; view[r*4+2] = Rn[r*3+2]; view[r*4+3] = tn[r];
+        inv [r*4+0] = Rn[0*3+r]; inv [r*4+1] = Rn[1*3+r]; inv [r*4+2] = Rn[2*3+r]; inv [r*4+3] = Pn[r];
+    }
+    pos[0] = Pn[0]; pos[1] = Pn[1]; pos[2] = Pn[2];
+}
+
+/// If the override is on and this write carries a camera, returns a patched
+/// private copy of the bytes to upload instead; otherwise returns src.
+static const void* maybe_override(const void* src, UINT size) {
+    if (!g_ovr_enabled || size < CAM_MIN_SIZE) return src;
+
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    float v[12], pos[3];
+    memcpy(v, p + CAM_VIEW_OFFSET, sizeof(v));
+    if (!looks_like_view(v, pos)) return src;
+
+    // Sanity: the inverse view's translation must agree with -R^T t, or this
+    // is not the layout we think it is.
+    const float* inv = reinterpret_cast<const float*>(p + CAM_INV_OFFSET);
+    if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) return src;
+
+    if (g_ovr_freeze) {
+        if (!g_ovr_have_base) { memcpy(g_ovr_base, v, sizeof(v)); g_ovr_have_base = true; }
+        memcpy(v, g_ovr_base, sizeof(v));
+    }
+    else {
+        g_ovr_have_base = false;
+    }
+
+    if (g_scratch.size() < size) g_scratch.resize(size);
+    memcpy(g_scratch.data(), p, size);
+    write_camera(g_scratch.data(), v);
+    g_ovr_applied++;
+    return g_scratch.data();
+}
+
 // Camera taken straight from the CPU-side write of a per-object buffer.
 // No latch, no GPU readback: UpdateSubresource hands us the bytes, and the
 // shape test at +64 rejects same-sized buffers that carry something else.
@@ -880,16 +981,30 @@ extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
 /// Called from the managed inline detour on UpdateSubresource, which the
 /// runtime would not let us vtable-patch. Records (and scans) the write when
 /// the target is a constant buffer being replaced whole.
-extern "C" __declspec(dllexport) void ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
+extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
     bump(C_UPDATESUB);
-    if (resource == nullptr || src == nullptr || box != nullptr) return;
+    if (resource == nullptr || src == nullptr || box != nullptr) return src;
 
     ID3D11Buffer* buf = nullptr; UINT size = 0;
-    if (as_constant_buffer(reinterpret_cast<ID3D11Resource*>(resource), &buf, &size)) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        record_buffer(buf, size, src, "UpdateSubresource");
-    }
+    if (!as_constant_buffer(reinterpret_cast<ID3D11Resource*>(resource), &buf, &size)) return src;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    record_buffer(buf, size, src, "UpdateSubresource");   // records the game's own camera
+    return maybe_override(src, size);                       // uploads ours
 }
+
+extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze, float yaw, float pitch,
+                                                          float right, float up, float forward) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_ovr_enabled = enabled != 0;
+    g_ovr_freeze  = freeze  != 0;
+    g_ovr_yaw     = yaw;
+    g_ovr_pitch   = pitch;
+    g_ovr_move[0] = right; g_ovr_move[1] = up; g_ovr_move[2] = forward;
+    if (!g_ovr_freeze) g_ovr_have_base = false;
+}
+
+extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
 
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
     if (out == nullptr) return 0;
