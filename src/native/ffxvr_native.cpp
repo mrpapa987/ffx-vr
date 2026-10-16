@@ -412,6 +412,33 @@ void heartbeat(bool force) {
         }
     }
 
+    fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n",
+            g_full.size(), g_draws_latched_at, g_cam_reads);
+    fprintf(f, "  changed since previous frame: %d floats", g_diff_count);
+    if (g_diff_count > 0) {
+        fprintf(f, " at bytes");
+        for (int i = 0; i < g_diff_count && i < 8; ++i) fprintf(f, " %u", g_diff_offs[i]);
+    }
+    fprintf(f, "\n");
+    if (g_cam_valid) {
+        const float* c = g_cam;
+        const float t0 = c[3], t1 = c[7], t2 = c[11];
+        fprintf(f, "  byte 64 as view -> camera at %.2f %.2f %.2f;  byte 320 translation %.2f %.2f %.2f\n",
+                -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
+                c[32+3], c[32+7], c[32+11]);
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        static const char* const via_name[4] = { "CreateBuffer", "Map", "UpdateSubresource", "Readback" };
+        fprintf(f, "  scanner hits (last frame with any): %d\n", g_scan_report_n);
+        for (int i = 0; i < g_scan_report_n; ++i) {
+            const ScanHit& h = g_scan_report[i];
+            fprintf(f, "      +%-5u in %6u B  %9.2f %9.2f %9.2f  via %s\n",
+                    h.offset, h.size, h.pos[0], h.pos[1], h.pos[2],
+                    via_name[(h.via >= 0 && h.via < 4) ? h.via : 2]);
+        }
+    }
+
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
     fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
     fprintf(f, "game's device context and the hooking approach must change.\n");
@@ -799,6 +826,20 @@ extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
 
 /// out[0] = floats changed since last frame, out[1] = buffer size, out[2] = draw
 /// index that latched, out[3..10] = first changed byte offsets.
+/// Called from the managed inline detour on UpdateSubresource, which the
+/// runtime would not let us vtable-patch. Records (and scans) the write when
+/// the target is a constant buffer being replaced whole.
+extern "C" __declspec(dllexport) void ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
+    bump(C_UPDATESUB);
+    if (resource == nullptr || src == nullptr || box != nullptr) return;
+
+    ID3D11Buffer* buf = nullptr; UINT size = 0;
+    if (as_constant_buffer(reinterpret_cast<ID3D11Resource*>(resource), &buf, &size)) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        record_buffer(buf, size, src, "UpdateSubresource");
+    }
+}
+
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
     if (out == nullptr) return 0;
     out[0] = g_diff_count;

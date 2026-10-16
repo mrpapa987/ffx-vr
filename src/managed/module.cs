@@ -39,6 +39,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
+    private delegate* unmanaged[Cdecl]<nint, nint, nint, void> _fn_on_updatesub;
 
     // -- inline detours on d3d11.dll's draw functions ------------------------
     //
@@ -56,12 +57,15 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate void d_DrawIndexedInstanced(nint ctx, uint a, uint b, uint c, int d, uint e);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void d_DrawInstanced(nint ctx, uint a, uint b, uint c, uint d);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_UpdateSubresource(nint ctx, nint resource, uint sub, nint box, nint src, uint row_pitch, uint depth_pitch);
 
     private d_DrawIndexed?          _h_drawindexed,  _o_drawindexed;
     private d_Draw?                 _h_draw,         _o_draw;
     private d_DrawIndexedInstanced? _h_drawidxinst,  _o_drawidxinst;
     private d_DrawInstanced?        _h_drawinst,     _o_drawinst;
-    private nint _a_drawindexed, _a_draw, _a_drawidxinst, _a_drawinst;
+    private d_UpdateSubresource?    _h_updatesub,    _o_updatesub;
+    private nint _a_drawindexed, _a_draw, _a_drawidxinst, _a_drawinst, _a_updatesub;
     private string _detour_status = "not installed";
 
     public FFXVRModule() { }
@@ -103,6 +107,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
+            _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -164,21 +169,24 @@ public sealed unsafe class FFXVRModule : FhModule {
         _a_draw        = vt[13];
         _a_drawidxinst = vt[20];
         _a_drawinst    = vt[21];
+        _a_updatesub   = vt[48];
 
         _h_drawindexed = h_drawindexed;
         _h_draw        = h_draw;
         _h_drawidxinst = h_drawidxinst;
         _h_drawinst    = h_drawinst;
+        _h_updatesub   = h_updatesub;
 
         bool ok = true;
         ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
         ok &= new FhCallHandle<d_Draw>                (new FhCallLocation((void*)_a_draw))       .hook(this, _h_draw);
         ok &= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).hook(this, _h_drawidxinst);
         ok &= new FhCallHandle<d_DrawInstanced>       (new FhCallLocation((void*)_a_drawinst))   .hook(this, _h_drawinst);
+        ok &= new FhCallHandle<d_UpdateSubresource>   (new FhCallLocation((void*)_a_updatesub))  .hook(this, _h_updatesub);
 
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
-                   + $"DrawIndexedInstanced 0x{_a_drawidxinst:X8}, DrawInstanced 0x{_a_drawinst:X8}");
+                   + $"DrawIndexedInstanced 0x{_a_drawidxinst:X8}, DrawInstanced 0x{_a_drawinst:X8}, UpdateSubresource 0x{_a_updatesub:X8}");
     }
 
     // Each detour reports to the native side, then continues down the chain.
@@ -207,6 +215,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_on_draw != null) _fn_on_draw(4);
         _o_drawinst ??= new FhCallHandle<d_DrawInstanced>(new FhCallLocation((void*)_a_drawinst)).chain_from(_h_drawinst!).fnptr;
         _o_drawinst!(ctx, a, b, c, d);
+    }
+
+    private void h_updatesub(nint ctx, nint resource, uint sub, nint box, nint src, uint row_pitch, uint depth_pitch) {
+        if (_fn_on_updatesub != null) _fn_on_updatesub(resource, box, src);
+        _o_updatesub ??= new FhCallHandle<d_UpdateSubresource>(new FhCallLocation((void*)_a_updatesub)).chain_from(_h_updatesub!).fnptr;
+        _o_updatesub!(ctx, resource, sub, box, src, row_pitch, depth_pitch);
     }
 
     /// <summary>
@@ -361,7 +375,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.Text($"Draw detours:          {_detour_status}");
                 if (_fn_counter != null) {
                     ImGui.Text($"Draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}, "
-                             + $"indexed-inst {_fn_counter(3)}, inst {_fn_counter(4)}");
+                             + $"indexed-inst {_fn_counter(3)}, inst {_fn_counter(4)}   UpdateSubresource {_fn_counter(7)}");
                 }
                 draw_diff();
                 ImGui.Separator();
