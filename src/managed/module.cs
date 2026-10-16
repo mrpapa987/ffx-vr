@@ -6,14 +6,10 @@ namespace FFXVR;
 ///     Scaffold module for the FFX VR mod.
 /// </summary>
 /// <remarks>
-///     Two jobs at this stage. It proves our code runs in-process and can draw
-///     through Fahrenheit's ImGui overlay — which lives inside the hooked
-///     <c>IDXGISwapChain::Present</c>, where the VR renderer will eventually go.
-///     And it loads the native helper, which hooks D3D11 constant buffer uploads
-///     so we can find the game's view and projection matrices.
-///
-///     The reported framerate is worth watching: game logic is locked to 30 Hz,
-///     and VR will need 72–90.
+///     Proves our code runs in-process and can draw through Fahrenheit's ImGui
+///     overlay - which lives inside the hooked <c>IDXGISwapChain::Present</c>,
+///     where the VR renderer will eventually go - and bootstraps the native
+///     helper that captures D3D11 constant buffer uploads.
 /// </remarks>
 [FhLoad(FhGameId.FFX)]
 public sealed unsafe class FFXVRModule : FhModule {
@@ -25,9 +21,15 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private nint   _native_handle;
     private string _native_status = "not loaded";
+    private bool   _native_init_done;
 
-    private delegate* unmanaged[Cdecl]<int> _fn_buffer_count;
-    private delegate* unmanaged[Cdecl]<int> _fn_dump_count;
+    private nint _game_device;
+    private nint _game_context;
+
+    private delegate* unmanaged[Cdecl]<nint, int> _fn_init;
+    private delegate* unmanaged[Cdecl]<int>       _fn_buffer_count;
+    private delegate* unmanaged[Cdecl]<int>       _fn_dump_count;
+    private delegate* unmanaged[Cdecl]<int>       _fn_hook_calls;
 
     public FFXVRModule() { }
 
@@ -39,35 +41,29 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     /// <summary>
     ///     Loads the native helper by absolute path, rather than relying on the
-    ///     default DLL search order finding it inside the mod folder.
+    ///     default DLL search order finding it inside the mod folder. Hooks are
+    ///     not installed yet: that needs the game's device context, which only
+    ///     exists once ImGui's D3D11 backend has been initialized.
     /// </summary>
     private void load_native(FhModContext mod_context) {
         string path = Path.Join(mod_context.Paths.ModDir.FullName, NativeDll);
 
         if (!File.Exists(path)) {
             _native_status = "missing: " + NativeDll;
-            _logger.Warning($"Native helper not found at {path}. Constant buffer scanning is off.");
+            _logger.Warning($"Native helper not found at {path}. Constant buffer capture is off.");
             return;
         }
 
         try {
             _native_handle = NativeLibrary.Load(path);
 
-            var fn_init      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
-            _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
-            _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
+            _fn_init         = (delegate* unmanaged[Cdecl]<nint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
+            _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
+            _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
+            _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
 
-            int rc = fn_init();
-
-            _native_status = rc switch {
-                 0 => "hooked",
-                -1 => "failed: could not create a D3D11 device",
-                -2 => "failed: could not patch the device context vtable",
-                 _ => $"failed: code {rc}",
-            };
-
-            if (rc == 0) _logger.Info("Native helper loaded; D3D11 constant buffer hooks installed.");
-            else         _logger.Error($"Native helper init failed with code {rc}.");
+            _native_status = "loaded, waiting for the render backend";
+            _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
         }
         catch (Exception ex) {
             _native_status = "load threw: " + ex.GetType().Name;
@@ -75,8 +71,53 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
     }
 
+    /// <summary>
+    ///     Recovers the game's own D3D11 device and immediate context from ImGui's
+    ///     backend data, then hands the context to the native helper.
+    /// </summary>
+    /// <remarks>
+    ///     <c>BackendRendererUserData</c> points at <c>ImGui_ImplDX11_Data</c>, whose
+    ///     first two fields are <c>ID3D11Device*</c> and <c>ID3D11DeviceContext*</c>.
+    ///     Fahrenheit initialized that backend with the game's own objects, so this
+    ///     is the context the game actually renders with - unlike a separately
+    ///     created device, whose vtable shares nothing with it.
+    /// </remarks>
+    private void try_install_hooks() {
+        if (_native_init_done || _fn_init == null) return;
+
+        nint backend = (nint)ImGui.GetIO().BackendRendererUserData;
+        if (backend == 0) return;   // backend not up yet; try again next frame
+
+        _native_init_done = true;
+
+        nint* fields = (nint*)backend;
+        _game_device  = fields[0];
+        _game_context = fields[1];
+
+        if (_game_context == 0) {
+            _native_status = "ImGui backend gave no device context";
+            _logger.Error("BackendRendererUserData held a null device context.");
+            return;
+        }
+
+        int rc = _fn_init(_game_context);
+
+        _native_status = rc switch {
+             0 => "hooked",
+            -1 => "failed: null context passed",
+            -2 => "failed: could not patch the vtable",
+            -3 => "failed: context vtable unreadable",
+             _ => $"failed: code {rc}",
+        };
+
+        if (rc == 0) _logger.Info($"Hooks installed on the game's context 0x{_game_context:X8} (device 0x{_game_device:X8}).");
+        else         _logger.Error($"Native init failed with code {rc} for context 0x{_game_context:X8}.");
+    }
+
     public override void render_imgui() {
         _frames++;
+
+        try_install_hooks();
 
         if (!_window_open) return;
 
@@ -87,13 +128,28 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Separator();
             ImGui.Text($"Native helper: {_native_status}");
 
-            if (_fn_buffer_count != null) {
+            if (_game_context != 0) {
+                ImGui.Text($"Game context:  0x{_game_context:X8}");
+            }
+
+            if (_fn_buffer_count != null && _native_init_done) {
+                int calls = _fn_hook_calls != null ? _fn_hook_calls() : -1;
+
+                ImGui.Text($"Hooked calls seen:     {calls}");
                 ImGui.Text($"Constant buffers seen: {_fn_buffer_count()}");
                 ImGui.Text($"Dumps written:         {_fn_dump_count()}");
                 ImGui.Separator();
-                ImGui.TextWrapped("Press F9 to dump every constant buffer. Take one "
-                                + "dump standing still, move somewhere else, take "
-                                + "another, then diff them to find the camera.");
+
+                if (calls == 0) {
+                    ImGui.TextWrapped("No hooked call has fired yet. If this stays at zero "
+                                    + "while the game renders, the patch is not on the "
+                                    + "context the game draws with.");
+                }
+                else {
+                    ImGui.TextWrapped("Press F9 to dump every constant buffer. Take one "
+                                    + "dump standing still, move somewhere else, take "
+                                    + "another, then diff them to find the camera.");
+                }
             }
         }
 
