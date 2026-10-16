@@ -35,6 +35,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float*, int> _fn_get_camera;
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_reads;
     private delegate* unmanaged[Cdecl]<int>       _fn_slot0_count;
+    private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
+    private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
 
     public FFXVRModule() { }
 
@@ -71,6 +73,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_get_camera");
             _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
             _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
+            _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
+            _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -174,6 +178,45 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
     }
 
+
+    /// <summary>
+    ///     Lists every view-matrix-shaped block the native scanner found in the
+    ///     constant buffers written recently, with the camera position each one
+    ///     implies.
+    /// </summary>
+    /// <remarks>
+    ///     The write path is the tell. A <c>CreateBuffer</c> hit was filled once,
+    ///     when the area loaded, so it is expected to sit still while walking. A
+    ///     <c>Map</c> or <c>UpdateSubresource</c> hit was written this frame, so a
+    ///     camera that tracks the player must be one of those.
+    /// </remarks>
+    private void draw_scan() {
+        if (_fn_scan == null) return;
+
+        float* s = stackalloc float[6 * 6];
+        int n = _fn_scan(s);
+
+        ImGui.Separator();
+        ImGui.Text($"Scanner: {n} view-shaped block(s)");
+
+        if (n == 0) {
+            ImGui.TextWrapped("No rotation-plus-translation block found in any written "
+                            + "constant buffer. The camera may not reach the GPU as a "
+                            + "view matrix at all.");
+            return;
+        }
+
+        for (int i = 0; i < n; i++) {
+            float* h   = s + i * 6;
+            string via = ((int)h[2]) switch {
+                0 => "CreateBuffer (area load)",
+                1 => "Map (per frame)",
+                _ => "UpdateSubresource (per frame)",
+            };
+            ImGui.Text($"  +{(int)h[0],-5} in {(int)h[1],6}B  {h[3],9:F2} {h[4],9:F2} {h[5],9:F2}  {via}");
+        }
+    }
+
     public override void render_imgui() {
         _frames++;
 
@@ -204,9 +247,15 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.Text($"Dumps written:         {_fn_dump_count()}");
                 if (_fn_frame_writes != null)
                     ImGui.Text($"Writes in last frame:  {_fn_frame_writes()}");
+
+                if (_fn_counter != null) {
+                    ImGui.Text($"Draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}, "
+                             + $"indexed-inst {_fn_counter(3)}, inst {_fn_counter(4)}");
+                }
                 ImGui.Separator();
 
                 draw_camera();
+                draw_scan();
 
                 if (calls == 0) {
                     ImGui.TextWrapped("No hooked call has fired yet. If this stays at zero "
@@ -214,9 +263,10 @@ public sealed unsafe class FFXVRModule : FhModule {
                                     + "context the game draws with.");
                 }
                 else {
-                    ImGui.TextWrapped("Press F9 to dump every constant buffer. Take one "
-                                    + "dump standing still, move somewhere else, take "
-                                    + "another, then diff them to find the camera.");
+                    ImGui.TextWrapped("Walk around and watch the numbers. A line that "
+                                    + "tracks you is the live camera; one that only "
+                                    + "changes on area load is a buffer filled at load "
+                                    + "time. F9 still dumps every constant buffer.");
                 }
             }
         }

@@ -142,9 +142,11 @@ constexpr UINT CAM_MIN_SIZE    = CAM_INV_OFFSET + 64;
 
 ID3D11Device*        g_device       = nullptr;
 ID3D11DeviceContext* g_ctx          = nullptr;
-ID3D11Buffer*        g_slot0_now    = nullptr;   // currently bound to VS slot 0
+ID3D11Buffer*        g_slot0_cur    = nullptr;   // actually bound to VS slot 0 right now
+bool                 g_slot0_big    = false;     // ...and it is camera-sized
 ID3D11Buffer*        g_slot0        = nullptr;   // latched at the frame's first 3D draw
-int                  g_slot0_seen   = 0;         // distinct slot-0 binds this frame
+int                  g_slot0_seen   = 0;         // distinct camera-sized slot-0 binds, this frame
+int                  g_slot0_report = 0;         // the above, for the frame the UI is drawing
 bool                 g_latched      = false;
 ID3D11Buffer*        g_staging      = nullptr;
 UINT                 g_staging_size = 0;
@@ -184,8 +186,116 @@ bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_s
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Live camera scanner
+//
+// The latched slot-0 readback assumes the big per-draw buffers carry the live
+// camera. If they turn out to be filled once per area instead, the real camera
+// must arrive through one of the handful of buffers the game writes each frame.
+// So every CPU write is also scanned directly for a view matrix: a 3x4 block
+// whose first three columns are orthonormal (a rotation) and whose last column
+// is a non-trivial translation. That shape is specific enough that false hits
+// are rare, and finding it needs no prior knowledge of offsets.
+//
+// Candidates are collected per frame and reported with the camera position each
+// implies, so watching which entry moves while walking identifies the live one.
+// ---------------------------------------------------------------------------
+
+struct ScanHit {
+    uint32_t offset;
+    uint32_t size;
+    int      via;        // 0 CreateBuffer, 1 Map/Unmap, 2 UpdateSubresource
+    float    pos[3];
+};
+
+constexpr int kScanMax = 6;
+
+// All of these are touched only under g_mutex.
+ScanHit g_scan_live[kScanMax]   = {};
+int     g_scan_live_n           = 0;
+ScanHit g_scan_report[kScanMax] = {};
+int     g_scan_report_n         = 0;
+
+inline bool near_one(float v)  { return v > 0.985f && v < 1.015f; }
+inline bool near_zero(float v) { return v > -0.015f && v < 0.015f; }
+
+/// Tests a 3x4 row-major block for the shape of a world-to-view matrix and,
+/// if it matches, returns the camera's world position (-R^T * t).
+static bool looks_like_view(const float* m, float out_pos[3]) {
+    for (int i = 0; i < 12; ++i) {
+        if (!std::isfinite(m[i])) return false;
+    }
+
+    // Columns 0..2 form the rotation; column 3 is the translation.
+    const float r[3][3] = { { m[0], m[1], m[2]  },
+                            { m[4], m[5], m[6]  },
+                            { m[8], m[9], m[10] } };
+    const float t[3]    = { m[3], m[7], m[11] };
+
+    for (int i = 0; i < 3; ++i) {
+        if (!near_one(r[i][0]*r[i][0] + r[i][1]*r[i][1] + r[i][2]*r[i][2])) return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        if (!near_zero(r[i][0]*r[j][0] + r[i][1]*r[j][1] + r[i][2]*r[j][2])) return false;
+    }
+
+    const float mag2 = t[0]*t[0] + t[1]*t[1] + t[2]*t[2];
+    if (mag2 < 1e-4f || mag2 > 1e12f) return false;   // identity, or nonsense
+
+    for (int i = 0; i < 3; ++i) {                     // -R^T * t
+        out_pos[i] = -(r[0][i]*t[0] + r[1][i]*t[1] + r[2][i]*t[2]);
+    }
+    return true;
+}
+
+/// Scans one freshly written constant buffer for view-matrix-shaped blocks.
+/// Caller holds g_mutex.
+static void scan_for_camera(const void* data, UINT size, const char* via) {
+    if (data == nullptr || size < 48) return;
+
+    // A hit from CreateBuffer was filled once, at area load; one from
+    // Map/Unmap or UpdateSubresource was written this frame. Telling them
+    // apart is the whole point of the scan.
+    const int via_code = (via != nullptr && via[0] == 'C') ? 0
+                       : (via != nullptr && via[0] == 'M') ? 1 : 2;
+
+    const char* base = static_cast<const char*>(data);
+
+    // Constant buffer registers are 16-byte aligned, so a matrix never starts
+    // off that grid.
+    for (UINT off = 0; off + 48 <= size; off += 16) {
+        float m[12];
+        memcpy(m, base + off, sizeof(m));
+
+        float pos[3];
+        if (!looks_like_view(m, pos)) continue;
+
+        bool seen = false;
+        for (int i = 0; i < g_scan_live_n; ++i) {
+            if (g_scan_live[i].offset == off && g_scan_live[i].size == size) {
+                g_scan_live[i].via = via_code;
+                memcpy(g_scan_live[i].pos, pos, sizeof(pos));   // refresh
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+
+        if (g_scan_live_n < kScanMax) {
+            ScanHit& h = g_scan_live[g_scan_live_n++];
+            h.offset   = off;
+            h.size     = size;
+            h.via      = via_code;
+            memcpy(h.pos, pos, sizeof(pos));
+        }
+    }
+}
+
 void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
     if (size == 0 || size > 65536 || src == nullptr) return;
+
+    scan_for_camera(src, size, via);
 
     CbRecord& rec = g_buffers[buf];
     rec.size    = size;
@@ -341,10 +451,10 @@ void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, U
     if (b != nullptr && s == 0 && n > 0 && b[0] != nullptr) {
         D3D11_BUFFER_DESC bd = {};
         b[0]->GetDesc(&bd);
-        if (bd.ByteWidth >= CAM_MIN_SIZE) {
-            if (g_slot0_now != b[0]) g_slot0_seen++;
-            g_slot0_now = b[0];
-        }
+        bool big = (bd.ByteWidth >= CAM_MIN_SIZE);
+        if (big && g_slot0_cur != b[0]) g_slot0_seen++;
+        g_slot0_cur = b[0];
+        g_slot0_big = big;
     }
 
     if (g_capturing && b != nullptr) {
@@ -389,14 +499,14 @@ void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* c, UINT n, UINT s) {
 // geometry, rather than whichever happened to be bound last.
 void STDMETHODCALLTYPE hk_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
     bump(C_DRAWIDXINST);
-    if (!g_latched && g_slot0_now != nullptr) { g_slot0 = g_slot0_now; g_latched = true; }
+    if (!g_latched && g_slot0_big) { g_slot0 = g_slot0_cur; g_latched = true; }
     tick();
     g_orig_drawidxinst(c, a, b, d, e, f);
 }
 
 void STDMETHODCALLTYPE hk_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
     bump(C_DRAWINST);
-    if (!g_latched && g_slot0_now != nullptr) { g_slot0 = g_slot0_now; g_latched = true; }
+    if (!g_latched && g_slot0_big) { g_slot0 = g_slot0_cur; g_latched = true; }
     tick();
     g_orig_drawinst(c, a, b, d, e);
 }
@@ -566,8 +676,18 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
-    g_latched    = false;
-    g_slot0_seen = 0;
+    g_latched      = false;
+    g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
+    g_slot0_seen   = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_scan_live_n > 0) {     // keep the last frame that had any hits
+            memcpy(g_scan_report, g_scan_live, sizeof(g_scan_report));
+            g_scan_report_n = g_scan_live_n;
+        }
+        g_scan_live_n = 0;
+    }
 
     if (dump_now) dump_capture();
 }
@@ -583,7 +703,32 @@ extern "C" __declspec(dllexport) int ffxvr_camera_reads() { return static_cast<i
 
 // How many distinct camera-sized buffers were bound to slot 0 last frame.
 // If this is large the choice of buffer is ambiguous and worth reporting.
-extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_seen; }
+extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report; }
+
+/// Reads one hook counter by index, so the overlay can show whether a specific
+/// draw path fires at all rather than only the aggregate.
+extern "C" __declspec(dllexport) int ffxvr_counter(int i) {
+    if (i < 0 || i >= C_COUNT) return -1;
+    return static_cast<int>(g_counters[i]);
+}
+
+/// Fills out[] with kScanMax * 6 floats -- offset, buffer size, write path
+/// (0 CreateBuffer, 1 Map/Unmap, 2 UpdateSubresource), then x, y, z of the
+/// camera position each candidate implies -- and returns the hit count.
+extern "C" __declspec(dllexport) int ffxvr_scan(float* out) {
+    if (out == nullptr) return 0;
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < kScanMax; ++i) {
+        out[i*6 + 0] = static_cast<float>(g_scan_report[i].offset);
+        out[i*6 + 1] = static_cast<float>(g_scan_report[i].size);
+        out[i*6 + 2] = static_cast<float>(g_scan_report[i].via);
+        out[i*6 + 3] = g_scan_report[i].pos[0];
+        out[i*6 + 4] = g_scan_report[i].pos[1];
+        out[i*6 + 5] = g_scan_report[i].pos[2];
+    }
+    return g_scan_report_n;
+}
 
 extern "C" __declspec(dllexport) int ffxvr_frame_writes() {
     return static_cast<int>(g_frame_writes);
