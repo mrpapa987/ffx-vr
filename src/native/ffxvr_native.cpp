@@ -7,16 +7,17 @@
 // 64-byte slot holds them gives us the camera without needing any of
 // PhyreEngine's internals.
 //
-// We patch several ID3D11DeviceContext vtable entries. The vtable normally lives
-// in d3d11.dll and is shared by every context, so patching it should cover the
-// one the game already created.
+// We patch ID3D11DeviceContext vtable entries on the context the GAME renders
+// with. An earlier attempt created its own D3D11 device and patched that
+// context's vtable, on the assumption that d3d11.dll shares one vtable across
+// devices. It does not: every counter stayed at zero. The managed side now reads
+// the real device and context out of ImGui's D3D11 backend data -- Fahrenheit
+// initialised that backend with the game's own objects -- and passes the context
+// here, so we patch exactly the object in use.
 //
-// "Should" is doing work in that sentence, so this build is instrumented: it
-// counts calls to every hooked entry point and writes a heartbeat log beside the
-// DLL every few seconds. If the counters stay at zero, the vtable patch did not
-// reach the game's context and the approach needs changing. If Draw fires but
-// Map does not, the game simply uses a different upload path - and we hook
-// UpdateSubresource as well for exactly that case.
+// Still instrumented: call counts per hooked entry point, written to a heartbeat
+// log beside the DLL every few seconds. If Draw fires but Map does not, the game
+// uploads constant buffers by another path, which UpdateSubresource covers.
 //
 // F9 writes a full dump of every constant buffer seen.
 
@@ -88,6 +89,7 @@ std::map<ID3D11Buffer*, CbRecord>               g_buffers;
 std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_in_flight;
 
 bool    g_installed   = false;
+void*   g_patched_context = nullptr;
 int     g_dump_index  = 0;
 bool    g_f9_was_down = false;
 DWORD   g_last_beat   = 0;
@@ -142,7 +144,8 @@ void heartbeat(bool force) {
     if (_wfopen_s(&f, path, L"w") != 0 || f == nullptr) return;
 
     fprintf(f, "FFX VR native helper - hook activity\n");
-    fprintf(f, "hooks installed: %s\n\n", g_installed ? "yes" : "no");
+    fprintf(f, "hooks installed: %s\n", g_installed ? "yes" : "no");
+    fprintf(f, "patched context: %p\n\n", g_patched_context);
 
     for (int i = 0; i < C_COUNT; ++i) {
         fprintf(f, "  %-26s %ld\n", kCounterName[i], g_counters[i]);
@@ -284,23 +287,18 @@ bool patch(void** vtable, int index, void* replacement, void** out_original) {
 
 // ---------------------------------------------------------------------------
 
-extern "C" __declspec(dllexport) int ffxvr_init() {
+extern "C" __declspec(dllexport) int ffxvr_init(void* game_context) {
     if (g_installed) return 0;
+    if (game_context == nullptr) return -1;
 
-    ID3D11Device*        device  = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    D3D_FEATURE_LEVEL    level   = D3D_FEATURE_LEVEL_11_0;
-
-    const HRESULT hr = D3D11CreateDevice(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION, &device, &level, &context);
-
-    if (FAILED(hr) || context == nullptr) {
-        if (device) device->Release();
-        return -1;
-    }
+    // The caller hands us the context the game actually renders with, read out
+    // of ImGui's D3D11 backend data. Patching this object's own vtable removes
+    // the guesswork that sank the previous attempt: a vtable obtained from a
+    // separately created device turned out to share nothing with the game's.
+    ID3D11DeviceContext* context = reinterpret_cast<ID3D11DeviceContext*>(game_context);
 
     void** vt = *reinterpret_cast<void***>(context);
+    if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb));
@@ -310,13 +308,11 @@ extern "C" __declspec(dllexport) int ffxvr_init() {
     ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap));
     ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub));
 
-    context->Release();
-    device->Release();
-
     if (!ok) return -2;
 
-    g_installed = true;
-    heartbeat(true);   // write immediately, so the file exists even if nothing ever fires
+    g_installed       = true;
+    g_patched_context = game_context;
+    heartbeat(true);
     return 0;
 }
 
