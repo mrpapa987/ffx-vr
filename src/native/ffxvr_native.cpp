@@ -779,6 +779,16 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 
     g_installed       = true;
     g_patched_context = game_context;
+
+    {   // start this run's trace fresh
+        wchar_t tpath[MAX_PATH];
+        _snwprintf_s(tpath, _TRUNCATE, L"%s\\ffxvr_trace.log", g_dir);
+        FILE* t = nullptr;
+        if (_wfopen_s(&t, tpath, L"w") == 0 && t != nullptr) {
+            fprintf(t, "camera trace: one line per second, from UpdateSubresource writes of per-object buffers\n");
+            fclose(t);
+        }
+    }
     heartbeat(true);
     return 0;
 }
