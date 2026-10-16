@@ -35,6 +35,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float*, int> _fn_get_camera;
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_reads;
     private delegate* unmanaged[Cdecl]<int>       _fn_slot0_count;
+    private delegate* unmanaged[Cdecl]<int>       _fn_camera_changes;
     private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
@@ -103,6 +104,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_get_camera");
             _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
             _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
+            _fn_camera_changes = (delegate* unmanaged[Cdecl]<int>)    NativeLibrary.GetExport(_native_handle, "ffxvr_camera_changes");
             _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
@@ -251,6 +253,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         // the inverse view at byte 320 carries the same position directly
         float qx = c[32 + 3], qy = c[32 + 7], qz = c[32 + 11];
 
+        float yaw   = MathF.Atan2(c[8], c[10]) * 180f / MathF.PI;
+        float pitch = MathF.Asin(Math.Clamp(-c[9], -1f, 1f)) * 180f / MathF.PI;
+        ImGui.Text($"view matrix changed in {(_fn_camera_changes != null ? _fn_camera_changes() : -1)} frames   yaw {yaw,7:F1}  pitch {pitch,6:F1}");
         ImGui.Text($"position (from view):    {px,9:F2} {py,9:F2} {pz,9:F2}");
         ImGui.Text($"position (from inverse): {qx,9:F2} {qy,9:F2} {qz,9:F2}");
 

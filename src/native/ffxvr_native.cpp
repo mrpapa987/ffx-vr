@@ -159,6 +159,8 @@ ID3D11Buffer*        g_staging      = nullptr;
 UINT                 g_staging_size = 0;
 
 float    g_cam[48] = {};     // view, projection, inverse view
+float    g_cam_last_view[12] = {};
+uint32_t g_cam_changes = 0;  // frames in which the view matrix differed from the previous one
 
 // Whole-buffer readback of the latched slot-0 buffer, and a diff against the
 // previous frame, so we can see which bytes move while walking even if none of
@@ -414,6 +416,7 @@ void heartbeat(bool force) {
 
     fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n",
             g_full.size(), g_draws_latched_at, g_cam_reads);
+    fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
     fprintf(f, "  changed since previous frame: %d floats", g_diff_count);
     if (g_diff_count > 0) {
         fprintf(f, " at bytes");
@@ -423,6 +426,8 @@ void heartbeat(bool force) {
     if (g_cam_valid) {
         const float* c = g_cam;
         const float t0 = c[3], t1 = c[7], t2 = c[11];
+        fprintf(f, "  view yaw %.1f deg, pitch %.1f deg\n",
+                atan2f(c[8], c[10]) * 57.2958f, asinf(-c[9] < -1.f ? -1.f : (-c[9] > 1.f ? 1.f : -c[9])) * 57.2958f);
         fprintf(f, "  byte 64 as view -> camera at %.2f %.2f %.2f;  byte 320 translation %.2f %.2f %.2f\n",
                 -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
                 c[32+3], c[32+7], c[32+11]);
@@ -666,6 +671,11 @@ void read_camera() {
         memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
         memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
         g_cam_valid = true;
+
+        if (memcmp(g_cam_last_view, g_cam, sizeof(g_cam_last_view)) != 0) {
+            memcpy(g_cam_last_view, g_cam, sizeof(g_cam_last_view));
+            g_cam_changes++;
+        }
     }
     g_cam_reads++;
 
@@ -796,6 +806,7 @@ extern "C" __declspec(dllexport) int ffxvr_get_camera(float* out) {
 }
 
 extern "C" __declspec(dllexport) int ffxvr_camera_reads() { return static_cast<int>(g_cam_reads); }
+extern "C" __declspec(dllexport) int ffxvr_camera_changes() { return static_cast<int>(g_cam_changes); }
 
 // How many distinct camera-sized buffers were bound to slot 0 last frame.
 // If this is large the choice of buffer is ambiguous and worth reporting.
@@ -816,7 +827,9 @@ extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
 
     D3D11_BUFFER_DESC bd = {};
     b->GetDesc(&bd);
-    if (bd.ByteWidth < CAM_MIN_SIZE) { b->Release(); return; }
+    // The camera lives in the ~1 KB per-object buffers (view at +64, inverse at
+    // +320). The ~7 KB ones are skinned characters with a different layout.
+    if (bd.ByteWidth < CAM_MIN_SIZE || bd.ByteWidth > 2048) { b->Release(); return; }
 
     if (g_slot0 != nullptr) g_slot0->Release();
     g_slot0             = b;                        // keep the reference
