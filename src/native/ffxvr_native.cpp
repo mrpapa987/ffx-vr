@@ -423,8 +423,7 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
 
     // Layout relative to the view block.
     const UINT o_pos = base - 16, o_view = base, o_projn = base + 64, o_vp = base + 128,
-               o_inv = base + 256, o_w = base + 416, o_vw = base + 480, o_wi = base + 544,
-               o_pvw = base + 608, o_ivw = base + 672;
+               o_inv = base + 256, o_w = base + 416;
 
     const float* V  = reinterpret_cast<const float*>(orig + o_view);
     const float* Pj = reinterpret_cast<const float*>(orig + o_projn);
@@ -444,24 +443,34 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         g_have_PV = true;
     }
 
-    if (size >= o_ivw + 64) {
-        const float* W  = reinterpret_cast<const float*>(orig + o_w);
-        const float* Wi = reinterpret_cast<const float*>(orig + o_wi);
+    // World-derived blocks come in two placements: right after the camera
+    // (+480.. in the ~1 KB family) or 160 bytes later (+640.. in everything
+    // from 1872 B up, skinned characters included). Try both; each block is
+    // only replaced if the original is the product it should be.
+    for (UINT wb : { o_w, o_w + 160 }) {
+        const UINT w_w = wb, w_vw = wb + 64, w_wi = wb + 128, w_pvw = wb + 192, w_ivw = wb + 256;
+        if (size < w_ivw + 64) continue;
+
+        const float* W  = reinterpret_cast<const float*>(orig + w_w);
+        const float* Wi = reinterpret_cast<const float*>(orig + w_wi);
         const float* I  = reinterpret_cast<const float*>(orig + o_inv);
         float VW[16], PVW[16], IVW[16], tmp[16];
+        unsigned got = 0;
 
         mul4(V, W, VW);
-        if (same4(reinterpret_cast<const float*>(orig + o_vw), VW)) {
-            mul4(Vn, W, tmp); memcpy(p + o_vw, tmp, 64);  mask |= 16;
+        if (same4(reinterpret_cast<const float*>(orig + w_vw), VW)) {
+            mul4(Vn, W, tmp); memcpy(p + w_vw, tmp, 64);  got |= 16;
         }
         mul4(PV, W, PVW);
-        if (same4(reinterpret_cast<const float*>(orig + o_pvw), PVW)) {
-            mul4(PVn, W, tmp); memcpy(p + o_pvw, tmp, 64);  mask |= 32;
+        if (same4(reinterpret_cast<const float*>(orig + w_pvw), PVW)) {
+            mul4(PVn, W, tmp); memcpy(p + w_pvw, tmp, 64);  got |= 32;
         }
         mul4(Wi, I, IVW);
-        if (same4(reinterpret_cast<const float*>(orig + o_ivw), IVW)) {
-            mul4(Wi, In, tmp); memcpy(p + o_ivw, tmp, 64);  mask |= 64;
+        if (same4(reinterpret_cast<const float*>(orig + w_ivw), IVW)) {
+            mul4(Wi, In, tmp); memcpy(p + w_ivw, tmp, 64);  got |= 64;
         }
+        mask |= got;
+        if (got) break;      // found this buffer's placement
     }
     return mask;
 }
