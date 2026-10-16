@@ -74,6 +74,13 @@ $natCode = $LASTEXITCODE
 Log "[native] exit code: $natCode"
 
 $natDll = Join-Path $srcNat 'bin\Win32\Release\ffxvr_native.dll'
+if ($natCode -ne 0) {
+    Log ''
+    Log 'Native build failed - nothing deployed. A stale ffxvr_native.dll next to a'
+    Log 'fresh ffxvr.dll would only fail at load time with a missing export.'
+    Log "Log: $log"
+    exit 1
+}
 if (-not (Test-Path $natDll)) {
     Log ''
     Log "ERROR: ffxvr_native.dll was not produced at $natDll"

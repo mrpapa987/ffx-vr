@@ -779,7 +779,7 @@ extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report
 /// On the first draw of a frame with a camera-sized buffer in VS slot 0, that
 /// buffer is latched for the end-of-frame readback.
 extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
-    if (which >= 1 && which <= 4) bump(which);
+    if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
     if (g_latched || g_ctx == nullptr) return;
 
