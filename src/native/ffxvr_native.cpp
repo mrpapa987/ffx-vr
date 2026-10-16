@@ -115,6 +115,8 @@ bool               g_capture_done  = false;
 bool               g_arm_next      = false;   // F9 pressed; start at the next frame
 uint32_t           g_seq           = 0;
 uint32_t           g_frames        = 0;
+int                g_frames_left   = 0;       // frames remaining in this capture
+constexpr int      kCaptureFrames  = 10;
 uint32_t           g_frame_writes  = 0;       // writes seen in the frame just finished
 
 // Which buffers actually get bound to the vertex shader during a captured
@@ -240,7 +242,7 @@ void dump_capture() {
     std::lock_guard<std::mutex> lock(g_mutex);
 
     fprintf(f, "FFX VR constant buffer capture #%d\n", g_dump_index - 1);
-    fprintf(f, "writes recorded: %zu (limit %zu) - one full frame\n\n", g_capture.size(), kCaptureLimit);
+    fprintf(f, "writes recorded: %zu (limit %zu) across %d frames\n\n", g_capture.size(), kCaptureLimit, kCaptureFrames);
     fprintf(f, "Buffers BOUND to the vertex shader during this frame: %zu\n", g_bound.size());
     for (const auto& [buf, n] : g_bound) {
         auto it = g_buffers.find(buf);
@@ -257,11 +259,19 @@ void dump_capture() {
         const size_t n  = w.data.size() / sizeof(float);
         const float* fp = reinterpret_cast<const float*>(w.data.data());
 
-        // Only print writes big enough to hold a matrix; skip the noise.
-        if (n < 16) continue;
-
         fprintf(f, "\n--- seq %u   buffer %p   %u bytes   via %s ---\n",
                 w.seq, static_cast<void*>(w.buf), w.size, w.via);
+
+        // Print every float, whatever the size. Hiding small writes was a
+        // mistake: it concealed two thirds of what the game actually sends.
+        if (n < 16) {
+            for (size_t i = 0; i < n; i += 4) {
+                fprintf(f, "     ");
+                for (size_t j = 0; j < 4 && (i + j) < n; ++j) fprintf(f, "%12.5f ", fp[i + j]);
+                fprintf(f, "\n");
+            }
+            continue;
+        }
 
         for (size_t blk = 0; blk * 16 + 16 <= n; ++blk) {
             const float* m = fp + blk * 16;
@@ -444,17 +454,20 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_frames++;
 
-        if (g_capturing) {               // a full frame has now elapsed
-            g_capturing   = false;
-            dump_now      = true;
-            g_frame_writes = static_cast<uint32_t>(g_capture.size());
+        if (g_capturing) {
+            if (--g_frames_left <= 0) {      // enough frames collected
+                g_capturing    = false;
+                dump_now       = true;
+                g_frame_writes = static_cast<uint32_t>(g_capture.size());
+            }
         }
         else if (g_arm_next) {
-            g_arm_next  = false;
+            g_arm_next    = false;
             g_capture.clear();
             g_bound.clear();
-            g_seq       = 0;
-            g_capturing = true;
+            g_seq         = 0;
+            g_frames_left = kCaptureFrames;
+            g_capturing   = true;
         }
     }
     if (dump_now) dump_capture();
