@@ -82,3 +82,49 @@ These offsets come from one capture of one scene. They should be re-verified in
 a battle and a cutscene before anything depends on them, and they are specific
 to the "P4" binaries - a future game patch could move them, exactly as the
 October patch moved Fahrenheit's hardcoded addresses.
+
+
+## Confirmed live at runtime (16 Oct 2026, evening)
+
+Verified in-process, not just in a RenderDoc capture. While walking back and
+forth across one field screen, the view matrix changed 30 times a second (the
+game's logic rate), yaw swung 61-89 deg, pitch tilted, and the position
+dollied along a rail. On every trace line the position derived from the view
+matrix (`-R^T t`) matched the inverse view's translation column to 0.01.
+
+Layout, in the **1072 / 1232-byte per-object buffers** (VS slot 0):
+
+| Byte | Contents |
+|---|---|
+| 64  | View (world -> view), translation in the last column |
+| 256 | Projection |
+| 320 | Inverse view (camera -> world); its translation column is the camera position |
+
+The **~6992-byte buffers** are skinned characters: a different layout whose
+blocks from +1344 on are bone matrices (dozens of distinct positions each).
+Do not read the camera from those. Not every 1072-byte buffer carries a
+camera either; validate with the orthonormal-rotation test at +64.
+
+### How the data actually arrives, and why it took all day
+
+- The per-object buffers are **DEFAULT usage, filled with `UpdateSubresource`**
+  (~400k calls per short run across ~110 buffers). Not Map, not CreateBuffer
+  with initial data.
+- **The D3D11 runtime restores vtable slots it owns.** Our patches to Draw,
+  DrawIndexed, DrawIndexedInstanced, DrawInstanced and UpdateSubresource were
+  silently put back to the d3d11.dll originals; VSSetConstantBuffers, Map and
+  Unmap were left alone. So those counters read zero for hours and we wrongly
+  concluded the game never called them. Those functions are now **detoured
+  inline** through Fahrenheit's MinHook (`FhCallHandle`/`FhCallLocation` with
+  the address taken from the vtable), which the runtime cannot undo.
+- The game draws with plain `DrawIndexed`/`Draw`, never the instanced forms.
+- F9 dumps are taken standing still, so a 10-frame dump always shows one
+  matrix. A frozen dump is not evidence of a stale buffer.
+- The title screen presents as an identity camera at (0, 0, -1), yaw 180.
+
+### The injection point
+
+The `UpdateSubresource` detour sees the CPU bytes **before** they reach the
+GPU. Rewriting the view/projection at +64/+256/+320 in a private copy and
+forwarding that is enough to move the camera for every object drawn with it.
+That is where per-eye matrices go.
