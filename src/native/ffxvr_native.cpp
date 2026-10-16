@@ -338,6 +338,12 @@ bool  g_ovr_have_base = false;
 uint32_t g_ovr_applied = 0;
 unsigned g_ovr_mask    = 0;     // union of blocks ever patched: 1 view 2 inv 4 pos 8 VP 16 VW 32 PVW 64 IVW
 
+// Per buffer size: how many writes were patched and which blocks validated
+// in all of them (AND) versus any of them (OR). A size whose AND lacks PVW
+// while its OR has VP is an object left behind by a camera move.
+struct OvrStat { uint32_t count; unsigned mask_all; unsigned mask_any; };
+std::map<UINT, OvrStat> g_ovr_stats;
+
 std::vector<uint8_t> g_scratch;
 
 static void mul3(const float a[9], const float b[9], float out[9]) {
@@ -472,8 +478,12 @@ static const void* maybe_override(const void* src, UINT size) {
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
-    g_ovr_mask |= write_camera(p, g_scratch.data(), size, v);
+    const unsigned mask = write_camera(p, g_scratch.data(), size, v);
+    g_ovr_mask |= mask;
     g_ovr_applied++;
+    auto it = g_ovr_stats.find(size);
+    if (it == g_ovr_stats.end()) g_ovr_stats[size] = { 1, mask, mask };
+    else { it->second.count++; it->second.mask_all &= mask; it->second.mask_any |= mask; }
     return g_scratch.data();
 }
 
@@ -647,6 +657,21 @@ void heartbeat(bool force) {
             fprintf(f, "      +%-5u in %6u B  %9.2f %9.2f %9.2f  via %s\n",
                     h.offset, h.size, h.pos[0], h.pos[1], h.pos[2],
                     via_name[(h.via >= 0 && h.via < 4) ? h.via : 2]);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_ovr_stats.empty()) {
+            fprintf(f, "\n  camera override, by buffer size (blocks patched in ALL writes / in ANY write):\n");
+            static const char* const names[7] = { "view", "inv", "pos", "VP", "VW", "PVW", "IVW" };
+            for (const auto& [size, st] : g_ovr_stats) {
+                fprintf(f, "    %6u B  %8u writes   all:", size, st.count);
+                for (int i = 0; i < 7; ++i) if (st.mask_all & (1u << i)) fprintf(f, " %s", names[i]);
+                fprintf(f, "   any:");
+                for (int i = 0; i < 7; ++i) if (st.mask_any & (1u << i)) fprintf(f, " %s", names[i]);
+                fprintf(f, "\n");
+            }
         }
     }
 
