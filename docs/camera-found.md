@@ -128,3 +128,30 @@ The `UpdateSubresource` detour sees the CPU bytes **before** they reach the
 GPU. Rewriting the view/projection at +64/+256/+320 in a private copy and
 forwarding that is enough to move the camera for every object drawn with it.
 That is where per-eye matrices go.
+
+## Full per-object buffer layout (verified against dumps, 16 Oct 2026)
+
+The vertex shader does **not** use the view matrix directly; it uses
+pre-multiplied products. Patching only +48/+64/+320 changes lighting (the
+position at +48 feeds the view vector) and nothing else.
+
+| Byte | Contents | Present in |
+|---|---|---|
+| +48  | camera position float3 (lighting) | all |
+| +64  | view | all |
+| +128 | projection, near-plane variant (z row `-1 -1`) | all |
+| +192 | **proj(+128) × view** | all |
+| +256 | projection, main (z row `-1 -2`) | all |
+| +320 | inverse view | all |
+| +480 | world (this object) | ~1 KB family |
+| +544 | view × world | ~1 KB family |
+| +608 | inverse world | ~1 KB family |
+| +672 | **proj(+128) × view × world** | ~1 KB family |
+| +736 | inverse world × inverse view | ~1 KB family |
+
+The ~7 KB skinned buffers share everything through +320 and then hold bone
+matrices from +1344 on instead of the world-derived blocks.
+
+Moving the camera means recomputing every derived block from the new view.
+The override does so, replacing a block only when its original equals the
+product it is expected to be.
