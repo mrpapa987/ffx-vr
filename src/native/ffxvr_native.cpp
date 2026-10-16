@@ -491,15 +491,14 @@ static const void* maybe_override(const void* src, UINT size) {
     UINT base = 0;
     float v[12], pos[3];
     for (UINT cand : { 64u, 48u }) {
-        if (size < cand + 64) continue;
+        const UINT o_inv = cand + 256;
+        if (size < o_inv + 64) continue;        // no inverse to validate against: not this layout
         memcpy(v, p + cand, sizeof(v));
         if (!looks_like_view(v, pos)) continue;
-        // If an inverse view is present it must agree, or this is a look-alike.
-        const UINT o_inv = cand + 256;
-        if (size >= o_inv + 64) {
-            const float* inv = reinterpret_cast<const float*>(p + o_inv);
-            if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) continue;
-        }
+        // The inverse view must agree, or this is a look-alike (a mirrored
+        // camera for a reflection pass, say).
+        const float* inv = reinterpret_cast<const float*>(p + o_inv);
+        if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) continue;
         base = cand;
         break;
     }
