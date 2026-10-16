@@ -30,6 +30,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_buffer_count;
     private delegate* unmanaged[Cdecl]<int>       _fn_dump_count;
     private delegate* unmanaged[Cdecl]<int>       _fn_hook_calls;
+    private delegate* unmanaged[Cdecl]<void>      _fn_begin_frame;
+    private delegate* unmanaged[Cdecl]<int>       _fn_frame_writes;
 
     public FFXVRModule() { }
 
@@ -61,6 +63,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
             _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
             _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
+            _fn_begin_frame  = (delegate* unmanaged[Cdecl]<void>)     NativeLibrary.GetExport(_native_handle, "ffxvr_begin_frame");
+            _fn_frame_writes = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_frame_writes");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -119,6 +123,10 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         try_install_hooks();
 
+        // Marks the frame boundary for the native helper. Fahrenheit calls
+        // render_imgui from inside Present, so this fires exactly once a frame.
+        if (_fn_begin_frame != null) _fn_begin_frame();
+
         if (!_window_open) return;
 
         if (ImGui.Begin("FFX VR", ref _window_open)) {
@@ -138,6 +146,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.Text($"Hooked calls seen:     {calls}");
                 ImGui.Text($"Constant buffers seen: {_fn_buffer_count()}");
                 ImGui.Text($"Dumps written:         {_fn_dump_count()}");
+                if (_fn_frame_writes != null)
+                    ImGui.Text($"Writes in last frame:  {_fn_frame_writes()}");
                 ImGui.Separator();
 
                 if (calls == 0) {

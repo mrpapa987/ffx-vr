@@ -102,12 +102,18 @@ struct Write {
     std::vector<uint8_t> data;
 };
 
-constexpr size_t kCaptureLimit = 1200;
+// One frame of a busy scene is a few thousand writes. The old limit of 1200 was
+// swallowed whole by the overlay's own draw calls before the game's 3D pass came
+// round again, which is why early captures held nothing but UI matrices.
+constexpr size_t kCaptureLimit = 20000;
 
 std::vector<Write> g_capture;
-bool               g_capturing    = false;
-bool               g_capture_done = false;
-uint32_t           g_seq          = 0;
+bool               g_capturing     = false;
+bool               g_capture_done  = false;
+bool               g_arm_next      = false;   // F9 pressed; start at the next frame
+uint32_t           g_seq           = 0;
+uint32_t           g_frames        = 0;
+uint32_t           g_frame_writes  = 0;       // writes seen in the frame just finished
 
 bool    g_installed   = false;
 void*   g_patched_context = nullptr;
@@ -162,7 +168,7 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
 
         // Dumping here would deadlock: we already hold the lock. Flag it and let
         // tick() write the file once the lock is released.
-        if (g_capture.size() >= kCaptureLimit) {
+        if (g_capture.size() >= kCaptureLimit) {   // safety valve only
             g_capturing    = false;
             g_capture_done = true;
         }
@@ -227,7 +233,7 @@ void dump_capture() {
     std::lock_guard<std::mutex> lock(g_mutex);
 
     fprintf(f, "FFX VR constant buffer capture #%d\n", g_dump_index - 1);
-    fprintf(f, "writes recorded: %zu (limit %zu)\n\n", g_capture.size(), kCaptureLimit);
+    fprintf(f, "writes recorded: %zu (limit %zu) - one full frame\n\n", g_capture.size(), kCaptureLimit);
     fprintf(f, "Every constant buffer write, in order. Blocks flagged PROJ look like\n");
     fprintf(f, "a projection matrix; AFFINE like a view or world matrix. Compare two\n");
     fprintf(f, "captures from different camera positions.\n");
@@ -261,10 +267,7 @@ void tick() {
 
     if (down && !g_f9_was_down) {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_capture.clear();
-        g_seq          = 0;
-        g_capturing    = true;
-        g_capture_done = false;
+        g_arm_next = true;   // begin at the next frame boundary, not mid-overlay
     }
     g_f9_was_down = down;
 
@@ -382,6 +385,34 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_context) {
     g_patched_context = game_context;
     heartbeat(true);
     return 0;
+}
+
+// Called once per frame from the managed module's render_imgui, which Fahrenheit
+// invokes inside its Present hook. That gives us a true frame boundary, so a
+// capture can span exactly one frame instead of whatever happened to come next.
+extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
+    bool dump_now = false;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_frames++;
+
+        if (g_capturing) {               // a full frame has now elapsed
+            g_capturing   = false;
+            dump_now      = true;
+            g_frame_writes = static_cast<uint32_t>(g_capture.size());
+        }
+        else if (g_arm_next) {
+            g_arm_next  = false;
+            g_capture.clear();
+            g_seq       = 0;
+            g_capturing = true;
+        }
+    }
+    if (dump_now) dump_capture();
+}
+
+extern "C" __declspec(dllexport) int ffxvr_frame_writes() {
+    return static_cast<int>(g_frame_writes);
 }
 
 extern "C" __declspec(dllexport) int ffxvr_buffer_count() {
