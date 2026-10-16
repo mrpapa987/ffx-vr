@@ -43,6 +43,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
     private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void> _fn_override_set;
     private delegate* unmanaged[Cdecl]<int> _fn_override_applied;
+    private delegate* unmanaged[Cdecl]<int> _fn_override_mask;
 
     // -- camera override state (owned here, pushed to native every frame) ----
     private bool  _ovr_enabled, _ovr_freeze;
@@ -119,6 +120,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
             _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
             _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
+            _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_mask");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -368,7 +370,11 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
 
-        ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}");
+        int mask = _fn_override_mask != null ? _fn_override_mask() : 0;
+        ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
+                 + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
+                 + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
+                 + ((mask & 64) != 0 ? " IVW" : ""));
         ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
     }
 

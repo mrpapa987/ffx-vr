@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <d3d11.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -335,6 +336,7 @@ float g_ovr_move[3] = { 0.f, 0.f, 0.f };           // right, up, forward (world 
 float g_ovr_base[12] = {};                         // frozen view (3x4), valid when g_ovr_have_base
 bool  g_ovr_have_base = false;
 uint32_t g_ovr_applied = 0;
+unsigned g_ovr_mask    = 0;     // union of blocks ever patched: 1 view 2 inv 4 pos 8 VP 16 VW 32 PVW 64 IVW
 
 std::vector<uint8_t> g_scratch;
 
@@ -344,9 +346,30 @@ static void mul3(const float a[9], const float b[9], float out[9]) {
             out[r*3+c] = a[r*3+0]*b[0*3+c] + a[r*3+1]*b[1*3+c] + a[r*3+2]*b[2*3+c];
 }
 
-/// Rewrites the camera in a buffer image. `v` is the 3x4 view to base on.
-static void write_camera(uint8_t* p, const float v[12]) {
-    // Base rotation R (rows) and camera position P = -R^T t.
+constexpr UINT CAM_PROJN_OFFSET = 128;   // projection, near-plane variant
+constexpr UINT CAM_VP_OFFSET    = 192;   // proj(+128) * view        -- what the vertex shader uses
+constexpr UINT CAM_W_OFFSET     = 480;   // world (per object)
+constexpr UINT CAM_VW_OFFSET    = 544;   // view * world
+constexpr UINT CAM_WI_OFFSET    = 608;   // inverse world
+constexpr UINT CAM_PVW_OFFSET   = 672;   // proj * view * world
+constexpr UINT CAM_IVW_OFFSET   = 736;   // inverse(view * world) = inv world * inv view
+
+static void mul4(const float* a, const float* b, float* out) {
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            out[r*4+c] = a[r*4+0]*b[0*4+c] + a[r*4+1]*b[1*4+c] + a[r*4+2]*b[2*4+c] + a[r*4+3]*b[3*4+c];
+}
+
+/// Relative comparison, loose enough for float products of large translations.
+static bool same4(const float* a, const float* b) {
+    float scale = 1.f;
+    for (int i = 0; i < 16; ++i) scale = (std::max)(scale, fabsf(b[i]));
+    for (int i = 0; i < 16; ++i) if (fabsf(a[i] - b[i]) > 0.01f * scale) return false;
+    return true;
+}
+
+/// Builds the override view V' (4x4) and its inverse from a base 3x4 view.
+static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
     float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
     const float t[3] = { v[3], v[7], v[11] };
     float P[3];
@@ -361,25 +384,67 @@ static void write_camera(uint8_t* p, const float v[12]) {
     mul3(Ry, R, tmp);
     mul3(Rx, tmp, Rn);
 
-    // Move along the new camera's axes: world right/up/forward are the rows of
-    // R' (right = row 0, up = row 1, forward = -row 2 in this -z convention).
-    float Pn[3];
-    for (int i = 0; i < 3; ++i) {
+    // Move along the new camera's axes (rows of R'; forward is -row 2).
+    for (int i = 0; i < 3; ++i)
         Pn[i] = P[i] + Rn[0*3+i]*g_ovr_move[0] + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2];
-    }
 
-    // t' = -R' P'
     float tn[3];
     for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
 
-    float* view = reinterpret_cast<float*>(p + CAM_VIEW_OFFSET);
-    float* inv  = reinterpret_cast<float*>(p + CAM_INV_OFFSET);
-    float* pos  = reinterpret_cast<float*>(p + CAM_POS_OFFSET);
     for (int r = 0; r < 3; ++r) {
-        view[r*4+0] = Rn[r*3+0]; view[r*4+1] = Rn[r*3+1]; view[r*4+2] = Rn[r*3+2]; view[r*4+3] = tn[r];
-        inv [r*4+0] = Rn[0*3+r]; inv [r*4+1] = Rn[1*3+r]; inv [r*4+2] = Rn[2*3+r]; inv [r*4+3] = Pn[r];
+        Vn[r*4+0] = Rn[r*3+0]; Vn[r*4+1] = Rn[r*3+1]; Vn[r*4+2] = Rn[r*3+2]; Vn[r*4+3] = tn[r];
+        In[r*4+0] = Rn[0*3+r]; In[r*4+1] = Rn[1*3+r]; In[r*4+2] = Rn[2*3+r]; In[r*4+3] = Pn[r];
     }
-    pos[0] = Pn[0]; pos[1] = Pn[1]; pos[2] = Pn[2];
+    Vn[12] = Vn[13] = Vn[14] = 0.f; Vn[15] = 1.f;
+    In[12] = In[13] = In[14] = 0.f; In[15] = 1.f;
+}
+
+/// Rewrites every camera-derived block in a buffer image. `orig` is the
+/// untouched original (to read the world matrix and to validate each derived
+/// block before replacing it), `p` the copy being patched, `v` the 3x4 view
+/// to base the override on. Returns a bitmask of what was patched.
+static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, const float v[12]) {
+    float Vn[16], In[16], Pn[3];
+    build_override_view(v, Vn, In, Pn);
+
+    const float* V  = reinterpret_cast<const float*>(orig + CAM_VIEW_OFFSET);
+    const float* Pj = reinterpret_cast<const float*>(orig + CAM_PROJN_OFFSET);
+    unsigned mask = 0;
+
+    memcpy(p + CAM_VIEW_OFFSET, Vn, 64);  mask |= 1;
+    memcpy(p + CAM_INV_OFFSET,  In, 64);  mask |= 2;
+    memcpy(p + CAM_POS_OFFSET,  Pn, 12);  mask |= 4;
+
+    float PV[16], PVn[16];
+    mul4(Pj, V, PV);
+    if (size >= CAM_VP_OFFSET + 64 && same4(reinterpret_cast<const float*>(orig + CAM_VP_OFFSET), PV)) {
+        mul4(Pj, Vn, PVn);
+        memcpy(p + CAM_VP_OFFSET, PVn, 64);  mask |= 8;
+    }
+    else {
+        mul4(Pj, Vn, PVn);   // still needed below if the world blocks validate
+    }
+
+    if (size >= CAM_IVW_OFFSET + 64) {
+        const float* W  = reinterpret_cast<const float*>(orig + CAM_W_OFFSET);
+        const float* Wi = reinterpret_cast<const float*>(orig + CAM_WI_OFFSET);
+        const float* I  = reinterpret_cast<const float*>(orig + CAM_INV_OFFSET);
+        float VW[16], PVW[16], IVW[16], tmp[16];
+
+        mul4(V, W, VW);
+        if (same4(reinterpret_cast<const float*>(orig + CAM_VW_OFFSET), VW)) {
+            mul4(Vn, W, tmp); memcpy(p + CAM_VW_OFFSET, tmp, 64);  mask |= 16;
+        }
+        mul4(PV, W, PVW);
+        if (same4(reinterpret_cast<const float*>(orig + CAM_PVW_OFFSET), PVW)) {
+            mul4(PVn, W, tmp); memcpy(p + CAM_PVW_OFFSET, tmp, 64);  mask |= 32;
+        }
+        mul4(Wi, I, IVW);
+        if (same4(reinterpret_cast<const float*>(orig + CAM_IVW_OFFSET), IVW)) {
+            mul4(Wi, In, tmp); memcpy(p + CAM_IVW_OFFSET, tmp, 64);  mask |= 64;
+        }
+    }
+    return mask;
 }
 
 /// If the override is on and this write carries a camera, returns a patched
@@ -407,7 +472,7 @@ static const void* maybe_override(const void* src, UINT size) {
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
-    write_camera(g_scratch.data(), v);
+    g_ovr_mask |= write_camera(p, g_scratch.data(), size, v);
     g_ovr_applied++;
     return g_scratch.data();
 }
@@ -1005,6 +1070,7 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
 }
 
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
+extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
 
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
     if (out == nullptr) return 0;
