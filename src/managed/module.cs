@@ -37,6 +37,32 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_slot0_count;
     private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
+    private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
+
+    // -- inline detours on d3d11.dll's draw functions ------------------------
+    //
+    // Patching the context's vtable for these does not stick: the D3D11
+    // runtime restores the draw slots itself, as the vtable audit showed. So
+    // the functions are detoured in place through Fahrenheit's MinHook, the
+    // same mechanism it uses for Present. Addresses come from the vtable at
+    // install time, which by then holds the runtime's own entries.
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_DrawIndexed(nint ctx, uint index_count, uint start_index, int base_vertex);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_Draw(nint ctx, uint vertex_count, uint start_vertex);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_DrawIndexedInstanced(nint ctx, uint a, uint b, uint c, int d, uint e);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_DrawInstanced(nint ctx, uint a, uint b, uint c, uint d);
+
+    private d_DrawIndexed?          _h_drawindexed,  _o_drawindexed;
+    private d_Draw?                 _h_draw,         _o_draw;
+    private d_DrawIndexedInstanced? _h_drawidxinst,  _o_drawidxinst;
+    private d_DrawInstanced?        _h_drawinst,     _o_drawinst;
+    private nint _a_drawindexed, _a_draw, _a_drawidxinst, _a_drawinst;
+    private string _detour_status = "not installed";
 
     public FFXVRModule() { }
 
@@ -75,6 +101,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
             _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
+            _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
+            _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -126,6 +154,59 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (rc == 0) _logger.Info($"Hooks installed on the game's context 0x{_game_context:X8} (device 0x{_game_device:X8}).");
         else         _logger.Error($"Native init failed with code {rc} for context 0x{_game_context:X8}.");
+
+        if (rc == 0) install_draw_detours();
+    }
+
+    private void install_draw_detours() {
+        nint* vt = *(nint**)_game_context;
+        _a_drawindexed = vt[12];
+        _a_draw        = vt[13];
+        _a_drawidxinst = vt[20];
+        _a_drawinst    = vt[21];
+
+        _h_drawindexed = h_drawindexed;
+        _h_draw        = h_draw;
+        _h_drawidxinst = h_drawidxinst;
+        _h_drawinst    = h_drawinst;
+
+        bool ok = true;
+        ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
+        ok &= new FhCallHandle<d_Draw>                (new FhCallLocation((void*)_a_draw))       .hook(this, _h_draw);
+        ok &= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).hook(this, _h_drawidxinst);
+        ok &= new FhCallHandle<d_DrawInstanced>       (new FhCallLocation((void*)_a_drawinst))   .hook(this, _h_drawinst);
+
+        _detour_status = ok ? "installed" : "FAILED (see core.log)";
+        _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
+                   + $"DrawIndexedInstanced 0x{_a_drawidxinst:X8}, DrawInstanced 0x{_a_drawinst:X8}");
+    }
+
+    // Each detour reports to the native side, then continues down the chain.
+    // The chain pointer is resolved once and cached; resolving it per call
+    // would cost a delegate marshal on every draw.
+
+    private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
+        if (_fn_on_draw != null) _fn_on_draw(1);
+        _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
+        _o_drawindexed!(ctx, n, start, base_vertex);
+    }
+
+    private void h_draw(nint ctx, uint n, uint start) {
+        if (_fn_on_draw != null) _fn_on_draw(2);
+        _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
+        _o_draw!(ctx, n, start);
+    }
+
+    private void h_drawidxinst(nint ctx, uint a, uint b, uint c, int d, uint e) {
+        if (_fn_on_draw != null) _fn_on_draw(3);
+        _o_drawidxinst ??= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).chain_from(_h_drawidxinst!).fnptr;
+        _o_drawidxinst!(ctx, a, b, c, d, e);
+    }
+
+    private void h_drawinst(nint ctx, uint a, uint b, uint c, uint d) {
+        if (_fn_on_draw != null) _fn_on_draw(4);
+        _o_drawinst ??= new FhCallHandle<d_DrawInstanced>(new FhCallLocation((void*)_a_drawinst)).chain_from(_h_drawinst!).fnptr;
+        _o_drawinst!(ctx, a, b, c, d);
     }
 
     /// <summary>
@@ -190,6 +271,34 @@ public sealed unsafe class FFXVRModule : FhModule {
     ///     <c>Map</c> or <c>UpdateSubresource</c> hit was written this frame, so a
     ///     camera that tracks the player must be one of those.
     /// </remarks>
+
+    /// <summary>
+    ///     Shows how much of the latched slot-0 buffer changed since the last
+    ///     frame. While walking, a live camera must change something in here;
+    ///     the offsets say where.
+    /// </summary>
+    private void draw_diff() {
+        if (_fn_diff == null) return;
+
+        int* d = stackalloc int[11];
+        _fn_diff(d);
+
+        if (d[1] == 0) {
+            ImGui.Text("Latched buffer:        none yet (no draw with a big slot-0 buffer)");
+            return;
+        }
+
+        ImGui.Text($"Latched buffer:        {d[1]} bytes, taken at draw #{d[2]} of the frame");
+        ImGui.Text($"Changed since last frame: {d[0]} floats");
+
+        if (d[0] > 0) {
+            var sb = new System.Text.StringBuilder("  at bytes:");
+            for (int i = 0; i < Math.Min(8, d[0]); i++) sb.Append(' ').Append(d[3 + i]);
+            if (d[0] > 8) sb.Append(" ...");
+            ImGui.Text(sb.ToString());
+        }
+    }
+
     private void draw_scan() {
         if (_fn_scan == null) return;
 
@@ -211,6 +320,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             string via = ((int)h[2]) switch {
                 0 => "CreateBuffer (area load)",
                 1 => "Map (per frame)",
+                3 => "latched buffer, read back",
                 _ => "UpdateSubresource (per frame)",
             };
             ImGui.Text($"  +{(int)h[0],-5} in {(int)h[1],6}B  {h[3],9:F2} {h[4],9:F2} {h[5],9:F2}  {via}");
@@ -248,10 +358,12 @@ public sealed unsafe class FFXVRModule : FhModule {
                 if (_fn_frame_writes != null)
                     ImGui.Text($"Writes in last frame:  {_fn_frame_writes()}");
 
+                ImGui.Text($"Draw detours:          {_detour_status}");
                 if (_fn_counter != null) {
                     ImGui.Text($"Draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}, "
                              + $"indexed-inst {_fn_counter(3)}, inst {_fn_counter(4)}");
                 }
+                draw_diff();
                 ImGui.Separator();
 
                 draw_camera();

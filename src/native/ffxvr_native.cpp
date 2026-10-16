@@ -159,6 +159,15 @@ ID3D11Buffer*        g_staging      = nullptr;
 UINT                 g_staging_size = 0;
 
 float    g_cam[48] = {};     // view, projection, inverse view
+
+// Whole-buffer readback of the latched slot-0 buffer, and a diff against the
+// previous frame, so we can see which bytes move while walking even if none of
+// them is a view matrix we recognise.
+std::vector<uint8_t> g_full, g_full_prev;
+int      g_diff_count   = 0;         // floats that changed since last frame
+uint32_t g_diff_offs[8] = {};        // first few changed byte offsets
+int      g_draws_latched_at = -1;    // which draw of the frame latched (0 = first)
+int      g_draw_in_frame    = 0;
 bool     g_cam_valid = false;
 uint32_t g_cam_reads = 0;
 
@@ -265,7 +274,8 @@ static void scan_for_camera(const void* data, UINT size, const char* via) {
     // Map/Unmap or UpdateSubresource was written this frame. Telling them
     // apart is the whole point of the scan.
     const int via_code = (via != nullptr && via[0] == 'C') ? 0
-                       : (via != nullptr && via[0] == 'M') ? 1 : 2;
+                       : (via != nullptr && via[0] == 'M') ? 1
+                       : (via != nullptr && via[0] == 'R') ? 3 : 2;
 
     const char* base = static_cast<const char*>(data);
 
@@ -536,14 +546,12 @@ void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* c, UINT n, UINT s) {
 // geometry, rather than whichever happened to be bound last.
 void STDMETHODCALLTYPE hk_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
     bump(C_DRAWIDXINST);
-    if (!g_latched && g_slot0_big) { g_slot0 = g_slot0_cur; g_latched = true; }
     tick();
     g_orig_drawidxinst(c, a, b, d, e, f);
 }
 
 void STDMETHODCALLTYPE hk_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
     bump(C_DRAWINST);
-    if (!g_latched && g_slot0_big) { g_slot0 = g_slot0_cur; g_latched = true; }
     tick();
     g_orig_drawinst(c, a, b, d, e);
 }
@@ -604,7 +612,7 @@ void read_camera() {
 
     D3D11_BUFFER_DESC src = {};
     g_slot0->GetDesc(&src);
-    if (src.ByteWidth < CAM_MIN_SIZE) return;
+    if (src.ByteWidth < 48) return;
 
     if (g_staging == nullptr || g_staging_size < src.ByteWidth) {
         if (g_staging) { g_staging->Release(); g_staging = nullptr; }
@@ -622,13 +630,38 @@ void read_camera() {
     if (FAILED(g_orig_map(g_ctx, g_staging, 0, D3D11_MAP_READ, 0, &ms)) || ms.pData == nullptr) return;
 
     const uint8_t* p = static_cast<const uint8_t*>(ms.pData);
-    memcpy(&g_cam[0],  p + CAM_VIEW_OFFSET, 64);
-    memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
-    memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
-    g_cam_valid = true;
+
+    g_full_prev.swap(g_full);
+    g_full.assign(p, p + src.ByteWidth);
+
+    if (src.ByteWidth >= CAM_MIN_SIZE) {
+        memcpy(&g_cam[0],  p + CAM_VIEW_OFFSET, 64);
+        memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
+        memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
+        g_cam_valid = true;
+    }
     g_cam_reads++;
 
     g_orig_unmap(g_ctx, g_staging, 0);
+
+    // Diff against last frame: same buffer, same size only.
+    g_diff_count = 0;
+    if (g_full_prev.size() == g_full.size()) {
+        const float* a = reinterpret_cast<const float*>(g_full.data());
+        const float* b = reinterpret_cast<const float*>(g_full_prev.data());
+        const size_t n = g_full.size() / 4;
+        for (size_t i = 0; i < n; ++i) {
+            if (a[i] != b[i]) {
+                if (g_diff_count < 8) g_diff_offs[g_diff_count] = static_cast<uint32_t>(i * 4);
+                g_diff_count++;
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        scan_for_camera(g_full.data(), static_cast<UINT>(g_full.size()), "Readback");
+    }
 }
 
 bool patch(void** vtable, int index, void* replacement, void** out_original, const char* name = "?") {
@@ -664,13 +697,8 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
-    ok &= patch(vt, VT_DRAWINDEXED,          reinterpret_cast<void*>(&hk_DrawIndexed),          reinterpret_cast<void**>(&g_orig_drawindexed), "DrawIndexed");
-    ok &= patch(vt, VT_DRAW,                 reinterpret_cast<void*>(&hk_Draw),                 reinterpret_cast<void**>(&g_orig_draw), "Draw");
-    ok &= patch(vt, VT_DRAWINDEXEDINST,      reinterpret_cast<void*>(&hk_DrawIndexedInstanced),  reinterpret_cast<void**>(&g_orig_drawidxinst), "DrawIndexedInstanced");
-    ok &= patch(vt, VT_DRAWINST,             reinterpret_cast<void*>(&hk_DrawInstanced),         reinterpret_cast<void**>(&g_orig_drawinst), "DrawInstanced");
     ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map), "Map");
     ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap), "Unmap");
-    ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub), "UpdateSubresource");
 
     // Patch CreateBuffer on the device: ID3D11Device vtable index 3.
     if (game_device != nullptr) {
@@ -717,6 +745,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     read_camera();
     g_latched      = false;
+    g_draw_in_frame = 0;
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
 
@@ -744,6 +773,40 @@ extern "C" __declspec(dllexport) int ffxvr_camera_reads() { return static_cast<i
 // How many distinct camera-sized buffers were bound to slot 0 last frame.
 // If this is large the choice of buffer is ambiguous and worth reporting.
 extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report; }
+
+/// Called from the managed inline detours on every draw. `which` is the
+/// counter index (1 DrawIndexed, 2 Draw, 3 DrawIndexedInstanced, 4 DrawInstanced).
+/// On the first draw of a frame with a camera-sized buffer in VS slot 0, that
+/// buffer is latched for the end-of-frame readback.
+extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
+    if (which >= 1 && which <= 4) bump(which);
+    const int idx = g_draw_in_frame++;
+    if (g_latched || g_ctx == nullptr) return;
+
+    ID3D11Buffer* b = nullptr;
+    g_ctx->VSGetConstantBuffers(0, 1, &b);          // AddRefs
+    if (b == nullptr) return;
+
+    D3D11_BUFFER_DESC bd = {};
+    b->GetDesc(&bd);
+    if (bd.ByteWidth < CAM_MIN_SIZE) { b->Release(); return; }
+
+    if (g_slot0 != nullptr) g_slot0->Release();
+    g_slot0             = b;                        // keep the reference
+    g_latched           = true;
+    g_draws_latched_at  = idx;
+}
+
+/// out[0] = floats changed since last frame, out[1] = buffer size, out[2] = draw
+/// index that latched, out[3..10] = first changed byte offsets.
+extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
+    if (out == nullptr) return 0;
+    out[0] = g_diff_count;
+    out[1] = static_cast<int>(g_full.size());
+    out[2] = g_draws_latched_at;
+    for (int i = 0; i < 8; ++i) out[3 + i] = static_cast<int>(g_diff_offs[i]);
+    return g_diff_count;
+}
 
 /// Reads one hook counter by index, so the overlay can show whether a specific
 /// draw path fires at all rather than only the aggregate.
