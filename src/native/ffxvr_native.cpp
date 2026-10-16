@@ -148,6 +148,13 @@ ID3D11Buffer*        g_slot0        = nullptr;   // latched at the frame's first
 int                  g_slot0_seen   = 0;         // distinct camera-sized slot-0 binds, this frame
 int                  g_slot0_report = 0;         // the above, for the frame the UI is drawing
 bool                 g_latched      = false;
+
+// Vtable audit: what we put in each patched slot, so the heartbeat can report
+// whether it is still there and, if not, whose code replaced it.
+void**  g_vt = nullptr;
+struct Patched { void** vt; int index; const char* name; void* ours; void* original; };
+Patched g_patched[12] = {};
+int     g_patched_n   = 0;
 ID3D11Buffer*        g_staging      = nullptr;
 UINT                 g_staging_size = 0;
 
@@ -336,6 +343,23 @@ bool looks_like_affine(const float* m) {
 }
 
 // Heartbeat: proves whether the hooks fire at all, without needing a keypress.
+static void describe_address(void* p, char* out, size_t n) {
+    HMODULE mod = nullptr;
+    if (p != nullptr && GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                         | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                           static_cast<LPCWSTR>(p), &mod) && mod != nullptr) {
+        wchar_t path[MAX_PATH] = L"";
+        GetModuleFileNameW(mod, path, MAX_PATH);
+        const wchar_t* base = wcsrchr(path, L'\\');
+        base = base ? base + 1 : path;
+        snprintf(out, n, "%p  %ls+0x%X", p, base,
+                 static_cast<unsigned>(reinterpret_cast<uintptr_t>(p) - reinterpret_cast<uintptr_t>(mod)));
+    }
+    else {
+        snprintf(out, n, "%p  (no module)", p);
+    }
+}
+
 void heartbeat(bool force) {
     const DWORD now = GetTickCount();
     if (!force && (now - g_last_beat) < 5000) return;
@@ -362,6 +386,19 @@ void heartbeat(bool force) {
             fprintf(f, "      %p  %5u bytes  %8llu updates  via %s\n",
                     static_cast<void*>(buf), rec.size,
                     static_cast<unsigned long long>(rec.updates), rec.via);
+        }
+    }
+
+    if (g_patched_n > 0) {
+        fprintf(f, "\n  vtable audit (slot: what is there now / what we installed / original):\n");
+        for (int i = 0; i < g_patched_n; ++i) {
+            const Patched& pt = g_patched[i];
+            void* now = IsBadReadPtr(&pt.vt[pt.index], sizeof(void*)) ? nullptr : pt.vt[pt.index];
+            char a[160], b[160];
+            describe_address(now,         a, sizeof(a));
+            describe_address(pt.original, b, sizeof(b));
+            fprintf(f, "    [%2d] %-22s %s  <- %s\n      original: %s\n",
+                    pt.index, pt.name, a, (now == pt.ours) ? "OURS" : "REPLACED", b);
         }
     }
 
@@ -594,12 +631,14 @@ void read_camera() {
     g_orig_unmap(g_ctx, g_staging, 0);
 }
 
-bool patch(void** vtable, int index, void* replacement, void** out_original) {
+bool patch(void** vtable, int index, void* replacement, void** out_original, const char* name = "?") {
     DWORD old = 0;
     if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
     *out_original = vtable[index];
     vtable[index] = replacement;
     VirtualProtect(&vtable[index], sizeof(void*), old, &old);
+
+    if (g_patched_n < 12) g_patched[g_patched_n++] = { vtable, index, name, replacement, *out_original };
     return true;
 }
 
@@ -621,16 +660,17 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 
     void** vt = *reinterpret_cast<void***>(context);
     if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
+    g_vt = vt;
 
     bool ok = true;
-    ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb));
-    ok &= patch(vt, VT_DRAWINDEXED,          reinterpret_cast<void*>(&hk_DrawIndexed),          reinterpret_cast<void**>(&g_orig_drawindexed));
-    ok &= patch(vt, VT_DRAW,                 reinterpret_cast<void*>(&hk_Draw),                 reinterpret_cast<void**>(&g_orig_draw));
-    ok &= patch(vt, VT_DRAWINDEXEDINST,      reinterpret_cast<void*>(&hk_DrawIndexedInstanced),  reinterpret_cast<void**>(&g_orig_drawidxinst));
-    ok &= patch(vt, VT_DRAWINST,             reinterpret_cast<void*>(&hk_DrawInstanced),         reinterpret_cast<void**>(&g_orig_drawinst));
-    ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map));
-    ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap));
-    ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub));
+    ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
+    ok &= patch(vt, VT_DRAWINDEXED,          reinterpret_cast<void*>(&hk_DrawIndexed),          reinterpret_cast<void**>(&g_orig_drawindexed), "DrawIndexed");
+    ok &= patch(vt, VT_DRAW,                 reinterpret_cast<void*>(&hk_Draw),                 reinterpret_cast<void**>(&g_orig_draw), "Draw");
+    ok &= patch(vt, VT_DRAWINDEXEDINST,      reinterpret_cast<void*>(&hk_DrawIndexedInstanced),  reinterpret_cast<void**>(&g_orig_drawidxinst), "DrawIndexedInstanced");
+    ok &= patch(vt, VT_DRAWINST,             reinterpret_cast<void*>(&hk_DrawInstanced),         reinterpret_cast<void**>(&g_orig_drawinst), "DrawInstanced");
+    ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map), "Map");
+    ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap), "Unmap");
+    ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub), "UpdateSubresource");
 
     // Patch CreateBuffer on the device: ID3D11Device vtable index 3.
     if (game_device != nullptr) {
@@ -638,7 +678,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
         void** dvt = *reinterpret_cast<void***>(dev);
         if (dvt != nullptr && !IsBadReadPtr(dvt, sizeof(void*) * 8)) {
             patch(dvt, 3, reinterpret_cast<void*>(&hk_CreateBuffer),
-                  reinterpret_cast<void**>(&g_orig_createbuffer));
+                  reinterpret_cast<void**>(&g_orig_createbuffer), "CreateBuffer (device)");
         }
     }
 
