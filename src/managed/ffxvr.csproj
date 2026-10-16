@@ -19,7 +19,11 @@
         <RepositoryUrl></RepositoryUrl>
         <FhManifestHomePage></FhManifestHomePage>
 
-        <!-- We do not alter saves, so no SEPARATE_SAVES flag. -->
-        <FhManifestFlags></FhManifestFlags>
+        <!--
+          Enum-valued, so it must be a real member, not empty: an empty string fails
+          to deserialize and kills the bootloader before it can log anything.
+          NONE = we do not need SEPARATE_SAVES; the mod does not alter saves.
+        -->
+        <FhManifestFlags>NONE</FhManifestFlags>
     </PropertyGroup>
 </Project>
