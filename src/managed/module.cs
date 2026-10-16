@@ -32,6 +32,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_hook_calls;
     private delegate* unmanaged[Cdecl]<void>      _fn_begin_frame;
     private delegate* unmanaged[Cdecl]<int>       _fn_frame_writes;
+    private delegate* unmanaged[Cdecl]<float*, int> _fn_get_camera;
+    private delegate* unmanaged[Cdecl]<int>       _fn_camera_reads;
 
     public FFXVRModule() { }
 
@@ -65,6 +67,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
             _fn_begin_frame  = (delegate* unmanaged[Cdecl]<void>)     NativeLibrary.GetExport(_native_handle, "ffxvr_begin_frame");
             _fn_frame_writes = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_frame_writes");
+            _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_get_camera");
+            _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -118,6 +122,55 @@ public sealed unsafe class FFXVRModule : FhModule {
         else         _logger.Error($"Native init failed with code {rc} for context 0x{_game_context:X8}.");
     }
 
+    /// <summary>
+    ///     Shows the camera read live out of the game's own constant buffer.
+    ///     Offsets came from a RenderDoc capture; see docs/camera-found.md.
+    ///     Translation sits in the last column, so the world position of the
+    ///     camera is -R^T * t.
+    /// </summary>
+    private void draw_camera() {
+        if (_fn_get_camera == null) return;
+
+        float* c = stackalloc float[48];
+        if (_fn_get_camera(c) == 0) {
+            ImGui.Text("Camera: not read yet");
+            return;
+        }
+
+        ImGui.Separator();
+        ImGui.Text($"Camera reads: {(_fn_camera_reads != null ? _fn_camera_reads() : -1)}");
+
+        // view matrix, world -> view
+        float t0 = c[3], t1 = c[7], t2 = c[11];
+        float px = -(c[0] * t0 + c[4] * t1 + c[8]  * t2);
+        float py = -(c[1] * t0 + c[5] * t1 + c[9]  * t2);
+        float pz = -(c[2] * t0 + c[6] * t1 + c[10] * t2);
+
+        // the inverse view at byte 320 carries the same position directly
+        float qx = c[32 + 3], qy = c[32 + 7], qz = c[32 + 11];
+
+        ImGui.Text($"position (from view):    {px,9:F2} {py,9:F2} {pz,9:F2}");
+        ImGui.Text($"position (from inverse): {qx,9:F2} {qy,9:F2} {qz,9:F2}");
+
+        float m0 = c[16 + 0], m5 = c[16 + 5];
+        if (MathF.Abs(m0) > 1e-6f && MathF.Abs(m5) > 1e-6f) {
+            float fovy = 2f * MathF.Atan(1f / m5) * 180f / MathF.PI;
+            float fovx = 2f * MathF.Atan(1f / m0) * 180f / MathF.PI;
+            ImGui.Text($"FOV: {fovy:F1} vertical, {fovx:F1} horizontal, aspect {m5 / m0:F3}");
+        }
+
+        if (ImGui.TreeNode("view matrix")) {
+            for (int r = 0; r < 4; r++)
+                ImGui.Text($"{c[r*4+0],10:F4} {c[r*4+1],10:F4} {c[r*4+2],10:F4} {c[r*4+3],10:F4}");
+            ImGui.TreePop();
+        }
+        if (ImGui.TreeNode("projection matrix")) {
+            for (int r = 0; r < 4; r++)
+                ImGui.Text($"{c[16+r*4+0],10:F4} {c[16+r*4+1],10:F4} {c[16+r*4+2],10:F4} {c[16+r*4+3],10:F4}");
+            ImGui.TreePop();
+        }
+    }
+
     public override void render_imgui() {
         _frames++;
 
@@ -149,6 +202,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 if (_fn_frame_writes != null)
                     ImGui.Text($"Writes in last frame:  {_fn_frame_writes()}");
                 ImGui.Separator();
+
+                draw_camera();
 
                 if (calls == 0) {
                     ImGui.TextWrapped("No hooked call has fired yet. If this stays at zero "

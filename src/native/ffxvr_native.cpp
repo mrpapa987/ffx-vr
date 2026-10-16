@@ -124,6 +124,25 @@ uint32_t           g_frame_writes  = 0;       // writes seen in the frame just f
 // whether the bound buffers are ones we ever saw filled.
 std::map<ID3D11Buffer*, int> g_bound;
 
+// Live camera readback. RenderDoc located the camera in vertex shader constant
+// block 0 of the large per-draw buffers: view matrix at byte 64, projection at
+// byte 256, inverse view at byte 320. Once a frame we copy whatever is bound to
+// VS slot 0 into a staging buffer and read those out.
+constexpr UINT CAM_VIEW_OFFSET = 64;
+constexpr UINT CAM_PROJ_OFFSET = 256;
+constexpr UINT CAM_INV_OFFSET  = 320;
+constexpr UINT CAM_MIN_SIZE    = CAM_INV_OFFSET + 64;
+
+ID3D11Device*        g_device       = nullptr;
+ID3D11DeviceContext* g_ctx          = nullptr;
+ID3D11Buffer*        g_slot0        = nullptr;   // newest buffer bound to VS slot 0
+ID3D11Buffer*        g_staging      = nullptr;
+UINT                 g_staging_size = 0;
+
+float    g_cam[48] = {};     // view, projection, inverse view
+bool     g_cam_valid = false;
+uint32_t g_cam_reads = 0;
+
 bool    g_installed   = false;
 void*   g_patched_context = nullptr;
 int     g_dump_index  = 0;
@@ -309,6 +328,12 @@ void tick() {
 void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) {
     bump(C_VSSETCB);
 
+    if (b != nullptr && s == 0 && n > 0 && b[0] != nullptr) {
+        D3D11_BUFFER_DESC bd = {};
+        b[0]->GetDesc(&bd);
+        if (bd.ByteWidth >= CAM_MIN_SIZE) g_slot0 = b[0];   // a camera-sized buffer
+    }
+
     if (g_capturing && b != nullptr) {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (UINT i = 0; i < n && i < 8; ++i) {
@@ -393,6 +418,42 @@ void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resour
 
 // ---------------------------------------------------------------- install
 
+// Copy the bound slot-0 buffer somewhere the CPU can read, and pull out the
+// camera. Uses the original Map/Unmap so our own hooks neither recurse nor
+// record the staging buffer as game data.
+void read_camera() {
+    if (g_slot0 == nullptr || g_device == nullptr || g_ctx == nullptr) return;
+    if (g_orig_map == nullptr || g_orig_unmap == nullptr) return;
+
+    D3D11_BUFFER_DESC src = {};
+    g_slot0->GetDesc(&src);
+    if (src.ByteWidth < CAM_MIN_SIZE) return;
+
+    if (g_staging == nullptr || g_staging_size < src.ByteWidth) {
+        if (g_staging) { g_staging->Release(); g_staging = nullptr; }
+        D3D11_BUFFER_DESC sd = {};
+        sd.ByteWidth      = src.ByteWidth;
+        sd.Usage          = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(g_device->CreateBuffer(&sd, nullptr, &g_staging))) { g_staging = nullptr; return; }
+        g_staging_size = src.ByteWidth;
+    }
+
+    g_ctx->CopyResource(g_staging, g_slot0);
+
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (FAILED(g_orig_map(g_ctx, g_staging, 0, D3D11_MAP_READ, 0, &ms)) || ms.pData == nullptr) return;
+
+    const uint8_t* p = static_cast<const uint8_t*>(ms.pData);
+    memcpy(&g_cam[0],  p + CAM_VIEW_OFFSET, 64);
+    memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
+    memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
+    g_cam_valid = true;
+    g_cam_reads++;
+
+    g_orig_unmap(g_ctx, g_staging, 0);
+}
+
 bool patch(void** vtable, int index, void* replacement, void** out_original) {
     DWORD old = 0;
     if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
@@ -415,6 +476,8 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     // the guesswork that sank the previous attempt: a vtable obtained from a
     // separately created device turned out to share nothing with the game's.
     ID3D11DeviceContext* context = reinterpret_cast<ID3D11DeviceContext*>(game_context);
+    g_ctx    = context;
+    g_device = reinterpret_cast<ID3D11Device*>(game_device);
 
     void** vt = *reinterpret_cast<void***>(context);
     if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
@@ -470,8 +533,19 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             g_capturing   = true;
         }
     }
+    read_camera();
+
     if (dump_now) dump_capture();
 }
+
+// Fills 48 floats: view, projection, inverse view. Returns 1 if valid.
+extern "C" __declspec(dllexport) int ffxvr_get_camera(float* out) {
+    if (!g_cam_valid || out == nullptr) return 0;
+    memcpy(out, g_cam, sizeof(g_cam));
+    return 1;
+}
+
+extern "C" __declspec(dllexport) int ffxvr_camera_reads() { return static_cast<int>(g_cam_reads); }
 
 extern "C" __declspec(dllexport) int ffxvr_frame_writes() {
     return static_cast<int>(g_frame_writes);
