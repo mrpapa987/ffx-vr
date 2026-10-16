@@ -155,3 +155,18 @@ matrices from +1344 on instead of the world-derived blocks.
 Moving the camera means recomputing every derived block from the new view.
 The override does so, replacing a block only when its original equals the
 product it is expected to be.
+
+### Other layouts (verified 16 Oct 2026, dump beside a save sphere)
+
+- **1872 B and up** (save-sphere family, skinned characters): camera blocks
+  as above, but the world-derived set -- world, view×world, inverse world,
+  proj×view×world, inverse(view×world) -- sits at **+640/+704/+768/+832/+896**
+  instead of +480 onward. Bone matrices follow.
+- **608 B**: the common layout shifted 16 bytes earlier (position +32, view
+  +48, VP +176, inverse +304); no world blocks.
+- **336 B**: only proj×view at +192, no view of its own. Patched by
+  recognising the frame's known product.
+- **192 B**: a mirrored camera (reflection/sprite pass) with no inverse;
+  deliberately left alone.
+- **256 B**: a world matrix whose translation is the camera position, i.e.
+  something camera-attached (sky?). Left alone.
