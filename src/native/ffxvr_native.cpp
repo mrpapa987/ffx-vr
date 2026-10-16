@@ -43,17 +43,20 @@ enum : int {
     VT_DRAW                 = 13,
     VT_MAP                  = 14,
     VT_UNMAP                = 15,
+    VT_DRAWINDEXEDINST      = 20,
+    VT_DRAWINST             = 21,
     VT_UPDATESUBRESOURCE    = 48,
 };
 
 enum CounterId {
-    C_VSSETCB = 0, C_DRAWINDEXED, C_DRAW, C_MAP, C_UNMAP, C_UPDATESUB,
-    C_CREATEBUF, C_CB_CAPTURED, C_COUNT
+    C_VSSETCB = 0, C_DRAWINDEXED, C_DRAW, C_DRAWIDXINST, C_DRAWINST,
+    C_MAP, C_UNMAP, C_UPDATESUB, C_CREATEBUF, C_CB_CAPTURED, C_COUNT
 };
 
 const char* const kCounterName[C_COUNT] = {
-    "VSSetConstantBuffers", "DrawIndexed", "Draw", "Map", "Unmap",
-    "UpdateSubresource", "CreateBuffer (const, w/ data)", "constant buffer captures"
+    "VSSetConstantBuffers", "DrawIndexed", "Draw", "DrawIndexedInstanced",
+    "DrawInstanced", "Map", "Unmap", "UpdateSubresource",
+    "CreateBuffer (const, w/ data)", "constant buffer captures"
 };
 
 volatile LONG g_counters[C_COUNT] = {};
@@ -65,6 +68,8 @@ inline void bump(CounterId id) { InterlockedIncrement(&g_counters[id]); }
 using PFN_VSSetConstantBuffers = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
 using PFN_DrawIndexed          = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
 using PFN_Draw                 = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
+using PFN_DrawIndexedInstanced = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
+using PFN_DrawInstanced        = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
 using PFN_Map                  = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 using PFN_Unmap                = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
 using PFN_UpdateSubresource    = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
@@ -73,6 +78,8 @@ using PFN_CreateBuffer         = HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*, con
 PFN_VSSetConstantBuffers g_orig_vssetcb        = nullptr;
 PFN_DrawIndexed          g_orig_drawindexed    = nullptr;
 PFN_Draw                 g_orig_draw           = nullptr;
+PFN_DrawIndexedInstanced g_orig_drawidxinst    = nullptr;
+PFN_DrawInstanced        g_orig_drawinst       = nullptr;
 PFN_Map                  g_orig_map            = nullptr;
 PFN_Unmap                g_orig_unmap          = nullptr;
 PFN_UpdateSubresource    g_orig_updatesub      = nullptr;
@@ -135,7 +142,10 @@ constexpr UINT CAM_MIN_SIZE    = CAM_INV_OFFSET + 64;
 
 ID3D11Device*        g_device       = nullptr;
 ID3D11DeviceContext* g_ctx          = nullptr;
-ID3D11Buffer*        g_slot0        = nullptr;   // newest buffer bound to VS slot 0
+ID3D11Buffer*        g_slot0_now    = nullptr;   // currently bound to VS slot 0
+ID3D11Buffer*        g_slot0        = nullptr;   // latched at the frame's first 3D draw
+int                  g_slot0_seen   = 0;         // distinct slot-0 binds this frame
+bool                 g_latched      = false;
 ID3D11Buffer*        g_staging      = nullptr;
 UINT                 g_staging_size = 0;
 
@@ -331,7 +341,10 @@ void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, U
     if (b != nullptr && s == 0 && n > 0 && b[0] != nullptr) {
         D3D11_BUFFER_DESC bd = {};
         b[0]->GetDesc(&bd);
-        if (bd.ByteWidth >= CAM_MIN_SIZE) g_slot0 = b[0];   // a camera-sized buffer
+        if (bd.ByteWidth >= CAM_MIN_SIZE) {
+            if (g_slot0_now != b[0]) g_slot0_seen++;
+            g_slot0_now = b[0];
+        }
     }
 
     if (g_capturing && b != nullptr) {
@@ -369,6 +382,23 @@ void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* c, UINT n, UINT s) {
     bump(C_DRAW);
     tick();
     g_orig_draw(c, n, s);
+}
+
+// The game draws through the instanced variants only. Latching the slot-0
+// binding at the FIRST such draw of a frame targets the buffer feeding real
+// geometry, rather than whichever happened to be bound last.
+void STDMETHODCALLTYPE hk_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
+    bump(C_DRAWIDXINST);
+    if (!g_latched && g_slot0_now != nullptr) { g_slot0 = g_slot0_now; g_latched = true; }
+    tick();
+    g_orig_drawidxinst(c, a, b, d, e, f);
+}
+
+void STDMETHODCALLTYPE hk_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
+    bump(C_DRAWINST);
+    if (!g_latched && g_slot0_now != nullptr) { g_slot0 = g_slot0_now; g_latched = true; }
+    tick();
+    g_orig_drawinst(c, a, b, d, e);
 }
 
 HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT fl, D3D11_MAPPED_SUBRESOURCE* m) {
@@ -486,6 +516,8 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb));
     ok &= patch(vt, VT_DRAWINDEXED,          reinterpret_cast<void*>(&hk_DrawIndexed),          reinterpret_cast<void**>(&g_orig_drawindexed));
     ok &= patch(vt, VT_DRAW,                 reinterpret_cast<void*>(&hk_Draw),                 reinterpret_cast<void**>(&g_orig_draw));
+    ok &= patch(vt, VT_DRAWINDEXEDINST,      reinterpret_cast<void*>(&hk_DrawIndexedInstanced),  reinterpret_cast<void**>(&g_orig_drawidxinst));
+    ok &= patch(vt, VT_DRAWINST,             reinterpret_cast<void*>(&hk_DrawInstanced),         reinterpret_cast<void**>(&g_orig_drawinst));
     ok &= patch(vt, VT_MAP,                  reinterpret_cast<void*>(&hk_Map),                  reinterpret_cast<void**>(&g_orig_map));
     ok &= patch(vt, VT_UNMAP,                reinterpret_cast<void*>(&hk_Unmap),                reinterpret_cast<void**>(&g_orig_unmap));
     ok &= patch(vt, VT_UPDATESUBRESOURCE,    reinterpret_cast<void*>(&hk_UpdateSubresource),    reinterpret_cast<void**>(&g_orig_updatesub));
@@ -534,6 +566,8 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    g_latched    = false;
+    g_slot0_seen = 0;
 
     if (dump_now) dump_capture();
 }
@@ -546,6 +580,10 @@ extern "C" __declspec(dllexport) int ffxvr_get_camera(float* out) {
 }
 
 extern "C" __declspec(dllexport) int ffxvr_camera_reads() { return static_cast<int>(g_cam_reads); }
+
+// How many distinct camera-sized buffers were bound to slot 0 last frame.
+// If this is large the choice of buffer is ambiguous and worth reporting.
+extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_seen; }
 
 extern "C" __declspec(dllexport) int ffxvr_frame_writes() {
     return static_cast<int>(g_frame_writes);

@@ -34,6 +34,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_frame_writes;
     private delegate* unmanaged[Cdecl]<float*, int> _fn_get_camera;
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_reads;
+    private delegate* unmanaged[Cdecl]<int>       _fn_slot0_count;
 
     public FFXVRModule() { }
 
@@ -69,6 +70,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_frame_writes = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_frame_writes");
             _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_get_camera");
             _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
+            _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -138,7 +140,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
 
         ImGui.Separator();
-        ImGui.Text($"Camera reads: {(_fn_camera_reads != null ? _fn_camera_reads() : -1)}");
+        ImGui.Text($"Camera reads: {(_fn_camera_reads != null ? _fn_camera_reads() : -1)}"
+                 + $"   slot-0 buffers/frame: {(_fn_slot0_count != null ? _fn_slot0_count() : -1)}");
 
         // view matrix, world -> view
         float t0 = c[3], t1 = c[7], t2 = c[11];
