@@ -1,0 +1,25 @@
+<!--
+  FFX VR - Fahrenheit mod project.
+
+  The SDK version must match the Fahrenheit build in _ext\fahrenheit.
+  Both come from the same commit; see docs\setup.md for why that matters.
+-->
+<Project Sdk="Fahrenheit.Sdk/1.0.0-alpha12">
+    <PropertyGroup>
+        <!-- Mod id, and the name of the DLL on disk. Goes in 'loadorder'. -->
+        <AssemblyName>ffxvr</AssemblyName>
+
+        <AssemblyTitle>FFX VR</AssemblyTitle>
+        <Product>FFX VR</Product>
+        <Description>VR support for Final Fantasy X HD Remaster.</Description>
+        <Version>0.1.0-dev</Version>
+        <Authors>mrpapa</Authors>
+
+        <RepositoryType></RepositoryType>
+        <RepositoryUrl></RepositoryUrl>
+        <FhManifestHomePage></FhManifestHomePage>
+
+        <!-- We do not alter saves, so no SEPARATE_SAVES flag. -->
+        <FhManifestFlags></FhManifestFlags>
+    </PropertyGroup>
+</Project>
