@@ -311,9 +311,32 @@ static void scan_for_camera(const void* data, UINT size, const char* via) {
     }
 }
 
+// Camera taken straight from the CPU-side write of a per-object buffer.
+// No latch, no GPU readback: UpdateSubresource hands us the bytes, and the
+// shape test at +64 rejects same-sized buffers that carry something else.
+static void camera_from_write(const void* src, UINT size) {
+    if (size < CAM_MIN_SIZE || size > 2048) return;
+
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    float m[12], pos[3];
+    memcpy(m, p + CAM_VIEW_OFFSET, sizeof(m));
+    if (!looks_like_view(m, pos)) return;
+
+    if (memcmp(g_cam_last_view, m, sizeof(m)) != 0) {
+        memcpy(g_cam_last_view, m, sizeof(m));
+        g_cam_changes++;
+    }
+    memcpy(&g_cam[0],  p + CAM_VIEW_OFFSET, 64);
+    memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
+    memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
+    g_cam_valid = true;
+    g_cam_reads++;
+}
+
 void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
     if (size == 0 || size > 65536 || src == nullptr) return;
 
+    camera_from_write(src, size);
     scan_for_camera(src, size, via);
 
     CbRecord& rec = g_buffers[buf];
@@ -374,8 +397,25 @@ static void describe_address(void* p, char* out, size_t n) {
 
 void heartbeat(bool force) {
     const DWORD now = GetTickCount();
-    if (!force && (now - g_last_beat) < 5000) return;
+    if (!force && (now - g_last_beat) < 1000) return;
     g_last_beat = now;
+
+    {   // one appended line per beat: the camera as a time series
+        wchar_t tpath[MAX_PATH];
+        _snwprintf_s(tpath, _TRUNCATE, L"%s\\ffxvr_trace.log", g_dir);
+        FILE* t = nullptr;
+        if (_wfopen_s(&t, tpath, L"a") == 0 && t != nullptr) {
+            const float* c = g_cam;
+            const float t0 = c[3], t1 = c[7], t2 = c[11];
+            fprintf(t, "t=%7.1fs  updates=%lu  cam_writes=%u  changes=%u  yaw=%7.1f pitch=%6.1f  pos=%8.2f %8.2f %8.2f  inv=%8.2f %8.2f %8.2f\n",
+                    now / 1000.0, g_counters[C_UPDATESUB], g_cam_reads, g_cam_changes,
+                    atan2f(c[8], c[10]) * 57.2958f,
+                    asinf(-c[9] < -1.f ? -1.f : (-c[9] > 1.f ? 1.f : -c[9])) * 57.2958f,
+                    -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
+                    c[32+3], c[32+7], c[32+11]);
+            fclose(t);
+        }
+    }
 
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
@@ -666,18 +706,6 @@ void read_camera() {
     g_full_prev.swap(g_full);
     g_full.assign(p, p + src.ByteWidth);
 
-    if (src.ByteWidth >= CAM_MIN_SIZE) {
-        memcpy(&g_cam[0],  p + CAM_VIEW_OFFSET, 64);
-        memcpy(&g_cam[16], p + CAM_PROJ_OFFSET, 64);
-        memcpy(&g_cam[32], p + CAM_INV_OFFSET,  64);
-        g_cam_valid = true;
-
-        if (memcmp(g_cam_last_view, g_cam, sizeof(g_cam_last_view)) != 0) {
-            memcpy(g_cam_last_view, g_cam, sizeof(g_cam_last_view));
-            g_cam_changes++;
-        }
-    }
-    g_cam_reads++;
 
     g_orig_unmap(g_ctx, g_staging, 0);
 
