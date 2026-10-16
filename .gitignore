@@ -1,0 +1,37 @@
+# Visual Studio / MSBuild
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+.vs/
+artifacts/
+*.user
+*.suo
+*.pdb
+
+# CMake / vcpkg
+build/
+out/
+vcpkg_installed/
+
+# Logs from the build-and-run loop
+logs/*
+!logs/.gitkeep
+
+# RenderDoc captures: large, and they contain game assets
+*.rdc
+*.cap
+captures/
+
+# Never commit anything from the game install
+game/
+*.vbf
+*.phyre
+
+# Downloaded installers, not source
+_staging/
+
+# External sources cloned for building
+_ext/
