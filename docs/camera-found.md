@@ -206,3 +206,44 @@ Our markers use, via Fahrenheit:
   battle pointers are stale outside battle.
 
 Damage numbers, names and the party highlight can follow the same route.
+
+## Second eye: how the frame is built, and what it took
+
+Eye 2 is produced by re-issuing every draw with the render targets, depth
+target and sampled render textures swapped for private "twins", and the
+object's constant buffer re-uploaded with the eye-2 camera (view translated
+along the camera's right axis). Clears, copies and resolves are mirrored
+onto the twins. What made it finally work, in the order found:
+
+- **The scene is rendered with 8x MSAA into two render targets** (3840x2160
+  R8G8B8A8, plus an MSAA depth) and *resolved* with `ResolveSubresource`
+  into plain textures; post-processing reads only the resolved copies, the
+  depth and a downscale pyramid -- never the MSAA textures. Until the
+  resolve was hooked and mirrored, eye 2's scene never left its MSAA twin
+  and the final image was pixel-identical to eye 1 while every other
+  counter looked right.
+- The game uses VS constant buffer **slot 0 only**, all draws on the one
+  immediate context, `OMSetRenderTargets` (the UAV variant is unused).
+- The save sphere's orb is drawn **after** the first resolve, in the post
+  chain, by a refraction pass sampling the resolved scene; a haze pass
+  blends the backdrop the same way. With the resolve unmirrored those read
+  the clear colour: "blue cube around the save sphere", "blue fog".
+- **Alpha in the colour buffers is garbage** (0 over the backdrop and
+  inside the refraction box). The game never shows it, but the overlay's
+  ImGui preview alpha-blends, which reproduced the same blue artifacts from
+  correct textures. The preview now goes through an opaque copy pass
+  (runtime-compiled HLSL via `d3dcompiler_47`, alpha forced to 1). Headset
+  layers must be submitted opaque.
+- Frame order: ImGui (4 draws, backbuffer) -> shadow maps (4096^2 colour
+  targets, no depth, skinned draws; one of them is static and never
+  redrawn per frame) -> clears + resolve of the cleared targets -> scene
+  pass (~170-200 draws, MRT, MSAA) -> resolve both targets -> post chain
+  (full-res ping-pong, the MSAA target reused and re-resolved as a
+  ping-pong buffer, pyramid 1920/960/480) -> UI -> backbuffer.
+- Eye images for the headset: the first resolve after the scene pass gives
+  a clean pre-post pair without the orb; the final backbuffer twin has
+  everything including UI. Pick a point in the post chain before the UI
+  when the compositor is built.
+
+Diagnostics: F4 writes `img_*.bmp` (quarter size, plus alpha-only variants)
+next to the native DLL; `tools/run-ffx.ps1` collects them with the logs.
