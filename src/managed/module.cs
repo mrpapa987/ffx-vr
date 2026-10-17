@@ -519,7 +519,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope);
         ImGui.Checkbox("preview eye 2", ref _eye2_preview);
         if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
-        draw_eye2_preview();
 
         ImGui.Separator();
         ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);
@@ -589,7 +588,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (srv == 0) return;
 
         ImGui.SetNextWindowSize(new Vector2(960, 540 + 40), ImGuiCond.FirstUseEver);
-        if (ImGui.Begin("Eye 2")) {
+        if (ImGui.Begin("Eye 2", ImGuiWindowFlags.NoDocking)) {
             Vector2 avail = ImGui.GetContentRegionAvail();
             float scale = Math.Min(avail.X / w, avail.Y / h);
             ImGui.Image(new ImTextureRef(null, (ImTextureID)(ulong)srv), new Vector2(w * scale, h * scale));
@@ -718,6 +717,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         try_install_hooks();
         if (_native_init_done) draw_markers();
+        if (_native_init_done) draw_eye2_preview();   // its own top-level window, never nested
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.
