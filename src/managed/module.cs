@@ -66,7 +66,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<void*, void*, uint, int> _fn_safe_read;
     private delegate* unmanaged[Cdecl]<float, float, float, float*, int> _fn_project;
     private bool  _markers_on    = true;
-    private float _marker_height = 120f;
+    private float _marker_height = 25f;
     private int   _markers_drawn;
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_world_positions;
     private double _last_pos_log;
@@ -421,7 +421,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         ImGui.Separator();
         ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);
-        ImGui.SliderFloat("marker height", ref _marker_height, 0f, 400f);
+        ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
         ImGui.Text($"markers drawn this frame: {_markers_drawn}");
 
         if (_fn_cam_mem_set != null) {
@@ -563,7 +563,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (c.stat_visible == 0 && label == "target") { /* still mark; the game does */ }
 
         float* ndc = stackalloc float[2];
-        if (_fn_project(a.chr_pos_vec.X, a.chr_pos_vec.Y + _marker_height, a.chr_pos_vec.Z, ndc) == 0) return;
+        // Actor positions are in the game's PS2-era space; the renderer's world
+        // space negates X and Y (verified against the skinned world matrices).
+        if (_fn_project(-a.chr_pos_vec.X, -a.chr_pos_vec.Y + _marker_height, a.chr_pos_vec.Z, ndc) == 0) return;
 
         Vector2 size = ImGui.GetIO().DisplaySize;
         float sx = (ndc[0] * 0.5f + 0.5f) * size.X;
