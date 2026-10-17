@@ -868,6 +868,10 @@ static void describe_view(ID3D11View* view, char* out, size_t n) {
 
 extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* const* rtvs, void* dsv) {
     if (g_in_eye2) return;
+    if (g_backbuffer == nullptr && n > 0 && rtvs && rtvs[0]) {
+        ID3D11Texture2D* t = texture_of(static_cast<ID3D11View*>(rtvs[0]));
+        if (t) { D3D11_TEXTURE2D_DESC d; t->GetDesc(&d); if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) g_backbuffer = t; }
+    }
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
     g_cur_dsv = static_cast<ID3D11DepthStencilView*>(dsv);
@@ -1553,10 +1557,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
-    if (g_backbuffer == nullptr && g_cur_rtv[0] != nullptr) {
-        ID3D11Texture2D* t = texture_of(g_cur_rtv[0]);
-        if (t) { D3D11_TEXTURE2D_DESC d; t->GetDesc(&d); if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) g_backbuffer = t; }
-    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
@@ -2098,16 +2098,36 @@ static Twin* twin_of(ID3D11Texture2D* game) {
     D3D11_TEXTURE2D_DESC cd = d;
     cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0; cd.MiscFlags = 0;
     if (game == g_backbuffer) { cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; }
-    if (FAILED(g_device->CreateTexture2D(&cd, nullptr, &t.tex))) return nullptr;
+
+    auto fail = [&](const char* what, HRESULT hr) -> Twin* {
+        wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path, L"a") == 0 && f) {
+            fprintf(f, "\n  twin FAILED (%s hr=0x%08X): %ux%u fmt %u mips %u array %u samples %u bind 0x%X misc 0x%X usage %u\n",
+                    what, static_cast<unsigned>(hr), d.Width, d.Height, static_cast<unsigned>(d.Format), d.MipLevels, d.ArraySize,
+                    d.SampleDesc.Count, d.BindFlags, d.MiscFlags, static_cast<unsigned>(d.Usage));
+            fclose(f);
+        }
+        if (t.tex) t.tex->Release();
+        Twin none = {}; none.game = game;          // remembered as failed: no views, never retried
+        g_twins[game] = none;
+        return nullptr;
+    };
+
+    HRESULT hr = g_device->CreateTexture2D(&cd, nullptr, &t.tex);
+    if (FAILED(hr)) return fail("CreateTexture2D", hr);
     if (cd.BindFlags & D3D11_BIND_RENDER_TARGET) {
-        if (FAILED(g_device->CreateRenderTargetView(t.tex, nullptr, &t.rtv))) t.rtv = nullptr;
+        hr = g_device->CreateRenderTargetView(t.tex, nullptr, &t.rtv);
+        if (FAILED(hr)) return fail("CreateRenderTargetView", hr);
     }
     if (cd.BindFlags & D3D11_BIND_DEPTH_STENCIL) {
         D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
         dd.Format = (d.Format == DXGI_FORMAT_R24G8_TYPELESS) ? DXGI_FORMAT_D24_UNORM_S8_UINT
-                  : (d.Format == DXGI_FORMAT_R32_TYPELESS)  ? DXGI_FORMAT_D32_FLOAT : d.Format;
-        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-        if (FAILED(g_device->CreateDepthStencilView(t.tex, &dd, &t.dsv))) t.dsv = nullptr;
+                  : (d.Format == DXGI_FORMAT_R32_TYPELESS)  ? DXGI_FORMAT_D32_FLOAT
+                  : (d.Format == DXGI_FORMAT_R16_TYPELESS)  ? DXGI_FORMAT_D16_UNORM : d.Format;
+        dd.ViewDimension = d.SampleDesc.Count > 1 ? D3D11_DSV_DIMENSION_TEXTURE2DMS : D3D11_DSV_DIMENSION_TEXTURE2D;
+        hr = g_device->CreateDepthStencilView(t.tex, &dd, &t.dsv);
+        if (FAILED(hr)) return fail("CreateDepthStencilView", hr);
     }
     g_twin_count++;
     return &(g_twins[game] = t);
@@ -2128,7 +2148,7 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
     ID3D11Texture2D* game = texture_of(v);
     if (game == nullptr) return nullptr;
     auto it = g_twins.find(game);
-    if (it == g_twins.end()) return nullptr;        // only textures we have seen as targets
+    if (it == g_twins.end() || it->second.tex == nullptr) return nullptr;   // only textures we have twins of
     Twin& t = it->second;
     auto sit = t.srvs.find(v);
     if (sit != t.srvs.end()) return sit->second;
