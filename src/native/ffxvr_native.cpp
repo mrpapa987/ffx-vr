@@ -360,7 +360,9 @@ std::vector<uint8_t> g_scratch;
 // ---------------------------------------------------------------------------
 bool  g_stereo       = false;
 int   g_stereo_scope = 0;             // 0 all draws, 1 camera-buffer draws only, 2 camera + product-only
-bool  g_overlay_phase = false;        // between our per-frame hook (inside Present) and the game's first clear: ImGui draws here
+bool  g_overlay_phase = false;        // from our per-frame hook (inside Present) to the game's first clear; used to find the backbuffer
+ID3D11Buffer* g_imgui_cb = nullptr;   // ImGui's constant buffer: the one bound at the first draw after our hook
+bool  g_first_draw_pending = false;   // set by the hook; cleared by that first draw
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
 bool  g_in_eye2      = false;         // re-entrancy guard
@@ -1587,6 +1589,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     read_camera();
     g_overlay_phase = true;
+    g_first_draw_pending = true;
     g_backbuffer_seen_this_frame = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -1659,7 +1662,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
-    if (g_overlay_phase) eye2 = false;                                                  // the overlay's draws
+    if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // ImGui draws first after our hook
+    if (g_slot0_cur != nullptr && g_slot0_cur == g_imgui_cb) eye2 = false;                 // the overlay's draws, never duplicated
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (!g_stereo) g_e2_no_stereo++;
