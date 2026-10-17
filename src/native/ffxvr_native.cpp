@@ -346,6 +346,11 @@ std::map<UINT, OvrStat> g_ovr_stats;
 
 std::vector<uint8_t> g_scratch;
 
+// Memory-scan results (see ffxvr_memscan below).
+struct MemHit { uintptr_t addr; const char* kind; };
+uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
+std::vector<MemHit> g_scan_hits;   // every hit of the last scan, for the shotgun write
+
 // Write-watch state (see ffxvr_watch below; kept for completeness, the stage-0
 // debugger swallows the exceptions so the static xref scan is what we use).
 struct Writer { uintptr_t eip; uint32_t count; };
@@ -1307,9 +1312,6 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
 // bare camera position. Results go to ffxvr_memscan.log.
 // ---------------------------------------------------------------------------
 
-struct MemHit { uintptr_t addr; const char* kind; };
-uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
-std::vector<MemHit> g_scan_hits;   // every hit of the last scan, for the shotgun write
 
 /// Searches one region for float-aligned needles, reporting hits through the
 /// callback. Runs under SEH so a page that faults despite VirtualQuery's word
