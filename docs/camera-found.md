@@ -181,3 +181,28 @@ arrive at the GPU as screen coordinates, with no matrix to rewrite.
 
 Fix belongs to the VR UI milestone: read the target's position from the
 battle state via Fahrenheit and draw our own 3D marker. Not a rendering fix.
+
+## Battle markers (17 Oct 2026): resolved by drawing our own
+
+The game's cursors cannot be redirected from the rendering side: their
+position is computed in the update phase and emitted as *vertex data* in a
+batched 2D quad, replayed from a command list by one render dispatch chain
+(`+2157C9 → +21C5FA → +1934D9/+1934F5 → Map`). No constant buffer changes
+when the target changes. Every persistent copy of the camera in memory
+(static matrix at `FFX.exe+0x88FD3C`, the 16-entry camera-state array,
+stride 0x4E0) also feeds the renderer, so writing the override there
+corrupts our own upload patching. Tried and withdrawn.
+
+Our markers use, via Fahrenheit:
+- `Globals.Battle.cur_window`: `sel_chrs | (sel_mons << 16)` is one 32-bit
+  mask over combatant **ids** (party ids 0..15, monsters `20 + slot`);
+  `cur_chr_id` is the acting character's id.
+- `Globals.Battle.player_characters` / `monster_characters`: `Chr` arrays
+  (stride 0xF90, sparse; garbage slots have `id > 100`), each with `Actor*`.
+- `Actor.chr_pos_vec` is in the game's PS2-era space; the renderer's world
+  space is **(-x, -y, z)**. Characters are ~20 units tall; markers at +25.
+- Projection = game's main projection (+256) × the override view.
+- All game-memory reads go through `ffxvr_safe_read` (SEH) because the
+  battle pointers are stale outside battle.
+
+Damage numbers, names and the party highlight can follow the same route.
