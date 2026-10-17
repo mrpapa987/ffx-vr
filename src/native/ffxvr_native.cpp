@@ -149,6 +149,8 @@ constexpr UINT CAM_MIN_SIZE    = CAM_INV_OFFSET + 64;
 ID3D11Device*        g_device       = nullptr;
 ID3D11DeviceContext* g_ctx          = nullptr;
 ID3D11Buffer*        g_slot0_cur    = nullptr;   // actually bound to VS slot 0 right now
+ID3D11Buffer*        g_vs_cb[14]    = {};        // every VS constant buffer slot, as bound
+uint32_t             g_slot_binds[14] = {};      // how often each slot is bound
 bool                 g_slot0_big    = false;     // ...and it is camera-sized
 ID3D11Buffer*        g_slot0        = nullptr;   // latched at the frame's first 3D draw
 int                  g_slot0_seen   = 0;         // distinct camera-sized slot-0 binds, this frame
@@ -375,6 +377,7 @@ struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; 
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
 EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
+EyeImage* g_eye2_slots[14] = {};      // entries uploaded for each VS slot in the current eye-2 draw
 uint32_t g_eye2_draws = 0, g_eye2_draws_report = 0;
 // why a draw did not get an eye-2 pass (cumulative)
 uint32_t g_e2_no_stereo = 0, g_e2_no_image = 0, g_e2_cb_mismatch = 0, g_e2_no_dsv = 0, g_e2_small = 0, g_e2_ok = 0, g_e2_begin_fail = 0;
@@ -1351,6 +1354,9 @@ void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, U
         g_slot0_cur = b[0];
         g_slot0_big = big;
     }
+    if (b != nullptr) {
+        for (UINT i = 0; i < n && s + i < 14; ++i) { g_vs_cb[s + i] = b[i]; if (b[i]) g_slot_binds[s + i]++; }
+    }
 
     if (g_capturing && b != nullptr) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2323,10 +2329,24 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
     }
     if (any) g_ctx->PSSetShaderResources(0, 16, srvs);
 
-    if (g_eye2_cur != nullptr) {
+    // Upload the eye-2 image of every bound VS constant buffer that has one,
+    // whichever slot it sits in: the shader may take the camera from a slot
+    // other than 0.
+    for (int sl = 0; sl < 14; ++sl) {
+        g_eye2_slots[sl] = nullptr;
+        ID3D11Buffer* cb = g_vs_cb[sl];
+        if (cb == nullptr) continue;
+        for (int k = 0; k < 32; ++k) {
+            EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
+            if (e.cb == cb && e.frame == g_frames) { g_eye2_slots[sl] = &e; break; }
+        }
+        if (g_eye2_slots[sl] == nullptr) continue;
+        bool dup = false;
+        for (int q = 0; q < sl; ++q) if (g_eye2_slots[q] == g_eye2_slots[sl]) dup = true;   // same buffer in two slots
+        if (dup) { g_eye2_slots[sl] = nullptr; continue; }
         g_e2_uploads++;
-        if (g_eye2_cur->eye1 == g_eye2_cur->eye2) g_e2_identical++;
-        g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
+        if (g_eye2_slots[sl]->eye1 == g_eye2_slots[sl]->eye2) g_e2_identical++;
+        g_ctx->UpdateSubresource(cb, 0, nullptr, g_eye2_slots[sl]->eye2.data(), 0, 0);
     }
     return 1;
 }
@@ -2336,7 +2356,11 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
     g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
-    if (g_eye2_cur != nullptr && !g_debug_leave) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
+    if (!g_debug_leave) {
+        for (int sl = 0; sl < 14; ++sl) {
+            if (g_eye2_slots[sl] != nullptr) g_ctx->UpdateSubresource(g_eye2_slots[sl]->cb, 0, nullptr, g_eye2_slots[sl]->eye1.data(), 0, 0);
+        }
+    }
     g_eye2_draws++;
     g_in_eye2 = false;
 }
@@ -2463,6 +2487,11 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
     diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u, red clears %u, twins %u",
          g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates, g_red_clears, g_twin_count);
     diag("    draw contexts: on the hooked immediate context %u, on another context %u (last %p); hooked context %p", g_draw_ctx_same, g_draw_ctx_other, g_draw_ctx_last_other, static_cast<void*>(g_ctx));
+    {
+        char line[256]; size_t l = 0;
+        for (int sl = 0; sl < 14; ++sl) l += snprintf(line + l, sizeof(line) - l, " s%d:%u", sl, g_slot_binds[sl]);
+        diag("    VS constant buffer slot binds:%s", line);
+    }
     for (int k = 0; k < 32; ++k) {
         const EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
         if (e.cb == nullptr || e.kind != 1 || e.eye1.size() < 128) continue;
