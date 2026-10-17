@@ -1173,6 +1173,102 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
     if (!g_ovr_freeze) g_ovr_have_base = false;
 }
 
+// ---------------------------------------------------------------------------
+// Memory scan: where does the game keep the camera?
+//
+// The view matrix we receive through UpdateSubresource is a copy of something
+// the game owns. Finding the original lets us drive the camera at the source,
+// so the CPU-side projection used by the battle cursor, damage numbers and the
+// like follows -- and so does culling. We search every committed, writable,
+// private region for the exact bits of the current view, in the row-major
+// 3x4/4x4 layout we see uploaded and in a column-major 4x4 layout, plus the
+// bare camera position. Results go to ffxvr_memscan.log.
+// ---------------------------------------------------------------------------
+
+struct MemHit { uintptr_t addr; const char* kind; };
+
+static bool region_ok(const MEMORY_BASIC_INFORMATION& mbi) {
+    if (mbi.State != MEM_COMMIT) return false;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+    const DWORD rw = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    return (mbi.Protect & rw) != 0;
+}
+
+static void describe_region(uintptr_t a, char* out, size_t n) {
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(a), &mod) && mod != nullptr) {
+        wchar_t path[MAX_PATH] = L""; GetModuleFileNameW(mod, path, MAX_PATH);
+        const wchar_t* base = wcsrchr(path, L'\\\\'); base = base ? base + 1 : path;
+        snprintf(out, n, "%ls+0x%X", base, static_cast<unsigned>(a - reinterpret_cast<uintptr_t>(mod)));
+    }
+    else snprintf(out, n, "heap");
+}
+
+extern "C" __declspec(dllexport) int ffxvr_memscan() {
+    float v[12];
+    float pos[3];
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_cam_valid) return -1;
+        memcpy(v, g_cam, sizeof(v));                        // game's view, rows 0..2 (3x4)
+        pos[0] = g_cam[32+3]; pos[1] = g_cam[32+7]; pos[2] = g_cam[32+11];
+    }
+
+    // Patterns. Row-major 3x4 as uploaded; column-major 4x4 (translation in
+    // floats 12..14); and the bare position.
+    float colmajor[16] = {};
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) colmajor[c*4 + r] = v[r*4 + c];
+    colmajor[12] = v[3]; colmajor[13] = v[7]; colmajor[14] = v[11]; colmajor[15] = 1.f;
+
+    struct Pat { const char* kind; const float* data; size_t bytes; } pats[] = {
+        { "view row-major 3x4",      v,        sizeof(v) },
+        { "view column-major (t at 12..14)", colmajor, 15 * sizeof(float) },
+        { "camera position float3", pos,      sizeof(pos) },
+    };
+
+    std::vector<MemHit> hits;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    const uintptr_t self = reinterpret_cast<uintptr_t>(&g_cam[0]);
+
+    while (a < end) {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
+        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (region_ok(mbi) && mbi.RegionSize < (256u << 20)) {
+            const uint8_t* base = static_cast<const uint8_t*>(mbi.BaseAddress);
+            const size_t   len  = mbi.RegionSize;
+            for (const Pat& pt : pats) {
+                const uint8_t* needle = reinterpret_cast<const uint8_t*>(pt.data);
+                // float-aligned search
+                for (size_t off = 0; off + pt.bytes <= len; off += 4) {
+                    if (memcmp(base + off, needle, pt.bytes) != 0) continue;
+                    const uintptr_t at = reinterpret_cast<uintptr_t>(base + off);
+                    if (at >= self - 4096 && at <= self + 4096) continue;      // our own copies
+                    if (hits.size() < 200) hits.push_back({ at, pt.kind });
+                }
+            }
+        }
+        a = next;
+    }
+
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\\\ffxvr_memscan.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
+    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits\n",
+            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size());
+    for (const MemHit& h : hits) {
+        char where[128]; describe_region(h.addr, where, sizeof(where));
+        fprintf(f, "  %08X  %-36s %s\n", static_cast<unsigned>(h.addr), h.kind, where);
+    }
+    fprintf(f, "\n");
+    fclose(f);
+    return static_cast<int>(hits.size());
+}
+
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
 extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
 
