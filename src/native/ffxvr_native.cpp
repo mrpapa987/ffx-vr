@@ -1437,8 +1437,10 @@ extern "C" __declspec(dllexport) int ffxvr_xrefs(uintptr_t addr, unsigned span) 
             uint32_t imm; memcpy(&imm, cs + off, 4);
             if (imm < addr || imm >= addr + span) continue;
             const uint8_t* at = cs + off;
-            fprintf(f, "  code FFX.exe+%08X  -> +%-3u  %s   bytes:", static_cast<unsigned>(at - base),
-                    static_cast<unsigned>(imm - addr), classify_xref(at));
+            fprintf(f, "  code FFX.exe+%08X  -> data FFX.exe+%06X (%+d from matrix)  %s   bytes:",
+                    static_cast<unsigned>(at - base), static_cast<unsigned>(imm - reinterpret_cast<uintptr_t>(base)),
+                    static_cast<int>(static_cast<intptr_t>(imm) - static_cast<intptr_t>(reinterpret_cast<uintptr_t>(base) + 0x88FD3C)),
+                    classify_xref(at));
             for (int k = -6; k < 4; ++k) fprintf(f, " %02X", at[k]);
             fprintf(f, "\n");
             n++;

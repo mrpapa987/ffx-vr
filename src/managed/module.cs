@@ -397,7 +397,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
 
         if (_fn_watch != null && _fn_exe_camera != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.F11) && _fn_xrefs != null) _xrefs_n = _fn_xrefs(_fn_exe_camera(), 64);
+            if (ImGui.IsKeyPressed(ImGuiKey.F11) && _fn_xrefs != null) {
+                // exact matrix, then a wide window, so a struct base that
+                // encloses it shows up with its distance
+                _xrefs_n  = _fn_xrefs(_fn_exe_camera(), 64);
+                _xrefs_n += _fn_xrefs(_fn_exe_camera() - 0x4000, 0x4000 + 0x400);
+            }
             ImGui.Text(_xrefs_n == -99 ? $"F11: list code touching the game camera at 0x{(nint)_fn_exe_camera():X8}"
                      : $"code references: {_xrefs_n} (ffxvr_xrefs.log)");
         }
