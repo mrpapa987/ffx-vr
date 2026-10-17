@@ -2549,7 +2549,7 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
 
 /// Writes a texture, downsampled 4x (point sampled), as a 24-bit BMP next to
 /// the logs. BGRA/RGBA 8-bit formats only. Returns true on success.
-static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name) {
+static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name, bool alpha_only = false) {
     if (tex == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
     D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
     if (d.SampleDesc.Count != 1) { diag("dump %ls: multisampled, skipped", name); return false; }
@@ -2573,8 +2573,9 @@ static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name) {
         uint8_t* o = out.data() + static_cast<size_t>(h - 1 - y) * stride;      // BMP is bottom-up
         for (UINT x = 0; x < w; ++x) {
             const uint8_t* px = row + static_cast<size_t>(x * 4) * 4;
-            if (bgra) { o[x*3+0] = px[0]; o[x*3+1] = px[1]; o[x*3+2] = px[2]; }
-            else      { o[x*3+0] = px[2]; o[x*3+1] = px[1]; o[x*3+2] = px[0]; }
+            if (alpha_only) { o[x*3+0] = o[x*3+1] = o[x*3+2] = px[3]; }
+            else if (bgra)  { o[x*3+0] = px[0]; o[x*3+1] = px[1]; o[x*3+2] = px[2]; }
+            else            { o[x*3+0] = px[2]; o[x*3+1] = px[1]; o[x*3+2] = px[0]; }
         }
     }
     g_orig_unmap(g_ctx, st, 0); st->Release();
@@ -2635,6 +2636,9 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         dump_bmp(g_snap_tex,  L"img_scene_eye2.bmp");
         dump_bmp(g_backbuffer, L"img_final_game.bmp");
         if (bt != g_twins.end()) dump_bmp(bt->second.tex, L"img_final_eye2.bmp");
+        dump_bmp(g_backbuffer, L"img_final_game_alpha.bmp", true);
+        if (bt != g_twins.end()) dump_bmp(bt->second.tex, L"img_final_eye2_alpha.bmp", true);
+        dump_bmp(g_snap_tex, L"img_scene_eye2_alpha.bmp", true);
     }
     return 0;
 }
