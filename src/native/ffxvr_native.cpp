@@ -345,6 +345,7 @@ struct OvrStat { uint32_t count; unsigned mask_all; unsigned mask_any; };
 std::map<UINT, OvrStat> g_ovr_stats;
 
 std::vector<uint8_t> g_scratch;
+static void census_write(UINT size);   // defined with the census code below
 
 // Memory-scan results (see ffxvr_memscan below).
 struct MemHit { uintptr_t addr; const char* kind; };
@@ -667,7 +668,7 @@ static void census_dump() {
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_stacks.log", g_dir);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
-    fprintf(f, "call stacks of UpdateSubresource writes to %u..%u byte constant buffers, one frame: %zu distinct\n",
+    fprintf(f, "call stacks of constant buffer writes (any path) to %u..%u byte buffers, one frame: %zu distinct\n",
             g_stacks_min, g_stacks_max, g_stacks.size());
     for (const StackRec& r : g_stacks) {
         fprintf(f, "  x%-4u %5uB :", r.count, r.size);
@@ -767,6 +768,8 @@ static void camera_from_write(const void* src, UINT size) {
 
 void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
     if (size == 0 || size > 65536 || src == nullptr) return;
+
+    census_write(size);     // all write paths: Map/Unmap carries the 2D UI buffers
 
     camera_from_write(src, size);
     scan_for_camera(src, size, via);
@@ -1352,7 +1355,6 @@ extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, 
     if (!as_constant_buffer(reinterpret_cast<ID3D11Resource*>(resource), &buf, &size)) return src;
 
     std::lock_guard<std::mutex> lock(g_mutex);
-    census_write(size);
     record_buffer(buf, size, src, "UpdateSubresource");   // records the game's own camera
     return maybe_override(src, size);                       // uploads ours
 }
