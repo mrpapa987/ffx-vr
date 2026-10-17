@@ -568,7 +568,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.Begin("Eye 2")) {
             Vector2 avail = ImGui.GetContentRegionAvail();
             float scale = Math.Min(avail.X / w, avail.Y / h);
-            ImGui.Image(new ImTextureID((ulong)srv), new Vector2(w * scale, h * scale));
+            ImGui.Image(new ImTextureRef(null, (ImTextureID)(ulong)srv), new Vector2(w * scale, h * scale));
         }
         ImGui.End();
     }
