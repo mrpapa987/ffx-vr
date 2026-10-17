@@ -346,6 +346,16 @@ std::map<UINT, OvrStat> g_ovr_stats;
 
 std::vector<uint8_t> g_scratch;
 
+// Write-watch state (see ffxvr_watch below; kept for completeness, the stage-0
+// debugger swallows the exceptions so the static xref scan is what we use).
+struct Writer { uintptr_t eip; uint32_t count; };
+Writer   g_writers[32] = {};
+int      g_writers_n   = 0;
+uint32_t g_watch_hits  = 0;
+uintptr_t g_watch_addr[2] = {};
+DWORD    g_main_tid    = 0;
+void*    g_veh         = nullptr;
+
 static void mul3(const float a[9], const float b[9], float out[9]) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
@@ -1317,13 +1327,6 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
 // the place to hook so that UI projection, rendering and culling all follow.
 // ---------------------------------------------------------------------------
 
-struct Writer { uintptr_t eip; uint32_t count; };
-Writer   g_writers[32] = {};
-int      g_writers_n   = 0;
-uint32_t g_watch_hits  = 0;
-uintptr_t g_watch_addr[2] = {};
-DWORD    g_main_tid    = 0;
-void*    g_veh         = nullptr;
 
 static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* ep) {
     if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
