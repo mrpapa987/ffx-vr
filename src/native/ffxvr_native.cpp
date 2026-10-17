@@ -2547,6 +2547,54 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
     return ok;
 }
 
+/// Writes a texture, downsampled 4x (point sampled), as a 24-bit BMP next to
+/// the logs. BGRA/RGBA 8-bit formats only. Returns true on success.
+static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name) {
+    if (tex == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
+    D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
+    if (d.SampleDesc.Count != 1) { diag("dump %ls: multisampled, skipped", name); return false; }
+    const bool bgra = (d.Format == DXGI_FORMAT_B8G8R8A8_UNORM || d.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB || d.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS);
+    const bool rgba = (d.Format == DXGI_FORMAT_R8G8B8A8_UNORM || d.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || d.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS);
+    if (!bgra && !rgba) { diag("dump %ls: format %u not 8-bit colour, skipped", name, static_cast<unsigned>(d.Format)); return false; }
+    D3D11_TEXTURE2D_DESC sd = {};
+    sd.Width = d.Width; sd.Height = d.Height; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = d.Format; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* st = nullptr;
+    HRESULT hr = g_device->CreateTexture2D(&sd, nullptr, &st);
+    if (FAILED(hr)) { diag("dump %ls: staging failed hr=0x%08X", name, static_cast<unsigned>(hr)); return false; }
+    g_in_eye2 = true; g_ctx->CopyResource(st, tex); g_in_eye2 = false;
+    D3D11_MAPPED_SUBRESOURCE m = {};
+    if (FAILED(g_orig_map(g_ctx, st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return false; }
+    const UINT w = d.Width / 4, h = d.Height / 4, stride = (w * 3 + 3) & ~3u;
+    std::vector<uint8_t> out(static_cast<size_t>(stride) * h);
+    for (UINT y = 0; y < h; ++y) {
+        const uint8_t* row = static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(y * 4) * m.RowPitch;
+        uint8_t* o = out.data() + static_cast<size_t>(h - 1 - y) * stride;      // BMP is bottom-up
+        for (UINT x = 0; x < w; ++x) {
+            const uint8_t* px = row + static_cast<size_t>(x * 4) * 4;
+            if (bgra) { o[x*3+0] = px[0]; o[x*3+1] = px[1]; o[x*3+2] = px[2]; }
+            else      { o[x*3+0] = px[2]; o[x*3+1] = px[1]; o[x*3+2] = px[0]; }
+        }
+    }
+    g_orig_unmap(g_ctx, st, 0); st->Release();
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\%ls", g_dir, name);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"wb") != 0 || f == nullptr) { diag("dump %ls: cannot open", name); return false; }
+    const uint32_t data_size = stride * h, file_size = 54 + data_size;
+    uint8_t hdr[54] = {};
+    hdr[0] = 'B'; hdr[1] = 'M';
+    memcpy(hdr + 2, &file_size, 4); const uint32_t off = 54; memcpy(hdr + 10, &off, 4);
+    const uint32_t ih = 40; memcpy(hdr + 14, &ih, 4);
+    const int32_t iw = static_cast<int32_t>(w), ihh = static_cast<int32_t>(h); memcpy(hdr + 18, &iw, 4); memcpy(hdr + 22, &ihh, 4);
+    const uint16_t planes = 1, bpp = 24; memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+    memcpy(hdr + 34, &data_size, 4);
+    fwrite(hdr, 1, 54, f); fwrite(out.data(), 1, out.size(), f); fclose(f);
+    diag("dump %ls: %ux%u written", name, w, h);
+    return true;
+}
+
 // A snapshot of the GAME's scene texture at the same moment as eye 2's, so
 // the two can be compared.
 extern "C" __declspec(dllexport) int ffxvr_measure() {
@@ -2581,6 +2629,13 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
     if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr, &ba, &bb))
         diag("    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
     else diag("    scene: could not compare (snapshots %s/%s)", g_snap_game ? "yes" : "no", g_snap_tex ? "yes" : "no");
+    {
+        auto bt = g_backbuffer ? g_twins.find(g_backbuffer) : g_twins.end();
+        dump_bmp(g_snap_game, L"img_scene_eye1.bmp");
+        dump_bmp(g_snap_tex,  L"img_scene_eye2.bmp");
+        dump_bmp(g_backbuffer, L"img_final_game.bmp");
+        if (bt != g_twins.end()) dump_bmp(bt->second.tex, L"img_final_eye2.bmp");
+    }
     return 0;
 }
 
