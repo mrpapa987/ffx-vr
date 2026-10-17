@@ -552,7 +552,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("debug: leave eye-2 camera in place (main view should shift)", ref _debug_leave);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope, _debug_red ? 1 : 0, _debug_leave ? 1 : 0);
         ImGui.Checkbox("preview eye 2", ref _eye2_preview);
-        ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1);
+        ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1); ImGui.SameLine(); ImGui.RadioButton("scene target, eye 1", ref _eye2_source, 2);
         if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
 
         ImGui.Separator();

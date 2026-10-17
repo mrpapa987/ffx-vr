@@ -409,6 +409,8 @@ ID3D11Texture2D* g_snap_tex = nullptr; ID3D11ShaderResourceView* g_snap_srv = nu
 ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
 ID3D11Texture2D* g_snap_game = nullptr;         // the game's own scene texture at the same moment
 ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
+ID3D11ShaderResourceView* g_snap_game_srv = nullptr;   // eye 1's copy, for the preview
+uint32_t g_snap_frame = 0;                            // frame the snapshot was taken in
 bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
 bool g_debug_leave = false;            // experiment: leave the eye-2 image in the buffer after the eye-2 draw (main view should shift)
 uint32_t g_red_clears = 0;
@@ -2237,32 +2239,30 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
 }
 
 
-/// If the last eye-2 target saw a long run of draws (the scene pass), copy
-/// its twin to the snapshot. Called when eye-2 draws move to another target
-/// and before a mirrored clear of that target, whichever comes first.
-static void snapshot_scene_if_due() {
-    if (g_prev_e2_target == nullptr || g_prev_e2_run < 50) return;
-    auto it = g_twins.find(g_prev_e2_target);
+/// Copies the scene target (eye 1) and its twin (eye 2) at the same instant.
+/// Called the moment the game first binds the scene texture as a shader
+/// input -- i.e. when post-processing starts reading it -- so every pass
+/// that draws into it, the late transparent ones included, is in the copy.
+static void snapshot_scene(ID3D11Texture2D* game) {
+    auto it = g_twins.find(game);
     if (it == g_twins.end() || it->second.tex == nullptr) return;
     Twin& src = it->second;
-    if (g_snap_tex == nullptr || g_snap_from != g_prev_e2_target) {
-        if (g_snap_srv) { g_snap_srv->Release(); g_snap_srv = nullptr; }
-        if (g_snap_tex) { g_snap_tex->Release(); g_snap_tex = nullptr; }
+    if (g_snap_tex == nullptr || g_snap_from != game) {
+        if (g_snap_srv)      { g_snap_srv->Release();      g_snap_srv = nullptr; }
+        if (g_snap_tex)      { g_snap_tex->Release();      g_snap_tex = nullptr; }
+        if (g_snap_game_srv) { g_snap_game_srv->Release(); g_snap_game_srv = nullptr; }
+        if (g_snap_game)     { g_snap_game->Release();     g_snap_game = nullptr; }
         D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
-        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))
-            g_device->CreateShaderResourceView(g_snap_tex, nullptr, &g_snap_srv);
-        g_snap_from = g_prev_e2_target;
+        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))  g_device->CreateShaderResourceView(g_snap_tex,  nullptr, &g_snap_srv);
+        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_game))) g_device->CreateShaderResourceView(g_snap_game, nullptr, &g_snap_game_srv);
+        g_snap_from = game;
     }
-    if (g_snap_tex) g_ctx->CopyResource(g_snap_tex, src.tex);
-    if (g_snap_tex) {
-        if (g_snap_game == nullptr) {
-            D3D11_TEXTURE2D_DESC d; g_snap_tex->GetDesc(&d);
-            g_device->CreateTexture2D(&d, nullptr, &g_snap_game);
-        }
-        if (g_snap_game) g_ctx->CopyResource(g_snap_game, g_prev_e2_target);
-    }
-    g_prev_e2_run = 0;              // taken; do not take again until another long run
+    g_in_eye2 = true;                                  // our copies must not be mirrored
+    if (g_snap_tex)  g_ctx->CopyResource(g_snap_tex,  src.tex);
+    if (g_snap_game) g_ctx->CopyResource(g_snap_game, game);
+    g_in_eye2 = false;
+    g_snap_frame = g_frames;
 }
 
 /// Switches every current target to its twin, every sampled render texture
@@ -2284,10 +2284,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, rtvs, dsv);
     {
         ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
-        if (gt != g_prev_e2_target) {
-            snapshot_scene_if_due();
-            g_prev_e2_target = gt; g_prev_e2_run = 0;
-        }
+        if (gt != g_prev_e2_target) { g_prev_e2_target = gt; g_prev_e2_run = 0; }
         g_prev_e2_run++;
         if (g_debug_red && gt && g_cur_dsv != nullptr && rtvs[0] != nullptr && g_red_done_frame[gt] != g_frames) {
             g_red_done_frame[gt] = g_frames;
@@ -2369,6 +2366,14 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
 extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned n, void* const* views) {
     if (g_in_eye2) return;
     for (unsigned i = 0; i < n && start + i < 16; ++i) g_cur_ps_srv[start + i] = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
+    // The first time this frame the game reads the texture that took the
+    // scene pass (the one with the most draws so far, past a minimum), the
+    // scene is complete: snapshot both eyes now.
+    if (!g_stereo || g_snap_frame == g_frames || views == nullptr || g_scene_live_tex == nullptr || g_scene_live_draws < 60) return;
+    for (unsigned i = 0; i < n; ++i) {
+        if (views[i] == nullptr) continue;
+        if (texture_of(static_cast<ID3D11View*>(views[i])) == g_scene_live_tex) { snapshot_scene(g_scene_live_tex); break; }
+    }
 }
 
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
@@ -2507,8 +2512,8 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         diag("    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
     else diag("    final: could not compare");
     {
-        D3D11_TEXTURE2D_DESC d = {}; if (g_prev_e2_target) g_prev_e2_target->GetDesc(&d);
-        diag("    scene snapshot source: %ux%u fmt %u, from %s", d.Width, d.Height, static_cast<unsigned>(d.Format), g_snap_from ? "set" : "none");
+        D3D11_TEXTURE2D_DESC d = {}; if (g_snap_from) g_snap_from->GetDesc(&d);
+        diag("    scene snapshot: %ux%u fmt %u, taken in frame %u (now %u) when the game first read the scene target", d.Width, d.Height, static_cast<unsigned>(d.Format), g_snap_frame, g_frames);
     }
     if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr, &ba, &bb))
         diag("    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
@@ -2550,11 +2555,12 @@ static void* twin_plain_srv(ID3D11Texture2D* game) {
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
     if (source == 1) return g_snap_srv;
+    if (source == 2) return g_snap_game_srv;
     return ffxvr_eye2_final_srv();
 }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int source) {
-    if (source == 1) {
+    if (source == 1 || source == 2) {
         if (g_snap_tex == nullptr) return 0;
         D3D11_TEXTURE2D_DESC d; g_snap_tex->GetDesc(&d);
         if (w) *w = static_cast<int>(d.Width); if (h) *h = static_cast<int>(d.Height);
