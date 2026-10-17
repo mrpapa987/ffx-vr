@@ -41,6 +41,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
+    private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets;
+    private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_on_viewport;
+    private delegate* unmanaged[Cdecl]<nint, int, void> _fn_on_clear;
+    private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
+    private int _frame_census_n = 0;
     private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void> _fn_override_set;
     private delegate* unmanaged[Cdecl]<int> _fn_override_applied;
     private delegate* unmanaged[Cdecl]<int> _fn_override_mask;
@@ -101,6 +106,19 @@ public sealed unsafe class FFXVRModule : FhModule {
     private d_DrawIndexedInstanced? _h_drawidxinst,  _o_drawidxinst;
     private d_DrawInstanced?        _h_drawinst,     _o_drawinst;
     private d_UpdateSubresource?    _h_updatesub,    _o_updatesub;
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_OMSetRenderTargets(nint ctx, uint n, nint* rtvs, nint dsv);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_RSSetViewports(nint ctx, uint n, float* viewports);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_ClearRenderTargetView(nint ctx, nint rtv, float* color);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_ClearDepthStencilView(nint ctx, nint dsv, uint flags, float depth, byte stencil);
+    private d_OMSetRenderTargets?     _h_omrt,  _o_omrt;
+    private d_RSSetViewports?         _h_vp,    _o_vp;
+    private d_ClearRenderTargetView?  _h_clr,   _o_clr;
+    private d_ClearDepthStencilView?  _h_clrd,  _o_clrd;
+    private nint _a_omrt, _a_vp, _a_clr, _a_clrd;
     private nint _a_drawindexed, _a_draw, _a_drawidxinst, _a_drawinst, _a_updatesub;
     private string _detour_status = "not installed";
 
@@ -145,6 +163,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
+            _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
+            _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_viewport");
+            _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
+            _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
             _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
             _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
             _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_mask");
@@ -225,12 +247,14 @@ public sealed unsafe class FFXVRModule : FhModule {
         _a_drawidxinst = vt[20];
         _a_drawinst    = vt[21];
         _a_updatesub   = vt[48];
+        _a_omrt = vt[33]; _a_vp = vt[44]; _a_clr = vt[50]; _a_clrd = vt[53];
 
         _h_drawindexed = h_drawindexed;
         _h_draw        = h_draw;
         _h_drawidxinst = h_drawidxinst;
         _h_drawinst    = h_drawinst;
         _h_updatesub   = h_updatesub;
+        _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd;
 
         bool ok = true;
         ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
@@ -238,6 +262,10 @@ public sealed unsafe class FFXVRModule : FhModule {
         ok &= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).hook(this, _h_drawidxinst);
         ok &= new FhCallHandle<d_DrawInstanced>       (new FhCallLocation((void*)_a_drawinst))   .hook(this, _h_drawinst);
         ok &= new FhCallHandle<d_UpdateSubresource>   (new FhCallLocation((void*)_a_updatesub))  .hook(this, _h_updatesub);
+        ok &= new FhCallHandle<d_OMSetRenderTargets>  (new FhCallLocation((void*)_a_omrt)).hook(this, _h_omrt);
+        ok &= new FhCallHandle<d_RSSetViewports>      (new FhCallLocation((void*)_a_vp))  .hook(this, _h_vp);
+        ok &= new FhCallHandle<d_ClearRenderTargetView>(new FhCallLocation((void*)_a_clr)).hook(this, _h_clr);
+        ok &= new FhCallHandle<d_ClearDepthStencilView>(new FhCallLocation((void*)_a_clrd)).hook(this, _h_clrd);
 
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
@@ -270,6 +298,30 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_on_draw != null) _fn_on_draw(4);
         _o_drawinst ??= new FhCallHandle<d_DrawInstanced>(new FhCallLocation((void*)_a_drawinst)).chain_from(_h_drawinst!).fnptr;
         _o_drawinst!(ctx, a, b, c, d);
+    }
+
+    private void h_omrt(nint ctx, uint n, nint* rtvs, nint dsv) {
+        if (_fn_on_rendertargets != null) _fn_on_rendertargets(n, rtvs, dsv);
+        _o_omrt ??= new FhCallHandle<d_OMSetRenderTargets>(new FhCallLocation((void*)_a_omrt)).chain_from(_h_omrt!).fnptr;
+        _o_omrt!(ctx, n, rtvs, dsv);
+    }
+
+    private void h_vp(nint ctx, uint n, float* vps) {
+        if (_fn_on_viewport != null && n > 0 && vps != null) _fn_on_viewport(vps[2], vps[3], vps[0], vps[1]);
+        _o_vp ??= new FhCallHandle<d_RSSetViewports>(new FhCallLocation((void*)_a_vp)).chain_from(_h_vp!).fnptr;
+        _o_vp!(ctx, n, vps);
+    }
+
+    private void h_clr(nint ctx, nint rtv, float* color) {
+        if (_fn_on_clear != null) _fn_on_clear(rtv, 0);
+        _o_clr ??= new FhCallHandle<d_ClearRenderTargetView>(new FhCallLocation((void*)_a_clr)).chain_from(_h_clr!).fnptr;
+        _o_clr!(ctx, rtv, color);
+    }
+
+    private void h_clrd(nint ctx, nint dsv, uint flags, float depth, byte stencil) {
+        if (_fn_on_clear != null) _fn_on_clear(dsv, 1);
+        _o_clrd ??= new FhCallHandle<d_ClearDepthStencilView>(new FhCallLocation((void*)_a_clrd)).chain_from(_h_clrd!).fnptr;
+        _o_clrd!(ctx, dsv, flags, depth, stencil);
     }
 
     private void h_updatesub(nint ctx, nint resource, uint sub, nint box, nint src, uint row_pitch, uint depth_pitch) {
@@ -438,6 +490,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_census_arm != null) {
                 if (ImGui.IsKeyPressed(ImGuiKey.F6)) { _fn_census_arm(16, 512); _census_n++; }
                 ImGui.Text($"F6: record call stacks of 2D-UI uploads for one frame ({_census_n} taken, ffxvr_stacks.log)");
+            if (_fn_frame_arm != null) {
+                if (ImGui.IsKeyPressed(ImGuiKey.F5)) { _fn_frame_arm(); _frame_census_n++; }
+                ImGui.Text($"F5: record one frame's render-target / viewport / draw structure ({_frame_census_n} taken, ffxvr_frame.log)");
+            }
             }
             }
             nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;

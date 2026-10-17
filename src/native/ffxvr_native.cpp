@@ -772,6 +772,102 @@ extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) 
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// Frame-structure census
+//
+// One frame's sequence of render-target switches, viewports, clears and the
+// runs of draws between them, with the constant-buffer families the draws
+// used. This is the map a second (per-eye) rendering of the scene needs.
+// ---------------------------------------------------------------------------
+
+struct FrameEv { char text[160]; };
+std::vector<FrameEv> g_frame_ev;
+bool  g_frame_arm = false, g_frame_live = false;
+int   g_frame_draw_run = 0;        // draws since the last non-draw event
+int   g_frame_run_small = 0, g_frame_run_mid = 0, g_frame_run_big = 0, g_frame_run_none = 0;
+
+static void frame_flush_draws() {
+    if (g_frame_draw_run == 0) return;
+    FrameEv e;
+    snprintf(e.text, sizeof(e.text), "      %4d draws   (slot0: none %d, <=512B %d, ~1KB %d, >=1872B %d)",
+             g_frame_draw_run, g_frame_run_none, g_frame_run_small, g_frame_run_mid, g_frame_run_big);
+    if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+    g_frame_draw_run = g_frame_run_small = g_frame_run_mid = g_frame_run_big = g_frame_run_none = 0;
+}
+
+static void frame_event(const char* text) {
+    if (!g_frame_live) return;
+    frame_flush_draws();
+    FrameEv e; strncpy_s(e.text, text, _TRUNCATE);
+    if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+}
+
+static void describe_view(ID3D11View* view, char* out, size_t n) {
+    if (view == nullptr) { snprintf(out, n, "null"); return; }
+    ID3D11Resource* res = nullptr;
+    view->GetResource(&res);
+    if (res == nullptr) { snprintf(out, n, "%p", static_cast<void*>(view)); return; }
+    D3D11_RESOURCE_DIMENSION dim; res->GetType(&dim);
+    if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) {
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
+            D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
+            snprintf(out, n, "%p tex %ux%u fmt %u%s", static_cast<void*>(res), d.Width, d.Height, static_cast<unsigned>(d.Format),
+                     (d.BindFlags & D3D11_BIND_SHADER_RESOURCE) ? " +SRV" : "");
+            tex->Release();
+        }
+        else snprintf(out, n, "%p tex2d", static_cast<void*>(res));
+    }
+    else snprintf(out, n, "%p dim %d", static_cast<void*>(res), static_cast<int>(dim));
+    res->Release();
+}
+
+extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* const* rtvs, void* dsv) {
+    if (!g_frame_live) return;
+    char a[96], b[96];
+    describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
+    describe_view(static_cast<ID3D11View*>(dsv), b, sizeof(b));
+    char t[160];
+    snprintf(t, sizeof(t), "RT  n=%u  rtv0 %s   dsv %s", n, a, b);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    frame_event(t);
+}
+
+extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float x, float y) {
+    if (!g_frame_live) return;
+    char t[160];
+    snprintf(t, sizeof(t), "VP  %gx%g at %g,%g", w, h, x, y);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    frame_event(t);
+}
+
+extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
+    if (!g_frame_live) return;
+    char a[96]; describe_view(static_cast<ID3D11View*>(view), a, sizeof(a));
+    char t[160];
+    snprintf(t, sizeof(t), "CLR %s %s", depth ? "depth" : "color", a);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    frame_event(t);
+}
+
+extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_frame_ev.clear();
+    g_frame_arm = true;
+}
+
+static void frame_dump() {
+    frame_flush_draws();
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_frame.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
+    fprintf(f, "frame structure, %zu events\n", g_frame_ev.size());
+    for (const FrameEv& e : g_frame_ev) fprintf(f, "  %s\n", e.text);
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
     g_cam_mem_mode = mode;
     g_cam_mem_obj  = obj;
@@ -1378,6 +1474,8 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     read_camera();
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
+        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; frame_event("-- frame start (after Present) --"); }
         if (g_stacks_live) { g_stacks_live = false; census_dump(); }
         if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
     }
@@ -1426,6 +1524,18 @@ extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report
 extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
+
+    if (g_frame_live) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_frame_draw_run++;
+        if (!g_slot0_cur) g_frame_run_none++;
+        else {
+            D3D11_BUFFER_DESC bd = {}; g_slot0_cur->GetDesc(&bd);
+            if (bd.ByteWidth <= 512) g_frame_run_small++;
+            else if (bd.ByteWidth < 1872) g_frame_run_mid++;
+            else g_frame_run_big++;
+        }
+    }
     if (g_latched || g_ctx == nullptr) return;
 
     ID3D11Buffer* b = nullptr;
