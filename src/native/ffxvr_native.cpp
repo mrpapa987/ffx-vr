@@ -2245,11 +2245,30 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
 
     ID3D11ShaderResourceView* srvs[16];
     bool any = false;
+    char inputs[160] = ""; size_t il = 0;
     for (int i = 0; i < 16; ++i) {
         g_saved_ps_srv[i] = g_cur_ps_srv[i];
         ID3D11ShaderResourceView* tw = twin_srv(g_cur_ps_srv[i]);
         srvs[i] = tw ? tw : g_cur_ps_srv[i];
         if (tw) any = true;
+        if (g_frame_live && g_cur_ps_srv[i] != nullptr) {
+            // name the input: a rendered texture (twinned or not) by size, else "tex"
+            ID3D11Texture2D* t = texture_of(g_cur_ps_srv[i]);
+            D3D11_TEXTURE2D_DESC d = {}; if (t) t->GetDesc(&d);
+            const bool rendered = (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0;
+            const bool copied   = !rendered && g_twins.find(t) != g_twins.end();
+            if (rendered || copied) {
+                il += snprintf(inputs + il, sizeof(inputs) - il, " s%d:%ux%u%s", i, d.Width, d.Height,
+                               tw ? "" : (rendered ? "!NO-TWIN" : "!NO-TWIN(copy)"));
+                if (il >= sizeof(inputs) - 1) break;
+            }
+        }
+    }
+    if (g_frame_live && inputs[0]) {
+        char t[160]; snprintf(t, sizeof(t), "      eye2 draw inputs:%s", inputs);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        FrameEv e; strncpy_s(e.text, t, _TRUNCATE);
+        if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
     }
     if (any) g_ctx->PSSetShaderResources(0, 16, srvs);
 
