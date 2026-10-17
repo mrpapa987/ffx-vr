@@ -27,3 +27,27 @@ Three mechanisms could hide geometry; status unknown until tested there:
 3. Distance fog: parameters live in the renderer globals block (and in every
    per-object buffer we patch) and can be pulled back for an observe mode.
 Test: Calm Lands, override on, numpad 7 / minus until looking down.
+
+## External design doc, assessed (17 Oct 2026)
+
+A brainstormed "PCVR Technical Design & Integration Guide" was reviewed.
+
+Adopt now:
+- **Test the battle debug free-camera flag** (`Btl.debug.free_camera`, in
+  Fahrenheit's `BtlDebugFlags`). If it is a developer camera, driving the
+  game's own camera makes culling, lighting and native cursors follow.
+- **UnX (Kaldaien)** as the reference for FFX's 30 Hz logic tick vs render
+  rate when we need 90 Hz for the headset.
+
+Later, if wanted:
+- Sphere grid: parse grid files offline (sphere-grid viewer project) for a
+  3D version; flat panel first.
+- Farplane / FFXProjectEditor as cross-references for battle memory, esp.
+  the CTB turn queue for a turn-order display.
+- Overdrive minigames as gesture-to-input mappings (they are inputs: timing
+  bar, stick rotation, button sequences), e.g. Lulu's Fury = stick rotation.
+
+Not applicable / overstated: frustum-culling suppression (the game does not
+appear to cull by frustum); Fahrenheit "lifecycle events" (it has pre/post
+main loop and a warp hook; we read battle state directly); UnX as a UI/3D
+render-pass separation (we mapped the UI pass ourselves).
