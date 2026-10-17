@@ -386,6 +386,7 @@ struct Twin {
 };
 std::map<ID3D11Texture2D*, Twin> g_twins;
 ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image
+bool g_backbuffer_seen_this_frame = false;
 ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, tracked from the detour
 uint32_t g_twin_count = 0;
 // backbuffer diagnostics
@@ -884,9 +885,12 @@ static void describe_view(ID3D11View* view, char* out, size_t n) {
 
 extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* const* rtvs, void* dsv) {
     if (g_in_eye2) return;
-    if (g_backbuffer == nullptr && n > 0 && rtvs && rtvs[0]) {
+    // The first target bound after our per-frame hook is the overlay's view of
+    // the real backbuffer (Fahrenheit binds it to draw ImGui). Re-identified
+    // every frame, so a swapchain resize is followed.
+    if (g_overlay_phase && !g_backbuffer_seen_this_frame && n > 0 && rtvs && rtvs[0]) {
         ID3D11Texture2D* t = texture_of(static_cast<ID3D11View*>(rtvs[0]));
-        if (t) { D3D11_TEXTURE2D_DESC d; t->GetDesc(&d); if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) g_backbuffer = t; }
+        if (t) { g_backbuffer = t; g_backbuffer_seen_this_frame = true; }
     }
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
@@ -1581,6 +1585,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     read_camera();
     g_overlay_phase = true;
+    g_backbuffer_seen_this_frame = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
