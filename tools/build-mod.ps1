@@ -46,32 +46,42 @@ if (-not (Test-Path (Join-Path $pkgDir 'Fahrenheit.Sdk.1.0.0-alpha12.nupkg'))) {
 }
 
 # ---------------------------------------------------------------- OpenXR loader
-# The headset half needs the Khronos OpenXR loader (32-bit) and headers. They
-# come from the official NuGet package, fetched once into _ext\openxr.
+# The headset half needs the Khronos OpenXR loader (32-bit) and the headers.
+# They are two NuGet packages (OpenXR.Loader depends on OpenXR.Headers),
+# fetched once into _ext\openxr\loader and _ext\openxr\headers.
 $oxrDir = Join-Path $proj '_ext\openxr'
-$oxrHdr = Join-Path $oxrDir 'include\openxr\openxr.h'
+$oxrHdr = Join-Path $oxrDir 'headers\include\openxr\openxr.h'
+function Fetch-NuGet($id, $dest) {
+    $nupkg = Join-Path $proj "_ext\$id.nupkg"
+    New-Item -ItemType Directory -Force -Path (Join-Path $proj '_ext') | Out-Null
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/$id" -OutFile $nupkg -UseBasicParsing
+    $zip = "$nupkg.zip"
+    Copy-Item $nupkg $zip -Force
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $dest -Force
+    Remove-Item $zip -Force
+}
 if (-not (Test-Path $oxrHdr)) {
     Log ''
-    Log '[openxr] fetching the OpenXR loader package (once)'
-    $nupkg = Join-Path $proj '_ext\OpenXR.Loader.nupkg'
-    New-Item -ItemType Directory -Force -Path (Join-Path $proj '_ext') | Out-Null
+    Log '[openxr] fetching the OpenXR loader and header packages (once)'
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/OpenXR.Loader' -OutFile $nupkg -UseBasicParsing
-        $zip = "$nupkg.zip"
-        Copy-Item $nupkg $zip -Force
         if (Test-Path $oxrDir) { Remove-Item $oxrDir -Recurse -Force }
-        Expand-Archive -Path $zip -DestinationPath $oxrDir -Force
-        Remove-Item $zip -Force
+        Fetch-NuGet 'OpenXR.Loader'  (Join-Path $oxrDir 'loader')
+        Fetch-NuGet 'OpenXR.Headers' (Join-Path $oxrDir 'headers')
     } catch {
-        Log "ERROR: could not fetch the OpenXR loader: $_"
+        Log "ERROR: could not fetch the OpenXR packages: $_"
         exit 1
     }
 }
-$oxrDll = Get-ChildItem $oxrDir -Recurse -Filter 'openxr_loader.dll' -ErrorAction SilentlyContinue |
-          Where-Object { $_.FullName -match '\\x86\\' -or $_.FullName -match '\\Win32\\' } |
+$oxrDll = Get-ChildItem (Join-Path $oxrDir 'loader') -Recurse -Filter 'openxr_loader.dll' -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -match '\\Win32\\release\\bin\\' } |
           Select-Object -First 1
-if (-not (Test-Path $oxrHdr)) { Log "ERROR: openxr.h not found under $oxrDir"; exit 1 }
+if (-not (Test-Path $oxrHdr)) {
+    Log "ERROR: openxr.h not found under $oxrDir"
+    Get-ChildItem $oxrDir -Recurse -Filter 'openxr.h' | ForEach-Object { Log ('  found: ' + $_.FullName) }
+    exit 1
+}
 if (-not $oxrDll) {
     Log "ERROR: no 32-bit openxr_loader.dll in the package under $oxrDir"
     Get-ChildItem $oxrDir -Recurse -Filter 'openxr_loader.dll' | ForEach-Object { Log ('  found: ' + $_.FullName) }

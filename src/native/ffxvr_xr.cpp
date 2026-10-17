@@ -127,7 +127,7 @@ bool xr_start(const XrHost& host) {
     strncpy_s(ici.applicationInfo.applicationName, "FFX VR", _TRUNCATE);
     ici.applicationInfo.applicationVersion = 1;
     strncpy_s(ici.applicationInfo.engineName, "ffxvr", _TRUNCATE);
-    ici.applicationInfo.apiVersion = XR_API_VERSION_1_0;
+    ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     ici.enabledExtensionCount = 1; ici.enabledExtensionNames = exts;
     XrResult r = p_xrCreateInstance(&ici, &g_instance);
     if (XR_FAILED(r)) { g_instance = XR_NULL_HANDLE; return fail("xrCreateInstance (is SteamVR set as the OpenXR runtime, and 32-bit support present?)", r); }
