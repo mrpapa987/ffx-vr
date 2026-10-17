@@ -406,6 +406,8 @@ ID3D11Texture2D* g_snap_tex = nullptr; ID3D11ShaderResourceView* g_snap_srv = nu
 ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
 ID3D11Texture2D* g_snap_game = nullptr;         // the game's own scene texture at the same moment
 ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
+bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
+std::map<ID3D11Texture2D*, uint32_t> g_red_done_frame;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -2273,6 +2275,11 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
             g_prev_e2_target = gt; g_prev_e2_run = 0;
         }
         g_prev_e2_run++;
+        if (g_debug_red && gt && g_cur_dsv != nullptr && rtvs[0] != nullptr && g_red_done_frame[gt] != g_frames) {
+            g_red_done_frame[gt] = g_frames;
+            const float red[4] = { 1.f, 0.f, 0.f, 1.f };
+            g_ctx->ClearRenderTargetView(rtvs[0], red);
+        }
         if (gt && g_cur_dsv != nullptr) {
             const uint32_t c = ++g_draws_per_target[gt];
             if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
@@ -2336,7 +2343,6 @@ extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned 
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
     g_in_eye2 = true;
-    if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_prev_e2_target) snapshot_scene_if_due();
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
     else       { ID3D11RenderTargetView* t = twin_rtv(static_cast<ID3D11RenderTargetView*>(view)); if (t) g_ctx->ClearRenderTargetView(t, color); }
     g_in_eye2 = false;
@@ -2488,7 +2494,7 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
     return nv;
 }
 
-extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; }
+extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope, int red) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; }
 /// A twin's plain SRV (whole texture), created on demand; null if none.
 static void* twin_plain_srv(ID3D11Texture2D* game) {
     if (game == nullptr) return nullptr;
