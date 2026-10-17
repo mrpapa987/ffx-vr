@@ -170,3 +170,14 @@ product it is expected to be.
   deliberately left alone.
 - **256 B**: a world matrix whose translation is the camera position, i.e.
   something camera-attached (sky?). Left alone.
+
+## Known limit of the override: CPU-projected UI (17 Oct 2026)
+
+Camera override works across field, the save sphere (frame and orb), and
+battle. What it cannot fix is anything the game positions by projecting a
+world position through *its* camera on the CPU and then drawing in 2D: the
+battle target cursor, damage numbers, enemy names, party highlights. Those
+arrive at the GPU as screen coordinates, with no matrix to rewrite.
+
+Fix belongs to the VR UI milestone: read the target's position from the
+battle state via Fahrenheit and draw our own 3D marker. Not a rendering fix.
