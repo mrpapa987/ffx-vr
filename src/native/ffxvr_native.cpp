@@ -753,6 +753,15 @@ void heartbeat(bool force) {
         }
     }
 
+    if (g_watch_addr[0] || g_watch_addr[1]) {
+        fprintf(f, "\n  write watch on %08X / %08X: %u hits\n",
+                static_cast<unsigned>(g_watch_addr[0]), static_cast<unsigned>(g_watch_addr[1]), g_watch_hits);
+        for (int i = 0; i < g_writers_n; ++i) {
+            char where[160]; describe_address(reinterpret_cast<void*>(g_writers[i].eip), where, sizeof(where));
+            fprintf(f, "    writer eip %s  x%u\n", where, g_writers[i].count);
+        }
+    }
+
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
     fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
     fprintf(f, "game's device context and the hooking approach must change.\n");
@@ -1048,6 +1057,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 
     g_installed       = true;
     g_patched_context = game_context;
+    g_main_tid        = GetCurrentThreadId();
 
     {   // start this run's trace fresh
         wchar_t tpath[MAX_PATH];
@@ -1295,6 +1305,91 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
     fprintf(f, "\n");
     fclose(f);
     return static_cast<int>(hits.size());
+}
+
+// ---------------------------------------------------------------------------
+// Write watch: who writes the game's camera?
+//
+// A hardware data breakpoint (DR0/DR1, write, 4 bytes) on an address, set on
+// the game's main thread from a helper thread, with a vectored exception
+// handler that records the writing instruction's address and continues. The
+// resulting table names the function that computes the camera each frame --
+// the place to hook so that UI projection, rendering and culling all follow.
+// ---------------------------------------------------------------------------
+
+struct Writer { uintptr_t eip; uint32_t count; };
+Writer   g_writers[32] = {};
+int      g_writers_n   = 0;
+uint32_t g_watch_hits  = 0;
+uintptr_t g_watch_addr[2] = {};
+DWORD    g_main_tid    = 0;
+void*    g_veh         = nullptr;
+
+static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    CONTEXT* c = ep->ContextRecord;
+    if ((c->Dr6 & 0x3) == 0) return EXCEPTION_CONTINUE_SEARCH;     // not one of ours
+
+    const uintptr_t eip = c->Eip;   // instruction after the write
+    g_watch_hits++;
+    bool found = false;
+    for (int i = 0; i < g_writers_n; ++i) if (g_writers[i].eip == eip) { g_writers[i].count++; found = true; break; }
+    if (!found && g_writers_n < 32) g_writers[g_writers_n++] = { eip, 1 };
+
+    c->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+struct WatchJob { DWORD tid; uintptr_t a0; uintptr_t a1; int result; };
+
+static DWORD WINAPI watch_thread(LPVOID arg) {
+    WatchJob* job = static_cast<WatchJob*>(arg);
+    HANDLE t = OpenThread(THREAD_ALL_ACCESS, FALSE, job->tid);
+    if (t == nullptr) { job->result = -1; return 0; }
+
+    if (SuspendThread(t) == (DWORD)-1) { CloseHandle(t); job->result = -2; return 0; }
+    CONTEXT c = {};
+    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    if (!GetThreadContext(t, &c)) { ResumeThread(t); CloseHandle(t); job->result = -3; return 0; }
+
+    c.Dr0 = job->a0;
+    c.Dr1 = job->a1;
+    c.Dr7 = 0;
+    if (job->a0) c.Dr7 |= (1u << 0) | (0b01u << 16) | (0b11u << 18);   // L0, write, 4 bytes
+    if (job->a1) c.Dr7 |= (1u << 2) | (0b01u << 20) | (0b11u << 22);   // L1, write, 4 bytes
+    c.Dr6 = 0;
+    const BOOL ok = SetThreadContext(t, &c);
+    ResumeThread(t);
+    CloseHandle(t);
+    job->result = ok ? 0 : -4;
+    return 0;
+}
+
+/// Arms write watches on up to two addresses (0 = none) on the game's main
+/// thread. Returns 0 on success.
+extern "C" __declspec(dllexport) int ffxvr_watch(uintptr_t a0, uintptr_t a1) {
+    if (g_main_tid == 0) return -10;
+    if (g_veh == nullptr) g_veh = AddVectoredExceptionHandler(1, watch_veh);
+
+    g_writers_n  = 0;
+    g_watch_hits = 0;
+    g_watch_addr[0] = a0; g_watch_addr[1] = a1;
+
+    WatchJob job = { g_main_tid, a0, a1, -99 };
+    HANDLE h = CreateThread(nullptr, 0, watch_thread, &job, 0, nullptr);
+    if (h == nullptr) return -11;
+    WaitForSingleObject(h, 5000);
+    CloseHandle(h);
+    return job.result;
+}
+
+extern "C" __declspec(dllexport) int ffxvr_watch_hits() { return static_cast<int>(g_watch_hits); }
+
+/// The address of the game's static camera matrix (column-major view),
+/// found by the memory scan: FFX.exe + 0x88FD3C.
+extern "C" __declspec(dllexport) uintptr_t ffxvr_exe_camera() {
+    HMODULE exe = GetModuleHandleW(nullptr);
+    return exe ? reinterpret_cast<uintptr_t>(exe) + 0x88FD3C : 0;
 }
 
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
