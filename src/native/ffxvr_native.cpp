@@ -1206,6 +1206,7 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
 // ---------------------------------------------------------------------------
 
 struct MemHit { uintptr_t addr; const char* kind; };
+uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
 
 /// Searches one region for float-aligned needles, reporting hits through the
 /// callback. Runs under SEH so a page that faults despite VirtualQuery's word
@@ -1302,12 +1303,21 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
         a = next;
     }
 
+    g_scan_struct = 0;
+    for (const MemHit& h : hits) {
+        if (strcmp(h.kind, "camera position float3") != 0) continue;
+        for (const MemHit& k : hits) {
+            if (k.addr == h.addr + 12 && strncmp(k.kind, "view row-major", 14) == 0) { g_scan_struct = h.addr; break; }
+        }
+        if (g_scan_struct) break;
+    }
+
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_memscan.log", g_dir);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted\n",
-            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted);
+    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted; camera object %08X\n",
+            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted, static_cast<unsigned>(g_scan_struct));
     for (const MemHit& h : hits) {
         char where[128]; describe_region(h.addr, where, sizeof(where));
         fprintf(f, "  %08X  %-36s %s\n", static_cast<unsigned>(h.addr), h.kind, where);
@@ -1451,6 +1461,81 @@ extern "C" __declspec(dllexport) int ffxvr_xrefs(uintptr_t addr, unsigned span) 
     fclose(f);
     return n;
 }
+
+// ---------------------------------------------------------------------------
+// Pointer scan: which variables point at the camera?
+//
+// Code that never names the matrix reaches it through a pointer. Search the
+// executable's data sections (and, separately counted, the heap) for 4-byte
+// values in [target - below, target], then cross-reference each pointer
+// variable found in the executable, since those are the camera accessors.
+// ---------------------------------------------------------------------------
+
+extern "C" __declspec(dllexport) int ffxvr_ptrscan(uintptr_t target, unsigned below) {
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (exe == nullptr || target == 0) return -1;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(exe);
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const IMAGE_NT_HEADERS* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_xrefs.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
+    fprintf(f, "pointers into [%08X-%u, %08X]:\n", static_cast<unsigned>(target), below, static_cast<unsigned>(target));
+
+    std::vector<uintptr_t> ptr_vars;
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
+        const uint8_t* ds = base + sec[i].VirtualAddress;
+        const size_t   dl = sec[i].Misc.VirtualSize;
+        for (size_t off = 0; off + 4 <= dl; off += 4) {
+            uint32_t v; memcpy(&v, ds + off, 4);
+            if (v + below < target || v > target) continue;
+            const uintptr_t at = reinterpret_cast<uintptr_t>(ds + off);
+            fprintf(f, "  exe data FFX.exe+%06X holds %08X (target%+d)\n", static_cast<unsigned>(at - reinterpret_cast<uintptr_t>(base)),
+                    v, static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
+            if (ptr_vars.size() < 32) ptr_vars.push_back(at);
+        }
+    }
+
+    // Heap: count only, with the first few, so a pointer field inside another object shows up.
+    int heap_n = 0;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    while (a < end) {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
+        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (next <= a) break;
+        if (region_ok(mbi) && mbi.Type == MEM_PRIVATE && mbi.RegionSize < (256u << 20)) {
+            const uint8_t* rb = static_cast<const uint8_t*>(mbi.BaseAddress);
+            __try {
+                for (size_t off = 0; off + 4 <= mbi.RegionSize; off += 4) {
+                    uint32_t v; memcpy(&v, rb + off, 4);
+                    if (v + below < target || v > target) continue;
+                    const uintptr_t at = reinterpret_cast<uintptr_t>(rb + off);
+                    if (at >= target - 0x1000 && at <= target + 0x1000) continue;   // inside the object itself
+                    if (heap_n < 12) fprintf(f, "  heap %08X holds %08X (target%+d)\n", static_cast<unsigned>(at), v,
+                                             static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
+                    heap_n++;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        a = next;
+    }
+    fprintf(f, "  %zu pointer variables in the exe, %d on the heap\n\n", ptr_vars.size(), heap_n);
+    fclose(f);
+
+    // Chain: who reads each pointer variable?
+    for (uintptr_t pv : ptr_vars) ffxvr_xrefs(pv, 4);
+    return static_cast<int>(ptr_vars.size());
+}
+
+extern "C" __declspec(dllexport) uintptr_t ffxvr_scan_struct() { return g_scan_struct; }
 
 /// Arms write watches on up to two addresses (0 = none) on the game's main
 /// thread. Returns 0 on success.

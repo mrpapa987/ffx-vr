@@ -51,6 +51,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _watch_rc = -99;
     private delegate* unmanaged[Cdecl]<nuint, uint, int> _fn_xrefs;
     private int _xrefs_n = -99;
+    private delegate* unmanaged[Cdecl]<nuint, uint, int> _fn_ptrscan;
+    private delegate* unmanaged[Cdecl]<nuint> _fn_scan_struct;
+    private int _ptrscan_n = -99;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -134,6 +137,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_watch_hits       = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_watch_hits");
             _fn_exe_camera       = (delegate* unmanaged[Cdecl]<nuint>)NativeLibrary.GetExport(_native_handle, "ffxvr_exe_camera");
             _fn_xrefs            = (delegate* unmanaged[Cdecl]<nuint, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xrefs");
+            _fn_ptrscan          = (delegate* unmanaged[Cdecl]<nuint, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ptrscan");
+            _fn_scan_struct      = (delegate* unmanaged[Cdecl]<nuint>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_struct");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -405,6 +410,16 @@ public sealed unsafe class FFXVRModule : FhModule {
             }
             ImGui.Text(_xrefs_n == -99 ? $"F11: list code touching the game camera at 0x{(nint)_fn_exe_camera():X8}"
                      : $"code references: {_xrefs_n} (ffxvr_xrefs.log)");
+
+            if (ImGui.IsKeyPressed(ImGuiKey.F12) && _fn_ptrscan != null) {
+                // Pointers to the static matrix (or a struct enclosing it), and to
+                // the heap camera object the F10 scan found, then who reads them.
+                _ptrscan_n  = _fn_ptrscan(_fn_exe_camera(), 0x800);
+                nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;
+                if (obj != 0) _ptrscan_n += _fn_ptrscan(obj, 0x800);
+            }
+            ImGui.Text(_ptrscan_n == -99 ? "F12: find pointers to the camera (run F10 first), then who reads them"
+                     : $"pointer variables found: {_ptrscan_n} (ffxvr_xrefs.log)");
         }
     }
 
