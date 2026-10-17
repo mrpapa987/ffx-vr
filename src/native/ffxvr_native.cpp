@@ -714,6 +714,49 @@ extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsign
     g_stacks_arm = true;
 }
 
+// ---------------------------------------------------------------------------
+// Support for the mod's own in-world markers
+// ---------------------------------------------------------------------------
+
+/// Copies `len` bytes from game memory under SEH. Returns 1 on success, 0 if
+/// the read faulted -- stale battle pointers outside a battle, for instance.
+extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
+    __try { memcpy(dst, src, len); return 1; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+}
+
+/// Projects a world point through the camera the player currently sees --
+/// the override view when enabled, else the game's -- and the game's main
+/// projection. Returns 1 and NDC x,y in out[] if the point is in front.
+extern "C" __declspec(dllexport) int ffxvr_project(float x, float y, float z, float* out) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_cam_valid || out == nullptr) return 0;
+
+    float v[12];
+    memcpy(v, g_cam, sizeof(v));
+    if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v));
+
+    float V[16];
+    if (g_ovr_enabled) {
+        float In[16], Pn[3];
+        build_override_view(v, V, In, Pn);
+    }
+    else {
+        memcpy(V, v, 48);
+        V[12] = V[13] = V[14] = 0.f; V[15] = 1.f;
+    }
+    const float* P = &g_cam[16];                    // main projection (+256)
+
+    const float w[4] = { x, y, z, 1.f };
+    float e[4], c[4];
+    for (int r = 0; r < 4; ++r) e[r] = V[r*4+0]*w[0] + V[r*4+1]*w[1] + V[r*4+2]*w[2] + V[r*4+3]*w[3];
+    for (int r = 0; r < 4; ++r) c[r] = P[r*4+0]*e[0] + P[r*4+1]*e[1] + P[r*4+2]*e[2] + P[r*4+3]*e[3];
+    if (c[3] <= 1e-4f) return 0;
+    out[0] = c[0] / c[3];
+    out[1] = c[1] / c[3];
+    return 1;
+}
+
 extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
     g_cam_mem_mode = mode;
     g_cam_mem_obj  = obj;

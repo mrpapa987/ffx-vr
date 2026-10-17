@@ -63,6 +63,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _memscan_cams = 0;
     private delegate* unmanaged[Cdecl]<uint, uint, void> _fn_census_arm;
     private int _census_n = 0;
+    private delegate* unmanaged[Cdecl]<void*, void*, uint, int> _fn_safe_read;
+    private delegate* unmanaged[Cdecl]<float, float, float, float*, int> _fn_project;
+    private bool  _markers_on    = true;
+    private float _marker_height = 120f;
+    private int   _markers_drawn;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -153,6 +158,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_dump_structs     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_structs");
             _fn_scan_cams        = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_cams");
             _fn_census_arm       = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
+            _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_safe_read");
+            _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_project");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -409,6 +416,11 @@ public sealed unsafe class FFXVRModule : FhModule {
                  + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
         ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
 
+        ImGui.Separator();
+        ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);
+        ImGui.SliderFloat("marker height", ref _marker_height, 0f, 400f);
+        ImGui.Text($"markers drawn this frame: {_markers_drawn}");
+
         if (_fn_cam_mem_set != null) {
             ImGui.Separator();
             ImGui.Text("Also write the camera into game memory (for CPU-projected UI):");
@@ -486,10 +498,68 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
     }
 
+
+    // -- in-world battle markers --------------------------------------------
+    //
+    // The game's target and turn cursors are 2D sprites positioned by CPU code
+    // through the game's own camera, so they cannot follow an override. These
+    // are ours: the same information (selected targets, whose turn it is, each
+    // combatant's position) read from the game, projected through the camera
+    // the player actually sees. Every game-memory read goes through a native
+    // SEH-guarded copy, because the battle pointers are stale outside battle.
+
+    private bool read<T>(void* src, out T value) where T : unmanaged {
+        T tmp = default;
+        bool ok = _fn_safe_read != null && _fn_safe_read(src, &tmp, (uint)sizeof(T)) != 0;
+        value = tmp;
+        return ok;
+    }
+
+    private void draw_markers() {
+        _markers_drawn = 0;
+        if (!_markers_on || _fn_project == null || _fn_safe_read == null) return;
+
+        Btl* btl = Globals.Battle.btl;
+        if (!read(btl, out Btl btl_v) || btl_v.battle_state == 0) return;
+
+        BtlWindow* win = Globals.Battle.cur_window;
+        if (!read(win, out BtlWindow w)) return;
+
+        Chr* mons = Globals.Battle.monster_characters;
+        Chr* plys = Globals.Battle.player_characters;
+
+        for (int i = 0; i < 16; i++) {
+            if ((w.sel_mons & (1 << i)) != 0 && mons != null) mark(mons + i, 0xFF4040FF, "target");
+            if ((w.sel_chrs & (1 << i)) != 0 && plys != null) mark(plys + i, 0xFF4040FF, "target");
+        }
+        if (w.cur_chr_id < 16 && plys != null) mark(plys + w.cur_chr_id, 0xFF40E0FF, "turn");
+    }
+
+    private void mark(Chr* chr, uint color, string label) {
+        if (!read(chr, out Chr c) || c.actor == null) return;
+        if (!read(c.actor, out Actor a)) return;
+        if (c.stat_visible == 0 && label == "target") { /* still mark; the game does */ }
+
+        float* ndc = stackalloc float[2];
+        if (_fn_project(a.chr_pos_vec.X, a.chr_pos_vec.Y + _marker_height, a.chr_pos_vec.Z, ndc) == 0) return;
+
+        Vector2 size = ImGui.GetIO().DisplaySize;
+        float sx = (ndc[0] * 0.5f + 0.5f) * size.X;
+        float sy = (0.5f - ndc[1] * 0.5f) * size.Y;
+
+        ImDrawListPtr dl = ImGui.GetForegroundDrawList();
+        // a downward-pointing triangle, like the game's cursor
+        dl.AddTriangleFilled(new Vector2(sx - 14, sy - 30), new Vector2(sx + 14, sy - 30), new Vector2(sx, sy - 4), color);
+        dl.AddTriangle(new Vector2(sx - 14, sy - 30), new Vector2(sx + 14, sy - 30), new Vector2(sx, sy - 4), 0xFF000000, 2f);
+        dl.AddText(new Vector2(sx - 16, sy - 48), color, label);
+        _markers_drawn++;
+    }
+
     public override void render_imgui() {
         _frames++;
 
         try_install_hooks();
+        if (_native_init_done) draw_markers();
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.
