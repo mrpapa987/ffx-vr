@@ -38,7 +38,16 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_changes;
     private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
-    private delegate* unmanaged[Cdecl]<int, void> _fn_on_draw;
+    private delegate* unmanaged[Cdecl]<int, int> _fn_on_draw;
+    private delegate* unmanaged[Cdecl]<int> _fn_eye2_begin;
+    private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
+    private delegate* unmanaged[Cdecl]<int, float, void> _fn_stereo_set;
+    private delegate* unmanaged[Cdecl]<nint> _fn_eye2_srv;
+    private delegate* unmanaged[Cdecl]<int> _fn_eye2_draws;
+    private delegate* unmanaged[Cdecl]<int*, int*, int> _fn_eye2_size;
+    private bool  _stereo_on = false;
+    private float _ipd = 6f;
+    private bool  _eye2_preview = true;
     private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets;
@@ -160,7 +169,13 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_camera_changes = (delegate* unmanaged[Cdecl]<int>)    NativeLibrary.GetExport(_native_handle, "ffxvr_camera_changes");
             _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
-            _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
+            _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
+            _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
+            _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
+            _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
+            _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
+            _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
+            _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
             _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
@@ -277,19 +292,21 @@ public sealed unsafe class FFXVRModule : FhModule {
     // would cost a delegate marshal on every draw.
 
     private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
-        if (_fn_on_draw != null) _fn_on_draw(1);
+        int eye2 = _fn_on_draw != null ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
         _o_drawindexed!(ctx, n, start, base_vertex);
+        if (eye2 != 0 && _fn_eye2_begin() != 0) { _o_drawindexed!(ctx, n, start, base_vertex); _fn_eye2_end(); }
     }
 
     private void h_draw(nint ctx, uint n, uint start) {
-        if (_fn_on_draw != null) _fn_on_draw(2);
+        int eye2 = _fn_on_draw != null ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
         _o_draw!(ctx, n, start);
+        if (eye2 != 0 && _fn_eye2_begin() != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
     }
 
     private void h_drawidxinst(nint ctx, uint a, uint b, uint c, int d, uint e) {
-        if (_fn_on_draw != null) _fn_on_draw(3);
+        if (_fn_on_draw != null) _fn_on_draw(3);   // instanced paths unused by this game
         _o_drawidxinst ??= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).chain_from(_h_drawidxinst!).fnptr;
         _o_drawidxinst!(ctx, a, b, c, d, e);
     }
@@ -472,6 +489,15 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
 
         ImGui.Separator();
+        ImGui.Text("Second eye");
+        ImGui.Checkbox("Render eye 2 (needs Enable above)", ref _stereo_on);
+        ImGui.SliderFloat("eye separation", ref _ipd, 0f, 30f);
+        if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd);
+        ImGui.Checkbox("preview eye 2", ref _eye2_preview);
+        if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
+        draw_eye2_preview();
+
+        ImGui.Separator();
         ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);
         ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
         ImGui.Text($"markers drawn this frame: {_markers_drawn}");
@@ -527,6 +553,24 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Text(_ptrscan_n == -99 ? "F12: find pointers to the camera (run F10 first), then who reads them"
                      : $"pointer variables found: {_ptrscan_n} (ffxvr_xrefs.log)");
         }
+    }
+
+
+    /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
+    private void draw_eye2_preview() {
+        if (!_eye2_preview || !_stereo_on || _fn_eye2_srv == null || _fn_eye2_size == null) return;
+        int w, h;
+        if (_fn_eye2_size(&w, &h) == 0 || w == 0) return;
+        nint srv = _fn_eye2_srv();
+        if (srv == 0) return;
+
+        ImGui.SetNextWindowSize(new Vector2(960, 540 + 40), ImGuiCond.FirstUseEver);
+        if (ImGui.Begin("Eye 2")) {
+            Vector2 avail = ImGui.GetContentRegionAvail();
+            float scale = Math.Min(avail.X / w, avail.Y / h);
+            ImGui.Image(new ImTextureID((ulong)srv), new Vector2(w * scale, h * scale));
+        }
+        ImGui.End();
     }
 
     private void draw_scan() {

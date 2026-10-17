@@ -346,6 +346,36 @@ std::map<UINT, OvrStat> g_ovr_stats;
 
 std::vector<uint8_t> g_scratch;
 
+// ---------------------------------------------------------------------------
+// Second eye
+//
+// The scene pass is one contiguous run of draws into a depth-bound target.
+// For each such draw, after the game's own, the same object buffer is
+// re-uploaded with the other eye's camera, the render target switched to our
+// eye-2 textures, the draw issued again, and everything restored. The
+// detours are re-entered during that, so a guard makes them pass-through.
+// ---------------------------------------------------------------------------
+bool  g_stereo       = false;
+float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
+float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
+bool  g_in_eye2      = false;         // re-entrancy guard
+std::vector<uint8_t> g_scratch2;      // eye-2 image of the last camera-carrying upload
+ID3D11Buffer* g_eye2_cb   = nullptr;  // the buffer that image belongs to
+UINT          g_eye2_size = 0;
+bool          g_eye2_valid = false;
+ID3D11Texture2D*        g_eye2_tex = nullptr;
+ID3D11RenderTargetView* g_eye2_rtv = nullptr;
+ID3D11Texture2D*        g_eye2_dep = nullptr;
+ID3D11DepthStencilView* g_eye2_dsv = nullptr;
+ID3D11ShaderResourceView* g_eye2_srv = nullptr;
+UINT g_eye2_w = 0, g_eye2_h = 0;
+bool g_eye2_cleared = false;
+uint32_t g_eye2_draws = 0, g_eye2_draws_report = 0;
+// current output-merger state, tracked from the OMSetRenderTargets detour
+ID3D11RenderTargetView* g_cur_rtv[4] = {};
+UINT                    g_cur_rtv_n  = 0;
+ID3D11DepthStencilView* g_cur_dsv    = nullptr;
+
 // World positions of skinned objects this frame (translation column of the
 // world matrix at +640 in the 1872 B+ family), for comparing against the
 // game's own actor positions.
@@ -413,9 +443,10 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     mul3(Ry, R, tmp);
     mul3(Rx, tmp, Rn);
 
-    // Move along the new camera's axes (rows of R'; forward is -row 2).
+    // Move along the new camera's axes (rows of R'; forward is -row 2). The
+    // eye shift is a further lateral offset, used for the second eye.
     for (int i = 0; i < 3; ++i)
-        Pn[i] = P[i] + Rn[0*3+i]*g_ovr_move[0] + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2];
+        Pn[i] = P[i] + Rn[0*3+i]*(g_ovr_move[0] + g_eye_shift) + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2];
 
     float tn[3];
     for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
@@ -823,6 +854,10 @@ static void describe_view(ID3D11View* view, char* out, size_t n) {
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* const* rtvs, void* dsv) {
+    if (g_in_eye2) return;
+    g_cur_rtv_n = n < 4 ? n : 4;
+    for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
+    g_cur_dsv = static_cast<ID3D11DepthStencilView*>(dsv);
     if (!g_frame_live) return;
     char a[96], b[96];
     describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
@@ -876,7 +911,8 @@ extern "C" __declspec(dllexport) int ffxvr_cam_mem_writes() { return static_cast
 
 /// If the override is on and this write carries a camera, returns a patched
 /// private copy of the bytes to upload instead; otherwise returns src.
-static const void* maybe_override(const void* src, UINT size) {
+static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf) {
+    if (g_in_eye2) return src;
     if (!g_ovr_enabled || size < 64) return src;
 
     const uint8_t* p = static_cast<const uint8_t*>(src);
@@ -911,6 +947,15 @@ static const void* maybe_override(const void* src, UINT size) {
         }
         mask = write_camera(p, g_scratch.data(), size, base, v);
         if (base == 48) mask |= 128;
+
+        if (g_stereo) {                                  // the same buffer seen from the other eye
+            if (g_scratch2.size() < size) g_scratch2.resize(size);
+            memcpy(g_scratch2.data(), p, size);
+            g_eye_shift = g_ipd;
+            write_camera(p, g_scratch2.data(), size, base, v);
+            g_eye_shift = 0.f;
+            g_eye2_cb = buf; g_eye2_size = size; g_eye2_valid = true;
+        }
     }
     else {
         if (replace_known_products(g_scratch.data(), size) == 0) return src;   // nothing of ours in here
@@ -1483,6 +1528,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_latched      = false;
     g_draw_in_frame = 0;
     g_have_PV       = false;
+    g_eye2_cleared  = false;
+    g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
+    g_eye2_valid    = false;
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
 
@@ -1521,9 +1569,13 @@ extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report
 /// counter index (1 DrawIndexed, 2 Draw, 3 DrawIndexedInstanced, 4 DrawInstanced).
 /// On the first draw of a frame with a camera-sized buffer in VS slot 0, that
 /// buffer is latched for the end-of-frame readback.
-extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
+extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
+    if (g_in_eye2) return 0;
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
+
+    // Scene-pass draw with the buffer we hold an eye-2 image for?
+    const bool eye2 = g_stereo && g_eye2_valid && g_slot0_cur == g_eye2_cb && g_cur_dsv != nullptr && g_slot0_big;
 
     if (g_frame_live) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -1536,22 +1588,23 @@ extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
             else g_frame_run_big++;
         }
     }
-    if (g_latched || g_ctx == nullptr) return;
+    if (g_latched || g_ctx == nullptr) return eye2 ? 1 : 0;
 
     ID3D11Buffer* b = nullptr;
     g_ctx->VSGetConstantBuffers(0, 1, &b);          // AddRefs
-    if (b == nullptr) return;
+    if (b == nullptr) return eye2 ? 1 : 0;
 
     D3D11_BUFFER_DESC bd = {};
     b->GetDesc(&bd);
     // The camera lives in the ~1 KB per-object buffers (view at +64, inverse at
     // +320). The ~7 KB ones are skinned characters with a different layout.
-    if (bd.ByteWidth < CAM_MIN_SIZE || bd.ByteWidth > 2048) { b->Release(); return; }
+    if (bd.ByteWidth < CAM_MIN_SIZE || bd.ByteWidth > 2048) { b->Release(); return eye2 ? 1 : 0; }
 
     if (g_slot0 != nullptr) g_slot0->Release();
     g_slot0             = b;                        // keep the reference
     g_latched           = true;
     g_draws_latched_at  = idx;
+    return eye2 ? 1 : 0;
 }
 
 /// out[0] = floats changed since last frame, out[1] = buffer size, out[2] = draw
@@ -1561,6 +1614,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_draw(int which) {
 /// the target is a constant buffer being replaced whole.
 extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
     bump(C_UPDATESUB);
+    if (g_in_eye2) return src;
     if (resource == nullptr || src == nullptr || box != nullptr) return src;
 
     ID3D11Buffer* buf = nullptr; UINT size = 0;
@@ -1568,7 +1622,7 @@ extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, 
 
     std::lock_guard<std::mutex> lock(g_mutex);
     record_buffer(buf, size, src, "UpdateSubresource");   // records the game's own camera
-    return maybe_override(src, size);                       // uploads ours
+    return maybe_override(src, size, buf);                  // uploads ours
 }
 
 extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze, float yaw, float pitch,
@@ -1971,6 +2025,65 @@ extern "C" __declspec(dllexport) uintptr_t ffxvr_exe_camera() {
 
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
 extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
+
+static bool eye2_ensure_targets() {
+    if (g_eye2_rtv != nullptr || g_device == nullptr || g_cur_rtv[0] == nullptr) return g_eye2_rtv != nullptr;
+
+    // Match the scene target's size.
+    ID3D11Resource* res = nullptr; g_cur_rtv[0]->GetResource(&res);
+    if (res == nullptr) return false;
+    ID3D11Texture2D* tex = nullptr;
+    res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
+    res->Release();
+    if (tex == nullptr) return false;
+    D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d); tex->Release();
+
+    D3D11_TEXTURE2D_DESC cd = {};
+    cd.Width = d.Width; cd.Height = d.Height; cd.MipLevels = 1; cd.ArraySize = 1;
+    cd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; cd.SampleDesc.Count = 1; cd.Usage = D3D11_USAGE_DEFAULT;
+    cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_device->CreateTexture2D(&cd, nullptr, &g_eye2_tex))) return false;
+    if (FAILED(g_device->CreateRenderTargetView(g_eye2_tex, nullptr, &g_eye2_rtv))) return false;
+    if (FAILED(g_device->CreateShaderResourceView(g_eye2_tex, nullptr, &g_eye2_srv))) return false;
+
+    D3D11_TEXTURE2D_DESC dd = cd;
+    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(g_device->CreateTexture2D(&dd, nullptr, &g_eye2_dep))) return false;
+    if (FAILED(g_device->CreateDepthStencilView(g_eye2_dep, nullptr, &g_eye2_dsv))) return false;
+    g_eye2_w = d.Width; g_eye2_h = d.Height;
+    return true;
+}
+
+/// Switches to the eye-2 target and uploads the eye-2 image of the current
+/// object buffer. The managed detour then re-issues the draw.
+extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
+    if (!g_stereo || !g_eye2_valid || g_ctx == nullptr) return 0;
+    if (!eye2_ensure_targets()) return 0;
+    g_in_eye2 = true;
+    if (!g_eye2_cleared) {
+        const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+        g_ctx->ClearRenderTargetView(g_eye2_rtv, black);
+        g_ctx->ClearDepthStencilView(g_eye2_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.f, 0);
+        g_eye2_cleared = true;
+    }
+    g_ctx->UpdateSubresource(g_eye2_cb, 0, nullptr, g_scratch2.data(), 0, 0);
+    g_ctx->OMSetRenderTargets(1, &g_eye2_rtv, g_eye2_dsv);
+    return 1;
+}
+
+/// Restores the game's targets and the eye-1 image of the buffer.
+extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
+    if (!g_in_eye2 || g_ctx == nullptr) return;
+    g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
+    g_ctx->UpdateSubresource(g_eye2_cb, 0, nullptr, g_scratch.data(), 0, 0);
+    g_eye2_draws++;
+    g_in_eye2 = false;
+}
+
+extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd) { g_stereo = on != 0; g_ipd = ipd; }
+extern "C" __declspec(dllexport) void* ffxvr_eye2_srv() { return g_eye2_srv; }
+extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
+extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h) { if (w) *w = static_cast<int>(g_eye2_w); if (h) *h = static_cast<int>(g_eye2_h); return g_eye2_rtv != nullptr; }
 
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
     if (out == nullptr) return 0;
