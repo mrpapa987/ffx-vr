@@ -371,6 +371,8 @@ ID3D11ShaderResourceView* g_eye2_srv = nullptr;
 UINT g_eye2_w = 0, g_eye2_h = 0;
 bool g_eye2_cleared = false;
 uint32_t g_eye2_draws = 0, g_eye2_draws_report = 0;
+// why a draw did not get an eye-2 pass (cumulative)
+uint32_t g_e2_no_stereo = 0, g_e2_no_image = 0, g_e2_cb_mismatch = 0, g_e2_no_dsv = 0, g_e2_small = 0, g_e2_ok = 0, g_e2_begin_fail = 0;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -1181,6 +1183,10 @@ void heartbeat(bool force) {
         }
     }
 
+    fprintf(f, "\n  eye 2: stereo=%d targets=%s (%ux%u) draws last frame=%u\n", g_stereo ? 1 : 0,
+            g_eye2_rtv ? "yes" : "no", g_eye2_w, g_eye2_h, g_eye2_draws_report);
+    fprintf(f, "         skipped: no stereo %u, no image %u, cb mismatch %u, no depth target %u, small cb %u; ok %u; begin failed %u\n",
+            g_e2_no_stereo, g_e2_no_image, g_e2_cb_mismatch, g_e2_no_dsv, g_e2_small, g_e2_ok, g_e2_begin_fail);
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
     fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
     fprintf(f, "game's device context and the hooking approach must change.\n");
@@ -1576,6 +1582,12 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
 
     // Scene-pass draw with the buffer we hold an eye-2 image for?
     const bool eye2 = g_stereo && g_eye2_valid && g_slot0_cur == g_eye2_cb && g_cur_dsv != nullptr && g_slot0_big;
+    if (!g_stereo) g_e2_no_stereo++;
+    else if (!g_eye2_valid) g_e2_no_image++;
+    else if (g_slot0_cur != g_eye2_cb) g_e2_cb_mismatch++;
+    else if (g_cur_dsv == nullptr) g_e2_no_dsv++;
+    else if (!g_slot0_big) g_e2_small++;
+    else g_e2_ok++;
 
     if (g_frame_live) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2057,8 +2069,8 @@ static bool eye2_ensure_targets() {
 /// Switches to the eye-2 target and uploads the eye-2 image of the current
 /// object buffer. The managed detour then re-issues the draw.
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
-    if (!g_stereo || !g_eye2_valid || g_ctx == nullptr) return 0;
-    if (!eye2_ensure_targets()) return 0;
+    if (!g_stereo || !g_eye2_valid || g_ctx == nullptr) { g_e2_begin_fail++; return 0; }
+    if (!eye2_ensure_targets()) { g_e2_begin_fail++; return 0; }
     g_in_eye2 = true;
     if (!g_eye2_cleared) {
         const float black[4] = { 0.f, 0.f, 0.f, 1.f };
