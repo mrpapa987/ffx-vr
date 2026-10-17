@@ -394,6 +394,11 @@ uint32_t g_bb_draws_seen = 0, g_bb_draws_overlay = 0, g_bb_begin = 0, g_bb_twin_
 ID3D11Texture2D* g_scene_tex = nullptr; uint32_t g_scene_draws = 0;
 ID3D11Texture2D* g_scene_live_tex = nullptr; uint32_t g_scene_live_draws = 0;
 std::map<ID3D11Texture2D*, uint32_t> g_draws_per_target;
+// snapshot of the scene target's twin taken when the scene pass ends (the
+// target gets cleared and reused by post-processing later in the frame)
+ID3D11Texture2D* g_snap_tex = nullptr; ID3D11ShaderResourceView* g_snap_srv = nullptr;
+ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
+ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -2199,10 +2204,34 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
 
     g_in_eye2 = true;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, rtvs, dsv);
-    if (g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {                 // a depth-bound target: scene-like
-        ID3D11Texture2D* gt = texture_of(g_cur_rtv[0]);
-        const uint32_t c = ++g_draws_per_target[gt];
-        if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+    {
+        ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
+        if (gt != g_prev_e2_target) {
+            // Leaving a target after a long run of draws: that was the scene
+            // pass. Snapshot its twin before post-processing reuses it.
+            if (g_prev_e2_target != nullptr && g_prev_e2_run >= 50) {
+                auto it = g_twins.find(g_prev_e2_target);
+                if (it != g_twins.end() && it->second.tex != nullptr) {
+                    Twin& src = it->second;
+                    if (g_snap_tex == nullptr || g_snap_from != g_prev_e2_target) {
+                        if (g_snap_srv) { g_snap_srv->Release(); g_snap_srv = nullptr; }
+                        if (g_snap_tex) { g_snap_tex->Release(); g_snap_tex = nullptr; }
+                        D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
+                        d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
+                        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))
+                            g_device->CreateShaderResourceView(g_snap_tex, nullptr, &g_snap_srv);
+                        g_snap_from = g_prev_e2_target;
+                    }
+                    if (g_snap_tex) g_ctx->CopyResource(g_snap_tex, src.tex);
+                }
+            }
+            g_prev_e2_target = gt; g_prev_e2_run = 0;
+        }
+        g_prev_e2_run++;
+        if (gt && g_cur_dsv != nullptr) {
+            const uint32_t c = ++g_draws_per_target[gt];
+            if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+        }
     }
 
     ID3D11ShaderResourceView* srvs[16];
@@ -2308,12 +2337,18 @@ static void* twin_plain_srv(ID3D11Texture2D* game) {
 
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
-    if (source == 1) return twin_plain_srv(g_scene_tex);
+    if (source == 1) return g_snap_srv;
     return ffxvr_eye2_final_srv();
 }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int source) {
-    ID3D11Texture2D* key = source == 1 ? g_scene_tex : g_backbuffer;
+    if (source == 1) {
+        if (g_snap_tex == nullptr) return 0;
+        D3D11_TEXTURE2D_DESC d; g_snap_tex->GetDesc(&d);
+        if (w) *w = static_cast<int>(d.Width); if (h) *h = static_cast<int>(d.Height);
+        return 1;
+    }
+    ID3D11Texture2D* key = g_backbuffer;
     if (key == nullptr) return 0;
     auto it = g_twins.find(key);
     if (it == g_twins.end() || it->second.tex == nullptr) return 0;
