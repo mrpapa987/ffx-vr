@@ -641,10 +641,13 @@ UINT     g_stacks_min  = 0, g_stacks_max = 0;
 
 static void census_write(UINT size) {
     if (!g_stacks_live || size < g_stacks_min || size > g_stacks_max) return;
-    void* bt[14] = {};
-    const USHORT n = RtlCaptureStackBackTrace(2, 12, bt, nullptr);   // skip ourselves and the managed detour
+    void* bt[24] = {};
+    const USHORT n = RtlCaptureStackBackTrace(0, 24, bt, nullptr);
     HMODULE exe = GetModuleHandleW(nullptr);
-    const uintptr_t lo = reinterpret_cast<uintptr_t>(exe), hi = lo + 0x800000;
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(exe);
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+        reinterpret_cast<const uint8_t*>(exe) + reinterpret_cast<const IMAGE_DOS_HEADER*>(exe)->e_lfanew);
+    const uintptr_t hi = lo + nt->OptionalHeader.SizeOfImage;
 
     StackRec r = {};
     r.size = size; r.count = 1;
