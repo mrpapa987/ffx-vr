@@ -366,16 +366,23 @@ struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; 
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
 EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
-ID3D11Texture2D*        g_eye2_tex = nullptr;
-ID3D11RenderTargetView* g_eye2_rtv = nullptr;
-ID3D11Texture2D*        g_eye2_dep = nullptr;
-ID3D11DepthStencilView* g_eye2_dsv = nullptr;
-ID3D11ShaderResourceView* g_eye2_srv = nullptr;
-UINT g_eye2_w = 0, g_eye2_h = 0;
-bool g_eye2_cleared = false;
 uint32_t g_eye2_draws = 0, g_eye2_draws_report = 0;
 // why a draw did not get an eye-2 pass (cumulative)
 uint32_t g_e2_no_stereo = 0, g_e2_no_image = 0, g_e2_cb_mismatch = 0, g_e2_no_dsv = 0, g_e2_small = 0, g_e2_ok = 0, g_e2_begin_fail = 0;
+// Twins: for every texture the game renders into, an identical texture of
+// ours. In eye-2 mode a draw's targets are swapped for their twins, and any
+// sampled texture that has a twin is swapped too, so post-processing,
+// reflections and the final composite all happen for eye 2 as well.
+struct Twin {
+    ID3D11Texture2D* game; ID3D11Texture2D* tex;
+    ID3D11RenderTargetView* rtv; ID3D11DepthStencilView* dsv;
+    std::map<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> srvs;   // game SRV -> twin SRV
+    UINT w, h; DXGI_FORMAT fmt;
+};
+std::map<ID3D11Texture2D*, Twin> g_twins;
+ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image
+ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, tracked from the detour
+uint32_t g_twin_count = 0;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -1204,8 +1211,8 @@ void heartbeat(bool force) {
         }
     }
 
-    fprintf(f, "\n  eye 2: stereo=%d targets=%s (%ux%u) draws last frame=%u\n", g_stereo ? 1 : 0,
-            g_eye2_rtv ? "yes" : "no", g_eye2_w, g_eye2_h, g_eye2_draws_report);
+    fprintf(f, "\n  eye 2: stereo=%d twins=%u backbuffer=%p draws last frame=%u\n", g_stereo ? 1 : 0,
+            g_twin_count, static_cast<void*>(g_backbuffer), g_eye2_draws_report);
     fprintf(f, "         skipped: no stereo %u, no image %u, cb mismatch %u, no depth target %u, small cb %u; ok %u; begin failed %u\n",
             g_e2_no_stereo, g_e2_no_image, g_e2_cb_mismatch, g_e2_no_dsv, g_e2_small, g_e2_ok, g_e2_begin_fail);
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
@@ -1544,6 +1551,10 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    if (g_backbuffer == nullptr && g_cur_rtv[0] != nullptr) {
+        ID3D11Texture2D* t = texture_of(g_cur_rtv[0]);
+        if (t) { D3D11_TEXTURE2D_DESC d; t->GetDesc(&d); if (!(d.BindFlags & D3D11_BIND_SHADER_RESOURCE)) g_backbuffer = t; }
+    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
@@ -1555,7 +1566,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_latched      = false;
     g_draw_in_frame = 0;
     g_have_PV       = false;
-    g_eye2_cleared  = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
@@ -1610,10 +1620,9 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
-    const bool eye2 = g_eye2_cur != nullptr && g_cur_dsv != nullptr;
+    const bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
     if (!g_stereo) g_e2_no_stereo++;
-    else if (g_eye2_cur == nullptr) g_e2_no_image++;
-    else if (g_cur_dsv == nullptr) g_e2_no_dsv++;
+    else if (g_eye2_cur == nullptr) g_e2_no_image++;   // UI and the like: drawn identically for eye 2
     else g_e2_ok++;
 
     if (g_frame_live) {
@@ -2065,64 +2074,151 @@ extern "C" __declspec(dllexport) uintptr_t ffxvr_exe_camera() {
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
 extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
 
-static bool eye2_ensure_targets() {
-    if (g_eye2_rtv != nullptr || g_device == nullptr || g_cur_rtv[0] == nullptr) return g_eye2_rtv != nullptr;
-
-    // Match the scene target's size.
-    ID3D11Resource* res = nullptr; g_cur_rtv[0]->GetResource(&res);
-    if (res == nullptr) return false;
+static ID3D11Texture2D* texture_of(ID3D11View* view) {
+    if (view == nullptr) return nullptr;
+    ID3D11Resource* res = nullptr; view->GetResource(&res);
+    if (res == nullptr) return nullptr;
     ID3D11Texture2D* tex = nullptr;
     res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex));
     res->Release();
-    if (tex == nullptr) return false;
-    D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d); tex->Release();
-
-    D3D11_TEXTURE2D_DESC cd = {};
-    cd.Width = d.Width; cd.Height = d.Height; cd.MipLevels = 1; cd.ArraySize = 1;
-    cd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; cd.SampleDesc.Count = 1; cd.Usage = D3D11_USAGE_DEFAULT;
-    cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(g_device->CreateTexture2D(&cd, nullptr, &g_eye2_tex))) return false;
-    if (FAILED(g_device->CreateRenderTargetView(g_eye2_tex, nullptr, &g_eye2_rtv))) return false;
-    if (FAILED(g_device->CreateShaderResourceView(g_eye2_tex, nullptr, &g_eye2_srv))) return false;
-
-    D3D11_TEXTURE2D_DESC dd = cd;
-    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT; dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    if (FAILED(g_device->CreateTexture2D(&dd, nullptr, &g_eye2_dep))) return false;
-    if (FAILED(g_device->CreateDepthStencilView(g_eye2_dep, nullptr, &g_eye2_dsv))) return false;
-    g_eye2_w = d.Width; g_eye2_h = d.Height;
-    return true;
+    if (tex) tex->Release();          // we only use it as a key; the game keeps it alive
+    return tex;
 }
 
-/// Switches to the eye-2 target and uploads the eye-2 image of the current
-/// object buffer. The managed detour then re-issues the draw.
-extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
-    if (!g_stereo || g_eye2_cur == nullptr || g_ctx == nullptr) { g_e2_begin_fail++; return 0; }
-    if (!eye2_ensure_targets()) { g_e2_begin_fail++; return 0; }
-    g_in_eye2 = true;
-    if (!g_eye2_cleared) {
-        const float black[4] = { 0.f, 0.f, 0.f, 1.f };
-        g_ctx->ClearRenderTargetView(g_eye2_rtv, black);
-        g_ctx->ClearDepthStencilView(g_eye2_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.f, 0);
-        g_eye2_cleared = true;
+static Twin* twin_of(ID3D11Texture2D* game) {
+    if (game == nullptr || g_device == nullptr) return nullptr;
+    auto it = g_twins.find(game);
+    if (it != g_twins.end()) return &it->second;
+
+    D3D11_TEXTURE2D_DESC d; game->GetDesc(&d);
+    Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format;
+
+    D3D11_TEXTURE2D_DESC cd = d;
+    cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0; cd.MiscFlags = 0;
+    if (game == g_backbuffer) { cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; }
+    if (FAILED(g_device->CreateTexture2D(&cd, nullptr, &t.tex))) return nullptr;
+    if (cd.BindFlags & D3D11_BIND_RENDER_TARGET) {
+        if (FAILED(g_device->CreateRenderTargetView(t.tex, nullptr, &t.rtv))) t.rtv = nullptr;
     }
-    g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
-    g_ctx->OMSetRenderTargets(1, &g_eye2_rtv, g_eye2_dsv);
+    if (cd.BindFlags & D3D11_BIND_DEPTH_STENCIL) {
+        D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+        dd.Format = (d.Format == DXGI_FORMAT_R24G8_TYPELESS) ? DXGI_FORMAT_D24_UNORM_S8_UINT
+                  : (d.Format == DXGI_FORMAT_R32_TYPELESS)  ? DXGI_FORMAT_D32_FLOAT : d.Format;
+        dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+        if (FAILED(g_device->CreateDepthStencilView(t.tex, &dd, &t.dsv))) t.dsv = nullptr;
+    }
+    g_twin_count++;
+    return &(g_twins[game] = t);
+}
+
+static ID3D11RenderTargetView* twin_rtv(ID3D11RenderTargetView* v) {
+    Twin* t = twin_of(texture_of(v));
+    return t ? t->rtv : nullptr;
+}
+static ID3D11DepthStencilView* twin_dsv(ID3D11DepthStencilView* v) {
+    Twin* t = twin_of(texture_of(v));
+    return t ? t->dsv : nullptr;
+}
+/// The twin's SRV matching a game SRV, or null if the sampled texture is not
+/// something the game renders into (ordinary textures pass through).
+static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
+    if (v == nullptr) return nullptr;
+    ID3D11Texture2D* game = texture_of(v);
+    if (game == nullptr) return nullptr;
+    auto it = g_twins.find(game);
+    if (it == g_twins.end()) return nullptr;        // only textures we have seen as targets
+    Twin& t = it->second;
+    auto sit = t.srvs.find(v);
+    if (sit != t.srvs.end()) return sit->second;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd; v->GetDesc(&sd);
+    ID3D11ShaderResourceView* nv = nullptr;
+    if (FAILED(g_device->CreateShaderResourceView(t.tex, &sd, &nv))) nv = nullptr;
+    t.srvs[v] = nv;
+    return nv;
+}
+
+
+/// Switches every current target to its twin, every sampled render texture
+/// to its twin, and uploads the eye-2 image of the object buffer if there is
+/// one. The managed detour then re-issues the draw.
+ID3D11ShaderResourceView* g_saved_ps_srv[16] = {};
+extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
+    if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
+    if (g_cur_rtv_n == 0 && g_cur_dsv == nullptr) { g_e2_begin_fail++; return 0; }
+
+    ID3D11RenderTargetView* rtvs[4] = {};
+    for (UINT i = 0; i < g_cur_rtv_n; ++i) rtvs[i] = twin_rtv(g_cur_rtv[i]);
+    ID3D11DepthStencilView* dsv = twin_dsv(g_cur_dsv);
+    if (g_cur_rtv_n > 0 && rtvs[0] == nullptr) { g_e2_begin_fail++; return 0; }
+
+    g_in_eye2 = true;
+    g_ctx->OMSetRenderTargets(g_cur_rtv_n, rtvs, dsv);
+
+    ID3D11ShaderResourceView* srvs[16];
+    bool any = false;
+    for (int i = 0; i < 16; ++i) {
+        g_saved_ps_srv[i] = g_cur_ps_srv[i];
+        ID3D11ShaderResourceView* tw = twin_srv(g_cur_ps_srv[i]);
+        srvs[i] = tw ? tw : g_cur_ps_srv[i];
+        if (tw) any = true;
+    }
+    if (any) g_ctx->PSSetShaderResources(0, 16, srvs);
+
+    if (g_eye2_cur != nullptr) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
     return 1;
 }
 
-/// Restores the game's targets and the eye-1 image of the buffer.
+/// Restores the game's targets, sampled textures and the eye-1 image.
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
-    g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
+    g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
+    if (g_eye2_cur != nullptr) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
     g_eye2_draws++;
     g_in_eye2 = false;
 }
 
+/// Tracks the pixel shader's resources, and in eye-2 mode is skipped.
+extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned n, void* const* views) {
+    if (g_in_eye2) return;
+    for (unsigned i = 0; i < n && start + i < 16; ++i) g_cur_ps_srv[start + i] = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
+}
+
+/// Clears mirror to the twin, so eye 2's targets start each pass the same way.
+extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
+    if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
+    g_in_eye2 = true;
+    if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
+    else       { ID3D11RenderTargetView* t = twin_rtv(static_cast<ID3D11RenderTargetView*>(view)); if (t) g_ctx->ClearRenderTargetView(t, color); }
+    g_in_eye2 = false;
+}
+
+extern "C" __declspec(dllexport) void ffxvr_set_backbuffer(void* tex) { g_backbuffer = static_cast<ID3D11Texture2D*>(tex); }
+
+/// Eye 2's final image: the twin of the backbuffer, as a shader resource.
+extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
+    if (g_backbuffer == nullptr) return nullptr;
+    auto it = g_twins.find(g_backbuffer);
+    if (it == g_twins.end() || it->second.rtv == nullptr) return nullptr;
+    Twin& t = it->second;
+    auto sit = t.srvs.find(nullptr);
+    if (sit != t.srvs.end()) return sit->second;
+    ID3D11ShaderResourceView* nv = nullptr;
+    g_device->CreateShaderResourceView(t.tex, nullptr, &nv);
+    t.srvs[nullptr] = nv;
+    return nv;
+}
+
 extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd) { g_stereo = on != 0; g_ipd = ipd; }
-extern "C" __declspec(dllexport) void* ffxvr_eye2_srv() { return g_eye2_srv; }
+extern "C" __declspec(dllexport) void* ffxvr_eye2_srv() { return ffxvr_eye2_final_srv(); }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
-extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h) { if (w) *w = static_cast<int>(g_eye2_w); if (h) *h = static_cast<int>(g_eye2_h); return g_eye2_rtv != nullptr; }
+extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h) {
+    if (g_backbuffer == nullptr) return 0;
+    auto it = g_twins.find(g_backbuffer);
+    if (it == g_twins.end()) return 0;
+    if (w) *w = static_cast<int>(it->second.w); if (h) *h = static_cast<int>(it->second.h);
+    return 1;
+}
 
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
     if (out == nullptr) return 0;

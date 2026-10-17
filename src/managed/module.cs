@@ -54,6 +54,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_on_viewport;
     private delegate* unmanaged[Cdecl]<nint, int, void> _fn_on_clear;
     private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
+    private delegate* unmanaged[Cdecl]<uint, uint, nint*, void> _fn_on_ps_srvs;
+    private delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void> _fn_on_clear_twin;
+    private delegate* unmanaged[Cdecl]<nint, void> _fn_set_backbuffer;
+    private bool _backbuffer_set;
     private int _frame_census_n = 0;
     private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void> _fn_override_set;
     private delegate* unmanaged[Cdecl]<int> _fn_override_applied;
@@ -127,7 +131,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private d_RSSetViewports?         _h_vp,    _o_vp;
     private d_ClearRenderTargetView?  _h_clr,   _o_clr;
     private d_ClearDepthStencilView?  _h_clrd,  _o_clrd;
-    private nint _a_omrt, _a_vp, _a_clr, _a_clrd;
+    private nint _a_omrt, _a_vp, _a_clr, _a_clrd, _a_pssrv;
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_PSSetShaderResources(nint ctx, uint start, uint n, nint* views);
+    private d_PSSetShaderResources? _h_pssrv, _o_pssrv;
     private nint _a_drawindexed, _a_draw, _a_drawidxinst, _a_drawinst, _a_updatesub;
     private string _detour_status = "not installed";
 
@@ -182,6 +189,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_viewport");
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
+            _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_ps_srvs");
+            _fn_on_clear_twin = (delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear_twin");
+            _fn_set_backbuffer = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_set_backbuffer");
             _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
             _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
             _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_mask");
@@ -262,14 +272,14 @@ public sealed unsafe class FFXVRModule : FhModule {
         _a_drawidxinst = vt[20];
         _a_drawinst    = vt[21];
         _a_updatesub   = vt[48];
-        _a_omrt = vt[33]; _a_vp = vt[44]; _a_clr = vt[50]; _a_clrd = vt[53];
+        _a_omrt = vt[33]; _a_vp = vt[44]; _a_clr = vt[50]; _a_clrd = vt[53]; _a_pssrv = vt[8];
 
         _h_drawindexed = h_drawindexed;
         _h_draw        = h_draw;
         _h_drawidxinst = h_drawidxinst;
         _h_drawinst    = h_drawinst;
         _h_updatesub   = h_updatesub;
-        _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd;
+        _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd; _h_pssrv = h_pssrv;
 
         bool ok = true;
         ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
@@ -281,6 +291,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ok &= new FhCallHandle<d_RSSetViewports>      (new FhCallLocation((void*)_a_vp))  .hook(this, _h_vp);
         ok &= new FhCallHandle<d_ClearRenderTargetView>(new FhCallLocation((void*)_a_clr)).hook(this, _h_clr);
         ok &= new FhCallHandle<d_ClearDepthStencilView>(new FhCallLocation((void*)_a_clrd)).hook(this, _h_clrd);
+        ok &= new FhCallHandle<d_PSSetShaderResources>(new FhCallLocation((void*)_a_pssrv)).hook(this, _h_pssrv);
 
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
@@ -329,14 +340,22 @@ public sealed unsafe class FFXVRModule : FhModule {
         _o_vp!(ctx, n, vps);
     }
 
+    private void h_pssrv(nint ctx, uint start, uint n, nint* views) {
+        if (_fn_on_ps_srvs != null) _fn_on_ps_srvs(start, n, views);
+        _o_pssrv ??= new FhCallHandle<d_PSSetShaderResources>(new FhCallLocation((void*)_a_pssrv)).chain_from(_h_pssrv!).fnptr;
+        _o_pssrv!(ctx, start, n, views);
+    }
+
     private void h_clr(nint ctx, nint rtv, float* color) {
         if (_fn_on_clear != null) _fn_on_clear(rtv, 0);
+        if (_fn_on_clear_twin != null) _fn_on_clear_twin(rtv, 0, color, 0, 0f, 0);
         _o_clr ??= new FhCallHandle<d_ClearRenderTargetView>(new FhCallLocation((void*)_a_clr)).chain_from(_h_clr!).fnptr;
         _o_clr!(ctx, rtv, color);
     }
 
     private void h_clrd(nint ctx, nint dsv, uint flags, float depth, byte stencil) {
         if (_fn_on_clear != null) _fn_on_clear(dsv, 1);
+        if (_fn_on_clear_twin != null) _fn_on_clear_twin(dsv, 1, null, flags, depth, stencil);
         _o_clrd ??= new FhCallHandle<d_ClearDepthStencilView>(new FhCallLocation((void*)_a_clrd)).chain_from(_h_clrd!).fnptr;
         _o_clrd!(ctx, dsv, flags, depth, stencil);
     }
