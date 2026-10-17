@@ -900,7 +900,9 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
     describe_view(static_cast<ID3D11View*>(dsv), b, sizeof(b));
     char t[160];
-    snprintf(t, sizeof(t), "RT  n=%u  rtv0 %s   dsv %s", n, a, b);
+    snprintf(t, sizeof(t), "RT  n=%u  rtv0 %s   dsv %s%s%s", n, a, b,
+             (n > 0 && rtvs && texture_of(static_cast<ID3D11View*>(rtvs[0])) == g_backbuffer) ? "  [BACKBUFFER]" : "",
+             g_overlay_phase ? "  [overlay phase]" : "");
     std::lock_guard<std::mutex> lock(g_mutex);
     frame_event(t);
 }
@@ -2313,13 +2315,27 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
 /// Returns 1 if mirrored. The region form passes a box; full copies pass null.
 extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_sub, unsigned x, unsigned y, unsigned z,
                                                    void* src_res, unsigned src_sub, const void* box, int whole) {
-    if (g_in_eye2 || !g_stereo || g_ctx == nullptr || dst_res == nullptr || src_res == nullptr) return 0;
+    if (g_in_eye2 || g_ctx == nullptr || dst_res == nullptr || src_res == nullptr) return 0;
 
     ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
     ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
     if (dst) dst->Release();
     if (src) src->Release();
     if (dst == nullptr || src == nullptr) return 0;
+
+    if (g_frame_live) {
+        D3D11_TEXTURE2D_DESC dd = {}, sd = {}; dst->GetDesc(&dd); src->GetDesc(&sd);
+        const bool st = g_twins.find(src) != g_twins.end() && g_twins[src].tex != nullptr;
+        const bool dt = g_twins.find(dst) != g_twins.end() && g_twins[dst].tex != nullptr;
+        char t[160];
+        snprintf(t, sizeof(t), "CPY %s %ux%u fmt %u%s -> %ux%u fmt %u%s%s%s", whole ? "whole" : "region",
+                 sd.Width, sd.Height, static_cast<unsigned>(sd.Format), st ? " (twinned)" : " (NO twin)",
+                 dd.Width, dd.Height, static_cast<unsigned>(dd.Format), dt ? " (twinned)" : "",
+                 dst == g_backbuffer ? "  [BACKBUFFER]" : "", g_overlay_phase ? "  [overlay phase]" : "");
+        std::lock_guard<std::mutex> lock(g_mutex);
+        frame_event(t);
+    }
+    if (!g_stereo) return 0;
 
     // Mirror when the destination is something we twin (a render texture or
     // the backbuffer), or when the source is: a depth or colour buffer copied
