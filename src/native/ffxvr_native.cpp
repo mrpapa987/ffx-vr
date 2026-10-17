@@ -1471,6 +1471,37 @@ extern "C" __declspec(dllexport) int ffxvr_xrefs(uintptr_t addr, unsigned span) 
 // variable found in the executable, since those are the camera accessors.
 // ---------------------------------------------------------------------------
 
+/// Heap half of the pointer scan, in a plain function so it can use SEH.
+static int ptrscan_heap(FILE* f, uintptr_t target, unsigned below) {
+    int heap_n = 0;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    while (a < end) {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
+        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (next <= a) break;
+        if (region_ok(mbi) && mbi.Type == MEM_PRIVATE && mbi.RegionSize < (256u << 20)) {
+            const uint8_t* rb = static_cast<const uint8_t*>(mbi.BaseAddress);
+            __try {
+                for (size_t off = 0; off + 4 <= mbi.RegionSize; off += 4) {
+                    uint32_t v; memcpy(&v, rb + off, 4);
+                    if (v + below < target || v > target) continue;
+                    const uintptr_t at = reinterpret_cast<uintptr_t>(rb + off);
+                    if (at >= target - 0x1000 && at <= target + 0x1000) continue;   // inside the object itself
+                    if (heap_n < 12) fprintf(f, "  heap %08X holds %08X (target%+d)\n", static_cast<unsigned>(at), v,
+                                             static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
+                    heap_n++;
+                }
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        a = next;
+    }
+    return heap_n;
+}
+
 extern "C" __declspec(dllexport) int ffxvr_ptrscan(uintptr_t target, unsigned below) {
     HMODULE exe = GetModuleHandleW(nullptr);
     if (exe == nullptr || target == 0) return -1;
@@ -1501,32 +1532,7 @@ extern "C" __declspec(dllexport) int ffxvr_ptrscan(uintptr_t target, unsigned be
     }
 
     // Heap: count only, with the first few, so a pointer field inside another object shows up.
-    int heap_n = 0;
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
-    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
-    while (a < end) {
-        MEMORY_BASIC_INFORMATION mbi = {};
-        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
-        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        if (next <= a) break;
-        if (region_ok(mbi) && mbi.Type == MEM_PRIVATE && mbi.RegionSize < (256u << 20)) {
-            const uint8_t* rb = static_cast<const uint8_t*>(mbi.BaseAddress);
-            __try {
-                for (size_t off = 0; off + 4 <= mbi.RegionSize; off += 4) {
-                    uint32_t v; memcpy(&v, rb + off, 4);
-                    if (v + below < target || v > target) continue;
-                    const uintptr_t at = reinterpret_cast<uintptr_t>(rb + off);
-                    if (at >= target - 0x1000 && at <= target + 0x1000) continue;   // inside the object itself
-                    if (heap_n < 12) fprintf(f, "  heap %08X holds %08X (target%+d)\n", static_cast<unsigned>(at), v,
-                                             static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
-                    heap_n++;
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-        a = next;
-    }
+    const int heap_n = ptrscan_heap(f, target, below);
     fprintf(f, "  %zu pointer variables in the exe, %d on the heap\n\n", ptr_vars.size(), heap_n);
     fclose(f);
 
