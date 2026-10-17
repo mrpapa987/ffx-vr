@@ -2912,6 +2912,8 @@ extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int sourc
 }
 
 // ---------------------------------------------------------------- headset
+int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F3)
+uint32_t g_e2_begin_fail_prev = 0;
 static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
 
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate) {
@@ -2942,8 +2944,6 @@ extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
 /// Called once per frame from the Present hook, with the finished frame in
 /// the backbuffer (eye 1) and its twin (eye 2).
 ID3D11Texture2D* g_bb_copy = nullptr;        // the backbuffer, copied into a texture that can be sampled
-int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F3)
-uint32_t g_e2_begin_fail_frame = 0, g_e2_begin_fail_prev = 0;
 static void xr_tick() {
     if (!g_xr_want) return;
     ID3D11Texture2D* e1 = nullptr;
