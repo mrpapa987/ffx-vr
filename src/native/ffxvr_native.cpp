@@ -450,6 +450,7 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         memcpy(p + o_vp, PVn, 64);  mask |= 8;
         memcpy(g_last_PV,  PV,  sizeof(PV));
         memcpy(g_last_PVn, PVn, sizeof(PVn));
+        if (!g_have_PV && g_ovr_enabled && (g_cam_mem_mode & 1)) write_game_camera();
         g_have_PV = true;
     }
 
@@ -523,6 +524,55 @@ static int replace_known_products(uint8_t* p, UINT size) {
     }
     return n;
 }
+
+// ---------------------------------------------------------------------------
+// Writing the override camera into the game's own memory
+//
+// Rendering is already handled by patching uploads. The battle cursor and
+// other CPU-projected UI read the camera from game memory instead: a static
+// column-major matrix at FFX.exe+0x88FD3C and (found by the F10 scan) a heap
+// object holding position / row-major / column-major copies. Writing the
+// override camera there, at a chosen moment in the frame, tests whether the
+// UI projection picks it up -- and when in the frame it runs.
+// ---------------------------------------------------------------------------
+
+int       g_cam_mem_mode = 0;          // 0 off, 1 at first upload, 2 at present, 3 both
+uintptr_t g_cam_mem_obj  = 0;          // heap camera object (position at +0)
+uint32_t  g_cam_mem_writes = 0;
+
+static void write_game_camera() {
+    if (!g_cam_valid) return;
+
+    float v[12];
+    memcpy(v, g_cam, sizeof(v));                 // the game's own view (recorded before override)
+    if (g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v));
+
+    float Vn[16], In[16], Pn[3];
+    build_override_view(v, Vn, In, Pn);
+
+    float col[16] = {};
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) col[c*4 + r] = Vn[r*4 + c];
+    col[12] = Vn[3]; col[13] = Vn[7]; col[14] = Vn[11]; col[15] = 1.f;
+
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (exe != nullptr) {
+        float* st = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(exe) + 0x88FD3C);
+        memcpy(st, col, sizeof(col));
+    }
+    if (g_cam_mem_obj != 0) {
+        uint8_t* o = reinterpret_cast<uint8_t*>(g_cam_mem_obj);
+        memcpy(o + 0,    Pn, 12);                // position
+        memcpy(o + 12,   Vn, 48);                // row-major 3x4
+        memcpy(o + 0x60, col, 64);               // column-major 4x4
+    }
+    g_cam_mem_writes++;
+}
+
+extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
+    g_cam_mem_mode = mode;
+    g_cam_mem_obj  = obj;
+}
+extern "C" __declspec(dllexport) int ffxvr_cam_mem_writes() { return static_cast<int>(g_cam_mem_writes); }
 
 /// If the override is on and this write carries a camera, returns a patched
 /// private copy of the bytes to upload instead; otherwise returns src.
@@ -1108,6 +1158,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
     g_draw_in_frame = 0;
     g_have_PV       = false;
@@ -1288,7 +1339,7 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
     Ctx ctx = { &hits, pats };
     HitFn on_hit = [](void* c, uintptr_t addr, int pi) {
         Ctx* cx = static_cast<Ctx*>(c);
-        if (cx->hits->size() < 200) cx->hits->push_back({ addr, cx->pats[pi].kind });
+        if (cx->hits->size() < 2000) cx->hits->push_back({ addr, cx->pats[pi].kind });
     };
 
     while (a < end) {
@@ -1318,7 +1369,9 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
     fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted; camera object %08X\n",
             GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted, static_cast<unsigned>(g_scan_struct));
+    size_t logged = 0;
     for (const MemHit& h : hits) {
+        if (logged++ >= 250) break;
         char where[128]; describe_region(h.addr, where, sizeof(where));
         fprintf(f, "  %08X  %-36s %s\n", static_cast<unsigned>(h.addr), h.kind, where);
     }
