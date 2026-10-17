@@ -23,6 +23,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3dcompiler.h>
 
 #include <algorithm>
 #include <cmath>
@@ -2674,8 +2675,121 @@ static void* twin_plain_srv(ID3D11Texture2D* game) {
     return nv;
 }
 
+// ---------------------------------------------------------------------------
+// Opaque copy pass: colour of a texture with alpha forced to 1. The overlay
+// draws its preview with alpha blending, and the game leaves alpha at 0 over
+// the backdrop and inside the save sphere's refraction box, so the raw
+// texture shows the window background through those regions.
+
+typedef HRESULT (WINAPI* PFN_D3DCompile)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR, UINT, UINT, ID3DBlob**, ID3DBlob**);
+static const char k_copy_hlsl[] =
+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "V vs(uint id : SV_VertexID) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.uv = uv; o.p = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1); return o; }\n"
+    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n";
+ID3D11VertexShader* g_copy_vs = nullptr; ID3D11PixelShader* g_copy_ps = nullptr; ID3D11SamplerState* g_copy_smp = nullptr;
+bool g_copy_tried = false;
+struct OpaqueCopy { ID3D11Texture2D* tex = nullptr; ID3D11RenderTargetView* rtv = nullptr; ID3D11ShaderResourceView* srv = nullptr; UINT w = 0, h = 0; };
+OpaqueCopy g_opaque[3];
+
+static bool copy_pass_init() {
+    if (g_copy_tried) return g_copy_vs != nullptr;
+    g_copy_tried = true;
+    HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+    if (!m) { diag("copy pass: d3dcompiler_47.dll not found"); return false; }
+    PFN_D3DCompile compile = reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile"));
+    if (!compile) { diag("copy pass: D3DCompile missing"); return false; }
+    ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
+    HRESULT hr = compile(k_copy_hlsl, sizeof(k_copy_hlsl) - 1, "copy", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vsb, &err);
+    if (FAILED(hr)) { diag("copy pass: vs compile failed 0x%08X: %s", static_cast<unsigned>(hr), err ? static_cast<const char*>(err->GetBufferPointer()) : ""); if (err) err->Release(); return false; }
+    if (err) { err->Release(); err = nullptr; }
+    hr = compile(k_copy_hlsl, sizeof(k_copy_hlsl) - 1, "copy", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &psb, &err);
+    if (FAILED(hr)) { diag("copy pass: ps compile failed 0x%08X: %s", static_cast<unsigned>(hr), err ? static_cast<const char*>(err->GetBufferPointer()) : ""); if (err) err->Release(); vsb->Release(); return false; }
+    if (err) err->Release();
+    hr = g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_copy_vs);
+    if (SUCCEEDED(hr)) hr = g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_copy_ps);
+    vsb->Release(); psb->Release();
+    if (FAILED(hr)) { diag("copy pass: shader create failed 0x%08X", static_cast<unsigned>(hr)); return false; }
+    D3D11_SAMPLER_DESC sd = {};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
+    g_device->CreateSamplerState(&sd, &g_copy_smp);
+    diag("copy pass: ready");
+    return true;
+}
+
+/// Renders `src` into the opaque copy for `slot` (0..2) and returns its SRV.
+static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
+    if (src == nullptr || g_device == nullptr || g_ctx == nullptr || slot < 0 || slot > 2) return nullptr;
+    if (!copy_pass_init()) return nullptr;
+    D3D11_TEXTURE2D_DESC d; src->GetDesc(&d);
+    if (d.SampleDesc.Count != 1) return nullptr;
+    OpaqueCopy& oc = g_opaque[slot];
+    if (oc.tex == nullptr || oc.w != d.Width || oc.h != d.Height) {
+        if (oc.srv) oc.srv->Release(); if (oc.rtv) oc.rtv->Release(); if (oc.tex) oc.tex->Release();
+        oc = OpaqueCopy{};
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = d.Width; td.Height = d.Height; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &oc.tex))) return nullptr;
+        g_device->CreateRenderTargetView(oc.tex, nullptr, &oc.rtv);
+        g_device->CreateShaderResourceView(oc.tex, nullptr, &oc.srv);
+        oc.w = d.Width; oc.h = d.Height;
+    }
+    // A plain SRV of the source (cached per texture pointer).
+    static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> srvs;
+    ID3D11ShaderResourceView* in = nullptr;
+    auto it = srvs.find(src);
+    if (it != srvs.end()) in = it->second;
+    else { if (FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) return nullptr; srvs[src] = in; }
+
+    // Save the pipeline state we touch, run the pass, restore.
+    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr;
+    g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
+    ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
+    g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
+    ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv);
+    ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
+    ID3D11BlendState* o_bs = nullptr; float o_bf[4]; UINT o_mask; g_ctx->OMGetBlendState(&o_bs, o_bf, &o_mask);
+    ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
+    ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
+    ID3D11InputLayout* o_il = nullptr; g_ctx->IAGetInputLayout(&o_il);
+    D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
+
+    g_in_eye2 = true;                                  // our hooks ignore this pass, restore included
+    ID3D11RenderTargetView* rt[1] = { oc.rtv };
+    g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(oc.w); vp.Height = static_cast<float>(oc.h); vp.MaxDepth = 1.f;
+    g_ctx->RSSetViewports(1, &vp);
+    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_ctx->PSSetShaderResources(0, 1, &in); g_ctx->PSSetSamplers(0, 1, &g_copy_smp);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->Draw(3, 0);
+
+    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv);
+    if (nvp) g_ctx->RSSetViewports(1, &o_vp);
+    g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
+    g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
+    g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
+    g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
+    g_in_eye2 = false;
+    for (auto* v : o_rtv) if (v) v->Release();
+    if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
+    if (o_srv) o_srv->Release(); if (o_smp) o_smp->Release(); if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release();
+    if (o_rs) o_rs->Release(); if (o_il) o_il->Release();
+    return oc.srv;
+}
+
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
+    ID3D11Texture2D* src = nullptr;
+    if (source == 1) src = g_snap_tex;
+    else if (source == 2) src = g_snap_game;
+    else if (g_backbuffer) { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) src = it->second.tex; }
+    ID3D11ShaderResourceView* v = opaque_copy(source, src);   // alpha forced to 1 for the overlay
+    if (v) return v;
     if (source == 1) return g_snap_srv;
     if (source == 2) return g_snap_game_srv;
     return ffxvr_eye2_final_srv();
