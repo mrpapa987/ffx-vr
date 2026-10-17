@@ -409,6 +409,7 @@ ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
 bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
 bool g_debug_leave = false;            // experiment: leave the eye-2 image in the buffer after the eye-2 draw (main view should shift)
 uint32_t g_red_clears = 0;
+uint32_t g_draw_ctx_same = 0, g_draw_ctx_other = 0; void* g_draw_ctx_last_other = nullptr;
 std::map<ID3D11Texture2D*, uint32_t> g_red_done_frame;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
@@ -1650,6 +1651,11 @@ extern "C" __declspec(dllexport) int ffxvr_slot0_count() { return g_slot0_report
 /// counter index (1 DrawIndexed, 2 Draw, 3 DrawIndexedInstanced, 4 DrawInstanced).
 /// On the first draw of a frame with a camera-sized buffer in VS slot 0, that
 /// buffer is latched for the end-of-frame readback.
+extern "C" __declspec(dllexport) void ffxvr_draw_ctx(void* ctx) {
+    if (g_in_eye2) return;
+    if (ctx == static_cast<void*>(g_ctx)) g_draw_ctx_same++; else { g_draw_ctx_other++; g_draw_ctx_last_other = ctx; }
+}
+
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
@@ -2456,6 +2462,7 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
 extern "C" __declspec(dllexport) int ffxvr_measure() {
     diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u, red clears %u, twins %u",
          g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates, g_red_clears, g_twin_count);
+    diag("    draw contexts: on the hooked immediate context %u, on another context %u (last %p); hooked context %p", g_draw_ctx_same, g_draw_ctx_other, g_draw_ctx_last_other, static_cast<void*>(g_ctx));
     for (int k = 0; k < 32; ++k) {
         const EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
         if (e.cb == nullptr || e.kind != 1 || e.eye1.size() < 128) continue;

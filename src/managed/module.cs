@@ -39,6 +39,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, int> _fn_on_draw;
+    private delegate* unmanaged[Cdecl]<nint, void> _fn_draw_ctx;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_begin;
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
@@ -190,6 +191,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
+            _fn_draw_ctx     = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_ctx");
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
@@ -320,6 +322,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // would cost a delegate marshal on every draw.
 
     private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
+        if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
         int eye2 = _fn_on_draw != null ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
         _o_drawindexed!(ctx, n, start, base_vertex);
@@ -327,6 +330,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     }
 
     private void h_draw(nint ctx, uint n, uint start) {
+        if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
         int eye2 = _fn_on_draw != null ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
         _o_draw!(ctx, n, start);
