@@ -48,7 +48,7 @@ finally {
 
 # Gather any log files produced during this run
 $collected = Join-Path $logDir "run-$stamp-gamelogs"
-$found = Get-ChildItem -Path $game -Recurse -Include *.log, *.txt -ErrorAction SilentlyContinue |
+$found = Get-ChildItem -Path $game -Recurse -Include *.log, *.txt, *.bmp -ErrorAction SilentlyContinue |
          Where-Object { $_.LastWriteTime -ge $startTime }
 
 foreach ($f in $found) {
