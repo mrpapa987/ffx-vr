@@ -963,6 +963,11 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         // camera for a reflection pass, say).
         const float* inv = reinterpret_cast<const float*>(p + o_inv);
         if (fabsf(inv[3] - pos[0]) > 1.f || fabsf(inv[7] - pos[1]) > 1.f || fabsf(inv[11] - pos[2]) > 1.f) continue;
+        // And the projection must be perspective: the shadow pass carries the
+        // light's view, also a rotation plus translation, with an orthographic
+        // projection. Moving that would misalign every shadow.
+        const float* proj = reinterpret_cast<const float*>(p + cand + 192);   // main projection (+256 in the common layout)
+        if (!(proj[14] < -0.99f && proj[14] > -1.01f && fabsf(proj[15]) < 1e-4f)) continue;
         base = cand;
         break;
     }
@@ -2292,15 +2297,18 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
     if (src) src->Release();
     if (dst == nullptr || src == nullptr) return 0;
 
-    // Destination must be something we twin: a known render texture or the backbuffer.
+    // Mirror when the destination is something we twin (a render texture or
+    // the backbuffer), or when the source is: a depth or colour buffer copied
+    // into a plain texture for post-processing to sample must carry eye 2's
+    // contents too, so the destination gets a twin as well.
     if (dst == g_backbuffer) g_bb_copies++;
-    if (g_twins.find(dst) == g_twins.end() && dst != g_backbuffer) return 0;
+    auto its = g_twins.find(src);
+    const bool src_twinned = its != g_twins.end() && its->second.tex != nullptr;
+    if (g_twins.find(dst) == g_twins.end() && dst != g_backbuffer && !src_twinned) return 0;
     Twin* td = twin_of(dst);
     if (td == nullptr || td->tex == nullptr) return 0;
 
-    ID3D11Resource* from = src;
-    auto its = g_twins.find(src);
-    if (its != g_twins.end() && its->second.tex != nullptr) from = its->second.tex;
+    ID3D11Resource* from = src_twinned ? static_cast<ID3D11Resource*>(its->second.tex) : static_cast<ID3D11Resource*>(src);
 
     g_in_eye2 = true;
     if (whole) g_ctx->CopyResource(td->tex, from);
