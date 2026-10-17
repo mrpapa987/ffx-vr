@@ -74,3 +74,40 @@ Not covered: HUD/menus drawn over a 3D scene still come through the
 projection layers identical in both eyes (read as "at infinity"); the
 floating UI panel is a later job that needs the UI draws separated from the
 scene draws.
+
+## Camera policies per mode (overworld, cutscene) and the spectator ghost
+
+Three policies, shared by overworld and in-engine cutscenes (they differ only
+in defaults):
+- Director: authored camera as is; blink (~100 ms black) on cuts; on a cut,
+  re-reference so the new camera's forward is where the head looks now.
+- Seat (default): authored camera *position* (+ clamped lean), head owns
+  orientation; authored pitch/roll discarded, authored yaw used only as the
+  reference heading reset at cuts; optional slow low-pass "follow pans"
+  (default off: forced rotation is the sickness source). NOTE: the current
+  build layers head rotation on the live authored rotation, so scripted
+  pans rotate the world -- must change.
+- Spectator: free position (stick free flight) and look; director's camera
+  drawn as a ghost: camera glyph + direction vector, a faint 16:9
+  viewfinder frame floating along the vector sized to the authored FOV
+  (default on), optional full frustum lines. Cuts move the ghost, not you.
+  Button to "sit in the director's chair" (blink, snap to authored
+  position) and back.
+The ghost is real 3D geometry drawn per eye with each eye's view/projection
+by a small runtime-compiled line pass into the eye images before submission;
+v1 ignores depth (shows through walls), later tests against the depth twins.
+
+First person / third-person follow (overworld, per-area user choice,
+remembered per area): camera at Tidus's head (actor pos + ~18 units) or a
+set distance behind/above; headset orientation; input remap -- rotate the
+stick vector by (head yaw - authored camera yaw) before the game sees it,
+since movement is relative to the game's camera; zone cuts stop mattering;
+hand back to the authored policy when a scripted event takes control.
+Expected imperfections: backfaces, LOD, backdrop cards, culling behind the
+authored camera, body inside the near plane.
+
+Shared prerequisites: mode system with a reliable "player has control" /
+"cutscene playing" signal, controller input (OpenXR actions) and an input
+injection path into the game, the line pass. Comfortable defaults for the
+community release (Seat, authored-with-head-look, blink on cuts); spectator
+and first person one toggle away.
