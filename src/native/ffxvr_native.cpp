@@ -1187,6 +1187,32 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
 
 struct MemHit { uintptr_t addr; const char* kind; };
 
+/// Searches one region for float-aligned needles, reporting hits through the
+/// callback. Runs under SEH so a page that faults despite VirtualQuery's word
+/// (decommitted mid-scan, an odd section) skips the region instead of taking
+/// the process down. No C++ objects live in here: __try forbids them.
+typedef void (*HitFn)(void* ctx, uintptr_t addr, int pat);
+static int search_region(const uint8_t* base, size_t len, const uint8_t* const* needles,
+                         const size_t* nbytes, int npat, uintptr_t skip_lo, uintptr_t skip_hi,
+                         HitFn on_hit, void* ctx) {
+    __try {
+        for (int pi = 0; pi < npat; ++pi) {
+            const size_t nb = nbytes[pi];
+            if (nb > len) continue;
+            for (size_t off = 0; off + nb <= len; off += 4) {
+                if (memcmp(base + off, needles[pi], nb) != 0) continue;
+                const uintptr_t at = reinterpret_cast<uintptr_t>(base + off);
+                if (at >= skip_lo && at <= skip_hi) continue;
+                on_hit(ctx, at, pi);
+            }
+        }
+        return 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 static bool region_ok(const MEMORY_BASIC_INFORMATION& mbi) {
     if (mbi.State != MEM_COMMIT) return false;
     if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
@@ -1199,7 +1225,7 @@ static void describe_region(uintptr_t a, char* out, size_t n) {
     if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            reinterpret_cast<LPCWSTR>(a), &mod) && mod != nullptr) {
         wchar_t path[MAX_PATH] = L""; GetModuleFileNameW(mod, path, MAX_PATH);
-        const wchar_t* base = wcsrchr(path, L'\\\\'); base = base ? base + 1 : path;
+        const wchar_t* base = wcsrchr(path, L'\\'); base = base ? base + 1 : path;
         snprintf(out, n, "%ls+0x%X", base, static_cast<unsigned>(a - reinterpret_cast<uintptr_t>(mod)));
     }
     else snprintf(out, n, "heap");
@@ -1228,38 +1254,40 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
     };
 
     std::vector<MemHit> hits;
+    int faulted = 0;
     SYSTEM_INFO si; GetSystemInfo(&si);
     uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
     const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
     const uintptr_t self = reinterpret_cast<uintptr_t>(&g_cam[0]);
 
+    const uint8_t* needles[3]; size_t nbytes[3];
+    for (int i = 0; i < 3; ++i) { needles[i] = reinterpret_cast<const uint8_t*>(pats[i].data); nbytes[i] = pats[i].bytes; }
+
+    struct Ctx { std::vector<MemHit>* hits; const Pat* pats; };
+    Ctx ctx = { &hits, pats };
+    HitFn on_hit = [](void* c, uintptr_t addr, int pi) {
+        Ctx* cx = static_cast<Ctx*>(c);
+        if (cx->hits->size() < 200) cx->hits->push_back({ addr, cx->pats[pi].kind });
+    };
+
     while (a < end) {
         MEMORY_BASIC_INFORMATION mbi = {};
         if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
         const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        if (region_ok(mbi) && mbi.RegionSize < (256u << 20)) {
-            const uint8_t* base = static_cast<const uint8_t*>(mbi.BaseAddress);
-            const size_t   len  = mbi.RegionSize;
-            for (const Pat& pt : pats) {
-                const uint8_t* needle = reinterpret_cast<const uint8_t*>(pt.data);
-                // float-aligned search
-                for (size_t off = 0; off + pt.bytes <= len; off += 4) {
-                    if (memcmp(base + off, needle, pt.bytes) != 0) continue;
-                    const uintptr_t at = reinterpret_cast<uintptr_t>(base + off);
-                    if (at >= self - 4096 && at <= self + 4096) continue;      // our own copies
-                    if (hits.size() < 200) hits.push_back({ at, pt.kind });
-                }
-            }
+        if (next <= a) break;
+        if (region_ok(mbi) && mbi.Type != MEM_MAPPED && mbi.RegionSize < (256u << 20)) {
+            if (!search_region(static_cast<const uint8_t*>(mbi.BaseAddress), mbi.RegionSize,
+                               needles, nbytes, 3, self - 4096, self + 4096, on_hit, &ctx)) faulted++;
         }
         a = next;
     }
 
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\\\ffxvr_memscan.log", g_dir);
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_memscan.log", g_dir);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits\n",
-            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size());
+    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted\n",
+            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted);
     for (const MemHit& h : hits) {
         char where[128]; describe_region(h.addr, where, sizeof(where));
         fprintf(f, "  %08X  %-36s %s\n", static_cast<unsigned>(h.addr), h.kind, where);
