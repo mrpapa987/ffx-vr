@@ -390,6 +390,10 @@ ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, track
 uint32_t g_twin_count = 0;
 // backbuffer diagnostics
 uint32_t g_bb_draws_seen = 0, g_bb_draws_overlay = 0, g_bb_begin = 0, g_bb_twin_null = 0, g_bb_copies = 0;
+// which twin received the most eye-2 draws this frame: the scene target
+ID3D11Texture2D* g_scene_tex = nullptr; uint32_t g_scene_draws = 0;
+ID3D11Texture2D* g_scene_live_tex = nullptr; uint32_t g_scene_live_draws = 0;
+std::map<ID3D11Texture2D*, uint32_t> g_draws_per_target;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -1579,6 +1583,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_draw_in_frame = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
+    g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
 
@@ -2194,6 +2199,11 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
 
     g_in_eye2 = true;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, rtvs, dsv);
+    if (g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {                 // a depth-bound target: scene-like
+        ID3D11Texture2D* gt = texture_of(g_cur_rtv[0]);
+        const uint32_t c = ++g_draws_per_target[gt];
+        if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+    }
 
     ID3D11ShaderResourceView* srvs[16];
     bool any = false;
@@ -2282,12 +2292,31 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
 }
 
 extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; }
-extern "C" __declspec(dllexport) void* ffxvr_eye2_srv() { return ffxvr_eye2_final_srv(); }
+/// A twin's plain SRV (whole texture), created on demand; null if none.
+static void* twin_plain_srv(ID3D11Texture2D* game) {
+    if (game == nullptr) return nullptr;
+    auto it = g_twins.find(game);
+    if (it == g_twins.end() || it->second.tex == nullptr) return nullptr;
+    Twin& t = it->second;
+    auto sit = t.srvs.find(nullptr);
+    if (sit != t.srvs.end()) return sit->second;
+    ID3D11ShaderResourceView* nv = nullptr;
+    g_device->CreateShaderResourceView(t.tex, nullptr, &nv);
+    t.srvs[nullptr] = nv;
+    return nv;
+}
+
+/// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
+extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
+    if (source == 1) return twin_plain_srv(g_scene_tex);
+    return ffxvr_eye2_final_srv();
+}
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
-extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h) {
-    if (g_backbuffer == nullptr) return 0;
-    auto it = g_twins.find(g_backbuffer);
-    if (it == g_twins.end()) return 0;
+extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int source) {
+    ID3D11Texture2D* key = source == 1 ? g_scene_tex : g_backbuffer;
+    if (key == nullptr) return 0;
+    auto it = g_twins.find(key);
+    if (it == g_twins.end() || it->second.tex == nullptr) return 0;
     if (w) *w = static_cast<int>(it->second.w); if (h) *h = static_cast<int>(it->second.h);
     return 1;
 }

@@ -43,9 +43,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
     private delegate* unmanaged[Cdecl]<int, float, int, void> _fn_stereo_set;
     private int _stereo_scope = 0;
-    private delegate* unmanaged[Cdecl]<nint> _fn_eye2_srv;
+    private delegate* unmanaged[Cdecl]<int, nint> _fn_eye2_srv;
+    private int _eye2_source = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_draws;
-    private delegate* unmanaged[Cdecl]<int*, int*, int> _fn_eye2_size;
+    private delegate* unmanaged[Cdecl]<int*, int*, int, int> _fn_eye2_size;
     private bool  _stereo_on = false;
     private float _ipd = 6f;
     private bool  _eye2_preview = true;
@@ -188,9 +189,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
-            _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
+            _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
-            _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
+            _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
             _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
@@ -540,6 +541,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("camera + product-only", ref _stereo_scope, 2);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope);
         ImGui.Checkbox("preview eye 2", ref _eye2_preview);
+        ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1);
         if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
 
         ImGui.Separator();
@@ -605,8 +607,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void draw_eye2_preview() {
         if (!_eye2_preview || !_stereo_on || _fn_eye2_srv == null || _fn_eye2_size == null) return;
         int w, h;
-        if (_fn_eye2_size(&w, &h) == 0 || w == 0) return;
-        nint srv = _fn_eye2_srv();
+        if (_fn_eye2_size(&w, &h, _eye2_source) == 0 || w == 0) return;
+        nint srv = _fn_eye2_srv(_eye2_source);
         if (srv == 0) return;
 
         ImGui.SetNextWindowSize(new Vector2(960, 540 + 40), ImGuiCond.FirstUseEver);
