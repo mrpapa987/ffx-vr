@@ -32,6 +32,9 @@
 #include <mutex>
 #include <vector>
 
+// Defined with the eye-2 twin code near the end; used from several places.
+static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
+
 #pragma comment(lib, "d3d11.lib")
 
 namespace {
@@ -1477,7 +1480,6 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 
 } // namespace
 
-static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 // ---------------------------------------------------------------------------
 
