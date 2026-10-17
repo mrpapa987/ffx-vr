@@ -2224,6 +2224,36 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
     g_in_eye2 = false;
 }
 
+/// Mirrors a resource copy onto the twins: when the game copies into a
+/// texture we twin (the backbuffer included), the source's twin -- or the
+/// source itself if it has none -- is copied into the destination's twin.
+/// Returns 1 if mirrored. The region form passes a box; full copies pass null.
+extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_sub, unsigned x, unsigned y, unsigned z,
+                                                   void* src_res, unsigned src_sub, const void* box, int whole) {
+    if (g_in_eye2 || !g_stereo || g_ctx == nullptr || dst_res == nullptr || src_res == nullptr) return 0;
+
+    ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
+    ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
+    if (dst) dst->Release();
+    if (src) src->Release();
+    if (dst == nullptr || src == nullptr) return 0;
+
+    // Destination must be something we twin: a known render texture or the backbuffer.
+    if (g_twins.find(dst) == g_twins.end() && dst != g_backbuffer) return 0;
+    Twin* td = twin_of(dst);
+    if (td == nullptr || td->tex == nullptr) return 0;
+
+    ID3D11Resource* from = src;
+    auto its = g_twins.find(src);
+    if (its != g_twins.end() && its->second.tex != nullptr) from = its->second.tex;
+
+    g_in_eye2 = true;
+    if (whole) g_ctx->CopyResource(td->tex, from);
+    else       g_ctx->CopySubresourceRegion(td->tex, dst_sub, x, y, z, from, src_sub, static_cast<const D3D11_BOX*>(box));
+    g_in_eye2 = false;
+    return 1;
+}
+
 extern "C" __declspec(dllexport) void ffxvr_set_backbuffer(void* tex) { g_backbuffer = static_cast<ID3D11Texture2D*>(tex); }
 
 /// Eye 2's final image: the twin of the backbuffer, as a shader resource.
