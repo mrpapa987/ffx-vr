@@ -359,13 +359,15 @@ std::vector<uint8_t> g_scratch;
 // detours are re-entered during that, so a guard makes them pass-through.
 // ---------------------------------------------------------------------------
 bool  g_stereo       = false;
+int   g_stereo_scope = 0;             // 0 all draws, 1 camera-buffer draws only, 2 camera + product-only
+ID3D11Buffer* g_imgui_cb = nullptr;   // ImGui's constant buffer, recognised by its orthographic matrix
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
 bool  g_in_eye2      = false;         // re-entrancy guard
 // Recent camera-carrying uploads, with both eyes' images, keyed by buffer.
 // The game uploads the next object's buffer before drawing the current one,
 // so the image for a draw is usually not the most recent upload.
-struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; uint32_t frame; };
+struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; uint32_t frame; int kind; };
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
 EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
@@ -971,7 +973,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (g_stereo && buf != nullptr) {               // the same buffer seen from the other eye
             EyeImage& e = g_eye_ring[g_eye_ring_next];
             g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-            e.cb = buf; e.size = size; e.frame = g_frames;
+            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 1;
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
 
@@ -992,7 +994,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (g_stereo && buf != nullptr) {
             EyeImage& e = g_eye_ring[g_eye_ring_next];
             g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-            e.cb = buf; e.size = size; e.frame = g_frames;
+            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 2;
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
             replace_known_products(e.eye2.data(), size, g_last_PVn2);
@@ -1031,6 +1033,12 @@ static void camera_from_write(const void* src, UINT size) {
 
 void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
     if (size == 0 || size > 65536 || src == nullptr) return;
+
+    if (size == 64) {
+        const float* m = static_cast<const float*>(src);
+        if (m[12] == -1.f && m[13] == 1.f && m[14] == 0.5f && m[10] == 0.5f && m[0] > 0.f && m[5] < 0.f
+            && fabsf(m[0] * m[5]) < 1e-5f) g_imgui_cb = buf;     // overlay, not the game: never duplicated
+    }
 
     census_write(size);     // all write paths: Map/Unmap carries the 2D UI buffers
 
@@ -1624,7 +1632,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
-    const bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
+    bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
+    if (g_slot0_cur != nullptr && g_slot0_cur == g_imgui_cb) eye2 = false;              // the overlay
+    if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
+    if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (!g_stereo) g_e2_no_stereo++;
     else if (g_eye2_cur == nullptr) g_e2_no_image++;   // UI and the like: drawn identically for eye 2
     else g_e2_ok++;
@@ -2233,7 +2244,7 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
     return nv;
 }
 
-extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd) { g_stereo = on != 0; g_ipd = ipd; }
+extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; }
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv() { return ffxvr_eye2_final_srv(); }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h) {
