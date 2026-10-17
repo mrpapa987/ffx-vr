@@ -61,6 +61,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _structs_dumped = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_scan_cams;
     private int _memscan_cams = 0;
+    private delegate* unmanaged[Cdecl]<uint, uint, void> _fn_census_arm;
+    private int _census_n = 0;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -150,6 +152,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_cam_mem_writes   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cam_mem_writes");
             _fn_dump_structs     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_structs");
             _fn_scan_cams        = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_cams");
+            _fn_census_arm       = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -417,6 +420,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_dump_structs != null) {
                 if (ImGui.IsKeyPressed(ImGuiKey.F8)) { _fn_dump_structs(); _structs_dumped++; }
                 ImGui.Text($"F8: dump the game's camera structs ({_structs_dumped} so far, ffxvr_structs.log)");
+            if (_fn_census_arm != null) {
+                if (ImGui.IsKeyPressed(ImGuiKey.F6)) { _fn_census_arm(16, 512); _census_n++; }
+                ImGui.Text($"F6: record call stacks of 2D-UI uploads for one frame ({_census_n} taken, ffxvr_stacks.log)");
+            }
             }
             nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;
             _fn_cam_mem_set(_cam_mem_mode, obj);

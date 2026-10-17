@@ -624,6 +624,65 @@ extern "C" __declspec(dllexport) int ffxvr_dump_structs() {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Call-stack census of 2D UI uploads
+//
+// The 2D sprites (battle cursors among them) reach the GPU through small
+// constant buffers written with UpdateSubresource. Capturing the call stack
+// at those writes, for one frame, names the game functions that draw the UI;
+// the one that projected the cursor is among them. No exceptions involved.
+// ---------------------------------------------------------------------------
+
+struct StackRec { uintptr_t frames[12]; int n; uint32_t count; UINT size; };
+std::vector<StackRec> g_stacks;
+bool     g_stacks_arm  = false;
+bool     g_stacks_live = false;
+UINT     g_stacks_min  = 0, g_stacks_max = 0;
+
+static void census_write(UINT size) {
+    if (!g_stacks_live || size < g_stacks_min || size > g_stacks_max) return;
+    void* bt[14] = {};
+    const USHORT n = RtlCaptureStackBackTrace(2, 12, bt, nullptr);   // skip ourselves and the managed detour
+    HMODULE exe = GetModuleHandleW(nullptr);
+    const uintptr_t lo = reinterpret_cast<uintptr_t>(exe), hi = lo + 0x800000;
+
+    StackRec r = {};
+    r.size = size; r.count = 1;
+    for (USHORT i = 0; i < n && r.n < 12; ++i) {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(bt[i]);
+        if (a >= lo && a < hi) r.frames[r.n++] = a - lo;       // keep only game code, as offsets
+    }
+    if (r.n == 0) return;
+    for (StackRec& e : g_stacks) {
+        if (e.n == r.n && e.size == r.size && memcmp(e.frames, r.frames, sizeof(uintptr_t) * r.n) == 0) { e.count++; return; }
+    }
+    if (g_stacks.size() < 400) g_stacks.push_back(r);
+}
+
+static void census_dump() {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_stacks.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
+    fprintf(f, "call stacks of UpdateSubresource writes to %u..%u byte constant buffers, one frame: %zu distinct\n",
+            g_stacks_min, g_stacks_max, g_stacks.size());
+    for (const StackRec& r : g_stacks) {
+        fprintf(f, "  x%-4u %5uB :", r.count, r.size);
+        for (int i = 0; i < r.n; ++i) fprintf(f, " +%06X", static_cast<unsigned>(r.frames[i]));
+        fprintf(f, "\n");
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
+/// Arms a one-frame census of writes to buffers in [min_size, max_size].
+extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsigned max_size) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_stacks.clear();
+    g_stacks_min = min_size; g_stacks_max = max_size;
+    g_stacks_arm = true;
+}
+
 extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
     g_cam_mem_mode = mode;
     g_cam_mem_obj  = obj;
@@ -1214,6 +1273,11 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_stacks_live) { g_stacks_live = false; census_dump(); }
+        if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
+    }
     if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
     g_draw_in_frame = 0;
@@ -1285,6 +1349,7 @@ extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, 
     if (!as_constant_buffer(reinterpret_cast<ID3D11Resource*>(resource), &buf, &size)) return src;
 
     std::lock_guard<std::mutex> lock(g_mutex);
+    census_write(size);
     record_buffer(buf, size, src, "UpdateSubresource");   // records the game's own camera
     return maybe_override(src, size);                       // uploads ours
 }
