@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
@@ -2121,6 +2122,19 @@ extern "C" __declspec(dllexport) uintptr_t ffxvr_exe_camera() {
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
 extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
 
+
+/// Appends a line to ffxvr_diag.log (the heartbeat rewrites ffxvr_native.log
+/// every second, so anything appended there is lost).
+static void diag(const char* fmt, ...) {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
+    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 static ID3D11Texture2D* texture_of(ID3D11View* view) {
     if (view == nullptr) return nullptr;
     ID3D11Resource* res = nullptr; view->GetResource(&res);
@@ -2145,14 +2159,9 @@ static Twin* twin_of(ID3D11Texture2D* game) {
     if (game == g_backbuffer) { cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE; }
 
     auto fail = [&](const char* what, HRESULT hr) -> Twin* {
-        wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
-        FILE* f = nullptr;
-        if (_wfopen_s(&f, path, L"a") == 0 && f) {
-            fprintf(f, "\n  twin FAILED (%s hr=0x%08X): %ux%u fmt %u mips %u array %u samples %u bind 0x%X misc 0x%X usage %u\n",
-                    what, static_cast<unsigned>(hr), d.Width, d.Height, static_cast<unsigned>(d.Format), d.MipLevels, d.ArraySize,
-                    d.SampleDesc.Count, d.BindFlags, d.MiscFlags, static_cast<unsigned>(d.Usage));
-            fclose(f);
-        }
+        diag("twin FAILED (%s hr=0x%08X): %ux%u fmt %u mips %u array %u samples %u bind 0x%X misc 0x%X usage %u",
+             what, static_cast<unsigned>(hr), d.Width, d.Height, static_cast<unsigned>(d.Format), d.MipLevels, d.ArraySize,
+             d.SampleDesc.Count, d.BindFlags, d.MiscFlags, static_cast<unsigned>(d.Usage));
         if (t.tex) t.tex->Release();
         Twin none = {}; none.game = game;          // remembered as failed: no views, never retried
         g_twins[game] = none;
@@ -2383,10 +2392,17 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
     D3D11_TEXTURE2D_DESC da, db; a->GetDesc(&da); b->GetDesc(&db);
     if (da.Width != db.Width || da.Height != db.Height) return false;
 
-    D3D11_TEXTURE2D_DESC sd = da;
-    sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    D3D11_TEXTURE2D_DESC sd = {};
+    sd.Width = da.Width; sd.Height = da.Height; sd.MipLevels = 1; sd.ArraySize = 1;
+    sd.Format = da.Format; sd.SampleDesc.Count = 1;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ID3D11Texture2D *sa = nullptr, *sb = nullptr;
-    if (FAILED(g_device->CreateTexture2D(&sd, nullptr, &sa)) || FAILED(g_device->CreateTexture2D(&sd, nullptr, &sb))) {
+    HRESULT h1 = g_device->CreateTexture2D(&sd, nullptr, &sa);
+    HRESULT h2 = SUCCEEDED(h1) ? g_device->CreateTexture2D(&sd, nullptr, &sb) : E_FAIL;
+    if (FAILED(h1) || FAILED(h2)) {
+        diag("readback: staging create failed hr=0x%08X/0x%08X for %ux%u fmt %u (a: bind 0x%X misc 0x%X samples %u mips %u; b: bind 0x%X misc 0x%X samples %u mips %u)",
+             static_cast<unsigned>(h1), static_cast<unsigned>(h2), da.Width, da.Height, static_cast<unsigned>(da.Format),
+             da.BindFlags, da.MiscFlags, da.SampleDesc.Count, da.MipLevels, db.BindFlags, db.MiscFlags, db.SampleDesc.Count, db.MipLevels);
         if (sa) sa->Release(); if (sb) sb->Release(); return false;
     }
     g_in_eye2 = true;                                  // our copies must not be mirrored
@@ -2417,22 +2433,15 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
 // A snapshot of the GAME's scene texture at the same moment as eye 2's, so
 // the two can be compared.
 extern "C" __declspec(dllexport) int ffxvr_measure() {
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -1;
-    fprintf(f, "\n  measure (eye separation %.2f):\n", g_ipd);
-
+    diag("measure (eye separation %.2f):", g_ipd);
     double m = 0, fr = 0;
     auto it = g_backbuffer ? g_twins.find(g_backbuffer) : g_twins.end();
     if (it != g_twins.end() && it->second.tex && readback_diff(g_backbuffer, it->second.tex, &m, &fr))
-        fprintf(f, "    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ\n", m, fr * 100);
-    else fprintf(f, "    final: no backbuffer twin to compare\n");
-
+        diag("    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ", m, fr * 100);
+    else diag("    final: could not compare");
     if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr))
-        fprintf(f, "    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ\n", m, fr * 100);
-    else fprintf(f, "    scene: no snapshots to compare\n");
-    fclose(f);
+        diag("    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ", m, fr * 100);
+    else diag("    scene: could not compare (snapshots %s/%s)", g_snap_game ? "yes" : "no", g_snap_tex ? "yes" : "no");
     return 0;
 }
 
