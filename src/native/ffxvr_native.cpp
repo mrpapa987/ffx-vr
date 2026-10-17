@@ -1365,6 +1365,88 @@ static DWORD WINAPI watch_thread(LPVOID arg) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Static cross-references: which instructions touch the game's camera?
+//
+// Fahrenheit's stage-0 debugger swallows first-chance exceptions, so a
+// hardware breakpoint never reaches us. But 32-bit code addresses a global
+// with a literal imm32, so scanning the executable's code for the matrix's
+// addresses finds every instruction that reads or writes it. The bytes just
+// before the immediate say which.
+// ---------------------------------------------------------------------------
+
+struct XrefKind { const uint8_t* pat; int len; int imm_at; const char* name; };
+
+static const char* classify_xref(const uint8_t* at) {
+    // `at` points at the imm32. Look at up to 4 preceding bytes.
+    const uint8_t b1 = at[-1], b2 = at[-2], b3 = at[-3], b4 = at[-4];
+    // modrm with mod=00 rm=101 (disp32, no base) has low 3 bits 101 and top 2 bits 00
+    const bool modrm_disp32 = (b1 & 0xC7) == 0x05;
+    if (!modrm_disp32) {
+        if (b1 >= 0xB8 && b1 <= 0xBF) return "mov r32, imm (address taken)";
+        if (b1 == 0x68)                return "push imm (address taken)";
+        return "other";
+    }
+    // SSE stores / loads
+    if (b3 == 0x0F && b2 == 0x11) return "STORE movups/movss [g], xmm";
+    if (b3 == 0x0F && b2 == 0x29) return "STORE movaps [g], xmm";
+    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x11) return "STORE movss [g], xmm";
+    if (b3 == 0x0F && b2 == 0x10) return "load movups [g]";
+    if (b3 == 0x0F && b2 == 0x28) return "load movaps [g]";
+    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x10) return "load movss [g]";
+    if (b3 == 0x0F && b2 == 0x58) return "load addps [g]";
+    if (b3 == 0x0F && b2 == 0x59) return "load mulps [g]";
+    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x59) return "load mulss [g]";
+    // integer / x87
+    if (b2 == 0x89) return "STORE mov [g], r32";
+    if (b2 == 0xC7) return "STORE mov [g], imm32";
+    if (b2 == 0x8B) return "load mov r32, [g]";
+    if (b2 == 0x8D) return "lea r32, [g] (address taken)";
+    if (b2 == 0xD9 && (b1 & 0x38) == 0x18) return "STORE fstp [g]";
+    if (b2 == 0xD9 && (b1 & 0x38) == 0x00) return "load fld [g]";
+    if (b2 == 0xFF && (b1 & 0x38) == 0x30) return "push [g]";
+    return "modrm disp32 (unclassified)";
+}
+
+/// Scans the executable's code sections for references to [addr, addr+span)
+/// and logs each with its classification. Returns the number found.
+extern "C" __declspec(dllexport) int ffxvr_xrefs(uintptr_t addr, unsigned span) {
+    HMODULE exe = GetModuleHandleW(nullptr);
+    if (exe == nullptr) return -1;
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(exe);
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const IMAGE_NT_HEADERS* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_xrefs.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
+    fprintf(f, "xrefs to %08X..%08X (FFX.exe+%X)\n", static_cast<unsigned>(addr), static_cast<unsigned>(addr + span),
+            static_cast<unsigned>(addr - reinterpret_cast<uintptr_t>(base)));
+
+    int n = 0;
+    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const uint8_t* cs = base + sec[i].VirtualAddress;
+        const size_t   cl = sec[i].Misc.VirtualSize;
+        for (size_t off = 4; off + 4 <= cl; ++off) {
+            uint32_t imm; memcpy(&imm, cs + off, 4);
+            if (imm < addr || imm >= addr + span) continue;
+            const uint8_t* at = cs + off;
+            fprintf(f, "  code FFX.exe+%08X  -> +%-3u  %s   bytes:", static_cast<unsigned>(at - base),
+                    static_cast<unsigned>(imm - addr), classify_xref(at));
+            for (int k = -6; k < 4; ++k) fprintf(f, " %02X", at[k]);
+            fprintf(f, "\n");
+            n++;
+            if (n >= 400) break;
+        }
+    }
+    fprintf(f, "  %d references\n\n", n);
+    fclose(f);
+    return n;
+}
+
 /// Arms write watches on up to two addresses (0 = none) on the game's main
 /// thread. Returns 0 on success.
 extern "C" __declspec(dllexport) int ffxvr_watch(uintptr_t a0, uintptr_t a1) {

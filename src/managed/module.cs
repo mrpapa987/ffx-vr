@@ -49,6 +49,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int> _fn_watch_hits;
     private delegate* unmanaged[Cdecl]<nuint> _fn_exe_camera;
     private int _watch_rc = -99;
+    private delegate* unmanaged[Cdecl]<nuint, uint, int> _fn_xrefs;
+    private int _xrefs_n = -99;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -131,6 +133,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_watch            = (delegate* unmanaged[Cdecl]<nuint, nuint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_watch");
             _fn_watch_hits       = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_watch_hits");
             _fn_exe_camera       = (delegate* unmanaged[Cdecl]<nuint>)NativeLibrary.GetExport(_native_handle, "ffxvr_exe_camera");
+            _fn_xrefs            = (delegate* unmanaged[Cdecl]<nuint, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xrefs");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -394,9 +397,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
 
         if (_fn_watch != null && _fn_exe_camera != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.F11)) _watch_rc = _fn_watch(_fn_exe_camera(), 0);
-            ImGui.Text(_watch_rc == -99 ? $"F11: watch who writes the game camera at 0x{(nint)_fn_exe_camera():X8}"
-                     : $"write watch rc {_watch_rc}: {(_fn_watch_hits != null ? _fn_watch_hits() : -1)} hits (writers in ffxvr_native.log)");
+            if (ImGui.IsKeyPressed(ImGuiKey.F11) && _fn_xrefs != null) _xrefs_n = _fn_xrefs(_fn_exe_camera(), 64);
+            ImGui.Text(_xrefs_n == -99 ? $"F11: list code touching the game camera at 0x{(nint)_fn_exe_camera():X8}"
+                     : $"code references: {_xrefs_n} (ffxvr_xrefs.log)");
         }
     }
 
