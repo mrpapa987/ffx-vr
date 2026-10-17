@@ -410,6 +410,8 @@ ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
 ID3D11Texture2D* g_snap_game = nullptr;         // the game's own scene texture at the same moment
 ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
 ID3D11ShaderResourceView* g_snap_game_srv = nullptr;   // eye 1's copy, for the preview
+uint32_t g_resolves = 0, g_resolves_mirrored = 0, g_omrt_uav_calls = 0;
+uint32_t g_snap_by = 0;                               // what triggered the last snapshot: 1 SRV bind, 2 copy/resolve, 3 clear
 uint32_t g_snap_frame = 0;                            // frame the snapshot was taken in
 bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
 bool g_debug_leave = false;            // experiment: leave the eye-2 image in the buffer after the eye-2 draw (main view should shift)
@@ -889,8 +891,8 @@ static void describe_view(ID3D11View* view, char* out, size_t n) {
         ID3D11Texture2D* tex = nullptr;
         if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex) {
             D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
-            snprintf(out, n, "%p tex %ux%u fmt %u%s", static_cast<void*>(res), d.Width, d.Height, static_cast<unsigned>(d.Format),
-                     (d.BindFlags & D3D11_BIND_SHADER_RESOURCE) ? " +SRV" : "");
+            snprintf(out, n, "%p tex %ux%u fmt %u%s%s", static_cast<void*>(res), d.Width, d.Height, static_cast<unsigned>(d.Format),
+                     (d.BindFlags & D3D11_BIND_SHADER_RESOURCE) ? " +SRV" : "", d.SampleDesc.Count > 1 ? " MSAA" : "");
             tex->Release();
         }
         else snprintf(out, n, "%p tex2d", static_cast<void*>(res));
@@ -921,6 +923,11 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
              g_overlay_phase ? "  [overlay phase]" : "");
     std::lock_guard<std::mutex> lock(g_mutex);
     frame_event(t);
+    for (unsigned i = 1; i < n && i < 4 && rtvs; ++i) {           // the other targets of an MRT pass
+        describe_view(static_cast<ID3D11View*>(rtvs[i]), a, sizeof(a));
+        snprintf(t, sizeof(t), "      rtv%u %s", i, a);
+        frame_event(t);
+    }
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float x, float y) {
@@ -2265,6 +2272,16 @@ static void snapshot_scene(ID3D11Texture2D* game) {
     g_snap_frame = g_frames;
 }
 
+/// Snapshot both eyes if `tex` is the texture that took the scene pass this
+/// frame and no snapshot was taken yet. `how` records the trigger.
+static bool snapshot_if_scene(ID3D11Texture2D* tex, uint32_t how) {
+    if (!g_stereo || tex == nullptr || g_snap_frame == g_frames) return false;
+    if (tex != g_scene_live_tex || g_scene_live_draws < 60) return false;
+    snapshot_scene(tex);
+    g_snap_by = how;
+    return true;
+}
+
 /// Switches every current target to its twin, every sampled render texture
 /// to its twin, and uploads the eye-2 image of the object buffer if there is
 /// one. The managed detour then re-issues the draw.
@@ -2367,18 +2384,59 @@ extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned 
     if (g_in_eye2) return;
     for (unsigned i = 0; i < n && start + i < 16; ++i) g_cur_ps_srv[start + i] = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
     // The first time this frame the game reads the texture that took the
-    // scene pass (the one with the most draws so far, past a minimum), the
-    // scene is complete: snapshot both eyes now.
-    if (!g_stereo || g_snap_frame == g_frames || views == nullptr || g_scene_live_tex == nullptr || g_scene_live_draws < 60) return;
+    // scene pass, the scene is complete: snapshot both eyes now.
+    if (views == nullptr) return;
     for (unsigned i = 0; i < n; ++i) {
         if (views[i] == nullptr) continue;
-        if (texture_of(static_cast<ID3D11View*>(views[i])) == g_scene_live_tex) { snapshot_scene(g_scene_live_tex); break; }
+        if (snapshot_if_scene(texture_of(static_cast<ID3D11View*>(views[i])), 1)) break;
     }
+}
+
+/// MSAA resolve mirrored onto the twins (the one way, besides copies, that a
+/// rendered texture's content reaches another texture). Hooked after the
+/// game's own call.
+extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned dst_sub, void* src_res, unsigned src_sub, unsigned fmt) {
+    if (g_in_eye2 || g_ctx == nullptr || dst_res == nullptr || src_res == nullptr) return;
+    g_resolves++;
+    ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
+    ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
+    if (dst && src) {
+        snapshot_if_scene(src, 2);
+        if (g_frame_live) {
+            char a[96], b[96]; char t[200];
+            D3D11_TEXTURE2D_DESC dd; dst->GetDesc(&dd); D3D11_TEXTURE2D_DESC sd; src->GetDesc(&sd);
+            snprintf(a, sizeof(a), "%p %ux%u fmt %u", static_cast<void*>(dst), dd.Width, dd.Height, static_cast<unsigned>(dd.Format));
+            snprintf(b, sizeof(b), "%p %ux%u fmt %u samples %u", static_cast<void*>(src), sd.Width, sd.Height, static_cast<unsigned>(sd.Format), sd.SampleDesc.Count);
+            snprintf(t, sizeof(t), "RSV %s  <-  %s", a, b);
+            std::lock_guard<std::mutex> lock(g_mutex); frame_event(t);
+        }
+        auto sit = g_twins.find(src);
+        if (g_stereo && sit != g_twins.end() && sit->second.tex != nullptr) {
+            Twin* dt = twin_of(dst);
+            if (dt && dt->tex) {
+                g_in_eye2 = true;
+                g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt));
+                g_in_eye2 = false;
+                g_resolves_mirrored++;
+            }
+        }
+    }
+    if (dst) dst->Release();
+    if (src) src->Release();
+}
+
+/// The UAV variant of target binding: same bookkeeping as the plain one.
+extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, void* const* rtvs, void* dsv) {
+    if (g_in_eye2) return;
+    g_omrt_uav_calls++;
+    if (n == 0xFFFFFFFFu) return;                      // D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL
+    ffxvr_on_rendertargets(n, rtvs, dsv);
 }
 
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
+    if (!depth) snapshot_if_scene(texture_of(static_cast<ID3D11View*>(view)), 3);   // about to be wiped: last chance
     g_in_eye2 = true;
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
     else       { ID3D11RenderTargetView* t = twin_rtv(static_cast<ID3D11RenderTargetView*>(view)); if (t) g_ctx->ClearRenderTargetView(t, color); }
@@ -2395,6 +2453,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
 
     ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
     ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
+    if (src) snapshot_if_scene(src, 2);
     if (dst) dst->Release();
     if (src) src->Release();
     if (dst == nullptr || src == nullptr) return 0;
@@ -2497,6 +2556,8 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         for (int sl = 0; sl < 14; ++sl) l += snprintf(line + l, sizeof(line) - l, " s%d:%u", sl, g_slot_binds[sl]);
         diag("    VS constant buffer slot binds:%s", line);
     }
+    diag("    resolves %u (mirrored %u), UAV-variant target binds %u, snapshot trigger %s", g_resolves, g_resolves_mirrored, g_omrt_uav_calls,
+         g_snap_by == 1 ? "SRV bind" : g_snap_by == 2 ? "copy/resolve" : g_snap_by == 3 ? "clear" : "none");
     for (int k = 0; k < 32; ++k) {
         const EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
         if (e.cb == nullptr || e.kind != 1 || e.eye1.size() < 128) continue;

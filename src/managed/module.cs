@@ -56,6 +56,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets;
+    private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets_uav;
+    private delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void> _fn_on_resolve;
     private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_on_viewport;
     private delegate* unmanaged[Cdecl]<nint, int, void> _fn_on_clear;
     private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
@@ -140,11 +142,18 @@ public sealed unsafe class FFXVRModule : FhModule {
     private d_ClearRenderTargetView?  _h_clr,   _o_clr;
     private d_ClearDepthStencilView?  _h_clrd,  _o_clrd;
     private nint _a_omrt, _a_vp, _a_clr, _a_clrd, _a_pssrv, _a_copy, _a_copyreg;
+    private nint _a_resolve, _a_omrtuav;
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void d_CopyResource(nint ctx, nint dst, nint src);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_ResolveSubresource(nint ctx, nint dst, uint dst_sub, nint src, uint src_sub, uint fmt);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_OMSetRenderTargetsAndUAVs(nint ctx, uint n, nint* rtvs, nint dsv, uint uav_start, uint uav_n, nint* uavs, uint* counts);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void d_CopySubresourceRegion(nint ctx, nint dst, uint dst_sub, uint x, uint y, uint z, nint src, uint src_sub, nint box);
     private d_CopyResource? _h_copy, _o_copy;
+    private d_ResolveSubresource? _h_resolve, _o_resolve;
+    private d_OMSetRenderTargetsAndUAVs? _h_omrtuav, _o_omrtuav;
     private d_CopySubresourceRegion? _h_copyreg, _o_copyreg;
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void d_PSSetShaderResources(nint ctx, uint start, uint n, nint* views);
@@ -201,6 +210,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
             _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
+            _fn_on_rendertargets_uav = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets_uav");
+            _fn_on_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_resolve");
             _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_viewport");
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
@@ -289,14 +300,14 @@ public sealed unsafe class FFXVRModule : FhModule {
         _a_drawidxinst = vt[20];
         _a_drawinst    = vt[21];
         _a_updatesub   = vt[48];
-        _a_omrt = vt[33]; _a_vp = vt[44]; _a_clr = vt[50]; _a_clrd = vt[53]; _a_pssrv = vt[8]; _a_copyreg = vt[46]; _a_copy = vt[47];
+        _a_omrt = vt[33]; _a_vp = vt[44]; _a_clr = vt[50]; _a_clrd = vt[53]; _a_pssrv = vt[8]; _a_copyreg = vt[46]; _a_copy = vt[47]; _a_resolve = vt[57]; _a_omrtuav = vt[34];
 
         _h_drawindexed = h_drawindexed;
         _h_draw        = h_draw;
         _h_drawidxinst = h_drawidxinst;
         _h_drawinst    = h_drawinst;
         _h_updatesub   = h_updatesub;
-        _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd; _h_pssrv = h_pssrv; _h_copy = h_copy; _h_copyreg = h_copyreg;
+        _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd; _h_pssrv = h_pssrv; _h_copy = h_copy; _h_copyreg = h_copyreg; _h_resolve = h_resolve; _h_omrtuav = h_omrtuav;
 
         bool ok = true;
         ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
@@ -311,6 +322,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         ok &= new FhCallHandle<d_PSSetShaderResources>(new FhCallLocation((void*)_a_pssrv)).hook(this, _h_pssrv);
         ok &= new FhCallHandle<d_CopyResource>(new FhCallLocation((void*)_a_copy)).hook(this, _h_copy);
         ok &= new FhCallHandle<d_CopySubresourceRegion>(new FhCallLocation((void*)_a_copyreg)).hook(this, _h_copyreg);
+        ok &= new FhCallHandle<d_ResolveSubresource>(new FhCallLocation((void*)_a_resolve)).hook(this, _h_resolve);
+        ok &= new FhCallHandle<d_OMSetRenderTargetsAndUAVs>(new FhCallLocation((void*)_a_omrtuav)).hook(this, _h_omrtuav);
 
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
@@ -365,6 +378,18 @@ public sealed unsafe class FFXVRModule : FhModule {
         _o_copy ??= new FhCallHandle<d_CopyResource>(new FhCallLocation((void*)_a_copy)).chain_from(_h_copy!).fnptr;
         _o_copy!(ctx, dst, src);
         if (_fn_on_copy != null) _fn_on_copy(dst, 0, 0, 0, 0, src, 0, 0, 1);
+    }
+
+    private void h_resolve(nint ctx, nint dst, uint dst_sub, nint src, uint src_sub, uint fmt) {
+        _o_resolve ??= new FhCallHandle<d_ResolveSubresource>(new FhCallLocation((void*)_a_resolve)).chain_from(_h_resolve!).fnptr;
+        _o_resolve!(ctx, dst, dst_sub, src, src_sub, fmt);
+        if (_fn_on_resolve != null) _fn_on_resolve(dst, dst_sub, src, src_sub, fmt);
+    }
+
+    private void h_omrtuav(nint ctx, uint n, nint* rtvs, nint dsv, uint uav_start, uint uav_n, nint* uavs, uint* counts) {
+        if (_fn_on_rendertargets_uav != null) _fn_on_rendertargets_uav(n, rtvs, dsv);
+        _o_omrtuav ??= new FhCallHandle<d_OMSetRenderTargetsAndUAVs>(new FhCallLocation((void*)_a_omrtuav)).chain_from(_h_omrtuav!).fnptr;
+        _o_omrtuav!(ctx, n, rtvs, dsv, uav_start, uav_n, uavs, counts);
     }
 
     private void h_copyreg(nint ctx, nint dst, uint dst_sub, uint x, uint y, uint z, nint src, uint src_sub, nint box) {
