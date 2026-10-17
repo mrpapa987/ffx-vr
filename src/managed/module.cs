@@ -536,7 +536,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         double now = ImGui.GetTime();
         if (now - _last_pos_log > 1.0 && _fn_world_positions != null) {
             _last_pos_log = now;
-            var sb = new System.Text.StringBuilder("actors:");
+            var sb = new System.Text.StringBuilder(
+                $"window: state={w.state} type={w.type} cur_chr_id={w.cur_chr_id} depth={w.submenu_depth} cmd={w.window_command_id} "
+              + $"sel_idx={w.sel_idx} sel_idx_render={w.sel_idx_render} sel_cmd={w.sel_command_id} sel_chrs=0x{w.sel_chrs:X4} sel_mons=0x{w.sel_mons:X4}  actors:");
             for (int i = 0; i < 8; i++) {
                 if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
                     sb.Append($" mon{i}=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
