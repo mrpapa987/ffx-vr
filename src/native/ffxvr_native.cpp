@@ -388,6 +388,8 @@ std::map<ID3D11Texture2D*, Twin> g_twins;
 ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image
 ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, tracked from the detour
 uint32_t g_twin_count = 0;
+// backbuffer diagnostics
+uint32_t g_bb_draws_seen = 0, g_bb_draws_overlay = 0, g_bb_begin = 0, g_bb_twin_null = 0, g_bb_copies = 0;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
@@ -1225,6 +1227,8 @@ void heartbeat(bool force) {
             g_twin_count, static_cast<void*>(g_backbuffer), g_eye2_draws_report);
     fprintf(f, "         skipped: no stereo %u, no image %u, cb mismatch %u, no depth target %u, small cb %u; ok %u; begin failed %u\n",
             g_e2_no_stereo, g_e2_no_image, g_e2_cb_mismatch, g_e2_no_dsv, g_e2_small, g_e2_ok, g_e2_begin_fail);
+    fprintf(f, "         backbuffer: draws seen %u (of which in overlay phase %u), eye2 begins %u (twin null %u), copies into it %u, overlay phase now %d\n",
+            g_bb_draws_seen, g_bb_draws_overlay, g_bb_begin, g_bb_twin_null, g_bb_copies, g_overlay_phase ? 1 : 0);
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
     fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
     fprintf(f, "game's device context and the hooking approach must change.\n");
@@ -1629,6 +1633,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
+    if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
+        g_bb_draws_seen++;
+        if (g_overlay_phase) g_bb_draws_overlay++;
+    }
     if (g_overlay_phase) eye2 = false;                                                  // the overlay's draws
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
@@ -2180,6 +2188,8 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
     ID3D11RenderTargetView* rtvs[4] = {};
     for (UINT i = 0; i < g_cur_rtv_n; ++i) rtvs[i] = twin_rtv(g_cur_rtv[i]);
     ID3D11DepthStencilView* dsv = twin_dsv(g_cur_dsv);
+    const bool to_bb = g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer;
+    if (to_bb) { g_bb_begin++; if (rtvs[0] == nullptr) g_bb_twin_null++; }
     if (g_cur_rtv_n > 0 && rtvs[0] == nullptr) { g_e2_begin_fail++; return 0; }
 
     g_in_eye2 = true;
@@ -2239,6 +2249,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
     if (dst == nullptr || src == nullptr) return 0;
 
     // Destination must be something we twin: a known render texture or the backbuffer.
+    if (dst == g_backbuffer) g_bb_copies++;
     if (g_twins.find(dst) == g_twins.end() && dst != g_backbuffer) return 0;
     Twin* td = twin_of(dst);
     if (td == nullptr || td->tex == nullptr) return 0;
