@@ -359,10 +359,13 @@ bool  g_stereo       = false;
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
 bool  g_in_eye2      = false;         // re-entrancy guard
-std::vector<uint8_t> g_scratch2;      // eye-2 image of the last camera-carrying upload
-ID3D11Buffer* g_eye2_cb   = nullptr;  // the buffer that image belongs to
-UINT          g_eye2_size = 0;
-bool          g_eye2_valid = false;
+// Recent camera-carrying uploads, with both eyes' images, keyed by buffer.
+// The game uploads the next object's buffer before drawing the current one,
+// so the image for a draw is usually not the most recent upload.
+struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; uint32_t frame; };
+EyeImage g_eye_ring[32];
+int      g_eye_ring_next = 0;
+EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
 ID3D11Texture2D*        g_eye2_tex = nullptr;
 ID3D11RenderTargetView* g_eye2_rtv = nullptr;
 ID3D11Texture2D*        g_eye2_dep = nullptr;
@@ -950,13 +953,21 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         mask = write_camera(p, g_scratch.data(), size, base, v);
         if (base == 48) mask |= 128;
 
-        if (g_stereo) {                                  // the same buffer seen from the other eye
-            if (g_scratch2.size() < size) g_scratch2.resize(size);
-            memcpy(g_scratch2.data(), p, size);
+        if (g_stereo && buf != nullptr) {               // the same buffer seen from the other eye
+            EyeImage& e = g_eye_ring[g_eye_ring_next];
+            g_eye_ring_next = (g_eye_ring_next + 1) % 32;
+            e.cb = buf; e.size = size; e.frame = g_frames;
+            e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
+            e.eye2.assign(p, p + size);
+
+            // write_camera also publishes the frame's known product for the
+            // product-only buffers; that must stay eye 1's, so save and restore.
+            float savePV[16], savePVn[16]; const bool saveHave = g_have_PV;
+            memcpy(savePV, g_last_PV, sizeof(savePV)); memcpy(savePVn, g_last_PVn, sizeof(savePVn));
             g_eye_shift = g_ipd;
-            write_camera(p, g_scratch2.data(), size, base, v);
+            write_camera(p, e.eye2.data(), size, base, v);
             g_eye_shift = 0.f;
-            g_eye2_cb = buf; g_eye2_size = size; g_eye2_valid = true;
+            memcpy(g_last_PV, savePV, sizeof(savePV)); memcpy(g_last_PVn, savePVn, sizeof(savePVn)); g_have_PV = saveHave;
         }
     }
     else {
@@ -1536,7 +1547,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_have_PV       = false;
     g_eye2_cleared  = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
-    g_eye2_valid    = false;
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
 
@@ -1581,12 +1591,17 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     const int idx = g_draw_in_frame++;
 
     // Scene-pass draw with the buffer we hold an eye-2 image for?
-    const bool eye2 = g_stereo && g_eye2_valid && g_slot0_cur == g_eye2_cb && g_cur_dsv != nullptr && g_slot0_big;
+    g_eye2_cur = nullptr;
+    if (g_stereo && g_slot0_cur != nullptr && g_slot0_big) {
+        for (EyeImage& e : g_eye_ring) {
+            if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
+        }
+    }
+    const bool eye2 = g_eye2_cur != nullptr && g_cur_dsv != nullptr;
     if (!g_stereo) g_e2_no_stereo++;
-    else if (!g_eye2_valid) g_e2_no_image++;
-    else if (g_slot0_cur != g_eye2_cb) g_e2_cb_mismatch++;
-    else if (g_cur_dsv == nullptr) g_e2_no_dsv++;
     else if (!g_slot0_big) g_e2_small++;
+    else if (g_eye2_cur == nullptr) g_e2_no_image++;
+    else if (g_cur_dsv == nullptr) g_e2_no_dsv++;
     else g_e2_ok++;
 
     if (g_frame_live) {
@@ -2069,7 +2084,7 @@ static bool eye2_ensure_targets() {
 /// Switches to the eye-2 target and uploads the eye-2 image of the current
 /// object buffer. The managed detour then re-issues the draw.
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
-    if (!g_stereo || !g_eye2_valid || g_ctx == nullptr) { g_e2_begin_fail++; return 0; }
+    if (!g_stereo || g_eye2_cur == nullptr || g_ctx == nullptr) { g_e2_begin_fail++; return 0; }
     if (!eye2_ensure_targets()) { g_e2_begin_fail++; return 0; }
     g_in_eye2 = true;
     if (!g_eye2_cleared) {
@@ -2078,7 +2093,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
         g_ctx->ClearDepthStencilView(g_eye2_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.f, 0);
         g_eye2_cleared = true;
     }
-    g_ctx->UpdateSubresource(g_eye2_cb, 0, nullptr, g_scratch2.data(), 0, 0);
+    g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
     g_ctx->OMSetRenderTargets(1, &g_eye2_rtv, g_eye2_dsv);
     return 1;
 }
@@ -2087,7 +2102,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
-    g_ctx->UpdateSubresource(g_eye2_cb, 0, nullptr, g_scratch.data(), 0, 0);
+    g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
     g_eye2_draws++;
     g_in_eye2 = false;
 }
