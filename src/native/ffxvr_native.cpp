@@ -2813,9 +2813,12 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
         td.Width = d.Width; td.Height = d.Height; td.MipLevels = 1; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &oc.tex))) return nullptr;
-        g_device->CreateRenderTargetView(oc.tex, nullptr, &oc.rtv);
-        g_device->CreateShaderResourceView(oc.tex, nullptr, &oc.srv);
+        HRESULT hr = g_device->CreateTexture2D(&td, nullptr, &oc.tex);
+        if (FAILED(hr)) { diag("preview: texture %ux%u failed hr=0x%08X", d.Width, d.Height, static_cast<unsigned>(hr)); oc.tex = nullptr; return nullptr; }
+        hr = g_device->CreateRenderTargetView(oc.tex, nullptr, &oc.rtv);
+        if (FAILED(hr)) diag("preview: rtv failed hr=0x%08X", static_cast<unsigned>(hr));
+        hr = g_device->CreateShaderResourceView(oc.tex, nullptr, &oc.srv);
+        if (FAILED(hr)) diag("preview: srv failed hr=0x%08X", static_cast<unsigned>(hr));
         oc.w = d.Width; oc.h = d.Height;
     }
     return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h) ? oc.srv : nullptr;
