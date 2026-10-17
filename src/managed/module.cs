@@ -552,11 +552,19 @@ public sealed unsafe class FFXVRModule : FhModule {
             _logger.Info(sb.ToString());
         }
 
+        // Selection is one 32-bit mask over combatant ids: sel_chrs holds ids
+        // 0..15 (party), sel_mons ids 16..31 (monsters are 20 + slot). Keyed on
+        // the id each slot reports, so sparse or reordered slots don't matter.
+        uint selected = w.sel_chrs | ((uint)w.sel_mons << 16);
         for (int i = 0; i < 16; i++) {
-            if ((w.sel_mons & (1 << i)) != 0 && mons != null) mark(mons + i, 0xFF4040FF, "target");
-            if ((w.sel_chrs & (1 << i)) != 0 && plys != null) mark(plys + i, 0xFF4040FF, "target");
+            if (plys != null && read(plys + i, out Chr pc) && pc.id < 32 && (selected & (1u << pc.id)) != 0) mark(plys + i, 0xFF4040FF, "target");
+            if (mons != null && read(mons + i, out Chr mc) && mc.id < 32 && (selected & (1u << mc.id)) != 0) mark(mons + i, 0xFF4040FF, "target");
         }
-        if (w.cur_chr_id < 16 && plys != null) mark(plys + w.cur_chr_id, 0xFF40E0FF, "turn");
+        if (plys != null) {
+            for (int i = 0; i < 16; i++) {
+                if (read(plys + i, out Chr pc) && pc.id == w.cur_chr_id) { mark(plys + i, 0xFF40E0FF, "turn"); break; }
+            }
+        }
     }
 
     private void mark(Chr* chr, uint color, string label) {
