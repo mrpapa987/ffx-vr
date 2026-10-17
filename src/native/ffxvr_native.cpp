@@ -2209,7 +2209,13 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
     if (sit != t.srvs.end()) return sit->second;
     D3D11_SHADER_RESOURCE_VIEW_DESC sd; v->GetDesc(&sd);
     ID3D11ShaderResourceView* nv = nullptr;
-    if (FAILED(g_device->CreateShaderResourceView(t.tex, &sd, &nv))) nv = nullptr;
+    HRESULT hr = g_device->CreateShaderResourceView(t.tex, &sd, &nv);
+    if (FAILED(hr)) {
+        nv = nullptr;
+        D3D11_TEXTURE2D_DESC td; t.tex->GetDesc(&td);
+        diag("twin SRV FAILED hr=0x%08X: view fmt %u dim %d on twin %ux%u fmt %u bind 0x%X", static_cast<unsigned>(hr),
+             static_cast<unsigned>(sd.Format), static_cast<int>(sd.ViewDimension), td.Width, td.Height, static_cast<unsigned>(td.Format), td.BindFlags);
+    }
     t.srvs[v] = nv;
     return nv;
 }
@@ -2288,8 +2294,8 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
             const bool rendered = (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0;
             const bool copied   = !rendered && g_twins.find(t) != g_twins.end();
             if (rendered || copied) {
-                il += snprintf(inputs + il, sizeof(inputs) - il, " s%d:%ux%u%s", i, d.Width, d.Height,
-                               tw ? "" : (rendered ? "!NO-TWIN" : "!NO-TWIN(copy)"));
+                il += snprintf(inputs + il, sizeof(inputs) - il, " s%d:%p %ux%u f%u%s", i, static_cast<void*>(t), d.Width, d.Height,
+                               static_cast<unsigned>(d.Format), tw ? "" : (rendered ? "!NO-TWIN" : "!NO-TWIN(copy)"));
                 if (il >= sizeof(inputs) - 1) break;
             }
         }
