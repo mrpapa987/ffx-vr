@@ -422,6 +422,12 @@ float g_last_PV[16]  = {};
 float g_last_PVn[16] = {};
 bool  g_have_PV      = false;
 
+// Game-memory camera write (defined below, used by write_camera).
+int       g_cam_mem_mode = 0;          // 0 off, 1 at first upload, 2 at present, 3 both
+uintptr_t g_cam_mem_obj  = 0;          // heap camera object (position at +0)
+uint32_t  g_cam_mem_writes = 0;
+static void write_game_camera();
+
 /// Rewrites every camera-derived block in a buffer image. `orig` is the
 /// untouched original, `p` the copy being patched, `base` the byte offset of
 /// the view matrix (64 in the common layout, 48 in the shifted one), `v` the
@@ -536,9 +542,6 @@ static int replace_known_products(uint8_t* p, UINT size) {
 // UI projection picks it up -- and when in the frame it runs.
 // ---------------------------------------------------------------------------
 
-int       g_cam_mem_mode = 0;          // 0 off, 1 at first upload, 2 at present, 3 both
-uintptr_t g_cam_mem_obj  = 0;          // heap camera object (position at +0)
-uint32_t  g_cam_mem_writes = 0;
 
 static void write_game_camera() {
     if (!g_cam_valid) return;
