@@ -568,7 +568,55 @@ static void write_game_camera() {
         memcpy(o + 12,   Vn, 48);                // row-major 3x4
         memcpy(o + 0x60, col, 64);               // column-major 4x4
     }
+    if (g_cam_mem_mode & 4) {                    // shotgun: every copy the scan found
+        for (const MemHit& h : g_scan_hits) {
+            uint8_t* o = reinterpret_cast<uint8_t*>(h.addr);
+            if (h.kind[0] == 'c' && h.kind[7] == 'p') memcpy(o, Pn, 12);                 // "camera position float3"
+            else if (strstr(h.kind, "row-major"))    memcpy(o, Vn, 48);
+            else if (strstr(h.kind, "column-major")) memcpy(o, col, 60);
+        }
+    }
     g_cam_mem_writes++;
+}
+
+/// Dumps the game's static camera struct (FFX.exe+0x88FB78, 0x400 bytes) and
+/// the heap camera object (-0x100..+0x300) as floats, so what they store
+/// besides the matrix -- position, target, angles -- can be worked out.
+extern "C" __declspec(dllexport) int ffxvr_dump_structs() {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_structs.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -1;
+
+    const float* c = g_cam;
+    const float t0 = c[3], t1 = c[7], t2 = c[11];
+    fprintf(f, "tick %lu  game camera pos %.3f %.3f %.3f  yaw %.1f\n", GetTickCount(),
+            -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
+            atan2f(c[8], c[10]) * 57.2958f);
+
+    struct Range { const char* name; uintptr_t base; size_t len; } ranges[2];
+    HMODULE exe = GetModuleHandleW(nullptr);
+    ranges[0] = { "static struct FFX.exe+88FB78", exe ? reinterpret_cast<uintptr_t>(exe) + 0x88FB78 : 0, 0x400 };
+    ranges[1] = { "heap object", g_scan_struct ? g_scan_struct - 0x100 : 0, 0x400 };
+
+    for (const Range& r : ranges) {
+        if (r.base == 0) continue;
+        fprintf(f, "  == %s @ %08X ==\n", r.name, static_cast<unsigned>(r.base));
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(r.base);
+        for (size_t off = 0; off < r.len; off += 16) {
+            float v[4]; memcpy(v, p + off, 16);
+            uint32_t u[4]; memcpy(u, p + off, 16);
+            fprintf(f, "  +%03X:", static_cast<unsigned>(off));
+            for (int i = 0; i < 4; ++i) {
+                if (std::isfinite(v[i]) && fabsf(v[i]) > 1e-6f && fabsf(v[i]) < 1e7f) fprintf(f, " %12.4f", v[i]);
+                else fprintf(f, "   0x%08X", u[i]);
+            }
+            fprintf(f, "\n");
+        }
+    }
+    fprintf(f, "\n");
+    fclose(f);
+    return 0;
 }
 
 extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
@@ -1261,6 +1309,7 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
 
 struct MemHit { uintptr_t addr; const char* kind; };
 uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
+std::vector<MemHit> g_scan_hits;   // every hit of the last scan, for the shotgun write
 
 /// Searches one region for float-aligned needles, reporting hits through the
 /// callback. Runs under SEH so a page that faults despite VirtualQuery's word
@@ -1357,6 +1406,7 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
         a = next;
     }
 
+    { std::lock_guard<std::mutex> lock(g_mutex); g_scan_hits = hits; }
     g_scan_struct = 0;
     for (const MemHit& h : hits) {
         if (strcmp(h.kind, "camera position float3") != 0) continue;
