@@ -2401,7 +2401,6 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
     ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
     ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
     if (dst && src) {
-        snapshot_if_scene(src, 2);
         if (g_frame_live) {
             char a[96], b[96]; char t[200];
             D3D11_TEXTURE2D_DESC dd; dst->GetDesc(&dd); D3D11_TEXTURE2D_DESC sd; src->GetDesc(&sd);
@@ -2418,6 +2417,9 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                 g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt));
                 g_in_eye2 = false;
                 g_resolves_mirrored++;
+                // The first resolve of the scene pass is the finished scene, in a
+                // plain (non-multisampled) texture: that is the eye image.
+                if (src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
             }
         }
     }
