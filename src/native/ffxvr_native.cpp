@@ -360,7 +360,7 @@ std::vector<uint8_t> g_scratch;
 // ---------------------------------------------------------------------------
 bool  g_stereo       = false;
 int   g_stereo_scope = 0;             // 0 all draws, 1 camera-buffer draws only, 2 camera + product-only
-ID3D11Buffer* g_imgui_cb = nullptr;   // ImGui's constant buffer, recognised by its orthographic matrix
+bool  g_overlay_phase = false;        // between our per-frame hook (inside Present) and the game's first clear: ImGui draws here
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
 bool  g_in_eye2      = false;         // re-entrancy guard
@@ -899,6 +899,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float 
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
+    if (!g_in_eye2) g_overlay_phase = false;
     if (!g_frame_live) return;
     char a[96]; describe_view(static_cast<ID3D11View*>(view), a, sizeof(a));
     char t[160];
@@ -1033,12 +1034,6 @@ static void camera_from_write(const void* src, UINT size) {
 
 void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* via) {
     if (size == 0 || size > 65536 || src == nullptr) return;
-
-    if (size == 64) {
-        const float* m = static_cast<const float*>(src);
-        if (m[12] == -1.f && m[13] == 1.f && m[14] == 0.5f && m[10] == 0.5f && m[0] > 0.f && m[5] < 0.f
-            && fabsf(m[0] * m[5]) < 1e-5f) g_imgui_cb = buf;     // overlay, not the game: never duplicated
-    }
 
     census_write(size);     // all write paths: Map/Unmap carries the 2D UI buffers
 
@@ -1567,6 +1562,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    g_overlay_phase = true;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
@@ -1633,7 +1629,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
-    if (g_slot0_cur != nullptr && g_slot0_cur == g_imgui_cb) eye2 = false;              // the overlay
+    if (g_overlay_phase) eye2 = false;                                                  // the overlay's draws
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (!g_stereo) g_e2_no_stereo++;
