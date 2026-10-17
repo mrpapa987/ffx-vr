@@ -469,6 +469,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
 // by recognising it.
 float g_last_PV[16]  = {};
 float g_last_PVn[16] = {};
+float g_last_PVn2[16] = {};   // the same product for eye 2
 bool  g_have_PV      = false;
 
 // Game-memory camera write (defined below, used by write_camera).
@@ -545,7 +546,7 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
 /// frame's known proj*view with the override's -- and any block equal to
 /// proj*view*X, where X is some other block in the same buffer (an object's
 /// world matrix), with the override's proj*view*X. Returns the number replaced.
-static int replace_known_products(uint8_t* p, UINT size) {
+static int replace_known_products(uint8_t* p, UINT size, const float* PVn) {
     if (!g_have_PV) return 0;
     int n = 0;
     const UINT nblocks = size / 16;
@@ -553,7 +554,7 @@ static int replace_known_products(uint8_t* p, UINT size) {
     // Pass 1: bare proj*view.
     for (UINT off = 0; off + 64 <= size; off += 16) {
         if (same4(reinterpret_cast<const float*>(p + off), g_last_PV)) {
-            memcpy(p + off, g_last_PVn, 64);
+            memcpy(p + off, PVn, 64);
             n++;
         }
     }
@@ -571,7 +572,7 @@ static int replace_known_products(uint8_t* p, UINT size) {
         for (UINT off = 0; off + 64 <= size; off += 16) {
             if (off == xo) continue;
             if (same4(reinterpret_cast<const float*>(p + off), PVX)) {
-                if (!used) { mul4(g_last_PVn, X, PVnX); used = true; }
+                if (!used) { mul4(PVn, X, PVnX); used = true; }
                 memcpy(p + off, PVnX, 64);
                 n++;
             }
@@ -967,12 +968,21 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             g_eye_shift = g_ipd;
             write_camera(p, e.eye2.data(), size, base, v);
             g_eye_shift = 0.f;
+            if (mask & 8) memcpy(g_last_PVn2, g_last_PVn, sizeof(g_last_PVn2));   // eye 2's proj*view
             memcpy(g_last_PV, savePV, sizeof(savePV)); memcpy(g_last_PVn, savePVn, sizeof(savePVn)); g_have_PV = saveHave;
         }
     }
     else {
-        if (replace_known_products(g_scratch.data(), size) == 0) return src;   // nothing of ours in here
+        if (replace_known_products(g_scratch.data(), size, g_last_PVn) == 0) return src;   // nothing of ours in here
         mask = 256;
+        if (g_stereo && buf != nullptr) {
+            EyeImage& e = g_eye_ring[g_eye_ring_next];
+            g_eye_ring_next = (g_eye_ring_next + 1) % 32;
+            e.cb = buf; e.size = size; e.frame = g_frames;
+            e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
+            e.eye2.assign(p, p + size);
+            replace_known_products(e.eye2.data(), size, g_last_PVn2);
+        }
     }
 
     g_ovr_mask |= mask;
@@ -1592,14 +1602,16 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
 
     // Scene-pass draw with the buffer we hold an eye-2 image for?
     g_eye2_cur = nullptr;
-    if (g_stereo && g_slot0_cur != nullptr && g_slot0_big) {
-        for (EyeImage& e : g_eye_ring) {
+    if (g_stereo && g_slot0_cur != nullptr) {
+        // Most recent first: the game reuses a buffer for several objects in
+        // a frame, and the draw belongs to the latest upload.
+        for (int k = 0; k < 32; ++k) {
+            EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
     const bool eye2 = g_eye2_cur != nullptr && g_cur_dsv != nullptr;
     if (!g_stereo) g_e2_no_stereo++;
-    else if (!g_slot0_big) g_e2_small++;
     else if (g_eye2_cur == nullptr) g_e2_no_image++;
     else if (g_cur_dsv == nullptr) g_e2_no_dsv++;
     else g_e2_ok++;
