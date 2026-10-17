@@ -640,21 +640,48 @@ bool     g_stacks_arm  = false;
 bool     g_stacks_live = false;
 UINT     g_stacks_min  = 0, g_stacks_max = 0;
 
+/// True if `a` looks like a return address: inside the game's code and
+/// immediately preceded by a call instruction (E8 rel32, FF 15 [mem],
+/// FF 5x [reg+disp8], FF 9x [reg+disp32], FF Dx reg).
+static bool looks_like_return(uintptr_t a, uintptr_t lo, uintptr_t hi) {
+    if (a < lo + 8 || a >= hi) return false;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(a);
+    __try {
+        if (p[-5] == 0xE8) return true;
+        if (p[-6] == 0xFF && p[-5] == 0x15) return true;
+        if (p[-3] == 0xFF && (p[-2] & 0xF8) == 0x50) return true;
+        if (p[-6] == 0xFF && (p[-5] & 0xF8) == 0x90) return true;
+        if (p[-2] == 0xFF && (p[-1] & 0xF8) == 0xD0) return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return false;
+}
+
 static void census_write(UINT size) {
     if (!g_stacks_live || size < g_stacks_min || size > g_stacks_max) return;
-    void* bt[24] = {};
-    const USHORT n = RtlCaptureStackBackTrace(0, 24, bt, nullptr);
+
     HMODULE exe = GetModuleHandleW(nullptr);
     const uintptr_t lo = reinterpret_cast<uintptr_t>(exe);
     const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
         reinterpret_cast<const uint8_t*>(exe) + reinterpret_cast<const IMAGE_DOS_HEADER*>(exe)->e_lfanew);
     const uintptr_t hi = lo + nt->OptionalHeader.SizeOfImage;
 
+    // Scan the raw stack upward from here for return addresses into game
+    // code. Frame pointers are not relied on, so callers compiled without
+    // them are found too. The stack base bounds the walk.
+    const NT_TIB* tib = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+    const uintptr_t* sp  = reinterpret_cast<const uintptr_t*>(&tib);   // a local: current stack position
+    const uintptr_t* top = reinterpret_cast<const uintptr_t*>(tib->StackBase);
+    if (top - sp > 4096) top = sp + 4096;
+
     StackRec r = {};
     r.size = size; r.count = 1;
-    for (USHORT i = 0; i < n && r.n < 12; ++i) {
-        const uintptr_t a = reinterpret_cast<uintptr_t>(bt[i]);
-        if (a >= lo && a < hi) r.frames[r.n++] = a - lo;       // keep only game code, as offsets
+    for (const uintptr_t* w = sp; w < top && r.n < 12; ++w) {
+        if (looks_like_return(*w, lo, hi)) {
+            const uintptr_t off = *w - lo;
+            if (r.n > 0 && r.frames[r.n - 1] == off) continue;
+            r.frames[r.n++] = off;
+        }
     }
     if (r.n == 0) return;
     for (StackRec& e : g_stacks) {
