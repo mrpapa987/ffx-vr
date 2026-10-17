@@ -401,6 +401,7 @@ std::map<ID3D11Texture2D*, uint32_t> g_draws_per_target;
 // target gets cleared and reused by post-processing later in the frame)
 ID3D11Texture2D* g_snap_tex = nullptr; ID3D11ShaderResourceView* g_snap_srv = nullptr;
 ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
+ID3D11Texture2D* g_snap_game = nullptr;         // the game's own scene texture at the same moment
 ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
@@ -2221,6 +2222,13 @@ static void snapshot_scene_if_due() {
         g_snap_from = g_prev_e2_target;
     }
     if (g_snap_tex) g_ctx->CopyResource(g_snap_tex, src.tex);
+    if (g_snap_tex) {
+        if (g_snap_game == nullptr) {
+            D3D11_TEXTURE2D_DESC d; g_snap_tex->GetDesc(&d);
+            g_device->CreateTexture2D(&d, nullptr, &g_snap_game);
+        }
+        if (g_snap_game) g_ctx->CopyResource(g_snap_game, g_prev_e2_target);
+    }
     g_prev_e2_run = 0;              // taken; do not take again until another long run
 }
 
@@ -2359,6 +2367,72 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
     else       g_ctx->CopySubresourceRegion(td->tex, dst_sub, x, y, z, from, src_sub, static_cast<const D3D11_BOX*>(box));
     g_in_eye2 = false;
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// Measuring eye 2 against eye 1
+//
+// Reads two textures back and reports the mean absolute difference per
+// channel and the fraction of pixels that differ at all. Identical images
+// give 0; a horizontally shifted view gives a clearly non-zero value.
+// ---------------------------------------------------------------------------
+
+static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_abs, double* frac_diff) {
+    if (a == nullptr || b == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
+    D3D11_TEXTURE2D_DESC da, db; a->GetDesc(&da); b->GetDesc(&db);
+    if (da.Width != db.Width || da.Height != db.Height) return false;
+
+    D3D11_TEXTURE2D_DESC sd = da;
+    sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    ID3D11Texture2D *sa = nullptr, *sb = nullptr;
+    if (FAILED(g_device->CreateTexture2D(&sd, nullptr, &sa)) || FAILED(g_device->CreateTexture2D(&sd, nullptr, &sb))) {
+        if (sa) sa->Release(); if (sb) sb->Release(); return false;
+    }
+    g_in_eye2 = true;                                  // our copies must not be mirrored
+    g_ctx->CopyResource(sa, a); g_ctx->CopyResource(sb, b);
+    g_in_eye2 = false;
+
+    D3D11_MAPPED_SUBRESOURCE ma = {}, mb = {};
+    bool ok = SUCCEEDED(g_orig_map(g_ctx, sa, 0, D3D11_MAP_READ, 0, &ma)) && SUCCEEDED(g_orig_map(g_ctx, sb, 0, D3D11_MAP_READ, 0, &mb));
+    if (ok) {
+        double sum = 0; uint64_t n = 0, diff = 0;
+        for (UINT y = 0; y < da.Height; y += 4) {       // every 4th row and pixel: plenty for a verdict
+            const uint8_t* ra = static_cast<const uint8_t*>(ma.pData) + y * ma.RowPitch;
+            const uint8_t* rb = static_cast<const uint8_t*>(mb.pData) + y * mb.RowPitch;
+            for (UINT x = 0; x < da.Width; x += 4) {
+                int d = 0;
+                for (int c = 0; c < 3; ++c) d += abs(static_cast<int>(ra[x*4+c]) - static_cast<int>(rb[x*4+c]));
+                sum += d / 3.0; n++; if (d > 6) diff++;
+            }
+        }
+        *mean_abs = n ? sum / n : 0; *frac_diff = n ? static_cast<double>(diff) / n : 0;
+    }
+    if (ma.pData) g_orig_unmap(g_ctx, sa, 0);
+    if (mb.pData) g_orig_unmap(g_ctx, sb, 0);
+    sa->Release(); sb->Release();
+    return ok;
+}
+
+// A snapshot of the GAME's scene texture at the same moment as eye 2's, so
+// the two can be compared.
+extern "C" __declspec(dllexport) int ffxvr_measure() {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_native.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -1;
+    fprintf(f, "\n  measure (eye separation %.2f):\n", g_ipd);
+
+    double m = 0, fr = 0;
+    auto it = g_backbuffer ? g_twins.find(g_backbuffer) : g_twins.end();
+    if (it != g_twins.end() && it->second.tex && readback_diff(g_backbuffer, it->second.tex, &m, &fr))
+        fprintf(f, "    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ\n", m, fr * 100);
+    else fprintf(f, "    final: no backbuffer twin to compare\n");
+
+    if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr))
+        fprintf(f, "    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ\n", m, fr * 100);
+    else fprintf(f, "    scene: no snapshots to compare\n");
+    fclose(f);
+    return 0;
 }
 
 extern "C" __declspec(dllexport) void ffxvr_set_backbuffer(void* tex) { g_backbuffer = static_cast<ID3D11Texture2D*>(tex); }
