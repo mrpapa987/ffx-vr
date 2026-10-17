@@ -394,7 +394,6 @@ ID3D11DepthStencilView* g_cur_dsv    = nullptr;
 float g_world_live[32][3];   int g_world_live_n = 0;
 float g_world_report[32][3]; int g_world_report_n = 0;
 static void census_write(UINT size);   // defined with the census code below
-static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 // Memory-scan results (see ffxvr_memscan below).
 struct MemHit { uintptr_t addr; const char* kind; };
@@ -1473,6 +1472,8 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 }
 
 } // namespace
+
+static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 // ---------------------------------------------------------------------------
 
