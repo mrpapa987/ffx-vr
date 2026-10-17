@@ -395,6 +395,7 @@ ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, track
 uint32_t g_twin_count = 0;
 // backbuffer diagnostics
 uint32_t g_bb_draws_seen = 0, g_bb_draws_overlay = 0, g_bb_begin = 0, g_bb_twin_null = 0, g_bb_copies = 0;
+uint32_t g_e2_uploads = 0, g_e2_identical = 0, g_e2_reentered_updates = 0;
 // which twin received the most eye-2 draws this frame: the scene target
 ID3D11Texture2D* g_scene_tex = nullptr; uint32_t g_scene_draws = 0;
 ID3D11Texture2D* g_scene_live_tex = nullptr; uint32_t g_scene_live_draws = 0;
@@ -1710,7 +1711,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
 /// the target is a constant buffer being replaced whole.
 extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
     bump(C_UPDATESUB);
-    if (g_in_eye2) return src;
+    if (g_in_eye2) { g_e2_reentered_updates++; return src; }
     if (resource == nullptr || src == nullptr || box != nullptr) return src;
 
     ID3D11Buffer* buf = nullptr; UINT size = 0;
@@ -2301,7 +2302,11 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
     }
     if (any) g_ctx->PSSetShaderResources(0, 16, srvs);
 
-    if (g_eye2_cur != nullptr) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
+    if (g_eye2_cur != nullptr) {
+        g_e2_uploads++;
+        if (g_eye2_cur->eye1 == g_eye2_cur->eye2) g_e2_identical++;
+        g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye2.data(), 0, 0);
+    }
     return 1;
 }
 
@@ -2433,7 +2438,17 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
 // A snapshot of the GAME's scene texture at the same moment as eye 2's, so
 // the two can be compared.
 extern "C" __declspec(dllexport) int ffxvr_measure() {
-    diag("measure (eye separation %.2f):", g_ipd);
+    diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u",
+         g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates);
+    for (int k = 0; k < 32; ++k) {
+        const EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
+        if (e.cb == nullptr || e.kind != 1 || e.eye1.size() < 128) continue;
+        const float* a = reinterpret_cast<const float*>(e.eye1.data() + CAM_VIEW_OFFSET);
+        const float* b = reinterpret_cast<const float*>(e.eye2.data() + CAM_VIEW_OFFSET);
+        diag("    latest camera image %u B: eye1 view t=(%.2f %.2f %.2f)  eye2 view t=(%.2f %.2f %.2f)",
+             e.size, a[3], a[7], a[11], b[3], b[7], b[11]);
+        break;
+    }
     double m = 0, fr = 0;
     auto it = g_backbuffer ? g_twins.find(g_backbuffer) : g_twins.end();
     if (it != g_twins.end() && it->second.tex && readback_diff(g_backbuffer, it->second.tex, &m, &fr))
