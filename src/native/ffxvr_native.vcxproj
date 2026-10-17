@@ -51,6 +51,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <PreprocessorDefinitions>WIN32;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\..\_ext\openxr\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- Static CRT: avoids depending on a redistributable being present in the game folder. -->
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
@@ -66,6 +67,7 @@
 
   <ItemGroup>
     <ClCompile Include="ffxvr_native.cpp" />
+    <ClCompile Include="ffxvr_xr.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

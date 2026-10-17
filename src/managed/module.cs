@@ -43,6 +43,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_begin;
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
+    private delegate* unmanaged[Cdecl]<int, float, int, int, int> _fn_xr_set;
+    private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
+    private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
+    private bool  _xr_on = false, _xr_rotate = true, _xr_translate = true;
+    private float _xr_scale = 94f;
     private bool _debug_red = false;
     private bool _debug_leave = false;
     private int _stereo_scope = 0;
@@ -204,6 +209,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
+            _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
+            _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
+            _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
             _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
@@ -579,6 +587,24 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("preview eye 2", ref _eye2_preview);
         ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1); ImGui.SameLine(); ImGui.RadioButton("scene target, eye 1", ref _eye2_source, 2);
         if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
+
+        ImGui.Separator();
+        ImGui.Text("Headset (OpenXR)");
+        if (_fn_xr_set != null) {
+            bool want = _xr_on;
+            ImGui.Checkbox("Send to headset", ref want);
+            if (want && !_xr_on) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
+            ImGui.SliderFloat("world scale (game units per metre)", ref _xr_scale, 10f, 300f);
+            ImGui.Checkbox("head rotation", ref _xr_rotate); ImGui.SameLine(); ImGui.Checkbox("head position", ref _xr_translate);
+            ImGui.SameLine(); if (ImGui.Button("Recentre") || ImGui.IsKeyPressed(ImGuiKey.Home)) _fn_xr_recenter();
+            _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0) != 0;
+            if (_fn_xr_status != null) {
+                byte* buf = stackalloc byte[256];
+                _fn_xr_status(buf, 256);
+                ImGui.TextWrapped(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)buf) ?? "");
+            }
+            ImGui.TextWrapped("Home: recentre. Put the headset on, look at the screen, press Home.");
+        }
 
         ImGui.Separator();
         ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);

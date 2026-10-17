@@ -45,6 +45,40 @@ if (-not (Test-Path (Join-Path $pkgDir 'Fahrenheit.Sdk.1.0.0-alpha12.nupkg'))) {
     exit 1
 }
 
+# ---------------------------------------------------------------- OpenXR loader
+# The headset half needs the Khronos OpenXR loader (32-bit) and headers. They
+# come from the official NuGet package, fetched once into _ext\openxr.
+$oxrDir = Join-Path $proj '_ext\openxr'
+$oxrHdr = Join-Path $oxrDir 'include\openxr\openxr.h'
+if (-not (Test-Path $oxrHdr)) {
+    Log ''
+    Log '[openxr] fetching the OpenXR loader package (once)'
+    $nupkg = Join-Path $proj '_ext\OpenXR.Loader.nupkg'
+    New-Item -ItemType Directory -Force -Path (Join-Path $proj '_ext') | Out-Null
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/OpenXR.Loader' -OutFile $nupkg -UseBasicParsing
+        $zip = "$nupkg.zip"
+        Copy-Item $nupkg $zip -Force
+        if (Test-Path $oxrDir) { Remove-Item $oxrDir -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $oxrDir -Force
+        Remove-Item $zip -Force
+    } catch {
+        Log "ERROR: could not fetch the OpenXR loader: $_"
+        exit 1
+    }
+}
+$oxrDll = Get-ChildItem $oxrDir -Recurse -Filter 'openxr_loader.dll' -ErrorAction SilentlyContinue |
+          Where-Object { $_.FullName -match '\\x86\\' -or $_.FullName -match '\\Win32\\' } |
+          Select-Object -First 1
+if (-not (Test-Path $oxrHdr)) { Log "ERROR: openxr.h not found under $oxrDir"; exit 1 }
+if (-not $oxrDll) {
+    Log "ERROR: no 32-bit openxr_loader.dll in the package under $oxrDir"
+    Get-ChildItem $oxrDir -Recurse -Filter 'openxr_loader.dll' | ForEach-Object { Log ('  found: ' + $_.FullName) }
+    exit 1
+}
+Log "[openxr] loader: $($oxrDll.FullName)"
+
 # ---------------------------------------------------------------- native half
 Log ''
 Log '[native] locating MSBuild'
@@ -131,6 +165,7 @@ New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
 Copy-Item (Join-Path $outDir '*') -Destination $dest -Recurse -Force
 Copy-Item $natDll                 -Destination $dest -Force
+Copy-Item $oxrDll.FullName        -Destination $dest -Force
 
 Get-ChildItem $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
 

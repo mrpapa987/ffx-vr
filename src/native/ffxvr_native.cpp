@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include "ffxvr_xr.h"
 
 #include <algorithm>
 #include <cmath>
@@ -476,6 +477,62 @@ static bool same4(const float* a, const float* b) {
 }
 
 /// Builds the override view V' (4x4) and its inverse from a base 3x4 view.
+// Head tracking (OpenXR). The located left-eye pose, relative to the
+// recentre reference, is applied on top of the manual override: rotation
+// in view space (the game's view axes match OpenXR's: x right, y up, -z
+// forward), translation along the base camera's axes scaled by the world
+// scale (game units per metre). Eye 2 adds the right-eye offset.
+bool  g_xr_want     = false;       // the user asked for the headset
+bool  g_xr_active   = false;       // poses valid this frame
+bool  g_xr_rotate   = true, g_xr_translate = true;
+float g_xr_scale    = 94.f;        // units per metre; 94 gives a 6-unit eye separation
+float g_xr_q[4]     = { 0, 0, 0, 1 };   // left eye orientation, relative to the reference
+float g_xr_p[3]     = {};               // left eye position (m), relative to the reference
+float g_xr_eye_off[3] = {};             // right eye minus left eye (m), in reference axes
+float g_xr_ref_q[4] = { 0, 0, 0, 1 };   // yaw-only reference orientation
+float g_xr_ref_p[3] = {};
+bool  g_xr_recenter_pending = true;     // first valid pose becomes the reference
+float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
+
+static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    M[0] = 1 - 2*(y*y + z*z); M[1] = 2*(x*y - w*z);     M[2] = 2*(x*z + w*y);
+    M[3] = 2*(x*y + w*z);     M[4] = 1 - 2*(x*x + z*z); M[5] = 2*(y*z - w*x);
+    M[6] = 2*(x*z - w*y);     M[7] = 2*(y*z + w*x);     M[8] = 1 - 2*(x*x + y*y);
+}
+static void quat_mul(const float a[4], const float b[4], float o[4]) {   // o = a * b
+    o[0] = a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1];
+    o[1] = a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0];
+    o[2] = a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3];
+    o[3] = a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2];
+}
+static void quat_rotate(const float q[4], const float v[3], float o[3]) {
+    float M[9]; quat_to_mat(q, M);
+    for (int i = 0; i < 3; ++i) o[i] = M[i*3+0]*v[0] + M[i*3+1]*v[1] + M[i*3+2]*v[2];
+}
+
+/// Takes the located poses for the frame about to render and derives the
+/// relative pose the override uses.
+static void xr_apply_poses(const XrFrameOut& f) {
+    if (!f.have_views) { g_xr_active = false; return; }
+    memcpy(g_xr_raw_q, f.view[0].q, sizeof(g_xr_raw_q)); memcpy(g_xr_raw_p, f.view[0].p, sizeof(g_xr_raw_p));
+    if (g_xr_recenter_pending) {
+        // Reference = the head's yaw and position now, so "forward" is where the user looks.
+        const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d);
+        const float a = atan2f(-d[0], -d[2]);
+        g_xr_ref_q[0] = 0; g_xr_ref_q[1] = sinf(a * 0.5f); g_xr_ref_q[2] = 0; g_xr_ref_q[3] = cosf(a * 0.5f);
+        memcpy(g_xr_ref_p, g_xr_raw_p, sizeof(g_xr_ref_p));
+        g_xr_recenter_pending = false;
+    }
+    const float ref_inv[4] = { -g_xr_ref_q[0], -g_xr_ref_q[1], -g_xr_ref_q[2], g_xr_ref_q[3] };
+    quat_mul(ref_inv, g_xr_raw_q, g_xr_q);
+    const float dp[3] = { g_xr_raw_p[0] - g_xr_ref_p[0], g_xr_raw_p[1] - g_xr_ref_p[1], g_xr_raw_p[2] - g_xr_ref_p[2] };
+    quat_rotate(ref_inv, dp, g_xr_p);
+    const float de[3] = { f.view[1].p[0] - f.view[0].p[0], f.view[1].p[1] - f.view[0].p[1], f.view[1].p[2] - f.view[0].p[2] };
+    quat_rotate(ref_inv, de, g_xr_eye_off);
+    g_xr_active = true;
+}
+
 static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
     float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
     const float t[3] = { v[3], v[7], v[11] };
@@ -487,14 +544,35 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     const float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pit), sp = sinf(pit);
     const float Ry[9] = {  cy, 0.f,  sy,   0.f, 1.f, 0.f,   -sy, 0.f,  cy };
     const float Rx[9] = { 1.f, 0.f, 0.f,   0.f,  cp, -sp,   0.f,  sp,  cp };
-    float tmp[9], Rn[9];
+    float tmp[9], Rb[9], Rn[9];
     mul3(Ry, R, tmp);
-    mul3(Rx, tmp, Rn);
+    mul3(Rx, tmp, Rb);                                  // base camera: the game's, turned by the manual override
+
+    // Head rotation, applied in the base camera's frame: the new axes are the
+    // head's axes expressed in base-camera coordinates, i.e. Rn = Rq^T * Rb.
+    const bool eye2 = (g_eye_shift != 0.f);
+    const bool xr = g_xr_active && g_ovr_enabled;
+    if (xr && g_xr_rotate) {
+        float Mq[9], MqT[9]; quat_to_mat(g_xr_q, Mq);
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) MqT[r*3+c] = Mq[c*3+r];
+        mul3(MqT, Rb, Rn);
+    }
+    else memcpy(Rn, Rb, sizeof(Rn));
 
     // Move along the new camera's axes (rows of R'; forward is -row 2). The
-    // eye shift is a further lateral offset, used for the second eye.
+    // eye shift is a further lateral offset, used for the second eye. With
+    // the headset, the head position and the right-eye offset are reference-
+    // space vectors: along the base camera's axes (x right, y up, z back).
+    const float lateral = xr ? 0.f : g_eye_shift;
+    float hx = 0.f, hy = 0.f, hz = 0.f;
+    if (xr) {
+        if (g_xr_translate) { hx = g_xr_p[0]; hy = g_xr_p[1]; hz = g_xr_p[2]; }
+        if (eye2) { hx += g_xr_eye_off[0]; hy += g_xr_eye_off[1]; hz += g_xr_eye_off[2]; }
+        hx *= g_xr_scale; hy *= g_xr_scale; hz *= g_xr_scale;
+    }
     for (int i = 0; i < 3; ++i)
-        Pn[i] = P[i] + Rn[0*3+i]*(g_ovr_move[0] + g_eye_shift) + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2];
+        Pn[i] = P[i] + Rn[0*3+i]*(g_ovr_move[0] + lateral) + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2]
+                     + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
 
     float tn[3];
     for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
@@ -1590,6 +1668,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 // Called once per frame from the managed module's render_imgui, which Fahrenheit
 // invokes inside its Present hook. That gives us a true frame boundary, so a
 // capture can span exactly one frame instead of whatever happened to come next.
+static void xr_tick();
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     bool dump_now = false;
     {
@@ -1613,6 +1692,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    xr_tick();                      // submit the frame just finished, locate the head for the next one
     g_overlay_phase = true;
     g_first_draw_pending = true;
     g_backbuffer_seen_this_frame = false;
@@ -2717,10 +2797,12 @@ static bool copy_pass_init() {
     return true;
 }
 
+static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h);
+
 /// Renders `src` into the opaque copy for `slot` (0..2) and returns its SRV.
 static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
     if (src == nullptr || g_device == nullptr || g_ctx == nullptr || slot < 0 || slot > 2) return nullptr;
-    if (!copy_pass_init()) return nullptr;
     D3D11_TEXTURE2D_DESC d; src->GetDesc(&d);
     if (d.SampleDesc.Count != 1) return nullptr;
     OpaqueCopy& oc = g_opaque[slot];
@@ -2736,12 +2818,18 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
         g_device->CreateShaderResourceView(oc.tex, nullptr, &oc.srv);
         oc.w = d.Width; oc.h = d.Height;
     }
-    // A plain SRV of the source (cached per texture pointer).
-    static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> srvs;
+    return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h) ? oc.srv : nullptr;
+}
+
+/// Stretch-copies `src` into `dst` (w x h) with alpha forced to 1, saving
+/// and restoring the pipeline state it touches. Also used for the headset.
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h) {
+    if (src == nullptr || dst == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
+    if (!copy_pass_init()) return false;
     ID3D11ShaderResourceView* in = nullptr;
-    auto it = srvs.find(src);
-    if (it != srvs.end()) in = it->second;
-    else { if (FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) return nullptr; srvs[src] = in; }
+    auto it = g_plain_srvs.find(src);
+    if (it != g_plain_srvs.end()) in = it->second;
+    else { if (FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) return false; g_plain_srvs[src] = in; }
 
     // Save the pipeline state we touch, run the pass, restore.
     ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr;
@@ -2758,9 +2846,9 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
     D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
 
     g_in_eye2 = true;                                  // our hooks ignore this pass, restore included
-    ID3D11RenderTargetView* rt[1] = { oc.rtv };
+    ID3D11RenderTargetView* rt[1] = { dst };
     g_ctx->OMSetRenderTargets(1, rt, nullptr);
-    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(oc.w); vp.Height = static_cast<float>(oc.h); vp.MaxDepth = 1.f;
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
     g_ctx->PSSetShaderResources(0, 1, &in); g_ctx->PSSetSamplers(0, 1, &g_copy_smp);
@@ -2779,7 +2867,7 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_srv) o_srv->Release(); if (o_smp) o_smp->Release(); if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release();
     if (o_rs) o_rs->Release(); if (o_il) o_il->Release();
-    return oc.srv;
+    return true;
 }
 
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
@@ -2808,6 +2896,47 @@ extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int sourc
     if (it == g_twins.end() || it->second.tex == nullptr) return 0;
     if (w) *w = static_cast<int>(it->second.w); if (h) *h = static_cast<int>(it->second.h);
     return 1;
+}
+
+// ---------------------------------------------------------------- headset
+static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
+
+extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate) {
+    g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0;
+    if (on && !g_xr_want) {
+        XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
+        g_xr_want = xr_start(h);
+        g_xr_recenter_pending = true;
+        return g_xr_want ? 1 : 0;
+    }
+    if (!on && g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; }
+    return g_xr_want ? 1 : 0;
+}
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
+extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
+    if (buf == nullptr || n <= 0) return;
+    const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
+    snprintf(buf, static_cast<size_t>(n), "%s%s  yaw %.0f pitch %.0f  pos (%.2f %.2f %.2f) m  eye sep %.2f m = %.1f units",
+             xr_status(), g_xr_active ? " [tracking]" : "",
+             atan2f(-d[0], -d[2]) * 57.2958f, asinf(fmaxf(-1.f, fminf(1.f, d[1]))) * 57.2958f,
+             g_xr_p[0], g_xr_p[1], g_xr_p[2],
+             sqrtf(g_xr_eye_off[0]*g_xr_eye_off[0] + g_xr_eye_off[1]*g_xr_eye_off[1] + g_xr_eye_off[2]*g_xr_eye_off[2]),
+             sqrtf(g_xr_eye_off[0]*g_xr_eye_off[0] + g_xr_eye_off[1]*g_xr_eye_off[1] + g_xr_eye_off[2]*g_xr_eye_off[2]) * g_xr_scale);
+}
+
+/// Called once per frame from the Present hook, with the finished frame in
+/// the backbuffer (eye 1) and its twin (eye 2).
+static void xr_tick() {
+    if (!g_xr_want) return;
+    ID3D11Texture2D* e2 = nullptr;
+    if (g_backbuffer) { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex; }
+    const float* P = &g_cam[16];
+    const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;
+    const float ty = (P[5] != 0.f) ? 1.f / fabsf(P[5]) : 0.5625f;
+    XrFrameOut out = {};
+    xr_frame(g_backbuffer, g_stereo ? e2 : nullptr, tx, ty, &out);
+    xr_apply_poses(out);
+    if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
 }
 
 extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
