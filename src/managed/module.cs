@@ -45,6 +45,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int> _fn_xr_set;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_dump_seq;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
     private bool  _xr_on = false, _xr_rotate = true, _xr_translate = true;
     private float _xr_scale = 94f;
@@ -216,6 +217,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
             _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
             _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
+            _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
             _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
@@ -649,6 +651,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.Text($"F5: record one frame's render-target / viewport / draw structure ({_frame_census_n} taken, ffxvr_frame.log)");
             if (_fn_measure != null) {
                 if (ImGui.IsKeyPressed(ImGuiKey.F4)) { _fn_measure(); _measure_n++; }
+                if (ImGui.IsKeyPressed(ImGuiKey.F3) && _fn_dump_seq != null) _fn_dump_seq(8);
+                ImGui.Text("F3: dump 8 consecutive frames of both eyes (seq_*.bmp)");
                 ImGui.Text($"F4: measure eye 2 against eye 1, final and scene ({_measure_n} taken, ffxvr_native.log)");
             }
             }

@@ -1772,8 +1772,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
-    if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // ImGui draws first after our hook
-    if (g_slot0_cur != nullptr && g_slot0_cur == g_imgui_cb) eye2 = false;                 // the overlay's draws, never duplicated
+    if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // (kept for the census)
+    if (g_overlay_phase) eye2 = false;      // between our hook and the game's first clear only the overlay draws
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (!g_stereo) g_e2_no_stereo++;
@@ -2926,6 +2926,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     return g_xr_want ? 1 : 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
+extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
@@ -2941,6 +2942,8 @@ extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
 /// Called once per frame from the Present hook, with the finished frame in
 /// the backbuffer (eye 1) and its twin (eye 2).
 ID3D11Texture2D* g_bb_copy = nullptr;        // the backbuffer, copied into a texture that can be sampled
+int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F3)
+uint32_t g_e2_begin_fail_frame = 0, g_e2_begin_fail_prev = 0;
 static void xr_tick() {
     if (!g_xr_want) return;
     ID3D11Texture2D* e1 = nullptr;
@@ -2965,6 +2968,14 @@ static void xr_tick() {
     const float ty = (P[5] != 0.f) ? 1.f / fabsf(P[5]) : 0.5625f;
     XrFrameOut out = {};
     if (e1 == nullptr) return;
+    if (g_seq_left > 0) {
+        wchar_t n1[64], n2[64];
+        _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
+        dump_bmp(e1, n1); if (e2) dump_bmp(e2, n2);
+        diag("seq %02d: frame %u, eye-2 draws %u, eye-2 begin failures %u, uploads so far %u", g_seq_index, g_frames, g_eye2_draws, g_e2_begin_fail - g_e2_begin_fail_prev, g_e2_uploads);
+        g_e2_begin_fail_prev = g_e2_begin_fail;
+        g_seq_index++; g_seq_left--;
+    }
     xr_frame(e1, g_stereo ? e2 : nullptr, tx, ty, &out);
     xr_apply_poses(out);
     if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
