@@ -59,6 +59,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _cam_mem_mode = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_dump_structs;
     private int _structs_dumped = 0;
+    private delegate* unmanaged[Cdecl]<int> _fn_scan_cams;
+    private int _memscan_cams = 0;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -147,6 +149,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_cam_mem_set      = (delegate* unmanaged[Cdecl]<int, nuint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cam_mem_set");
             _fn_cam_mem_writes   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cam_mem_writes");
             _fn_dump_structs     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_structs");
+            _fn_scan_cams        = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_cams");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -410,18 +413,18 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("at first upload", ref _cam_mem_mode, 1); ImGui.SameLine();
             ImGui.RadioButton("at present", ref _cam_mem_mode, 2); ImGui.SameLine();
             ImGui.RadioButton("both", ref _cam_mem_mode, 3); ImGui.SameLine();
-            ImGui.RadioButton("shotgun (every copy, both timings)", ref _cam_mem_mode, 7);
+            ImGui.RadioButton("array + static, both timings", ref _cam_mem_mode, 7);
             if (_fn_dump_structs != null) {
                 if (ImGui.IsKeyPressed(ImGuiKey.F8)) { _fn_dump_structs(); _structs_dumped++; }
                 ImGui.Text($"F8: dump the game's camera structs ({_structs_dumped} so far, ffxvr_structs.log)");
             }
             nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;
             _fn_cam_mem_set(_cam_mem_mode, obj);
-            ImGui.Text($"heap camera object: {(obj != 0 ? $"0x{(nint)obj:X8}" : "not found - press F10")}   writes: {(_fn_cam_mem_writes != null ? _fn_cam_mem_writes() : -1)}");
+            ImGui.Text($"camera object: {(obj != 0 ? $"0x{(nint)obj:X8}" : "none")}   array entries: {_memscan_cams}   writes: {(_fn_cam_mem_writes != null ? _fn_cam_mem_writes() : -1)}   (press F10 first)");
         }
 
         if (_fn_memscan != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.F10)) _memscan_last = _fn_memscan();
+            if (ImGui.IsKeyPressed(ImGuiKey.F10)) { _memscan_last = _fn_memscan(); if (_fn_scan_cams != null) _memscan_cams = _fn_scan_cams(); }
             ImGui.Text(_memscan_last == -99 ? "F10: scan memory for the game's camera"
                      : $"memory scan: {_memscan_last} hits (ffxvr_memscan.log)");
         }

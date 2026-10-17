@@ -349,7 +349,8 @@ std::vector<uint8_t> g_scratch;
 // Memory-scan results (see ffxvr_memscan below).
 struct MemHit { uintptr_t addr; const char* kind; };
 uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
-std::vector<MemHit> g_scan_hits;   // every hit of the last scan, for the shotgun write
+std::vector<MemHit> g_scan_hits;   // every hit of the last scan
+std::vector<uintptr_t> g_scan_cams; // camera-state array entries: position at +0, column-major view at +0x10
 
 // Write-watch state (see ffxvr_watch below; kept for completeness, the stage-0
 // debugger swallows the exceptions so the static xref scan is what we use).
@@ -573,12 +574,11 @@ static void write_game_camera() {
         memcpy(o + 12,   Vn, 48);                // row-major 3x4
         memcpy(o + 0x60, col, 64);               // column-major 4x4
     }
-    if (g_cam_mem_mode & 4) {                    // shotgun: every copy the scan found
-        for (const MemHit& h : g_scan_hits) {
-            uint8_t* o = reinterpret_cast<uint8_t*>(h.addr);
-            if (h.kind[0] == 'c' && h.kind[7] == 'p') memcpy(o, Pn, 12);                 // "camera position float3"
-            else if (strstr(h.kind, "row-major"))    memcpy(o, Vn, 48);
-            else if (strstr(h.kind, "column-major")) memcpy(o, col, 60);
+    if (g_cam_mem_mode & 4) {                    // the camera-state array: position, column-major view
+        for (uintptr_t a : g_scan_cams) {
+            uint8_t* o = reinterpret_cast<uint8_t*>(a);
+            memcpy(o,        Pn,  12);
+            memcpy(o + 0x10, col, 60);
         }
     }
     g_cam_mem_writes++;
@@ -1409,21 +1409,29 @@ extern "C" __declspec(dllexport) int ffxvr_memscan() {
     }
 
     { std::lock_guard<std::mutex> lock(g_mutex); g_scan_hits = hits; }
-    g_scan_struct = 0;
-    for (const MemHit& h : hits) {
-        if (strcmp(h.kind, "camera position float3") != 0) continue;
-        for (const MemHit& k : hits) {
-            if (k.addr == h.addr + 12 && strncmp(k.kind, "view row-major", 14) == 0) { g_scan_struct = h.addr; break; }
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_scan_struct = 0;
+        g_scan_cams.clear();
+        for (const MemHit& h : hits) {
+            if (strcmp(h.kind, "camera position float3") != 0) continue;
+            bool row12 = false, col16 = false, col60 = false;
+            for (const MemHit& k : hits) {
+                if (k.addr == h.addr + 12   && strncmp(k.kind, "view row-major", 14) == 0)    row12 = true;
+                if (k.addr == h.addr + 0x10 && strncmp(k.kind, "view column-major", 17) == 0) col16 = true;
+                if (k.addr == h.addr + 0x60 && strncmp(k.kind, "view column-major", 17) == 0) col60 = true;
+            }
+            if (col16) g_scan_cams.push_back(h.addr);                       // array entry: pos, then col-major at +0x10
+            if (row12 && col60 && g_scan_struct == 0) g_scan_struct = h.addr; // the three-way object, if any
         }
-        if (g_scan_struct) break;
     }
 
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_memscan.log", g_dir);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted; camera object %08X\n",
-            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted, static_cast<unsigned>(g_scan_struct));
+    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted; camera object %08X, %zu array entries\n",
+            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted, static_cast<unsigned>(g_scan_struct), g_scan_cams.size());
     size_t logged = 0;
     for (const MemHit& h : hits) {
         if (logged++ >= 250) break;
@@ -1650,6 +1658,7 @@ extern "C" __declspec(dllexport) int ffxvr_ptrscan(uintptr_t target, unsigned be
 }
 
 extern "C" __declspec(dllexport) uintptr_t ffxvr_scan_struct() { return g_scan_struct; }
+extern "C" __declspec(dllexport) int ffxvr_scan_cams() { std::lock_guard<std::mutex> lock(g_mutex); return static_cast<int>(g_scan_cams.size()); }
 
 /// Arms write watches on up to two addresses (0 = none) on the game's main
 /// thread. Returns 0 on success.
