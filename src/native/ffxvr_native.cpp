@@ -345,6 +345,12 @@ struct OvrStat { uint32_t count; unsigned mask_all; unsigned mask_any; };
 std::map<UINT, OvrStat> g_ovr_stats;
 
 std::vector<uint8_t> g_scratch;
+
+// World positions of skinned objects this frame (translation column of the
+// world matrix at +640 in the 1872 B+ family), for comparing against the
+// game's own actor positions.
+float g_world_live[32][3];   int g_world_live_n = 0;
+float g_world_report[32][3]; int g_world_report_n = 0;
 static void census_write(UINT size);   // defined with the census code below
 
 // Memory-scan results (see ffxvr_memscan below).
@@ -757,6 +763,15 @@ extern "C" __declspec(dllexport) int ffxvr_project(float x, float y, float z, fl
     return 1;
 }
 
+/// Distinct world positions of skinned objects drawn last frame; out holds
+/// up to max*3 floats. Returns the count.
+extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    const int n = (g_world_report_n < max) ? g_world_report_n : max;
+    for (int i = 0; i < n; ++i) { out[i*3] = g_world_report[i][0]; out[i*3+1] = g_world_report[i][1]; out[i*3+2] = g_world_report[i][2]; }
+    return n;
+}
+
 extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
     g_cam_mem_mode = mode;
     g_cam_mem_obj  = obj;
@@ -843,6 +858,18 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
 
     camera_from_write(src, size);
     scan_for_camera(src, size, via);
+
+    if (size >= 1872 && size < 16384) {
+        const float* W = reinterpret_cast<const float*>(static_cast<const uint8_t*>(src) + 640);
+        const float t[3] = { W[3], W[7], W[11] };
+        if (std::isfinite(t[0]) && std::isfinite(t[1]) && std::isfinite(t[2]) && W[15] == 1.f) {
+            bool seen = false;
+            for (int i = 0; i < g_world_live_n; ++i) {
+                if (fabsf(g_world_live[i][0]-t[0]) < 0.5f && fabsf(g_world_live[i][1]-t[1]) < 0.5f && fabsf(g_world_live[i][2]-t[2]) < 0.5f) { seen = true; break; }
+            }
+            if (!seen && g_world_live_n < 32) { memcpy(g_world_live[g_world_live_n++], t, sizeof(t)); }
+        }
+    }
 
     CbRecord& rec = g_buffers[buf];
     rec.size    = size;
@@ -1363,6 +1390,11 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_world_live_n > 0) {
+            memcpy(g_world_report, g_world_live, sizeof(g_world_report));
+            g_world_report_n = g_world_live_n;
+        }
+        g_world_live_n = 0;
         if (g_scan_live_n > 0) {     // keep the last frame that had any hits
             memcpy(g_scan_report, g_scan_live, sizeof(g_scan_report));
             g_scan_report_n = g_scan_live_n;

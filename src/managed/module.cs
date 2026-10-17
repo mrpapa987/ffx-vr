@@ -68,6 +68,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool  _markers_on    = true;
     private float _marker_height = 120f;
     private int   _markers_drawn;
+    private delegate* unmanaged[Cdecl]<float*, int, int> _fn_world_positions;
+    private double _last_pos_log;
     private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
@@ -160,6 +162,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_census_arm       = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_safe_read");
             _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_project");
+            _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_world_positions");
 
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
@@ -527,6 +530,25 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         Chr* mons = Globals.Battle.monster_characters;
         Chr* plys = Globals.Battle.player_characters;
+
+        // Once a second, log the game's actor positions next to the renderer's
+        // world positions, to work out the relation between the two spaces.
+        double now = ImGui.GetTime();
+        if (now - _last_pos_log > 1.0 && _fn_world_positions != null) {
+            _last_pos_log = now;
+            var sb = new System.Text.StringBuilder("actors:");
+            for (int i = 0; i < 8; i++) {
+                if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
+                    sb.Append($" mon{i}=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
+                if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa))
+                    sb.Append($" ply{i}=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
+            }
+            float* wp = stackalloc float[32 * 3];
+            int n = _fn_world_positions(wp, 32);
+            sb.Append($"  | rendered skinned world positions ({n}):");
+            for (int i = 0; i < n; i++) sb.Append($" ({wp[i*3]:F1},{wp[i*3+1]:F1},{wp[i*3+2]:F1})");
+            _logger.Info(sb.ToString());
+        }
 
         for (int i = 0; i < 16; i++) {
             if ((w.sel_mons & (1 << i)) != 0 && mons != null) mark(mons + i, 0xFF4040FF, "target");
