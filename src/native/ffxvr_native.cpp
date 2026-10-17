@@ -2829,7 +2829,17 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     ID3D11ShaderResourceView* in = nullptr;
     auto it = g_plain_srvs.find(src);
     if (it != g_plain_srvs.end()) in = it->second;
-    else { if (FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) return false; g_plain_srvs[src] = in; }
+    else {
+        D3D11_TEXTURE2D_DESC sd; src->GetDesc(&sd);
+        if (!(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) || sd.SampleDesc.Count != 1) {
+            g_plain_srvs[src] = nullptr;                // remembered: never asked again
+            diag("copy pass: source %p (%ux%u bind 0x%X samples %u) cannot be sampled", static_cast<void*>(src), sd.Width, sd.Height, sd.BindFlags, sd.SampleDesc.Count);
+            return false;
+        }
+        if (FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) { g_plain_srvs[src] = nullptr; return false; }
+        g_plain_srvs[src] = in;
+    }
+    if (in == nullptr) return false;
 
     // Save the pipeline state we touch, run the pass, restore.
     ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr;
@@ -2913,6 +2923,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     return g_xr_want ? 1 : 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
+extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
     const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
@@ -2926,15 +2937,32 @@ extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
 
 /// Called once per frame from the Present hook, with the finished frame in
 /// the backbuffer (eye 1) and its twin (eye 2).
+ID3D11Texture2D* g_bb_copy = nullptr;        // the backbuffer, copied into a texture that can be sampled
 static void xr_tick() {
     if (!g_xr_want) return;
+    ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
-    if (g_backbuffer) { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex; }
+    if (g_backbuffer) {
+        auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex;
+        D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+        if (g_bb_copy) {
+            D3D11_TEXTURE2D_DESC cd; g_bb_copy->GetDesc(&cd);
+            if (cd.Width != bd.Width || cd.Height != bd.Height || cd.Format != bd.Format) { g_bb_copy->Release(); g_bb_copy = nullptr; }
+        }
+        if (g_bb_copy == nullptr) {
+            D3D11_TEXTURE2D_DESC td = {};
+            td.Width = bd.Width; td.Height = bd.Height; td.MipLevels = 1; td.ArraySize = 1; td.Format = bd.Format;
+            td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_bb_copy))) g_bb_copy = nullptr;
+        }
+        if (g_bb_copy) { g_in_eye2 = true; g_ctx->CopyResource(g_bb_copy, g_backbuffer); g_in_eye2 = false; e1 = g_bb_copy; }
+    }
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;
     const float ty = (P[5] != 0.f) ? 1.f / fabsf(P[5]) : 0.5625f;
     XrFrameOut out = {};
-    xr_frame(g_backbuffer, g_stereo ? e2 : nullptr, tx, ty, &out);
+    if (e1 == nullptr) return;
+    xr_frame(e1, g_stereo ? e2 : nullptr, tx, ty, &out);
     xr_apply_poses(out);
     if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
 }

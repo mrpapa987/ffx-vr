@@ -148,6 +148,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private d_ClearDepthStencilView?  _h_clrd,  _o_clrd;
     private nint _a_omrt, _a_vp, _a_clr, _a_clrd, _a_pssrv, _a_copy, _a_copyreg;
     private nint _a_resolve, _a_omrtuav;
+    private nint _a_exitprocess;
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void d_ExitProcess(uint code);
+    private d_ExitProcess? _h_exitprocess, _o_exitprocess;
+    private delegate* unmanaged[Cdecl]<void> _fn_shutdown;
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate void d_CopyResource(nint ctx, nint dst, nint src);
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
@@ -211,6 +216,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
             _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
             _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
+            _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
             _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
@@ -333,6 +339,13 @@ public sealed unsafe class FFXVRModule : FhModule {
         ok &= new FhCallHandle<d_ResolveSubresource>(new FhCallLocation((void*)_a_resolve)).hook(this, _h_resolve);
         ok &= new FhCallHandle<d_OMSetRenderTargetsAndUAVs>(new FhCallLocation((void*)_a_omrtuav)).hook(this, _h_omrtuav);
 
+        // The headset session must be torn down while the D3D device is still
+        // alive; the runtime crashes if it is left to DLL unload at exit.
+        nint k32 = NativeLibrary.Load("kernel32.dll");
+        _a_exitprocess = NativeLibrary.GetExport(k32, "ExitProcess");
+        _h_exitprocess = h_exitprocess;
+        ok &= new FhCallHandle<d_ExitProcess>(new FhCallLocation((void*)_a_exitprocess)).hook(this, _h_exitprocess);
+
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
                    + $"DrawIndexedInstanced 0x{_a_drawidxinst:X8}, DrawInstanced 0x{_a_drawinst:X8}, UpdateSubresource 0x{_a_updatesub:X8}");
@@ -386,6 +399,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         _o_copy ??= new FhCallHandle<d_CopyResource>(new FhCallLocation((void*)_a_copy)).chain_from(_h_copy!).fnptr;
         _o_copy!(ctx, dst, src);
         if (_fn_on_copy != null) _fn_on_copy(dst, 0, 0, 0, 0, src, 0, 0, 1);
+    }
+
+    private void h_exitprocess(uint code) {
+        try { if (_fn_shutdown != null) _fn_shutdown(); } catch { }
+        _o_exitprocess ??= new FhCallHandle<d_ExitProcess>(new FhCallLocation((void*)_a_exitprocess)).chain_from(_h_exitprocess!).fnptr;
+        _o_exitprocess!(code);
     }
 
     private void h_resolve(nint ctx, nint dst, uint dst_sub, nint src, uint src_sub, uint fmt) {
