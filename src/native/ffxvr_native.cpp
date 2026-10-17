@@ -2187,6 +2187,27 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
 }
 
 
+/// If the last eye-2 target saw a long run of draws (the scene pass), copy
+/// its twin to the snapshot. Called when eye-2 draws move to another target
+/// and before a mirrored clear of that target, whichever comes first.
+static void snapshot_scene_if_due() {
+    if (g_prev_e2_target == nullptr || g_prev_e2_run < 50) return;
+    auto it = g_twins.find(g_prev_e2_target);
+    if (it == g_twins.end() || it->second.tex == nullptr) return;
+    Twin& src = it->second;
+    if (g_snap_tex == nullptr || g_snap_from != g_prev_e2_target) {
+        if (g_snap_srv) { g_snap_srv->Release(); g_snap_srv = nullptr; }
+        if (g_snap_tex) { g_snap_tex->Release(); g_snap_tex = nullptr; }
+        D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
+        d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
+        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))
+            g_device->CreateShaderResourceView(g_snap_tex, nullptr, &g_snap_srv);
+        g_snap_from = g_prev_e2_target;
+    }
+    if (g_snap_tex) g_ctx->CopyResource(g_snap_tex, src.tex);
+    g_prev_e2_run = 0;              // taken; do not take again until another long run
+}
+
 /// Switches every current target to its twin, every sampled render texture
 /// to its twin, and uploads the eye-2 image of the object buffer if there is
 /// one. The managed detour then re-issues the draw.
@@ -2207,24 +2228,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
     {
         ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
         if (gt != g_prev_e2_target) {
-            // Leaving a target after a long run of draws: that was the scene
-            // pass. Snapshot its twin before post-processing reuses it.
-            if (g_prev_e2_target != nullptr && g_prev_e2_run >= 50) {
-                auto it = g_twins.find(g_prev_e2_target);
-                if (it != g_twins.end() && it->second.tex != nullptr) {
-                    Twin& src = it->second;
-                    if (g_snap_tex == nullptr || g_snap_from != g_prev_e2_target) {
-                        if (g_snap_srv) { g_snap_srv->Release(); g_snap_srv = nullptr; }
-                        if (g_snap_tex) { g_snap_tex->Release(); g_snap_tex = nullptr; }
-                        D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
-                        d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
-                        if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))
-                            g_device->CreateShaderResourceView(g_snap_tex, nullptr, &g_snap_srv);
-                        g_snap_from = g_prev_e2_target;
-                    }
-                    if (g_snap_tex) g_ctx->CopyResource(g_snap_tex, src.tex);
-                }
-            }
+            snapshot_scene_if_due();
             g_prev_e2_target = gt; g_prev_e2_run = 0;
         }
         g_prev_e2_run++;
@@ -2268,6 +2272,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned 
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
     g_in_eye2 = true;
+    if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_prev_e2_target) snapshot_scene_if_due();
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
     else       { ID3D11RenderTargetView* t = twin_rtv(static_cast<ID3D11RenderTargetView*>(view)); if (t) g_ctx->ClearRenderTargetView(t, color); }
     g_in_eye2 = false;
