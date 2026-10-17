@@ -51,3 +51,26 @@ Not applicable / overstated: frustum-culling suppression (the game does not
 appear to cull by frustum); Fahrenheit "lifecycle events" (it has pre/post
 main loop and a warp hook; we read battle state directly); UnX as a UI/3D
 render-pass separation (we mapped the UI pass ourselves).
+
+## 2D screens in the headset: the virtual screen (stopgap that is also the final piece)
+
+Problem: title screen, load/save menus, loading screens, FMVs and any other
+frame without a perspective camera break the eye-2 pipeline (no clear ends
+the overlay phase, no camera buffer, flat draws straight to the backbuffer),
+so the two eyes disagree and the screen is unreadable or missing.
+
+Plan: per frame, if no perspective camera was uploaded, treat the frame as
+2D: ignore eye 2 and show eye 1's final image on an OpenXR quad layer -- a
+flat panel ~2.5 m away, ~2.5 m wide (~50 deg), world-locked in front of the
+recentred forward direction; Home re-places it. Identical in both eyes, so
+always readable. 3D frames keep the projection layers; a frame or two of
+hysteresis on the switch. Overlay gets a "force screen mode" toggle for the
+edge cases (a menu over a frozen 3D background would otherwise stay in
+projection mode).
+
+This quad layer is the design's "virtual screen" for FMVs and is the natural
+home of every screen where the game is a 2D program, so it is not throwaway.
+Not covered: HUD/menus drawn over a 3D scene still come through the
+projection layers identical in both eyes (read as "at infinity"); the
+floating UI panel is a later job that needs the UI draws separated from the
+scene draws.
