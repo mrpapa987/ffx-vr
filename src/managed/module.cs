@@ -41,8 +41,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_begin;
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
-    private delegate* unmanaged[Cdecl]<int, float, int, int, void> _fn_stereo_set;
+    private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
     private bool _debug_red = false;
+    private bool _debug_leave = false;
     private int _stereo_scope = 0;
     private delegate* unmanaged[Cdecl]<int, nint> _fn_eye2_srv;
     private int _eye2_source = 0;
@@ -191,7 +192,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
-            _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
+            _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
             _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
@@ -544,7 +545,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("camera-buffer draws only", ref _stereo_scope, 1); ImGui.SameLine();
         ImGui.RadioButton("camera + product-only", ref _stereo_scope, 2);
         ImGui.Checkbox("debug: clear eye-2 scene twin to red", ref _debug_red);
-        if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope, _debug_red ? 1 : 0);
+        ImGui.Checkbox("debug: leave eye-2 camera in place (main view should shift)", ref _debug_leave);
+        if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope, _debug_red ? 1 : 0, _debug_leave ? 1 : 0);
         ImGui.Checkbox("preview eye 2", ref _eye2_preview);
         ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1);
         if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");

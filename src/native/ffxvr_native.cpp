@@ -407,6 +407,8 @@ ID3D11Texture2D* g_snap_from = nullptr;         // which game texture it mirrors
 ID3D11Texture2D* g_snap_game = nullptr;         // the game's own scene texture at the same moment
 ID3D11Texture2D* g_prev_e2_target = nullptr; uint32_t g_prev_e2_run = 0;
 bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
+bool g_debug_leave = false;            // experiment: leave the eye-2 image in the buffer after the eye-2 draw (main view should shift)
+uint32_t g_red_clears = 0;
 std::map<ID3D11Texture2D*, uint32_t> g_red_done_frame;
 // current output-merger state, tracked from the OMSetRenderTargets detour
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
@@ -2278,7 +2280,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
         if (g_debug_red && gt && g_cur_dsv != nullptr && rtvs[0] != nullptr && g_red_done_frame[gt] != g_frames) {
             g_red_done_frame[gt] = g_frames;
             const float red[4] = { 1.f, 0.f, 0.f, 1.f };
-            g_ctx->ClearRenderTargetView(rtvs[0], red);
+            g_ctx->ClearRenderTargetView(rtvs[0], red); g_red_clears++;
         }
         if (gt && g_cur_dsv != nullptr) {
             const uint32_t c = ++g_draws_per_target[gt];
@@ -2328,7 +2330,7 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
     g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
-    if (g_eye2_cur != nullptr) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
+    if (g_eye2_cur != nullptr && !g_debug_leave) g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1.data(), 0, 0);
     g_eye2_draws++;
     g_in_eye2 = false;
 }
@@ -2452,8 +2454,8 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
 // A snapshot of the GAME's scene texture at the same moment as eye 2's, so
 // the two can be compared.
 extern "C" __declspec(dllexport) int ffxvr_measure() {
-    diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u",
-         g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates);
+    diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u, red clears %u, twins %u",
+         g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates, g_red_clears, g_twin_count);
     for (int k = 0; k < 32; ++k) {
         const EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
         if (e.cb == nullptr || e.kind != 1 || e.eye1.size() < 128) continue;
@@ -2494,7 +2496,7 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
     return nv;
 }
 
-extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope, int red) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; }
+extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope, int red, int leave) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; g_debug_leave = leave != 0; }
 /// A twin's plain SRV (whole texture), created on demand; null if none.
 static void* twin_plain_srv(ID3D11Texture2D* game) {
     if (game == nullptr) return nullptr;
