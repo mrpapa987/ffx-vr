@@ -539,11 +539,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             var sb = new System.Text.StringBuilder(
                 $"window: state={w.state} type={w.type} cur_chr_id={w.cur_chr_id} depth={w.submenu_depth} cmd={w.window_command_id} "
               + $"sel_idx={w.sel_idx} sel_idx_render={w.sel_idx_render} sel_cmd={w.sel_command_id} sel_chrs=0x{w.sel_chrs:X4} sel_mons=0x{w.sel_mons:X4}  actors:");
-            for (int i = 0; i < 8; i++) {
+            for (int i = 0; i < 16; i++) {
                 if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
-                    sb.Append($" mon{i}=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
+                    sb.Append($" mon{i}[id={mc.id} chr_id={mc.chr_id} vis={mc.stat_visible}]=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
                 if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa))
-                    sb.Append($" ply{i}=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
+                    sb.Append($" ply{i}[id={pc.id} chr_id={pc.chr_id}]=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
             }
             float* wp = stackalloc float[32 * 3];
             int n = _fn_world_positions(wp, 32);
