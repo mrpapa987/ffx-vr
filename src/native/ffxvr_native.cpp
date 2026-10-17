@@ -2392,7 +2392,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
 // give 0; a horizontally shifted view gives a clearly non-zero value.
 // ---------------------------------------------------------------------------
 
-static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_abs, double* frac_diff) {
+static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_abs, double* frac_diff, double* bright_a = nullptr, double* bright_b = nullptr) {
     if (a == nullptr || b == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
     D3D11_TEXTURE2D_DESC da, db; a->GetDesc(&da); b->GetDesc(&db);
     if (da.Width != db.Width || da.Height != db.Height) return false;
@@ -2417,17 +2417,19 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
     D3D11_MAPPED_SUBRESOURCE ma = {}, mb = {};
     bool ok = SUCCEEDED(g_orig_map(g_ctx, sa, 0, D3D11_MAP_READ, 0, &ma)) && SUCCEEDED(g_orig_map(g_ctx, sb, 0, D3D11_MAP_READ, 0, &mb));
     if (ok) {
-        double sum = 0; uint64_t n = 0, diff = 0;
+        double sum = 0, la = 0, lb = 0; uint64_t n = 0, diff = 0;
         for (UINT y = 0; y < da.Height; y += 4) {       // every 4th row and pixel: plenty for a verdict
             const uint8_t* ra = static_cast<const uint8_t*>(ma.pData) + y * ma.RowPitch;
             const uint8_t* rb = static_cast<const uint8_t*>(mb.pData) + y * mb.RowPitch;
             for (UINT x = 0; x < da.Width; x += 4) {
                 int d = 0;
-                for (int c = 0; c < 3; ++c) d += abs(static_cast<int>(ra[x*4+c]) - static_cast<int>(rb[x*4+c]));
+                for (int c = 0; c < 3; ++c) { d += abs(static_cast<int>(ra[x*4+c]) - static_cast<int>(rb[x*4+c])); la += ra[x*4+c]; lb += rb[x*4+c]; }
                 sum += d / 3.0; n++; if (d > 6) diff++;
             }
         }
         *mean_abs = n ? sum / n : 0; *frac_diff = n ? static_cast<double>(diff) / n : 0;
+        if (bright_a) *bright_a = n ? la / (3.0 * n) : 0;
+        if (bright_b) *bright_b = n ? lb / (3.0 * n) : 0;
     }
     if (ma.pData) g_orig_unmap(g_ctx, sa, 0);
     if (mb.pData) g_orig_unmap(g_ctx, sb, 0);
@@ -2449,13 +2451,17 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
              e.size, a[3], a[7], a[11], b[3], b[7], b[11]);
         break;
     }
-    double m = 0, fr = 0;
+    double m = 0, fr = 0, ba = 0, bb = 0;
     auto it = g_backbuffer ? g_twins.find(g_backbuffer) : g_twins.end();
-    if (it != g_twins.end() && it->second.tex && readback_diff(g_backbuffer, it->second.tex, &m, &fr))
-        diag("    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ", m, fr * 100);
+    if (it != g_twins.end() && it->second.tex && readback_diff(g_backbuffer, it->second.tex, &m, &fr, &ba, &bb))
+        diag("    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
     else diag("    final: could not compare");
-    if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr))
-        diag("    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ", m, fr * 100);
+    {
+        D3D11_TEXTURE2D_DESC d = {}; if (g_prev_e2_target) g_prev_e2_target->GetDesc(&d);
+        diag("    scene snapshot source: %ux%u fmt %u, from %s", d.Width, d.Height, static_cast<unsigned>(d.Format), g_snap_from ? "set" : "none");
+    }
+    if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr, &ba, &bb))
+        diag("    scene: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
     else diag("    scene: could not compare (snapshots %s/%s)", g_snap_game ? "yes" : "no", g_snap_tex ? "yes" : "no");
     return 0;
 }
