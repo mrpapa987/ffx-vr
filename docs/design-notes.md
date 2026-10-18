@@ -161,3 +161,48 @@ What to do about it, in order of effort:
   history-blend pass) will need the same treatment as that pass.
 - Also noted for the same sections: the frame-rate collapse after several
   underwater battles, under investigation with the perf telemetry.
+
+## First person: the player's body, arms and hands (noted 18 Oct 2026)
+
+Goal: the overworld from Tidus's real perspective, body visible, hands where
+the controllers are. The game already animates a full skinned Tidus every
+frame and we already rewrite the constant buffers that carry his bones, so
+this is staged work on top of what exists.
+
+Stage 1 - the body (the game's animation, our eyes):
+- Hide only the head and hair draws instead of the whole model. Parts are
+  identified by mesh (stable per model); a one-time "tick the head parts"
+  list under Debug, saved against the model name (c101) like the player
+  lookup.
+- Eye on the head bone: read the head bone's world position from the skinned
+  buffer (7 KB layout, bone palette) each frame instead of actor position +
+  eye height. The eye then bobs and leans with the walk cycle; looking down
+  shows the torso and legs, animated by the game's own locomotion.
+- Near plane: the game's clips close geometry; the chest and shoulders may
+  need a nearer plane in the projection we already write.
+- Cutscenes: a head-bone eye under scripted head animation is sickening;
+  hand off to spectator mode (planned anyway). Swimming and Blitzball: eye
+  follows the actor, not the bone (see the swimming note).
+
+Stage 2 - arms and hands (IK):
+- Prerequisite: controller poses from OpenXR (an action set with grip/aim
+  poses; a day or two; wanted for menus and pointing regardless).
+- Two-bone IK per arm (shoulder-elbow-wrist) with the controller as the
+  target; torso yaw follows the head; legs stay on the game's animation.
+  Solve on the CPU, overwrite those bones in the skinned buffer before the
+  GPU reads it (same mechanism as the camera override, further down the
+  buffer).
+- Skeleton map needed: arm bone indices, parents, bind pose, the game's
+  bone-matrix convention. The FFX-60fps mod's SMOOTH-003 reads bones and
+  motion channels per actor (Ch_SkeletonJob, Ch_StepMotion, SeqFrame): start
+  from its findings.
+- Polish: elbow hinting (no flipped elbows), hand poses from controller
+  buttons, reach clamping so the arm never dislocates.
+- Estimate: two to three weeks including a week of tuning.
+
+Not planned: leg/foot IK (no trackers; the walk animation is better than a
+guess) and finger tracking (button-driven hand poses are enough).
+
+Order: Stage 1 first (quick, and it tells us whether a body at true scale
+feels right - Tidus at ~20 units is a 1.75 m man), then controllers, then
+arms.
