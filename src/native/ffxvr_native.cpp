@@ -23,6 +23,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h>   // ID3D11Multithread
 #include <d3dcompiler.h>
 #include "ffxvr_xr.h"
 
