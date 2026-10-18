@@ -138,3 +138,26 @@ it). The 16:9 target is the limit, not the GPU.
    downsample, once 2 holds and the GPU has headroom.
 Not DLSS: no motion vectors in the game, temporal ghosting is worse in VR,
 and 8x MSAA is already the better anti-aliasing for a headset.
+
+## First person: swimming (noted 18 Oct 2026)
+
+When the player enters water the character goes prone and swims at the
+surface, but the first-person eye stays at `player position + eye height`
+with the heading frame upright, so swimming looks like walking on water:
+the eye is a full standing height above the surface and the body is hidden
+as if standing.
+
+What to do about it, in order of effort:
+- Detect the swimming state (the field actor's animation/motion state, or
+  the player's height relative to the water plane; a stated flag in the
+  actor struct is the thing to look for) and drop the eye height to a
+  swimming value (a few units above the surface), with a short slew between
+  the two so the transition is a dip, not a cut.
+- Optionally pitch the resting view slightly down and widen the body-hide
+  radius, since the prone model extends further from the actor origin.
+- Underwater sections (free swimming in three axes) are a different mode
+  again: the eye should follow the actor origin directly, and the game's
+  own underwater distortion pass (the same family as the water-area
+  history-blend pass) will need the same treatment as that pass.
+- Also noted for the same sections: the frame-rate collapse after several
+  underwater battles, under investigation with the perf telemetry.
