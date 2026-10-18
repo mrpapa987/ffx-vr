@@ -61,6 +61,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_bisect_set;
     private delegate* unmanaged[Cdecl]<uint> _fn_scene_draws;
     private int _bisect_mode = 0, _bisect_a = 0, _bisect_b = 0;
+    private delegate* unmanaged[Cdecl]<void> _fn_blend_off, _fn_blend_restore;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_hist_set;
+    private delegate* unmanaged[Cdecl]<uint> _fn_hist_draws;
+    private int _hist_mode = 1;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_move_set;
     private delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void> _fn_move_status;
     private bool _move_remap = true, _move_invert = false;
@@ -241,6 +245,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_noimg_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_draws");
             _fn_bisect_set   = (delegate* unmanaged[Cdecl]<int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bisect_set");
             _fn_scene_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_scene_draws");
+            _fn_blend_off    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_blend_off");
+            _fn_blend_restore= (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_blend_restore");
+            _fn_hist_set     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hist_set");
+            _fn_hist_draws   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hist_draws");
             _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
             _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
@@ -383,20 +391,26 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
-        int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(1) : 0;
+        int r = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
-        if (eye2 < 0) return;                       // hidden (the player's own body in first person)
+        if (r < 0) return;                          // hidden (the player's own body in first person)
+        int eye2 = r & 15; bool noblend = (r & 16) != 0 && _fn_blend_off != null;
+        if (noblend) _fn_blend_off();
         _o_drawindexed!(ctx, n, start, base_vertex);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_drawindexed!(ctx, n, start, base_vertex); _fn_eye2_end(); }
+        if (noblend) _fn_blend_restore();
     }
 
     private void h_draw(nint ctx, uint n, uint start) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
-        int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(2) : 0;
+        int r = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
-        if (eye2 < 0) return;
+        if (r < 0) return;
+        int eye2 = r & 15; bool noblend = (r & 16) != 0 && _fn_blend_off != null;
+        if (noblend) _fn_blend_off();
         _o_draw!(ctx, n, start);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
+        if (noblend) _fn_blend_restore();
     }
 
     private void h_drawidxinst(nint ctx, uint a, uint b, uint c, int d, uint e) {
@@ -534,6 +548,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "move_invert":       _move_invert = v == "1"; break;
                     case "fp_actor":          _fp_actor = v.Trim(); break;
                     case "noimg_mode":        int.TryParse(v, out _noimg_mode); break;
+                    case "hist_mode":         int.TryParse(v, out _hist_mode); break;
                     case "follow_pans":       _follow_pans = v == "1"; break;
                     case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
                     case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
@@ -577,6 +592,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"move_invert={(_move_invert ? 1 : 0)}\n" +
             $"fp_actor={_fp_actor}\n" +
             $"noimg_mode={_noimg_mode}\n" +
+            $"hist_mode={_hist_mode}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
@@ -669,6 +685,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("never", ref _xr_screen_mode, 2);
         if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on);
+        ImGui.Text("frame blending (water areas):"); ImGui.SameLine();
+        ImGui.RadioButton("off (no trails)", ref _hist_mode, 1); ImGui.SameLine();
+        ImGui.RadioButton("game default", ref _hist_mode, 0); ImGui.SameLine();
+        ImGui.RadioButton("skip pass", ref _hist_mode, 2);
+        if (_fn_hist_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"blend draws seen: {_fn_hist_draws()}"); }
+        if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
 
         ImGui.Separator();

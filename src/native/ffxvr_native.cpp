@@ -560,6 +560,17 @@ uint32_t g_fp_hidden_draws = 0;
 int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 // Bisect tool: scene-pass draws by index in the frame. mode 1 hides [a,b],
 // mode 2 shows only [a,b]. The census lists every scene-pass draw.
+// History (temporal accumulation) draws: a full-screen draw, blending, into a
+// full-resolution target that was neither cleared nor rendered into earlier
+// this frame -- the previous frame mixed into this one. Water areas do this
+// (a persistent buffer that the scene is drawn into and read back from),
+// which trails on every head movement. 0 leave, 1 draw without blending
+// (history = this frame only), 2 skip.
+int g_hist_mode = 1; uint32_t g_hist_draws = 0;
+ID3D11Texture2D* g_targets_frame[64]; int g_targets_frame_n = 0;   // rtv0 textures bound so far this frame
+ID3D11Texture2D* g_cleared_frame[64]; int g_cleared_frame_n = 0;   // colour-cleared so far this frame
+bool g_cur_rtv0_first_use = false;
+ID3D11BlendState* g_opaque_blend = nullptr; ID3D11BlendState* g_nb_saved = nullptr; float g_nb_saved_bf[4]; UINT g_nb_saved_mask = 0; bool g_nb_active = false;
 int g_bisect_mode = 0, g_bisect_a = 0, g_bisect_b = 0; int g_scene_census_lines = 0; uint32_t g_scene_draw_idx = 0, g_scene_draws_last = 0;
 uint32_t g_twins_recycled = 0, g_twins_swept = 0, g_twin_srvs_dropped = 0, g_buffers_pruned = 0;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
@@ -1293,6 +1304,13 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
     g_cur_dsv = static_cast<ID3D11DepthStencilView*>(dsv);
+    g_cur_rtv0_first_use = false;
+    if (g_cur_rtv_n > 0 && g_cur_rtv[0]) {
+        ID3D11Texture2D* t0 = texture_of(g_cur_rtv[0]);
+        bool seen = false;
+        for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == t0) { seen = true; break; }
+        if (!seen) { g_cur_rtv0_first_use = true; if (g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = t0; }
+    }
     if (!g_frame_live) return;
     char a[96], b[96];
     describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
@@ -2081,6 +2099,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_latched      = false;
     g_draw_in_frame = 0;
     g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0;
+    g_targets_frame_n = 0; g_cleared_frame_n = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
@@ -2154,6 +2173,30 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
+    // History-blend draw (see g_hist_mode).
+    int ret_flags = 0;
+    if (g_stereo && !g_overlay_phase && g_cur_rtv_n == 1 && g_cur_dsv == nullptr && g_cur_rtv0_first_use && g_ctx) {
+        ID3D11Texture2D* ht = texture_of(g_cur_rtv[0]);
+        D3D11_TEXTURE2D_DESC hd = {}; if (ht) ht->GetDesc(&hd);
+        if (ht && ht != g_backbuffer && hd.SampleDesc.Count == 1 && hd.Width >= 1280) {
+            bool cleared = false;
+            for (int i = 0; i < g_cleared_frame_n; ++i) if (g_cleared_frame[i] == ht) { cleared = true; break; }
+            if (!cleared) {
+                ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+                bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
+                if (blend) {
+                    g_hist_draws++;
+                    if (g_frame_live) {
+                        FrameEv e; snprintf(e.text, sizeof(e.text), "      draw %d HISTORY BLEND into %p %ux%u (uncleared, first use this frame) mode %d", idx, (void*)ht, hd.Width, hd.Height, g_hist_mode);
+                        std::lock_guard<std::mutex> lock(g_mutex); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+                    }
+                    if (g_hist_mode == 2) return -1;
+                    if (g_hist_mode == 1) ret_flags |= 16;
+                }
+            }
+        }
+    }
+
     // Scene-pass draw (multisampled target): the bisect tool and, for draws
     // without a camera image, the experiment switch; census lines for both.
     if (g_stereo && !g_overlay_phase && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
@@ -2209,23 +2252,23 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             else g_frame_run_big++;
         }
     }
-    if (g_latched || g_ctx == nullptr) return eye2 ? 1 : 0;
+    if (g_latched || g_ctx == nullptr) return (eye2 ? 1 : 0) | ret_flags;
 
     ID3D11Buffer* b = nullptr;
     g_ctx->VSGetConstantBuffers(0, 1, &b);          // AddRefs
-    if (b == nullptr) return eye2 ? 1 : 0;
+    if (b == nullptr) return (eye2 ? 1 : 0) | ret_flags;
 
     D3D11_BUFFER_DESC bd = {};
     b->GetDesc(&bd);
     // The camera lives in the ~1 KB per-object buffers (view at +64, inverse at
     // +320). The ~7 KB ones are skinned characters with a different layout.
-    if (bd.ByteWidth < CAM_MIN_SIZE || bd.ByteWidth > 2048) { b->Release(); return eye2 ? 1 : 0; }
+    if (bd.ByteWidth < CAM_MIN_SIZE || bd.ByteWidth > 2048) { b->Release(); return (eye2 ? 1 : 0) | ret_flags; }
 
     if (g_slot0 != nullptr) g_slot0->Release();
     g_slot0             = b;                        // keep the reference
     g_latched           = true;
     g_draws_latched_at  = idx;
-    return eye2 ? 1 : 0;
+    return (eye2 ? 1 : 0) | ret_flags;
 }
 
 /// out[0] = floats changed since last frame, out[1] = buffer size, out[2] = draw
@@ -3015,7 +3058,11 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, voi
 static void ui_pass_begin();
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
-    if (!depth) snapshot_if_scene(texture_of(static_cast<ID3D11View*>(view)), 3);   // about to be wiped: last chance
+    if (!depth) {
+        ID3D11Texture2D* ct = texture_of(static_cast<ID3D11View*>(view));
+        if (ct && g_cleared_frame_n < 64) g_cleared_frame[g_cleared_frame_n++] = ct;
+        snapshot_if_scene(ct, 3);   // about to be wiped: last chance
+    }
     if (g_scene_live_tex && g_scene_live_draws >= 20) {
         ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
@@ -3628,6 +3675,23 @@ extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int
 extern "C" __declspec(dllexport) void ffxvr_noimg_set(int mode) { g_noimg_mode = mode; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_noimg_draws() { return g_noimg_draws; }
 extern "C" __declspec(dllexport) void ffxvr_bisect_set(int mode, int a, int b) { g_bisect_mode = mode; g_bisect_a = a; g_bisect_b = b; }
+extern "C" __declspec(dllexport) void ffxvr_hist_set(int mode) { g_hist_mode = mode; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_hist_draws() { return g_hist_draws; }
+/// Around a history-blend draw (both eyes): blending off, so the buffer holds this frame only.
+extern "C" __declspec(dllexport) void ffxvr_blend_off() {
+    if (g_ctx == nullptr || g_nb_active) return;
+    if (g_opaque_blend == nullptr && g_device) { D3D11_BLEND_DESC bd = {}; bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL; g_device->CreateBlendState(&bd, &g_opaque_blend); }
+    if (g_opaque_blend == nullptr) return;
+    g_ctx->OMGetBlendState(&g_nb_saved, g_nb_saved_bf, &g_nb_saved_mask);
+    g_ctx->OMSetBlendState(g_opaque_blend, g_nb_saved_bf, g_nb_saved_mask);
+    g_nb_active = true;
+}
+extern "C" __declspec(dllexport) void ffxvr_blend_restore() {
+    if (g_ctx == nullptr || !g_nb_active) return;
+    g_ctx->OMSetBlendState(g_nb_saved, g_nb_saved_bf, g_nb_saved_mask);
+    if (g_nb_saved) { g_nb_saved->Release(); g_nb_saved = nullptr; }
+    g_nb_active = false;
+}
 extern "C" __declspec(dllexport) uint32_t ffxvr_scene_draws() { return g_scene_draws_last; }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
