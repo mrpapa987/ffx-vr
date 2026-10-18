@@ -111,3 +111,30 @@ Shared prerequisites: mode system with a reliable "player has control" /
 injection path into the game, the line pass. Comfortable defaults for the
 community release (Seat, authored-with-head-look, blink on cuts); spectator
 and first person one toggle away.
+
+## Sharpness in the headset (next steps)
+
+Why it went soft with the full FOV: the 3840x2160 target that covered the
+game's 45x26 deg window (~85 px/deg) now covers ~100x100 deg: ~38 px/deg
+horizontally (above the Quest 3's ~25) but ~22 px/deg vertically (below
+it). The 16:9 target is the limit, not the GPU.
+
+1. DONE in code: eye swapchains at the full 3840x2160 (no mod-side
+   downscale to 2496x1404 before the runtime's own resample).
+2. NEXT TEST: render taller. Everything we do is independent of the
+   target's shape (our projection maps whatever rectangle the game renders
+   onto the headset FOV), so a taller game resolution fixes it directly.
+   Find the launcher's settings store (Square Enix launcher; usually a small
+   config under Documents\SQUARE ENIX\FINAL FANTASY X&X-2 HD Remaster\ or
+   next to FFX&X-2_LAUNCHER.exe) and try a custom value such as 3840x3600
+   (~36 px/deg vertical). The monitor window becomes tall and odd; it does
+   not matter in VR. If the game refuses custom values, override the
+   swapchain/target size at creation from the mod instead.
+   Note: the virtual-screen and preview paths assume 16:9 for the panel
+   size; with a taller target, letterbox or crop the panel copy.
+3. Optional: a contrast-adaptive sharpen (FSR-1 RCAS style) in the copy
+   pass, mild default, slider.
+4. Later: supersample 1.3-1.5x the headset density and let the runtime
+   downsample, once 2 holds and the GPU has headroom.
+Not DLSS: no motion vectors in the game, temporal ghosting is worse in VR,
+and 8x MSAA is already the better anti-aliasing for a headset.

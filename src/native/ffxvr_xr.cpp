@@ -207,9 +207,14 @@ bool xr_start(const XrHost& host) {
     for (int i = 0; i < 3; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
-            e.w = vcv[i].recommendedImageRectWidth;
-            e.h = e.w * 9 / 16;
-            if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
+            // Full game resolution: the game renders 3840x2160 and the runtime
+            // resamples to the display anyway, so an intermediate downscale
+            // here only cost sharpness. Capped by what the runtime allows.
+            e.w = 3840; e.h = 2160;
+            if (e.w > vcv[i].maxImageRectWidth || e.h > vcv[i].maxImageRectHeight) {
+                e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
+                if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
+            }
         }
         else { e.w = 2560; e.h = 1440; }                   // the virtual screen
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
