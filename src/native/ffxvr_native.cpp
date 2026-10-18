@@ -554,6 +554,10 @@ float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and abo
 float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
 bool  g_fp_hide_body = true; float g_fp_hide_radius = 12.f;
 uint32_t g_fp_hidden_draws = 0;
+// Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
+// with a constant-buffer layout we do not patch). 0 draw identically in both
+// eyes, 1 eye 1 only, 2 hide in both.
+int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 uint32_t g_twins_recycled = 0, g_twins_swept = 0, g_twin_srvs_dropped = 0, g_buffers_pruned = 0;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
@@ -2066,7 +2070,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
-        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; frame_event("-- frame start (after Present) --"); }
+        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; g_noimg_census_lines = 0; frame_event("-- frame start (after Present) --"); }
         if (g_stacks_live) { g_stacks_live = false; census_dump(); }
         if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
     }
@@ -2145,6 +2149,36 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
+    }
+    // Scene-pass draw (multisampled target) without a camera image: the
+    // experiment switch, and a census line describing it.
+    if (g_stereo && g_eye2_cur == nullptr && !g_overlay_phase && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
+        ID3D11Texture2D* tt = texture_of(g_cur_rtv[0]);
+        D3D11_TEXTURE2D_DESC td = {}; if (tt) tt->GetDesc(&td);
+        if (tt && td.SampleDesc.Count > 1) {
+            g_noimg_draws++;
+            if (g_frame_live && g_noimg_census_lines < 300 && g_ctx) {
+                ID3D11Buffer* vcb[4] = {}; ID3D11Buffer* pcb[4] = {}; UINT vsz[4] = {}, psz[4] = {};
+                g_ctx->VSGetConstantBuffers(0, 4, vcb); g_ctx->PSGetConstantBuffers(0, 4, pcb);
+                for (int k = 0; k < 4; ++k) {
+                    if (vcb[k]) { D3D11_BUFFER_DESC bd; vcb[k]->GetDesc(&bd); vsz[k] = bd.ByteWidth; vcb[k]->Release(); }
+                    if (pcb[k]) { D3D11_BUFFER_DESC bd; pcb[k]->GetDesc(&bd); psz[k] = bd.ByteWidth; pcb[k]->Release(); }
+                }
+                ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+                int blend = -1; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable ? 1 : 0; bs->Release(); }
+                ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
+                ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
+                int zwrite = -1; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = (dd.DepthEnable && dd.DepthWriteMask) ? 1 : 0; ds->Release(); }
+                FrameEv e;
+                snprintf(e.text, sizeof(e.text), "      draw %d NO IMAGE: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p",
+                         idx, vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps);
+                if (vs) vs->Release(); if (ps) ps->Release();
+                std::lock_guard<std::mutex> lock(g_mutex);
+                if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_noimg_census_lines++; }
+            }
+            if (g_noimg_mode == 2) return -1;
+            if (g_noimg_mode == 1) { g_e2_no_image++; return 0; }
+        }
     }
     if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // (kept for the census)
     if (g_overlay_phase) eye2 = false;      // between our hook and the game's first clear only the overlay draws (handled above)
@@ -3581,6 +3615,8 @@ extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float 
 }
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) { g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0; }
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
+extern "C" __declspec(dllexport) void ffxvr_noimg_set(int mode) { g_noimg_mode = mode; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_noimg_draws() { return g_noimg_draws; }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }

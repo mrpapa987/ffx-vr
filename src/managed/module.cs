@@ -55,6 +55,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, void> _fn_turn;
     private delegate* unmanaged[Cdecl]<uint> _fn_turn_count;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_perf_status;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_noimg_set;
+    private delegate* unmanaged[Cdecl]<uint> _fn_noimg_draws;
+    private int _noimg_mode = 0;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_move_set;
     private delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void> _fn_move_status;
     private bool _move_remap = true, _move_invert = false;
@@ -231,6 +234,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_perf_status");
+            _fn_noimg_set    = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_set");
+            _fn_noimg_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_draws");
             _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
             _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
@@ -522,6 +527,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "turn_blink":        _turn_blink = v != "0"; break;
                     case "move_remap":        _move_remap = v != "0"; break;
                     case "move_invert":       _move_invert = v == "1"; break;
+                    case "fp_actor":          _fp_actor = v.Trim(); break;
+                    case "noimg_mode":        int.TryParse(v, out _noimg_mode); break;
                     case "follow_pans":       _follow_pans = v == "1"; break;
                     case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
                     case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
@@ -563,6 +570,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"turn_blink={(_turn_blink ? 1 : 0)}\n" +
             $"move_remap={(_move_remap ? 1 : 0)}\n" +
             $"move_invert={(_move_invert ? 1 : 0)}\n" +
+            $"fp_actor={_fp_actor}\n" +
+            $"noimg_mode={_noimg_mode}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
@@ -744,6 +753,16 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
 
+        if (ImGui.TreeNode("Effects without a camera (fog, water: ghosting experiment)")) {
+            ImGui.TextWrapped("Scene draws whose constant buffers carry no camera we recognise are drawn identically in both eyes, which shows as ghosting. Try each setting in a foggy or watery spot, then press Frame census so the log lists those draws.");
+            ImGui.RadioButton("draw in both eyes (default)", ref _noimg_mode, 0); ImGui.SameLine();
+            ImGui.RadioButton("eye 1 only", ref _noimg_mode, 1); ImGui.SameLine();
+            ImGui.RadioButton("hide", ref _noimg_mode, 2);
+            if (_fn_noimg_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"such draws so far: {_fn_noimg_draws()}"); }
+            ImGui.TreePop();
+        }
+        if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
+
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
             ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
@@ -751,6 +770,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
             ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 2f, 40f);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
+            ImGui.InputText("player model name", ref _fp_actor, 16); ImGui.SameLine();
+            ImGui.TextDisabled(_fp_actor_idx >= 0 ? $"actor {_fp_actor_idx}" : "not found (using actor 0)");
             ImGui.TreePop();
         }
 
@@ -862,11 +883,24 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
     }
 
-    /// <summary>Player = field actor 0 (verified: it is the one that moves). Render space negates X and Y.</summary>
+    /// <summary>The player: the enabled field actor whose model name matches (Tidus is c101); index 0
+    /// is not reliable. Falls back to actor 0. Render space negates X and Y.</summary>
+    private string _fp_actor = "c101"; private int _fp_actor_idx = -1;
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
-        if (actors != null && read(actors, out Actor a) && a.chr_enabled != 0) _fn_player_set(-a.chr_pos_vec.X, -a.chr_pos_vec.Y, a.chr_pos_vec.Z, 1);
+        if (actors == null) { _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; return; }
+        int pick = -1;
+        if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && cur.chr_enabled != 0 && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
+        else {
+            for (int i = 0; i < 48 && pick < 0; i++) {
+                if (!read(actors + i, out Actor a)) break;
+                if (a.chr_enabled != 0 && actor_name(a.chr_name) == _fp_actor) pick = i;
+            }
+            if (pick < 0 && read(actors, out Actor a0) && a0.chr_enabled != 0) pick = 0;
+        }
+        _fp_actor_idx = pick;
+        if (pick >= 0 && read(actors + pick, out Actor p)) _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);
         else _fn_player_set(0, 0, 0, 0);
     }
 
