@@ -488,6 +488,12 @@ static bool same4(const float* a, const float* b) {
 // forward), translation along the base camera's axes scaled by the world
 // scale (game units per metre). Eye 2 adds the right-eye offset.
 bool  g_xr_want     = false;       // the user asked for the headset
+ID3D11Texture2D* g_bb_copy = nullptr;        // eye 1: the backbuffer copied at the hook, then the overlay drawn on top
+ID3D11RenderTargetView* g_bb_copy_rtv = nullptr;
+ID3D11Texture2D* g_e2_copy = nullptr;        // eye 2: the backbuffer twin copied at the hook, then the overlay drawn on top
+ID3D11RenderTargetView* g_e2_copy_rtv = nullptr;
+bool g_copies_complete = false;              // both hold a finished frame (game + overlay) ready to submit
+
 bool  g_xr_active   = false;       // poses valid this frame
 bool  g_xr_rotate   = true, g_xr_translate = true;
 float g_xr_scale    = 94.f;        // units per metre; 94 gives a 6-unit eye separation
@@ -1837,12 +1843,17 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
+    // Overlay-phase draws (ImGui: our overlay, Fahrenheit's save UI) go to
+    // the backbuffer after our copies were taken: re-issue them into both
+    // copies so the headset sees them. Two passes, no camera, no twins.
+    if (g_overlay_phase && g_xr_want && g_copies_complete && g_bb_copy_rtv && g_e2_copy_rtv
+        && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) return 2;
     if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
     if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // (kept for the census)
-    if (g_overlay_phase) eye2 = false;      // between our hook and the game's first clear only the overlay draws
+    if (g_overlay_phase) eye2 = false;      // between our hook and the game's first clear only the overlay draws (handled above)
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (!g_stereo) g_e2_no_stereo++;
@@ -2457,9 +2468,24 @@ static bool snapshot_if_scene(ID3D11Texture2D* tex, uint32_t how) {
 /// to its twin, and uploads the eye-2 image of the object buffer if there is
 /// one. The managed detour then re-issues the draw.
 ID3D11ShaderResourceView* g_saved_ps_srv[16] = {};
-extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
-    if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
+bool g_overlay_pass = false;
+extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
+    if (g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
+    if (g_overlay_phase && g_xr_want && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
+        // Overlay draw: pass 0 -> eye 1's copy, pass 1 -> eye 2's copy. Same
+        // depth target as the game (none for ImGui), same viewport/scissor.
+        ID3D11RenderTargetView* rt = (pass == 0) ? g_bb_copy_rtv : g_e2_copy_rtv;
+        if (rt == nullptr) return 0;
+        g_in_eye2 = true; g_overlay_pass = true;
+        for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
+        for (int i = 0; i < 16; ++i) g_saved_ps_srv[i] = g_cur_ps_srv[i];
+        ID3D11RenderTargetView* rts[1] = { rt };
+        g_ctx->OMSetRenderTargets(1, rts, g_cur_dsv);
+        return 1;
+    }
+    if (!g_stereo) { g_e2_begin_fail++; return 0; }
     if (g_cur_rtv_n == 0 && g_cur_dsv == nullptr) { g_e2_begin_fail++; return 0; }
+    g_overlay_pass = false;
 
     ID3D11RenderTargetView* rtvs[4] = {};
     for (UINT i = 0; i < g_cur_rtv_n; ++i) rtvs[i] = twin_rtv(g_cur_rtv[i]);
@@ -2540,6 +2566,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin() {
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
+    if (g_overlay_pass) { g_overlay_pass = false; g_in_eye2 = false; return; }
     g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
     if (!g_debug_leave) {
         for (int sl = 0; sl < 14; ++sl) {
@@ -3042,7 +3069,20 @@ extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
 
 /// Called once per frame from the Present hook, with the finished frame in
 /// the backbuffer (eye 1) and its twin (eye 2).
-ID3D11Texture2D* g_bb_copy = nullptr;        // the backbuffer, copied into a texture that can be sampled
+static ID3D11Texture2D* ensure_copy(ID3D11Texture2D*& tex, ID3D11RenderTargetView*& rtv, const D3D11_TEXTURE2D_DESC& like) {
+    if (tex) {
+        D3D11_TEXTURE2D_DESC cd; tex->GetDesc(&cd);
+        if (cd.Width != like.Width || cd.Height != like.Height || cd.Format != like.Format) { g_plain_srvs_forget(tex); if (rtv) rtv->Release(); rtv = nullptr; tex->Release(); tex = nullptr; }
+    }
+    if (tex == nullptr) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = like.Width; td.Height = like.Height; td.MipLevels = 1; td.ArraySize = 1; td.Format = like.Format;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &tex))) { tex = nullptr; return nullptr; }
+        if (FAILED(g_device->CreateRenderTargetView(tex, nullptr, &rtv))) rtv = nullptr;
+    }
+    return tex;
+}
 static void xr_tick() {
     if (!g_xr_want) return;
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
@@ -3050,33 +3090,30 @@ static void xr_tick() {
         if (!said) { said = true; diag("xr: forcing override + eye 2 on (were %d/%d)", g_ovr_enabled ? 1 : 0, g_stereo ? 1 : 0); }
         g_stereo = true; g_ovr_enabled = true;
     }
-    ID3D11Texture2D* e1 = nullptr;
-    ID3D11Texture2D* e2 = nullptr;
-    if (g_backbuffer) {
-        auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex;
-        D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
-        if (g_bb_copy) {
-            D3D11_TEXTURE2D_DESC cd; g_bb_copy->GetDesc(&cd);
-            if (cd.Width != bd.Width || cd.Height != bd.Height || cd.Format != bd.Format) { g_plain_srvs_forget(g_bb_copy); g_bb_copy->Release(); g_bb_copy = nullptr; }
-        }
-        if (g_bb_copy == nullptr) {
-            D3D11_TEXTURE2D_DESC td = {};
-            td.Width = bd.Width; td.Height = bd.Height; td.MipLevels = 1; td.ArraySize = 1; td.Format = bd.Format;
-            td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_bb_copy))) g_bb_copy = nullptr;
-        }
-        if (g_bb_copy) { { InEye2 guard; g_ctx->CopyResource(g_bb_copy, g_backbuffer); } e1 = g_bb_copy; }
-    }
+    // The frame finished at the previous hook -- game image plus the overlay
+    // the runtime drew after that hook -- is complete now; submit it. Then
+    // copy this frame's game images so the overlay can be drawn on top of
+    // them during this hook's overlay phase.
+    ID3D11Texture2D* e1 = g_copies_complete ? g_bb_copy : nullptr;
+    ID3D11Texture2D* e2 = g_copies_complete ? g_e2_copy : nullptr;
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;
     const float ty = (P[5] != 0.f) ? 1.f / fabsf(P[5]) : 0.5625f;
-    // The field of view the frame just finished was rendered with.
+    // The field of view the submitted frame was rendered with: that frame
+    // finished at the previous hook, so take what was recorded then.
+    static XrFovTan prev_used[2] = {}; static bool prev_valid = false;
     XrFovTan used[2];
-    if (g_xr_fov_applied) { used[0] = g_xr_fov_used[0]; used[1] = g_xr_fov_used[1]; }
+    if (prev_valid) { used[0] = prev_used[0]; used[1] = prev_used[1]; }
     else { used[0] = used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
+    if (g_xr_fov_applied) { prev_used[0] = g_xr_fov_used[0]; prev_used[1] = g_xr_fov_used[1]; }
+    else { prev_used[0] = prev_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
+    prev_valid = true;
     XrFrameOut out = {};
-    if (e1 == nullptr) return;
+    const bool had_fov = g_xr_fov_applied;
     g_xr_fov_applied = false;
+    if (e1 == nullptr && !g_copies_complete) {
+        // Nothing to submit yet: still wait/begin/locate so the session runs.
+    }
     if (g_seq_left > 0) {
         wchar_t n1[64], n2[64];
         _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
@@ -3087,7 +3124,10 @@ static void xr_tick() {
     }
     // 2D frame? No perspective camera was uploaded. Two frames of hysteresis
     // before switching to the screen; back to 3D at once.
-    if (g_cam_uploads_frame == 0) g_frames_without_cam++; else g_frames_without_cam = 0;
+    // A 3D frame has a scene pass: dozens of draws into one depth-tested
+    // target. The title screen and menus upload a (dummy) camera too, so the
+    // camera count alone is not the test.
+    if (g_cam_uploads_frame == 0 || g_scene_live_draws < 20) g_frames_without_cam++; else g_frames_without_cam = 0;
     g_cam_uploads_frame = 0;
     const bool is2d = g_frames_without_cam >= 2;
     g_xr_screen_now = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
@@ -3104,6 +3144,21 @@ static void xr_tick() {
         xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &out);
     }
     xr_apply_poses(out);
+    (void)had_fov;
+
+    // This frame's game images -> the copies; the overlay phase draws on top.
+    g_copies_complete = false;
+    if (g_backbuffer) {
+        D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+        ID3D11Texture2D* twin = nullptr;
+        { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) twin = it->second.tex; }
+        if (ensure_copy(g_bb_copy, g_bb_copy_rtv, bd) && ensure_copy(g_e2_copy, g_e2_copy_rtv, bd)) {
+            InEye2 guard;
+            g_ctx->CopyResource(g_bb_copy, g_backbuffer);
+            g_ctx->CopyResource(g_e2_copy, twin ? twin : g_backbuffer);
+            g_copies_complete = true;
+        }
+    }
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
     else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }

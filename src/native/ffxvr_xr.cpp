@@ -60,8 +60,10 @@ bool         g_running  = false;
 bool         g_frame_open = false;
 XrTime       g_render_time = 0;
 bool         g_should_render = false;
-XrView       g_render_views[2] = {};
+XrView       g_render_views[2] = {};            // located at the last wait: what the frame now rendering uses
 bool         g_render_views_valid = false;
+XrView       g_submit_views[2] = {};            // located one wait earlier: what the frame being submitted was rendered with
+bool         g_submit_views_valid = false;
 
 struct Eye {
     XrSwapchain sc = XR_NULL_HANDLE;
@@ -117,6 +119,7 @@ void xr_stop() {
             p_xrEndFrame(g_session, &end); g_frame_open = false;
         }
         if (g_running && p_xrEndSession) { p_xrEndSession(g_session); g_running = false; }
+        g_submit_views_valid = false;
         destroy_eyes();
         if (g_space != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_space);
         g_space = XR_NULL_HANDLE;
@@ -307,7 +310,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         const bool use_screen = screen != nullptr && screen->on;
-        bool ok = g_should_render && g_render_views_valid;
+        bool ok = g_should_render && g_submit_views_valid;
         if (ok && use_screen) {
             ok = submit_eye(2, eye1);
             quad.space = g_space; quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -321,7 +324,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         else if (ok) {
             for (int i = 0; i < 2; ++i) {
                 if (!submit_eye(i, i == 0 ? eye1 : (eye2 ? eye2 : eye1))) { ok = false; break; }
-                pv[i].pose = g_render_views[i].pose;
+                pv[i].pose = g_submit_views[i].pose;
                 pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
                 pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
                 pv[i].subImage.swapchain = g_eye[i].sc;
@@ -365,6 +368,11 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     stage("xrLocateViews");
     r = p_xrLocateViews(g_session, &vli, &vs, 2, &n, views);
     const bool valid = XR_SUCCEEDED(r) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+    // The images submitted at the next call are the frame rendered with the
+    // views located now; the ones submitted at this call were rendered with
+    // the views located last time (one hook of delay, so the overlay drawn
+    // after the hook is included).
+    memcpy(g_submit_views, g_render_views, sizeof(g_submit_views)); g_submit_views_valid = g_render_views_valid;
     g_render_views_valid = valid;
     stage("game");
     if (!valid) return;
