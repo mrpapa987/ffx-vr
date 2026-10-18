@@ -20,6 +20,26 @@ XrHost g_h = {};
 HMODULE g_loader = nullptr;
 char g_status[160] = "off";
 
+// Stall watchdog: the render thread records the stage it is in; a thread
+// checks every second and logs if a stage has lasted more than 5 s.
+volatile const char* g_stage = "idle";
+volatile DWORD g_stage_tick = 0;
+HANDLE g_watchdog = nullptr;
+volatile bool g_watchdog_stop = false;
+void stage(const char* s) { g_stage = s; g_stage_tick = GetTickCount(); }
+DWORD WINAPI watchdog_main(LPVOID) {
+    const char* last_reported = nullptr; DWORD last_tick_reported = 0;
+    while (!g_watchdog_stop) {
+        Sleep(1000);
+        const DWORD now = GetTickCount(); const DWORD t0 = g_stage_tick; const char* s = const_cast<const char*>(g_stage);
+        if (now - t0 > 5000 && (s != last_reported || t0 != last_tick_reported)) {
+            g_h.diag("xr: STALL -- render thread has been in stage '%s' for %lu ms", s, now - t0);
+            last_reported = s; last_tick_reported = t0;
+        }
+    }
+    return 0;
+}
+
 PFN_xrGetInstanceProcAddr p_gipa = nullptr;
 #define XRFN(name) PFN_##name p_##name = nullptr;
 XRFN(xrCreateInstance) XRFN(xrDestroyInstance) XRFN(xrGetInstanceProperties) XRFN(xrGetSystem) XRFN(xrGetSystemProperties)
@@ -106,6 +126,8 @@ void xr_stop() {
     if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance) { p_xrDestroyInstance(g_instance); g_instance = XR_NULL_HANDLE; }
     g_state = XR_SESSION_STATE_UNKNOWN; g_render_views_valid = false; g_running = false;
     set_status("off");
+    stage("stopped");
+    if (g_watchdog) { g_watchdog_stop = true; WaitForSingleObject(g_watchdog, 3000); CloseHandle(g_watchdog); g_watchdog = nullptr; }
     g_h.diag("xr: stopped");
 }
 
@@ -208,6 +230,8 @@ bool xr_start(const XrHost& host) {
     }
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
+    stage("session created");
+    if (g_watchdog == nullptr) { g_watchdog_stop = false; g_watchdog = CreateThread(nullptr, 0, watchdog_main, nullptr, 0, nullptr); }
     return true;
 }
 
@@ -241,15 +265,22 @@ void poll_events() {
     }
 }
 
+uint32_t g_wait_timeouts = 0;
 bool submit_eye(int i, ID3D11Texture2D* src) {
     Eye& e = g_eye[i];
     uint32_t idx = 0;
+    stage(i == 0 ? "acquire eye 0" : "acquire eye 1");
     XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
     if (XR_FAILED(p_xrAcquireSwapchainImage(e.sc, &ai, &idx))) return false;
-    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO }; wi.timeout = XR_INFINITE_DURATION;
-    if (XR_FAILED(p_xrWaitSwapchainImage(e.sc, &wi))) return false;
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h)) g_h.ctx->CopyResource(e.images[idx], e.mid);
+    stage(i == 0 ? "wait image eye 0" : "wait image eye 1");
+    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO }; wi.timeout = 250000000;   // 250 ms, never forever
+    XrResult r = p_xrWaitSwapchainImage(e.sc, &wi);
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    if (r == XR_TIMEOUT_EXPIRED) { g_wait_timeouts++; if (g_wait_timeouts <= 5) g_h.diag("xr: swapchain image wait timed out (eye %d)", i); p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
+    if (XR_FAILED(r)) { p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
+    stage(i == 0 ? "copy eye 0" : "copy eye 1");
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h)) g_h.ctx->CopyResource(e.images[idx], e.mid);
+    stage("release image");
     p_xrReleaseSwapchainImage(e.sc, &ri);
     return true;
 }
@@ -259,8 +290,9 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
 void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], XrFrameOut* next) {
     if (next) next->have_views = false;
     if (!xr_active()) return;
+    stage("poll events");
     poll_events();
-    if (!xr_active() || !g_running) return;
+    if (!xr_active() || !g_running) { stage("game (session not running)"); return; }
 
     // End the frame that was just rendered, with the poses it was rendered from.
     if (g_frame_open) {
@@ -284,19 +316,22 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount = ok ? 1 : 0; end.layers = ok ? layers : nullptr;
+        stage("xrEndFrame");
         XrResult r = p_xrEndFrame(g_session, &end);
         g_frame_open = false;
         if (XR_FAILED(r)) fail("xrEndFrame", r);
     }
 
     // Wait for the next frame and locate the eyes for it.
+    stage("xrWaitFrame");
     XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
     XrResult r = p_xrWaitFrame(g_session, &fwi, &fs);
-    if (XR_FAILED(r)) { fail("xrWaitFrame", r); return; }
+    if (XR_FAILED(r)) { fail("xrWaitFrame", r); stage("game"); return; }
+    stage("xrBeginFrame");
     XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
     r = p_xrBeginFrame(g_session, &fbi);
-    if (XR_FAILED(r) ) { fail("xrBeginFrame", r); return; }
+    if (XR_FAILED(r) ) { fail("xrBeginFrame", r); stage("game"); return; }
     g_frame_open = true;
     g_render_time = fs.predictedDisplayTime;
     g_should_render = fs.shouldRender == XR_TRUE;
@@ -306,9 +341,11 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     XrViewState vs = { XR_TYPE_VIEW_STATE };
     XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
     uint32_t n = 0;
+    stage("xrLocateViews");
     r = p_xrLocateViews(g_session, &vli, &vs, 2, &n, views);
     const bool valid = XR_SUCCEEDED(r) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
     g_render_views_valid = valid;
+    stage("game");
     if (!valid) return;
     memcpy(g_render_views, views, sizeof(views));
     if (next) {

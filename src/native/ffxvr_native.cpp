@@ -2306,12 +2306,32 @@ static ID3D11Texture2D* texture_of(ID3D11View* view) {
     return tex;
 }
 
+static void g_plain_srvs_forget(ID3D11Texture2D* t);
+static void twin_release(Twin& t) {
+    for (auto& kv : t.srvs) if (kv.second) kv.second->Release();
+    t.srvs.clear();
+    if (t.rtv) t.rtv->Release();
+    if (t.dsv) t.dsv->Release();
+    if (t.tex) { g_plain_srvs_forget(t.tex); t.tex->Release(); }
+    t.rtv = nullptr; t.dsv = nullptr; t.tex = nullptr;
+}
+uint32_t g_twins_recycled = 0;
 static Twin* twin_of(ID3D11Texture2D* game) {
     if (game == nullptr || g_device == nullptr) return nullptr;
-    auto it = g_twins.find(game);
-    if (it != g_twins.end()) return &it->second;
-
     D3D11_TEXTURE2D_DESC d; game->GetDesc(&d);
+    auto it = g_twins.find(game);
+    if (it != g_twins.end()) {
+        // The game frees and recreates textures at area changes, and a new
+        // texture can land at an old address: the twin must match the
+        // texture that is there now.
+        Twin& old = it->second;
+        if (old.tex == nullptr || (old.w == d.Width && old.h == d.Height && old.fmt == d.Format)) return &old;
+        twin_release(old);
+        g_twins.erase(it);
+        g_twins_recycled++;
+        if (g_twins_recycled <= 10) diag("twin recycled: %p now %ux%u fmt %u", static_cast<void*>(game), d.Width, d.Height, static_cast<unsigned>(d.Format));
+    }
+
     Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format;
 
     D3D11_TEXTURE2D_DESC cd = d;
@@ -2390,9 +2410,9 @@ static void snapshot_scene(ID3D11Texture2D* game) {
     Twin& src = it->second;
     if (g_snap_tex == nullptr || g_snap_from != game) {
         if (g_snap_srv)      { g_snap_srv->Release();      g_snap_srv = nullptr; }
-        if (g_snap_tex)      { g_snap_tex->Release();      g_snap_tex = nullptr; }
+        if (g_snap_tex)      { g_plain_srvs_forget(g_snap_tex);  g_snap_tex->Release();  g_snap_tex = nullptr; }
         if (g_snap_game_srv) { g_snap_game_srv->Release(); g_snap_game_srv = nullptr; }
-        if (g_snap_game)     { g_snap_game->Release();     g_snap_game = nullptr; }
+        if (g_snap_game)     { g_plain_srvs_forget(g_snap_game); g_snap_game->Release(); g_snap_game = nullptr; }
         D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
         if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))  g_device->CreateShaderResourceView(g_snap_tex,  nullptr, &g_snap_srv);
@@ -2851,6 +2871,7 @@ static bool copy_pass_init() {
 }
 
 static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
+static void g_plain_srvs_forget(ID3D11Texture2D* t) { auto it = g_plain_srvs.find(t); if (it != g_plain_srvs.end()) { if (it->second) it->second->Release(); g_plain_srvs.erase(it); } }
 bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h);
 
 /// Renders `src` into the opaque copy for `slot` (0..2) and returns its SRV.
@@ -2860,7 +2881,7 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
     if (d.SampleDesc.Count != 1) return nullptr;
     OpaqueCopy& oc = g_opaque[slot];
     if (oc.tex == nullptr || oc.w != d.Width || oc.h != d.Height) {
-        if (oc.srv) oc.srv->Release(); if (oc.rtv) oc.rtv->Release(); if (oc.tex) oc.tex->Release();
+        if (oc.srv) oc.srv->Release(); if (oc.rtv) oc.rtv->Release(); if (oc.tex) { g_plain_srvs_forget(oc.tex); oc.tex->Release(); }
         oc = OpaqueCopy{};
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = d.Width; td.Height = d.Height; td.MipLevels = 1; td.ArraySize = 1;
@@ -3015,7 +3036,7 @@ static void xr_tick() {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         if (g_bb_copy) {
             D3D11_TEXTURE2D_DESC cd; g_bb_copy->GetDesc(&cd);
-            if (cd.Width != bd.Width || cd.Height != bd.Height || cd.Format != bd.Format) { g_bb_copy->Release(); g_bb_copy = nullptr; }
+            if (cd.Width != bd.Width || cd.Height != bd.Height || cd.Format != bd.Format) { g_plain_srvs_forget(g_bb_copy); g_bb_copy->Release(); g_bb_copy = nullptr; }
         }
         if (g_bb_copy == nullptr) {
             D3D11_TEXTURE2D_DESC td = {};
