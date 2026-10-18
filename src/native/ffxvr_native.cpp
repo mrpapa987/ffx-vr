@@ -2004,7 +2004,11 @@ static void twin_release(Twin& t);
 static void sweep_caches() {
     if (g_frames % 300 != 0) return;
     for (auto it = g_twins.begin(); it != g_twins.end();) {
-        if (it->first != g_backbuffer && g_frames - it->second.last_used > 900) { twin_release(it->second); it = g_twins.erase(it); g_twins_swept++; }
+        // Scene-sized twins cost hundreds of MB and a long allocation; the
+        // game re-uses its targets across battles, so they stay for 10 min.
+        const bool big = it->second.w >= 1280;
+        const uint32_t idle = big ? 36000u : 900u;
+        if (it->first != g_backbuffer && g_frames - it->second.last_used > idle) { twin_release(it->second); it = g_twins.erase(it); g_twins_swept++; }
         else ++it;
     }
     std::lock_guard<std::mutex> lock(g_mutex);
