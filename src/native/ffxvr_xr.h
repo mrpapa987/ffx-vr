@@ -40,7 +40,8 @@ struct XrUiPanel {
 bool        xr_start(const XrHost& host);                   // loads the loader, creates instance + session + swapchains
 void        xr_stop();
 bool        xr_active();                                    // session exists (may not be running yet)
-const char* xr_status();                                    // one line for the overlay
+const char* xr_status();
+void xr_timing(double* wait_ms, double* end_ms);           // last frame: xrWaitFrame / xrEndFrame durations                                    // one line for the overlay
 
 /// Per frame, from the Present hook. `eye1`/`eye2` are the finished images
 /// of the frame just rendered (eye2 may be null: mono); `used` the field of

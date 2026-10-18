@@ -566,7 +566,7 @@ int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 // (a persistent buffer that the scene is drawn into and read back from),
 // which trails on every head movement. 0 leave, 1 draw without blending
 // (history = this frame only), 2 skip.
-int g_hist_mode = 1; uint32_t g_hist_draws = 0;
+int g_hist_mode = 1; uint32_t g_hist_draws = 0; uint32_t g_draw_in_frame_last = 0;
 ID3D11Texture2D* g_targets_frame[64]; int g_targets_frame_n = 0;   // rtv0 textures bound so far this frame
 ID3D11Texture2D* g_cleared_frame[64]; int g_cleared_frame_n = 0;   // colour-cleared so far this frame
 bool g_cur_rtv0_first_use = false;
@@ -2020,18 +2020,24 @@ static void sweep_caches() {
     }
 }
 
-struct Perf { double frame_ms, xr_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
+struct Perf { double frame_ms, xr_ms, frame_max_ms, wait_ms, end_ms, e2_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
 static Perf g_perf = {};
 static LARGE_INTEGER g_qpf = {}, g_t_frame_prev = {}; static double g_acc_frame = 0, g_acc_xr = 0; static int g_acc_n = 0; static ULONGLONG g_perf_log_tick = 0;
-double g_xr_ms_this_frame = 0;
+double g_xr_ms_this_frame = 0; double g_e2_ms_this_frame = 0; static double g_acc_wait = 0, g_acc_end = 0, g_acc_e2 = 0, g_acc_max = 0; LARGE_INTEGER g_e2_t0 = {};
 static IDXGIAdapter3* g_adapter3 = nullptr; static bool g_adapter3_tried = false;
 static void perf_tick() {
     if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
-    if (g_t_frame_prev.QuadPart) { g_acc_frame += (now.QuadPart - g_t_frame_prev.QuadPart) * 1000.0 / g_qpf.QuadPart; g_acc_xr += g_xr_ms_this_frame; g_acc_n++; }
-    g_t_frame_prev = now; g_xr_ms_this_frame = 0;
+    if (g_t_frame_prev.QuadPart) {
+        const double fm = (now.QuadPart - g_t_frame_prev.QuadPart) * 1000.0 / g_qpf.QuadPart;
+        g_acc_frame += fm; if (fm > g_acc_max) g_acc_max = fm; g_acc_xr += g_xr_ms_this_frame; g_acc_e2 += g_e2_ms_this_frame; g_acc_n++;
+        double w = 0, e = 0; xr_timing(&w, &e); g_acc_wait += w; g_acc_end += e;
+    }
+    g_t_frame_prev = now; g_xr_ms_this_frame = 0; g_e2_ms_this_frame = 0;
     if (g_acc_n < 60) return;
-    g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_acc_frame = g_acc_xr = 0; g_acc_n = 0;
+    g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_perf.frame_max_ms = g_acc_max;
+    g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
+    g_acc_frame = g_acc_xr = g_acc_wait = g_acc_end = g_acc_e2 = g_acc_max = 0; g_acc_n = 0;
     g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
     { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
     g_perf.plain_srvs = g_plain_srvs_count();
@@ -2050,11 +2056,12 @@ static void perf_tick() {
         if (SUCCEEDED(g_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vi))) { g_perf.vram_mb = vi.CurrentUsage >> 20; g_perf.vram_budget_mb = vi.Budget >> 20; }
     }
     const ULONGLONG t = GetTickCount64();
-    if (t - g_perf_log_tick > 30000) {
+    const bool slow = g_perf.frame_ms > 40.0;
+    if (t - g_perf_log_tick > (slow ? 5000ULL : 30000ULL)) {
         g_perf_log_tick = t;
-        diag("perf: frame %.1f ms (xr %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) in-flight %u plain srvs %u | private %llu MB, vram %llu / %llu MB | eye2 draws %u, hidden %u",
-             g_perf.frame_ms, g_perf.xr_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned, g_perf.in_flight, g_perf.plain_srvs,
-             (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_eye2_draws_report, g_fp_hidden_draws);
+        diag("perf: frame %.1f ms (max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u hidden %u hist %u",
+             g_perf.frame_ms, g_perf.frame_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
+             (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_fp_hidden_draws, g_hist_draws);
     }
 }
 
@@ -2098,7 +2105,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
     g_draw_in_frame = 0;
-    g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0;
+    g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0; g_draw_in_frame_last = (uint32_t)g_draw_in_frame;
     g_targets_frame_n = 0; g_cleared_frame_n = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
@@ -2885,6 +2892,7 @@ ID3D11ShaderResourceView* g_saved_ps_srv[16] = {};
 ID3D11BlendState* g_saved_blend = nullptr; float g_saved_blend_factor[4]; UINT g_saved_sample_mask = 0xFFFFFFFF;
 bool g_ui_pass_active_draw = false;
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
+    QueryPerformanceCounter(&g_e2_t0);
     (void)pass;
     if (g_ui_draw_now) {
         if (g_ui_rtv == nullptr || g_ctx == nullptr) return 0;
@@ -2977,6 +2985,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
 
 /// Restores the game's targets, sampled textures and the eye-1 image.
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
+    { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); if (g_qpf.QuadPart && g_e2_t0.QuadPart) g_e2_ms_this_frame += (t1.QuadPart - g_e2_t0.QuadPart) * 1000.0 / g_qpf.QuadPart; }
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
     if (g_ui_pass_active_draw) {
@@ -3094,9 +3103,9 @@ extern "C" __declspec(dllexport) int ffxvr_on_copy(void* dst_res, unsigned dst_s
         const bool st = g_twins.find(src) != g_twins.end() && g_twins[src].tex != nullptr;
         const bool dt = g_twins.find(dst) != g_twins.end() && g_twins[dst].tex != nullptr;
         char t[160];
-        snprintf(t, sizeof(t), "CPY %s %ux%u fmt %u%s -> %ux%u fmt %u%s%s%s", whole ? "whole" : "region",
-                 sd.Width, sd.Height, static_cast<unsigned>(sd.Format), st ? " (twinned)" : " (NO twin)",
-                 dd.Width, dd.Height, static_cast<unsigned>(dd.Format), dt ? " (twinned)" : "",
+        snprintf(t, sizeof(t), "CPY %s %p %ux%u fmt %u%s -> %p %ux%u fmt %u%s%s%s", whole ? "whole" : "region",
+                 static_cast<void*>(src), sd.Width, sd.Height, static_cast<unsigned>(sd.Format), st ? " (twinned)" : " (NO twin)",
+                 static_cast<void*>(dst), dd.Width, dd.Height, static_cast<unsigned>(dd.Format), dt ? " (twinned)" : "",
                  dst == g_backbuffer ? "  [BACKBUFFER]" : "", g_overlay_phase ? "  [overlay phase]" : "");
         std::lock_guard<std::mutex> lock(g_mutex);
         frame_event(t);
@@ -3656,8 +3665,8 @@ extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float 
 extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
-    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (xr %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
-        g_perf.frame_ms, g_perf.xr_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
+    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
+        g_perf.frame_ms, g_perf.frame_max_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
         (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
 }
 extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }

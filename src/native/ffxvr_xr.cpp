@@ -27,6 +27,8 @@ volatile DWORD g_stage_tick = 0;
 HANDLE g_watchdog = nullptr;
 volatile bool g_watchdog_stop = false;
 void stage(const char* s) { g_stage = s; g_stage_tick = GetTickCount(); }
+double g_t_wait_ms = 0, g_t_end_ms = 0;            // last frame: time in xrWaitFrame, time in submit+xrEndFrame
+static double qpc_ms() { static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f); LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
 DWORD WINAPI watchdog_main(LPVOID) {
     const char* last_reported = nullptr; DWORD last_tick_reported = 0;
     while (!g_watchdog_stop) {
@@ -359,7 +361,9 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount = ok ? (have_ui ? 2u : 1u) : 0u; end.layers = ok ? layers : nullptr;
         stage("xrEndFrame");
+        const double t_end0 = qpc_ms();
         XrResult r = p_xrEndFrame(g_session, &end);
+        g_t_end_ms = qpc_ms() - t_end0;
         g_frame_open = false;
         if (XR_FAILED(r)) fail("xrEndFrame", r);
     }
@@ -368,7 +372,9 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     stage("xrWaitFrame");
     XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
+    const double t_wait0 = qpc_ms();
     XrResult r = p_xrWaitFrame(g_session, &fwi, &fs);
+    g_t_wait_ms = qpc_ms() - t_wait0;
     if (XR_FAILED(r)) { fail("xrWaitFrame", r); stage("game"); return; }
     stage("xrBeginFrame");
     XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
@@ -404,3 +410,5 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         }
     }
 }
+
+void xr_timing(double* wait_ms, double* end_ms) { if (wait_ms) *wait_ms = g_t_wait_ms; if (end_ms) *end_ms = g_t_end_ms; }
