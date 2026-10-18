@@ -48,6 +48,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_ui_set;
     private delegate* unmanaged[Cdecl]<int> _fn_ui_draws;
+    private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
+    private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
+    private bool _markers_3d = true;
     private bool _ui_on = true; private float _ui_dist = 1.5f, _ui_width = 1.6f;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
@@ -202,6 +206,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_set");
             _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_set");
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
+            _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
+            _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
@@ -626,7 +632,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
 
         if (ImGui.TreeNode("Battle markers")) {
-            ImGui.Checkbox("draw target / turn markers", ref _markers_on);
+            ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
+            ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
             ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
             ImGui.TreePop();
@@ -695,8 +702,18 @@ public sealed unsafe class FFXVRModule : FhModule {
         return ok;
     }
 
+    private void push_markers() {
+        if (_fn_markers_set == null) return;
+        fixed (float* p = _mk_pos) fixed (uint* c = _mk_col) _fn_markers_set(p, c, _mk_n);
+        if (_fn_markers_3d != null) _fn_markers_3d(_markers_3d ? 1 : 0);
+    }
+
     private void draw_markers() {
-        _markers_drawn = 0;
+        _markers_drawn = 0; _mk_n = 0;
+        try { draw_markers_inner(); } finally { push_markers(); }
+    }
+
+    private void draw_markers_inner() {
         if (!_markers_on || _fn_project == null || _fn_safe_read == null) return;
 
         Btl* btl = Globals.Battle.btl;
@@ -748,6 +765,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (!read(chr, out Chr c) || c.actor == null) return;
         if (!read(c.actor, out Actor a)) return;
         if (c.stat_visible == 0 && label == "target") { /* still mark; the game does */ }
+
+        // For the headset: the same point as 3D geometry, drawn natively per eye.
+        if (_mk_n < 32) {
+            _mk_pos[_mk_n * 3 + 0] = -a.chr_pos_vec.X; _mk_pos[_mk_n * 3 + 1] = -a.chr_pos_vec.Y + _marker_height; _mk_pos[_mk_n * 3 + 2] = a.chr_pos_vec.Z;
+            _mk_col[_mk_n] = color; _mk_n++;
+        }
 
         float* ndc = stackalloc float[2];
         // Actor positions are in the game's PS2-era space; the renderer's world

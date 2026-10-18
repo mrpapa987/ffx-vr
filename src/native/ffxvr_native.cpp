@@ -529,6 +529,7 @@ enum UiState { UI_IDLE = 0, UI_RESOLVED = 1, UI_PASS = 2, UI_DONE = 3 };
 int   g_ui_state = UI_IDLE;
 bool  g_ui_enabled = true;
 float g_ui_dist = 1.5f, g_ui_width = 1.6f;
+bool  g_markers_3d = true;             // our battle markers as 3D geometry in the eye images
 ID3D11Texture2D* g_scene_resolved = nullptr;    // the latest resolve destination of the scene target (game's)
 ID3D11Texture2D* g_ui_tex = nullptr; ID3D11RenderTargetView* g_ui_rtv = nullptr;
 ID3D11Texture2D* g_eye1_final = nullptr; ID3D11RenderTargetView* g_eye1_final_rtv = nullptr;
@@ -3094,6 +3095,154 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 3D markers: small camera-facing triangles at world positions, drawn into
+// each eye's image with that eye's view and projection, so they sit on the
+// combatant at the right depth (the game's cursors are placed through its
+// own camera and land in the wrong place on the UI panel).
+
+struct Marker { float x, y, z; uint32_t color; };
+Marker g_markers[32]; int g_marker_n = 0;
+static const char k_marker_hlsl[] =
+    "cbuffer C : register(b0) { row_major float4x4 VP; };\n"
+    "struct VI { float3 p : POSITION; float4 c : COLOR; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); o.p.z = 0.5 * o.p.w; o.c = i.c; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3D11InputLayout* g_mk_il = nullptr;
+ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr;
+bool g_mk_tried = false;
+struct MkVertex { float p[3]; float c[4]; };
+static const int k_mk_max_verts = 32 * 6;
+
+static bool marker_pass_init() {
+    if (g_mk_tried) return g_mk_vs != nullptr;
+    g_mk_tried = true;
+    HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+    PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
+    if (!compile) { diag("marker pass: no compiler"); return false; }
+    ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
+    HRESULT hr = compile(k_marker_hlsl, sizeof(k_marker_hlsl) - 1, "mk", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vsb, &err);
+    if (FAILED(hr)) { diag("marker pass: vs failed: %s", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); if (err) err->Release(); return false; }
+    if (err) { err->Release(); err = nullptr; }
+    hr = compile(k_marker_hlsl, sizeof(k_marker_hlsl) - 1, "mk", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &psb, &err);
+    if (FAILED(hr)) { diag("marker pass: ps failed: %s", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); if (err) err->Release(); vsb->Release(); return false; }
+    if (err) err->Release();
+    g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_mk_vs);
+    g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_mk_ps);
+    D3D11_INPUT_ELEMENT_DESC ie[2] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+    g_device->CreateInputLayout(ie, 2, vsb->GetBufferPointer(), vsb->GetBufferSize(), &g_mk_il);
+    vsb->Release(); psb->Release();
+    D3D11_BUFFER_DESC bd = {};
+    bd.ByteWidth = sizeof(MkVertex) * k_mk_max_verts; bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_device->CreateBuffer(&bd, nullptr, &g_mk_vb);
+    D3D11_BUFFER_DESC cd = {};
+    cd.ByteWidth = 64; cd.Usage = D3D11_USAGE_DYNAMIC; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_device->CreateBuffer(&cd, nullptr, &g_mk_cb);
+    D3D11_BLEND_DESC bl = {};
+    bl.RenderTarget[0].BlendEnable = TRUE;
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; bl.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA; bl.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    g_device->CreateBlendState(&bl, &g_mk_blend);
+    const bool ok = g_mk_vs && g_mk_ps && g_mk_il && g_mk_vb && g_mk_cb;
+    diag("marker pass: %s", ok ? "ready" : "FAILED");
+    return ok;
+}
+
+/// Draws the markers into `dst` (w x h) for one eye: `V` the eye's view
+/// (row-major 4x4, column-vector convention), `f` its field of view.
+static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f) {
+    if (g_marker_n == 0 || dst == nullptr || !marker_pass_init()) return;
+    // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
+    float P[16] = {};
+    P[0] = 2.f / (f.r - f.l); P[2] = (f.r + f.l) / (f.r - f.l);
+    P[5] = 2.f / (f.u - f.d); P[6] = (f.u + f.d) / (f.u - f.d);
+    P[10] = -1.f; P[14] = -1.f;
+    float VP[16]; mul4(P, V, VP);
+    // Camera axes in world space (rows of the view's rotation) for billboarding.
+    const float right[3] = { V[0], V[1], V[2] }, up[3] = { V[4], V[5], V[6] };
+    // Size: a marker ~1/8 of a character (20 units) wide.
+    const float sz = 2.5f;
+    MkVertex verts[k_mk_max_verts]; int nv = 0;
+    for (int i = 0; i < g_marker_n && nv + 6 <= k_mk_max_verts; ++i) {
+        const Marker& m = g_markers[i];
+        const float c[4] = { ((m.color >> 0) & 255) / 255.f, ((m.color >> 8) & 255) / 255.f, ((m.color >> 16) & 255) / 255.f, ((m.color >> 24) & 255) / 255.f };
+        // Downward-pointing triangle above the point: tip at the point, base sz above.
+        float tip[3] = { m.x, m.y, m.z };
+        float a[3], b[3];
+        for (int k = 0; k < 3; ++k) { a[k] = tip[k] + up[k] * sz * 2.f - right[k] * sz; b[k] = tip[k] + up[k] * sz * 2.f + right[k] * sz; }
+        MkVertex v0 = { { a[0], a[1], a[2] }, { c[0], c[1], c[2], c[3] } };
+        MkVertex v1 = { { b[0], b[1], b[2] }, { c[0], c[1], c[2], c[3] } };
+        MkVertex v2 = { { tip[0], tip[1], tip[2] }, { c[0], c[1], c[2], c[3] } };
+        verts[nv++] = v0; verts[nv++] = v1; verts[nv++] = v2;
+        verts[nv++] = v0; verts[nv++] = v2; verts[nv++] = v1;      // both windings: no culling surprises
+    }
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
+    if (SUCCEEDED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, VP, 64); g_orig_unmap(g_ctx, g_mk_cb, 0); }
+
+    // Save, draw, restore (the subset of state we touch).
+    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
+    ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
+    g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
+    ID3D11Buffer* o_cb = nullptr; g_ctx->VSGetConstantBuffers(0, 1, &o_cb);
+    ID3D11Buffer* o_vb = nullptr; UINT o_stride = 0, o_off = 0; g_ctx->IAGetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+    ID3D11InputLayout* o_il = nullptr; g_ctx->IAGetInputLayout(&o_il);
+    D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
+    ID3D11BlendState* o_bs = nullptr; float o_bf[4]; UINT o_mask; g_ctx->OMGetBlendState(&o_bs, o_bf, &o_mask);
+    ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
+    ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
+
+    InEye2 guard;
+    ID3D11RenderTargetView* rt[1] = { dst };
+    g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
+    g_ctx->RSSetViewports(1, &vp);
+    g_ctx->VSSetShader(g_mk_vs, nullptr, 0); g_ctx->PSSetShader(g_mk_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_orig_vssetcb(g_ctx, 0, 1, &g_mk_cb);
+    UINT stride = sizeof(MkVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_mk_vb, &stride, &off);
+    g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    g_ctx->Draw(static_cast<UINT>(nv), 0);
+
+    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv);
+    if (nvp) g_ctx->RSSetViewports(1, &o_vp);
+    g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
+    g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
+    g_ctx->IASetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+    g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
+    g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
+    for (auto* v : o_rtv) if (v) v->Release();
+    if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
+    if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
+    if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release(); if (o_rs) o_rs->Release();
+}
+
+/// Markers for this frame, in render space. Called from the managed side each frame.
+extern "C" __declspec(dllexport) void ffxvr_markers_set(const float* xyz, const uint32_t* colors, int n) {
+    if (n < 0) n = 0; if (n > 32) n = 32;
+    for (int i = 0; i < n; ++i) { g_markers[i].x = xyz[i*3]; g_markers[i].y = xyz[i*3+1]; g_markers[i].z = xyz[i*3+2]; g_markers[i].color = colors[i]; }
+    g_marker_n = n;
+}
+
+/// Draws the markers into both eye images, each with its own view and FOV.
+static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
+    if (g_marker_n == 0 || !g_cam_valid) return;
+    float v[12];
+    { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); }
+    float V1[16], V2[16], I[16], Pn[3];
+    g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn);
+    g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn);
+    g_eye_shift = 0.f;
+    D3D11_TEXTURE2D_DESC d;
+    if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0]); }
+    if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1]); }
+}
+
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
     ID3D11Texture2D* src = nullptr;
@@ -3144,6 +3293,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
 extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
+extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
@@ -3190,7 +3340,10 @@ static void xr_tick() {
     XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width };
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
     g_ui_state = UI_IDLE;
-    if (ui_frame) { e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex; }
+    if (ui_frame) {
+        e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex;
+        if (g_markers_3d) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);
+    }
     else if (g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex; }
