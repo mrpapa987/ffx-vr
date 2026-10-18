@@ -49,7 +49,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_ui_set;
     private delegate* unmanaged[Cdecl]<int> _fn_ui_draws;
     private delegate* unmanaged[Cdecl]<float, void> _fn_xr_pitch_follow;
-    private float _xr_pitch_follow = 0.5f;
+    private float _xr_pitch_follow = 0.85f;
+    private delegate* unmanaged[Cdecl]<int, int, int, float, float, void> _fn_cuts_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_cut_count;
+    private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
     private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
     private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
@@ -97,7 +100,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // -- camera override state (owned here, pushed to native every frame) ----
     private bool  _ovr_enabled, _ovr_freeze;
     private float _ovr_yaw, _ovr_pitch;
-    private float _ovr_right, _ovr_up, _ovr_forward;
+    private float _ovr_right, _ovr_up = -78f, _ovr_forward;   // seat height default from testing
 
     // -- inline detours on d3d11.dll's draw functions ------------------------
     //
@@ -209,6 +212,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_set");
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_pitch_follow");
+            _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cuts_set");
+            _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
@@ -483,6 +488,10 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "pitch_follow":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_pitch_follow); break;
                     case "seat_height":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_up); break;
                     case "seat_forward":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_forward); break;
+                    case "cut_recentre":      _cut_recentre = v != "0"; break;
+                    case "cut_blink":         _cut_blink = v == "1"; break;
+                    case "follow_pans":       _follow_pans = v == "1"; break;
+                    case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -509,7 +518,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"ui_width={_ui_width.ToString("F2", ci)}\n" +
             $"pitch_follow={_xr_pitch_follow.ToString("F2", ci)}\n" +
             $"seat_height={_ovr_up.ToString("F0", ci)}\n" +
-            $"seat_forward={_ovr_forward.ToString("F0", ci)}\n";
+            $"seat_forward={_ovr_forward.ToString("F0", ci)}\n" +
+            $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
+            $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
+            $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
+            $"follow_rate={_follow_rate.ToString("F0", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -548,6 +561,13 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.SliderFloat("pitch follow", ref _xr_pitch_follow, 0f, 1f, "%.2f");
         ImGui.SameLine(); ImGui.TextDisabled("0 level horizon .. 1 the original view");
         if (_fn_xr_pitch_follow != null) _fn_xr_pitch_follow(_xr_pitch_follow);
+        ImGui.Text("camera cuts:"); ImGui.SameLine();
+        ImGui.Checkbox("recentre on cut", ref _cut_recentre); ImGui.SameLine();
+        ImGui.Checkbox("blink", ref _cut_blink); ImGui.SameLine();
+        ImGui.Checkbox("follow pans", ref _follow_pans);
+        if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 90f);
+        if (_fn_cuts_set != null) _fn_cuts_set(_cut_recentre ? 1 : 0, _cut_blink ? 1 : 0, _follow_pans ? 1 : 0, _follow_rate, ImGui.GetIO().DeltaTime);
+        if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
         ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }

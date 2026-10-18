@@ -510,7 +510,18 @@ float g_xr_ref_p[3] = {};
 bool  g_xr_recenter_pending = true;     // first valid pose becomes the reference
 bool  g_xr_use_fov  = true;             // replace the game's projection with the headset's per-eye field of view
 bool  g_xr_seat     = true;             // head owns orientation; the authored camera contributes position and heading only
-float g_xr_pitch_follow = 0.5f;         // seat: how much of the authored pitch stays in the reference frame (0 level .. 1 the original view)
+float g_xr_pitch_follow = 0.85f;        // seat: how much of the authored pitch stays in the reference frame (0 level .. 1 the original view)
+// Seat heading latch: the reference frame is taken from the authored camera
+// once and kept, so scripted pans do not turn the world; a cut re-latches
+// (and recentres on the head), optionally with a blink. "Follow pans" slews
+// the latched heading toward the live one slowly.
+bool  g_seat_latched = false;
+float g_seat_yaw = 0.f, g_seat_pitch = 0.f;   // latched authored heading (radians; yaw about +y, pitch + looks up)
+bool  g_cut_recentre = true, g_cut_blink = false, g_follow_pans = false;
+float g_follow_rate = 20.f;                    // deg/s
+uint32_t g_cut_count = 0; int g_blink_frames = 0;
+float g_cam_prev_pos[3] = {}, g_cam_prev_fwd[3] = {}; bool g_cam_prev_valid = false;
+float g_dt = 1.f / 72.f;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
 bool  g_xr_fov_applied = false;
@@ -616,17 +627,27 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             float len = sqrtf(f[0]*f[0] + f[2]*f[2]);
             if (len < 1e-4f) { f[0] = 0.f; f[2] = -1.f; len = 1.f; }
             f[0] /= len; f[2] /= len;
-            const float up[3] = { 0.f, 1.f, 0.f };
-            const float right[3] = { f[1]*up[2] - f[2]*up[1], f[2]*up[0] - f[0]*up[2], f[0]*up[1] - f[1]*up[0] };   // f x up
-            float Rh[9] = { right[0], right[1], right[2],  up[0], up[1], up[2],  -f[0], -f[1], -f[2] };
-            // Pitch follow: a fraction of the authored pitch kept in the frame,
-            // so "straight ahead" leans toward where the director pointed.
+            // Live authored heading (yaw about +y) and pitch (+ looks up).
+            const float live_yaw = atan2f(-f[0], -f[2]);
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
-            const float authored_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1])));   // + looks up
-            const float pf = authored_pitch * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
-            if (fabsf(pf) > 1e-4f) {
-                // rotate the frame about its right axis: rows up and back mix
-                const float cp = cosf(pf), sp = sinf(pf);
+            const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
+            if (!g_seat_latched) { g_seat_yaw = live_yaw; g_seat_pitch = live_pitch; g_seat_latched = true; }
+            else if (g_follow_pans) {
+                // slew the latched yaw toward the live one, rate-limited
+                float d = live_yaw - g_seat_yaw;
+                while (d >  3.14159265f) d -= 6.2831853f;
+                while (d < -3.14159265f) d += 6.2831853f;
+                const float step = g_follow_rate * 0.0174533f * g_dt;
+                g_seat_yaw += fmaxf(-step, fminf(step, d));
+                g_seat_pitch += (live_pitch - g_seat_pitch) * fminf(1.f, g_dt * 2.f);
+            }
+            // Frame from the latched yaw: forward (-sin yaw, 0, -cos yaw), right = f x up, then pitch about right.
+            const float fy[3] = { -sinf(g_seat_yaw), 0.f, -cosf(g_seat_yaw) };
+            const float up[3] = { 0.f, 1.f, 0.f };
+            const float right[3] = { fy[1]*up[2] - fy[2]*up[1], fy[2]*up[0] - fy[0]*up[2], fy[0]*up[1] - fy[1]*up[0] };
+            float Rh[9] = { right[0], right[1], right[2],  up[0], up[1], up[2],  -fy[0], -fy[1], -fy[2] };
+            if (fabsf(g_seat_pitch) > 1e-4f) {
+                const float cp = cosf(g_seat_pitch), sp = sinf(g_seat_pitch);
                 float nu[3], nb[3];
                 for (int k = 0; k < 3; ++k) { nu[k] = Rh[3+k] * cp + Rh[6+k] * sp; nb[k] = -Rh[3+k] * sp + Rh[6+k] * cp; }
                 for (int k = 0; k < 3; ++k) { Rh[3+k] = nu[k]; Rh[6+k] = nb[k]; }
@@ -3305,7 +3326,11 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (!on && g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; }
     return g_xr_want ? 1 : 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; }
+extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
+    g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate; if (dt > 0.f && dt < 1.f) g_dt = dt;
+}
+extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }
@@ -3340,8 +3365,34 @@ static ID3D11Texture2D* ensure_copy(ID3D11Texture2D*& tex, ID3D11RenderTargetVie
     }
     return tex;
 }
+/// Once per frame: a jump in the authored camera is a cut. Re-latch the seat
+/// heading, recentre on the head, optionally blink.
+static void detect_cut() {
+    if (!g_cam_valid) return;
+    float v[12]; { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); }
+    const float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
+    const float t[3] = { v[3], v[7], v[11] };
+    float pos[3]; for (int i = 0; i < 3; ++i) pos[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
+    const float fwd[3] = { -R[6], -R[7], -R[8] };
+    if (g_cam_prev_valid) {
+        const float dp[3] = { pos[0]-g_cam_prev_pos[0], pos[1]-g_cam_prev_pos[1], pos[2]-g_cam_prev_pos[2] };
+        const float dist = sqrtf(dp[0]*dp[0] + dp[1]*dp[1] + dp[2]*dp[2]);
+        const float dot = fmaxf(-1.f, fminf(1.f, fwd[0]*g_cam_prev_fwd[0] + fwd[1]*g_cam_prev_fwd[1] + fwd[2]*g_cam_prev_fwd[2]));
+        const float ang = acosf(dot) * 57.2958f;
+        if (dist > 40.f || ang > 25.f) {
+            g_cut_count++;
+            g_seat_latched = false;
+            if (g_cut_recentre) g_xr_recenter_pending = true;
+            if (g_cut_blink) g_blink_frames = 6;
+            if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg", g_cut_count, dist, ang);
+        }
+    }
+    memcpy(g_cam_prev_pos, pos, sizeof(pos)); memcpy(g_cam_prev_fwd, fwd, sizeof(fwd)); g_cam_prev_valid = true;
+}
+
 static void xr_tick() {
     if (!g_xr_want) return;
+    detect_cut();
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
         static bool said = false;
         if (!said) { said = true; diag("xr: forcing override + eye 2 on (were %d/%d)", g_ovr_enabled ? 1 : 0, g_stereo ? 1 : 0); }
@@ -3374,6 +3425,10 @@ static void xr_tick() {
     XrFrameOut out = {};
     g_xr_fov_applied = false;
     if (e1 == nullptr) return;
+    if (g_blink_frames > 0) {                       // a cut: a few black frames
+        g_blink_frames--;
+        if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
+    }
     if (g_seq_left > 0) {
         wchar_t n1[64], n2[64];
         _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
