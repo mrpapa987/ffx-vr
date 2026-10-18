@@ -74,7 +74,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void> _fn_fp_set;
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_set;
     private delegate* unmanaged[Cdecl]<int> _fn_fp_hidden;
-    private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 12f;
+    private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 3f;
     private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
     private const float k_true_scale = 11.4f;   // 20-unit characters = 1.75 m
     private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
@@ -811,7 +811,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
             ImGui.SliderFloat("follow height", ref _fp_follow_h, 0f, 150f);
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
-            ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 2f, 40f);
+            ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.5f, 12f); ImGui.SameLine(); ImGui.TextDisabled("small: the player's parts share the actor's exact position; NPCs at talking distance are 5+ units away");
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.InputText("player model name", ref _fp_actor, 16); ImGui.SameLine();
             ImGui.TextDisabled(_fp_actor_idx >= 0 ? $"actor {_fp_actor_idx}" : "not found (using actor 0)");

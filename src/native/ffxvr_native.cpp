@@ -553,7 +553,7 @@ bool  g_fp_have_pos = false;
 float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units)
 float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
 float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
-bool  g_fp_hide_body = true; float g_fp_hide_radius = 12.f;
+bool  g_fp_hide_body = true; float g_fp_hide_radius = 3.f;   // the player's own parts sit on the actor position; NPCs you talk to are 5+ units off
 uint32_t g_fp_hidden_draws = 0;
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
