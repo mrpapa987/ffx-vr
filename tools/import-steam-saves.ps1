@@ -18,13 +18,16 @@ $dest = Join-Path $game 'fahrenheit\saves\0\default\FINAL FANTASY X'
 
 if (-not (Test-Path $root)) { Write-Host "No Steam save folder at $root"; exit 1 }
 
-# One numeric subfolder per Steam account; pick the one with FFX saves (newest if several).
-$src = Get-ChildItem $root -Directory |
-       Where-Object { Test-Path (Join-Path $_.FullName 'FINAL FANTASY X') } |
-       Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $src) { Write-Host "No account folder with FINAL FANTASY X saves under $root"; exit 1 }
-
-$from  = Join-Path $src.FullName 'FINAL FANTASY X'
+# Saves live either directly in the game folder or under a numbered Steam-account folder (newest if several).
+$from = $null
+if (Test-Path (Join-Path $root 'FINAL FANTASY X')) { $from = Join-Path $root 'FINAL FANTASY X' }
+else {
+    $src = Get-ChildItem $root -Directory |
+           Where-Object { Test-Path (Join-Path $_.FullName 'FINAL FANTASY X') } |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($src) { $from = Join-Path $src.FullName 'FINAL FANTASY X' }
+}
+if (-not $from) { Write-Host "No FINAL FANTASY X save folder under $root"; exit 1 }
 $files = Get-ChildItem $from -File -Filter 'ffx_*'
 if ($files.Count -eq 0) { Write-Host "No ffx_* saves in $from"; exit 1 }
 
