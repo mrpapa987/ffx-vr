@@ -325,9 +325,13 @@ public sealed unsafe class FFXVRModule : FhModule {
     // The chain pointer is resolved once and cached; resolving it per call
     // would cost a delegate marshal on every draw.
 
+    // Inline detours fire for every D3D11 context in the process (the OpenXR
+    // runtime has its own). Only the game's immediate context is ours.
+    private bool ours(nint ctx) => ctx == _game_context;
+
     private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
-        int eye2 = _fn_on_draw != null ? _fn_on_draw(1) : 0;
+        int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
         _o_drawindexed!(ctx, n, start, base_vertex);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_drawindexed!(ctx, n, start, base_vertex); _fn_eye2_end(); }
@@ -335,32 +339,32 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private void h_draw(nint ctx, uint n, uint start) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
-        int eye2 = _fn_on_draw != null ? _fn_on_draw(2) : 0;
+        int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
         _o_draw!(ctx, n, start);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
     }
 
     private void h_drawidxinst(nint ctx, uint a, uint b, uint c, int d, uint e) {
-        if (_fn_on_draw != null) _fn_on_draw(3);   // instanced paths unused by this game
+        if (ours(ctx) && _fn_on_draw != null) _fn_on_draw(3);   // instanced paths unused by this game
         _o_drawidxinst ??= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).chain_from(_h_drawidxinst!).fnptr;
         _o_drawidxinst!(ctx, a, b, c, d, e);
     }
 
     private void h_drawinst(nint ctx, uint a, uint b, uint c, uint d) {
-        if (_fn_on_draw != null) _fn_on_draw(4);
+        if (ours(ctx) && _fn_on_draw != null) _fn_on_draw(4);
         _o_drawinst ??= new FhCallHandle<d_DrawInstanced>(new FhCallLocation((void*)_a_drawinst)).chain_from(_h_drawinst!).fnptr;
         _o_drawinst!(ctx, a, b, c, d);
     }
 
     private void h_omrt(nint ctx, uint n, nint* rtvs, nint dsv) {
-        if (_fn_on_rendertargets != null) _fn_on_rendertargets(n, rtvs, dsv);
+        if (ours(ctx) && _fn_on_rendertargets != null) _fn_on_rendertargets(n, rtvs, dsv);
         _o_omrt ??= new FhCallHandle<d_OMSetRenderTargets>(new FhCallLocation((void*)_a_omrt)).chain_from(_h_omrt!).fnptr;
         _o_omrt!(ctx, n, rtvs, dsv);
     }
 
     private void h_vp(nint ctx, uint n, float* vps) {
-        if (_fn_on_viewport != null && n > 0 && vps != null) _fn_on_viewport(vps[2], vps[3], vps[0], vps[1]);
+        if (ours(ctx) && _fn_on_viewport != null && n > 0 && vps != null) _fn_on_viewport(vps[2], vps[3], vps[0], vps[1]);
         _o_vp ??= new FhCallHandle<d_RSSetViewports>(new FhCallLocation((void*)_a_vp)).chain_from(_h_vp!).fnptr;
         _o_vp!(ctx, n, vps);
     }
@@ -368,7 +372,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void h_copy(nint ctx, nint dst, nint src) {
         _o_copy ??= new FhCallHandle<d_CopyResource>(new FhCallLocation((void*)_a_copy)).chain_from(_h_copy!).fnptr;
         _o_copy!(ctx, dst, src);
-        if (_fn_on_copy != null) _fn_on_copy(dst, 0, 0, 0, 0, src, 0, 0, 1);
+        if (ours(ctx) && _fn_on_copy != null) _fn_on_copy(dst, 0, 0, 0, 0, src, 0, 0, 1);
     }
 
     private void h_exitprocess(uint code) {
@@ -380,11 +384,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void h_resolve(nint ctx, nint dst, uint dst_sub, nint src, uint src_sub, uint fmt) {
         _o_resolve ??= new FhCallHandle<d_ResolveSubresource>(new FhCallLocation((void*)_a_resolve)).chain_from(_h_resolve!).fnptr;
         _o_resolve!(ctx, dst, dst_sub, src, src_sub, fmt);
-        if (_fn_on_resolve != null) _fn_on_resolve(dst, dst_sub, src, src_sub, fmt);
+        if (ours(ctx) && _fn_on_resolve != null) _fn_on_resolve(dst, dst_sub, src, src_sub, fmt);
     }
 
     private void h_omrtuav(nint ctx, uint n, nint* rtvs, nint dsv, uint uav_start, uint uav_n, nint* uavs, uint* counts) {
-        if (_fn_on_rendertargets_uav != null) _fn_on_rendertargets_uav(n, rtvs, dsv);
+        if (ours(ctx) && _fn_on_rendertargets_uav != null) _fn_on_rendertargets_uav(n, rtvs, dsv);
         _o_omrtuav ??= new FhCallHandle<d_OMSetRenderTargetsAndUAVs>(new FhCallLocation((void*)_a_omrtuav)).chain_from(_h_omrtuav!).fnptr;
         _o_omrtuav!(ctx, n, rtvs, dsv, uav_start, uav_n, uavs, counts);
     }
@@ -392,25 +396,25 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void h_copyreg(nint ctx, nint dst, uint dst_sub, uint x, uint y, uint z, nint src, uint src_sub, nint box) {
         _o_copyreg ??= new FhCallHandle<d_CopySubresourceRegion>(new FhCallLocation((void*)_a_copyreg)).chain_from(_h_copyreg!).fnptr;
         _o_copyreg!(ctx, dst, dst_sub, x, y, z, src, src_sub, box);
-        if (_fn_on_copy != null) _fn_on_copy(dst, dst_sub, x, y, z, src, src_sub, box, 0);
+        if (ours(ctx) && _fn_on_copy != null) _fn_on_copy(dst, dst_sub, x, y, z, src, src_sub, box, 0);
     }
 
     private void h_pssrv(nint ctx, uint start, uint n, nint* views) {
-        if (_fn_on_ps_srvs != null) _fn_on_ps_srvs(start, n, views);
+        if (ours(ctx) && _fn_on_ps_srvs != null) _fn_on_ps_srvs(start, n, views);
         _o_pssrv ??= new FhCallHandle<d_PSSetShaderResources>(new FhCallLocation((void*)_a_pssrv)).chain_from(_h_pssrv!).fnptr;
         _o_pssrv!(ctx, start, n, views);
     }
 
     private void h_clr(nint ctx, nint rtv, float* color) {
-        if (_fn_on_clear != null) _fn_on_clear(rtv, 0);
-        if (_fn_on_clear_twin != null) _fn_on_clear_twin(rtv, 0, color, 0, 0f, 0);
+        if (ours(ctx) && _fn_on_clear != null) _fn_on_clear(rtv, 0);
+        if (ours(ctx) && _fn_on_clear_twin != null) _fn_on_clear_twin(rtv, 0, color, 0, 0f, 0);
         _o_clr ??= new FhCallHandle<d_ClearRenderTargetView>(new FhCallLocation((void*)_a_clr)).chain_from(_h_clr!).fnptr;
         _o_clr!(ctx, rtv, color);
     }
 
     private void h_clrd(nint ctx, nint dsv, uint flags, float depth, byte stencil) {
-        if (_fn_on_clear != null) _fn_on_clear(dsv, 1);
-        if (_fn_on_clear_twin != null) _fn_on_clear_twin(dsv, 1, null, flags, depth, stencil);
+        if (ours(ctx) && _fn_on_clear != null) _fn_on_clear(dsv, 1);
+        if (ours(ctx) && _fn_on_clear_twin != null) _fn_on_clear_twin(dsv, 1, null, flags, depth, stencil);
         _o_clrd ??= new FhCallHandle<d_ClearDepthStencilView>(new FhCallLocation((void*)_a_clrd)).chain_from(_h_clrd!).fnptr;
         _o_clrd!(ctx, dsv, flags, depth, stencil);
     }
@@ -418,7 +422,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void h_updatesub(nint ctx, nint resource, uint sub, nint box, nint src, uint row_pitch, uint depth_pitch) {
         // The native side records the game's camera and, when the override is
         // on, hands back a patched private copy to upload in its place.
-        if (_fn_on_updatesub != null) src = _fn_on_updatesub(resource, box, src);
+        if (ours(ctx) && _fn_on_updatesub != null) src = _fn_on_updatesub(resource, box, src);
         _o_updatesub ??= new FhCallHandle<d_UpdateSubresource>(new FhCallLocation((void*)_a_updatesub)).chain_from(_h_updatesub!).fnptr;
         _o_updatesub!(ctx, resource, sub, box, src, row_pitch, depth_pitch);
     }

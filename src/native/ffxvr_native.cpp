@@ -1522,6 +1522,7 @@ void tick() {
 // ---------------------------------------------------------------- hooks
 
 void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, UINT n, ID3D11Buffer* const* b) {
+    if (c != g_ctx) { g_orig_vssetcb(c, s, n, b); return; }   // another context (the OpenXR runtime's): not ours
     bump(C_VSSETCB);
 
     if (b != nullptr && s == 0 && n > 0 && b[0] != nullptr) {
@@ -1589,8 +1590,9 @@ void STDMETHODCALLTYPE hk_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, 
 }
 
 HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT fl, D3D11_MAPPED_SUBRESOURCE* m) {
-    bump(C_MAP);
     const HRESULT hr = g_orig_map(c, r, sub, t, fl, m);
+    if (c != g_ctx) return hr;                                  // another context: not ours
+    bump(C_MAP);
     if (FAILED(hr) || m == nullptr || m->pData == nullptr) return hr;
 
     ID3D11Buffer* buf = nullptr; UINT size = 0;
@@ -1602,6 +1604,7 @@ HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT
 }
 
 void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub) {
+    if (c != g_ctx) { g_orig_unmap(c, r, sub); return; }       // another context: not ours
     bump(C_UNMAP);
 
     ID3D11Buffer* buf = nullptr; UINT size = 0;
@@ -3045,20 +3048,6 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
         if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe)
-        // The runtime and the game's loader thread may touch the device while
-        // the render thread is mid-frame; the D3D11 context is not thread-safe
-        // unless asked. Cheap, and the intermittent driver-thread crashes at
-        // session start look like exactly that race.
-        {
-            ID3D11Multithread* mt = nullptr;
-            if (SUCCEEDED(g_ctx->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt))) && mt) {
-                const BOOL was = mt->GetMultithreadProtected();
-                mt->SetMultithreadProtected(TRUE);
-                diag("xr: context multithread protection %s -> on", was ? "was on" : "was off");
-                mt->Release();
-            }
-            else diag("xr: ID3D11Multithread not available on this context");
-        }
         XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
         g_xr_want = xr_start(h);
         g_xr_recenter_pending = true;
