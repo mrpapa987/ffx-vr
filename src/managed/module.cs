@@ -43,7 +43,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_begin;
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
-    private delegate* unmanaged[Cdecl]<int, float, int, int, int> _fn_xr_set;
+    private delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int> _fn_xr_set;
+    private bool _xr_fov = true, _xr_seat = true;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_dump_seq;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
@@ -215,7 +216,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
-            _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
+            _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
             _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
@@ -618,7 +619,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SliderFloat("world scale (game units per metre)", ref _xr_scale, 10f, 300f);
             ImGui.Checkbox("head rotation", ref _xr_rotate); ImGui.SameLine(); ImGui.Checkbox("head position", ref _xr_translate);
             ImGui.SameLine(); if (ImGui.Button("Recentre") || ImGui.IsKeyPressed(ImGuiKey.Home)) _fn_xr_recenter();
-            _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0) != 0;
+            ImGui.Checkbox("headset field of view (off: the game's 16:9 window)", ref _xr_fov);
+            ImGui.Checkbox("seat: head owns orientation, authored camera gives position + heading only", ref _xr_seat);
+            _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
             if (_fn_xr_status != null) {
                 byte* buf = stackalloc byte[256];
                 _fn_xr_status(buf, 256);

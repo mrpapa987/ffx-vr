@@ -15,9 +15,12 @@ struct XrHost {
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space
 
+struct XrFovTan { float l, r, u, d; };                     // tangents of the half angles (l and d negative)
+
 struct XrFrameOut {
     bool      have_views;                                   // false: render as usual, nothing is submitted this frame
     XrPoseOut view[2];                                      // left / right eye as located for the frame about to render
+    XrFovTan  fov[2];                                       // the headset's field of view per eye
 };
 
 bool        xr_start(const XrHost& host);                   // loads the loader, creates instance + session + swapchains
@@ -26,8 +29,8 @@ bool        xr_active();                                    // session exists (m
 const char* xr_status();                                    // one line for the overlay
 
 /// Per frame, from the Present hook. `eye1`/`eye2` are the finished images
-/// of the frame just rendered (eye2 may be null: mono); `tan_x`/`tan_y` the
-/// tangents of the half field of view they were rendered with. Submits them
-/// with the poses returned by the previous call, then waits for the next
-/// frame and returns its poses in `next`.
-void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, float tan_x, float tan_y, XrFrameOut* next);
+/// of the frame just rendered (eye2 may be null: mono); `used` the field of
+/// view each was rendered with. Submits them with the poses returned by the
+/// previous call, then waits for the next frame and returns its poses and
+/// the headset's field of view in `next`.
+void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], XrFrameOut* next);

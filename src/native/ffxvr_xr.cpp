@@ -256,7 +256,7 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
 
 } // namespace
 
-void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, float tan_x, float tan_y, XrFrameOut* next) {
+void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], XrFrameOut* next) {
     if (next) next->have_views = false;
     if (!xr_active()) return;
     poll_events();
@@ -270,8 +270,8 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, float tan_x, float t
             for (int i = 0; i < 2; ++i) {
                 if (!submit_eye(i, i == 0 ? eye1 : (eye2 ? eye2 : eye1))) { ok = false; break; }
                 pv[i].pose = g_render_views[i].pose;
-                pv[i].fov.angleLeft = -atanf(tan_x); pv[i].fov.angleRight = atanf(tan_x);
-                pv[i].fov.angleUp = atanf(tan_y);    pv[i].fov.angleDown = -atanf(tan_y);
+                pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
+                pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
                 pv[i].subImage.swapchain = g_eye[i].sc;
                 pv[i].subImage.imageRect.offset = { 0, 0 };
                 pv[i].subImage.imageRect.extent = { static_cast<int32_t>(g_eye[i].w), static_cast<int32_t>(g_eye[i].h) };
@@ -320,6 +320,8 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, float tan_x, float t
             next->view[i].p[0] = pos_ok ? views[i].pose.position.x : 0.f;
             next->view[i].p[1] = pos_ok ? views[i].pose.position.y : 0.f;
             next->view[i].p[2] = pos_ok ? views[i].pose.position.z : 0.f;
+            next->fov[i].l = tanf(views[i].fov.angleLeft); next->fov[i].r = tanf(views[i].fov.angleRight);
+            next->fov[i].u = tanf(views[i].fov.angleUp);   next->fov[i].d = tanf(views[i].fov.angleDown);
         }
     }
 }

@@ -492,6 +492,11 @@ float g_xr_eye_off[3] = {};             // right eye minus left eye (m), in refe
 float g_xr_ref_q[4] = { 0, 0, 0, 1 };   // yaw-only reference orientation
 float g_xr_ref_p[3] = {};
 bool  g_xr_recenter_pending = true;     // first valid pose becomes the reference
+bool  g_xr_use_fov  = true;             // replace the game's projection with the headset's per-eye field of view
+bool  g_xr_seat     = true;             // head owns orientation; the authored camera contributes position and heading only
+XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
+XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
+bool  g_xr_fov_applied = false;
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
 
 static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
@@ -531,6 +536,7 @@ static void xr_apply_poses(const XrFrameOut& f) {
     const float de[3] = { f.view[1].p[0] - f.view[0].p[0], f.view[1].p[1] - f.view[0].p[1], f.view[1].p[2] - f.view[0].p[2] };
     quat_rotate(ref_inv, de, g_xr_eye_off);
     g_xr_active = true;
+    g_xr_fov[0] = f.fov[0]; g_xr_fov[1] = f.fov[1];
 }
 
 static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
@@ -555,6 +561,20 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     if (xr && g_xr_rotate) {
         float Mq[9], MqT[9]; quat_to_mat(g_xr_q, Mq);
         for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) MqT[r*3+c] = Mq[c*3+r];
+        if (g_xr_seat) {
+            // Seat: the authored camera's pitch and roll are discarded; its
+            // heading becomes the reference frame the head rotates in. World
+            // up is +y in render space.
+            float f[3] = { -Rb[6], -Rb[7], -Rb[8] };            // authored forward
+            f[1] = 0.f;
+            float len = sqrtf(f[0]*f[0] + f[2]*f[2]);
+            if (len < 1e-4f) { f[0] = 0.f; f[2] = -1.f; len = 1.f; }
+            f[0] /= len; f[2] /= len;
+            const float up[3] = { 0.f, 1.f, 0.f };
+            const float right[3] = { f[1]*up[2] - f[2]*up[1], f[2]*up[0] - f[0]*up[2], f[0]*up[1] - f[1]*up[0] };   // f x up
+            const float Rh[9] = { right[0], right[1], right[2],  up[0], up[1], up[2],  -f[0], -f[1], -f[2] };
+            memcpy(Rb, Rh, sizeof(Rh));                          // position offsets follow the heading frame too
+        }
         mul3(MqT, Rb, Rn);
     }
     else memcpy(Rn, Rb, sizeof(Rn));
@@ -614,15 +634,35 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
 
     const float* V  = reinterpret_cast<const float*>(orig + o_view);
     const float* Pj = reinterpret_cast<const float*>(orig + o_projn);
+    const UINT o_proj = base + 192;                     // the main projection (+256 in the common layout)
     unsigned mask = 0;
 
     memcpy(p + o_view, Vn, 64);  mask |= 1;
     memcpy(p + o_pos,  Pn, 12);  mask |= 4;
     if (size >= o_inv + 64) { memcpy(p + o_inv, In, 64);  mask |= 2; }
 
+    // Headset field of view: both projection variants get the eye's
+    // asymmetric frustum in x and y; their depth rows are left alone.
+    // Column-vector convention (w = -z): ndc_x = P[0]*t - P[2] for a
+    // direction with tangent t, so P[0] = 2/(r-l), P[2] = (r+l)/(r-l).
+    float Pjn[16]; memcpy(Pjn, Pj, sizeof(Pjn));
+    const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov;
+    if (fov) {
+        const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
+        auto apply = [&](float* P) {
+            const float sx = (P[0] < 0.f) ? -1.f : 1.f, sy = (P[5] < 0.f) ? -1.f : 1.f;
+            P[0] = sx * 2.f / (f.r - f.l);  P[2] = sx * (f.r + f.l) / (f.r - f.l);
+            P[5] = sy * 2.f / (f.u - f.d);  P[6] = sy * (f.u + f.d) / (f.u - f.d);
+        };
+        apply(Pjn);
+        memcpy(p + o_projn, Pjn, 64);
+        if (size >= o_proj + 64) { float Pm[16]; memcpy(Pm, orig + o_proj, 64); apply(Pm); memcpy(p + o_proj, Pm, 64); }
+        g_xr_fov_applied = true;
+    }
+
     float PV[16], PVn[16];
     mul4(Pj, V, PV);
-    mul4(Pj, Vn, PVn);
+    mul4(Pjn, Vn, PVn);
     if (size >= o_vp + 64 && same4(reinterpret_cast<const float*>(orig + o_vp), PV)) {
         memcpy(p + o_vp, PVn, 64);  mask |= 8;
         memcpy(g_last_PV,  PV,  sizeof(PV));
@@ -1106,7 +1146,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             // product-only buffers; that must stay eye 1's, so save and restore.
             float savePV[16], savePVn[16]; const bool saveHave = g_have_PV;
             memcpy(savePV, g_last_PV, sizeof(savePV)); memcpy(savePVn, g_last_PVn, sizeof(savePVn));
-            g_eye_shift = g_ipd;
+            g_eye_shift = (g_ipd != 0.f) ? g_ipd : 1e-6f;   // non-zero marks "eye 2"; with the headset the real offset is used instead
             write_camera(p, e.eye2.data(), size, base, v);
             g_eye_shift = 0.f;
             if (mask & 8) memcpy(g_last_PVn2, g_last_PVn, sizeof(g_last_PVn2));   // eye 2's proj*view
@@ -2916,8 +2956,8 @@ int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F
 uint32_t g_e2_begin_fail_prev = 0;
 static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
 
-extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate) {
-    g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0;
+extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
+    g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
         XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
         g_xr_want = xr_start(h);
@@ -2933,12 +2973,13 @@ extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_sto
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
     const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
-    snprintf(buf, static_cast<size_t>(n), "%s%s  yaw %.0f pitch %.0f  pos (%.2f %.2f %.2f) m  eye sep %.2f m = %.1f units",
+    snprintf(buf, static_cast<size_t>(n), "%s%s  yaw %.0f pitch %.0f  pos (%.2f %.2f %.2f) m  eye sep %.2f m = %.1f units  fov L %.0f..%.0f U %.0f..%.0f deg",
              xr_status(), g_xr_active ? " [tracking]" : "",
              atan2f(-d[0], -d[2]) * 57.2958f, asinf(fmaxf(-1.f, fminf(1.f, d[1]))) * 57.2958f,
              g_xr_p[0], g_xr_p[1], g_xr_p[2],
              sqrtf(g_xr_eye_off[0]*g_xr_eye_off[0] + g_xr_eye_off[1]*g_xr_eye_off[1] + g_xr_eye_off[2]*g_xr_eye_off[2]),
-             sqrtf(g_xr_eye_off[0]*g_xr_eye_off[0] + g_xr_eye_off[1]*g_xr_eye_off[1] + g_xr_eye_off[2]*g_xr_eye_off[2]) * g_xr_scale);
+             sqrtf(g_xr_eye_off[0]*g_xr_eye_off[0] + g_xr_eye_off[1]*g_xr_eye_off[1] + g_xr_eye_off[2]*g_xr_eye_off[2]) * g_xr_scale,
+             atanf(g_xr_fov[0].l) * 57.2958f, atanf(g_xr_fov[0].r) * 57.2958f, atanf(g_xr_fov[0].d) * 57.2958f, atanf(g_xr_fov[0].u) * 57.2958f);
 }
 
 /// Called once per frame from the Present hook, with the finished frame in
@@ -2966,8 +3007,13 @@ static void xr_tick() {
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;
     const float ty = (P[5] != 0.f) ? 1.f / fabsf(P[5]) : 0.5625f;
+    // The field of view the frame just finished was rendered with.
+    XrFovTan used[2];
+    if (g_xr_fov_applied) { used[0] = g_xr_fov_used[0]; used[1] = g_xr_fov_used[1]; }
+    else { used[0] = used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
     XrFrameOut out = {};
     if (e1 == nullptr) return;
+    g_xr_fov_applied = false;
     if (g_seq_left > 0) {
         wchar_t n1[64], n2[64];
         _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
@@ -2976,8 +3022,11 @@ static void xr_tick() {
         g_e2_begin_fail_prev = g_e2_begin_fail;
         g_seq_index++; g_seq_left--;
     }
-    xr_frame(e1, g_stereo ? e2 : nullptr, tx, ty, &out);
+    xr_frame(e1, g_stereo ? e2 : nullptr, used, &out);
     xr_apply_poses(out);
+    // What the next frame renders with.
+    if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
+    else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
     if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
 }
 
