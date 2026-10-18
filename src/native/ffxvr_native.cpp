@@ -558,6 +558,9 @@ uint32_t g_fp_hidden_draws = 0;
 // with a constant-buffer layout we do not patch). 0 draw identically in both
 // eyes, 1 eye 1 only, 2 hide in both.
 int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
+// Bisect tool: scene-pass draws by index in the frame. mode 1 hides [a,b],
+// mode 2 shows only [a,b]. The census lists every scene-pass draw.
+int g_bisect_mode = 0, g_bisect_a = 0, g_bisect_b = 0; int g_scene_census_lines = 0; uint32_t g_scene_draw_idx = 0, g_scene_draws_last = 0;
 uint32_t g_twins_recycled = 0, g_twins_swept = 0, g_twin_srvs_dropped = 0, g_buffers_pruned = 0;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
@@ -2070,13 +2073,14 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
-        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; g_noimg_census_lines = 0; frame_event("-- frame start (after Present) --"); }
+        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; g_noimg_census_lines = 0; g_scene_census_lines = 0; frame_event("-- frame start (after Present) --"); }
         if (g_stacks_live) { g_stacks_live = false; census_dump(); }
         if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
     }
     if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
     g_draw_in_frame = 0;
+    g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
@@ -2150,14 +2154,15 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
-    // Scene-pass draw (multisampled target) without a camera image: the
-    // experiment switch, and a census line describing it.
-    if (g_stereo && g_eye2_cur == nullptr && !g_overlay_phase && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
+    // Scene-pass draw (multisampled target): the bisect tool and, for draws
+    // without a camera image, the experiment switch; census lines for both.
+    if (g_stereo && !g_overlay_phase && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
         ID3D11Texture2D* tt = texture_of(g_cur_rtv[0]);
         D3D11_TEXTURE2D_DESC td = {}; if (tt) tt->GetDesc(&td);
         if (tt && td.SampleDesc.Count > 1) {
-            g_noimg_draws++;
-            if (g_frame_live && g_noimg_census_lines < 300 && g_ctx) {
+            const int sidx = (int)g_scene_draw_idx++;
+            if (g_eye2_cur == nullptr) g_noimg_draws++;
+            if (g_frame_live && g_scene_census_lines < 700 && g_ctx) {
                 ID3D11Buffer* vcb[4] = {}; ID3D11Buffer* pcb[4] = {}; UINT vsz[4] = {}, psz[4] = {};
                 g_ctx->VSGetConstantBuffers(0, 4, vcb); g_ctx->PSGetConstantBuffers(0, 4, pcb);
                 for (int k = 0; k < 4; ++k) {
@@ -2170,14 +2175,19 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
                 int zwrite = -1; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = (dd.DepthEnable && dd.DepthWriteMask) ? 1 : 0; ds->Release(); }
                 FrameEv e;
-                snprintf(e.text, sizeof(e.text), "      draw %d NO IMAGE: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p",
-                         idx, vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps);
+                snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p",
+                         sidx, idx, g_eye2_cur == nullptr ? "NO IMAGE" : (g_eye2_cur->kind == 1 ? "camera" : "product"),
+                         vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps);
                 if (vs) vs->Release(); if (ps) ps->Release();
                 std::lock_guard<std::mutex> lock(g_mutex);
-                if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_noimg_census_lines++; }
+                if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_scene_census_lines++; }
             }
-            if (g_noimg_mode == 2) return -1;
-            if (g_noimg_mode == 1) { g_e2_no_image++; return 0; }
+            if (g_bisect_mode == 1 && sidx >= g_bisect_a && sidx <= g_bisect_b) return -1;
+            if (g_bisect_mode == 2 && (sidx < g_bisect_a || sidx > g_bisect_b)) return -1;
+            if (g_eye2_cur == nullptr) {
+                if (g_noimg_mode == 2) return -1;
+                if (g_noimg_mode == 1) { g_e2_no_image++; return 0; }
+            }
         }
     }
     if (g_first_draw_pending) { g_imgui_cb = g_slot0_cur; g_first_draw_pending = false; }   // (kept for the census)
@@ -3617,6 +3627,8 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
 extern "C" __declspec(dllexport) void ffxvr_noimg_set(int mode) { g_noimg_mode = mode; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_noimg_draws() { return g_noimg_draws; }
+extern "C" __declspec(dllexport) void ffxvr_bisect_set(int mode, int a, int b) { g_bisect_mode = mode; g_bisect_a = a; g_bisect_b = b; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_scene_draws() { return g_scene_draws_last; }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }

@@ -58,6 +58,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, void> _fn_noimg_set;
     private delegate* unmanaged[Cdecl]<uint> _fn_noimg_draws;
     private int _noimg_mode = 0;
+    private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_bisect_set;
+    private delegate* unmanaged[Cdecl]<uint> _fn_scene_draws;
+    private int _bisect_mode = 0, _bisect_a = 0, _bisect_b = 0;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_move_set;
     private delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void> _fn_move_status;
     private bool _move_remap = true, _move_invert = false;
@@ -236,6 +239,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_perf_status");
             _fn_noimg_set    = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_set");
             _fn_noimg_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_draws");
+            _fn_bisect_set   = (delegate* unmanaged[Cdecl]<int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bisect_set");
+            _fn_scene_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_scene_draws");
             _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
             _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
@@ -762,6 +767,22 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
+
+        if (ImGui.TreeNode("Find a draw (bisect scene draws)")) {
+            int total = _fn_scene_draws != null ? (int)_fn_scene_draws() : 0;
+            ImGui.TextWrapped($"Scene draws last frame: {total}. Hide a range of them (or show only that range) and narrow it down until the thing you want to identify disappears; then Frame census lists the draw's shaders. Draw order is stable while you stand still.");
+            ImGui.RadioButton("off", ref _bisect_mode, 0); ImGui.SameLine();
+            ImGui.RadioButton("hide range", ref _bisect_mode, 1); ImGui.SameLine();
+            ImGui.RadioButton("show only range", ref _bisect_mode, 2);
+            int hi = Math.Max(total, 1);
+            ImGui.SliderInt("from", ref _bisect_a, 0, hi); ImGui.SliderInt("to", ref _bisect_b, 0, hi);
+            if (ImGui.Button("first half")) { _bisect_a = 0; _bisect_b = hi / 2; } ImGui.SameLine();
+            if (ImGui.Button("second half")) { _bisect_a = hi / 2 + 1; _bisect_b = hi; } ImGui.SameLine();
+            if (ImGui.Button("split: lower")) { _bisect_b = (_bisect_a + _bisect_b) / 2; } ImGui.SameLine();
+            if (ImGui.Button("split: upper")) { _bisect_a = (_bisect_a + _bisect_b) / 2 + 1; }
+            ImGui.TreePop();
+        }
+        if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
 
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
