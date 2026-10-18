@@ -3128,10 +3128,21 @@ static void xr_tick() {
     // A 3D frame has a scene pass: dozens of draws into one depth-tested
     // target. The title screen and menus upload a (dummy) camera too, so the
     // camera count alone is not the test.
-    if (g_cam_uploads_frame == 0 || g_scene_live_draws < 20) g_frames_without_cam++; else g_frames_without_cam = 0;
-    g_cam_uploads_frame = 0;
+    const bool frame2d = (g_cam_uploads_frame == 0 || g_scene_live_draws < 20);
+    if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
     const bool is2d = g_frames_without_cam >= 2;
-    g_xr_screen_now = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
+    const bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
+    if (screen_next != g_xr_screen_now) {
+        static int logged = 0;
+        if (logged++ < 40) {
+            D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
+            diag("mode -> %s at frame %u: camera uploads %u, scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+                 screen_next ? "SCREEN" : "3D", g_frames, g_cam_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
+                 static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
+        }
+    }
+    g_cam_uploads_frame = 0;
+    g_xr_screen_now = screen_next;
     XrScreen screen = {};
     screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
