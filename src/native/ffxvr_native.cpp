@@ -567,7 +567,7 @@ int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 // which trails on every head movement. 0 leave, 1 draw without blending
 // (history = this frame only), 2 skip.
 int g_hist_mode = 1; uint32_t g_hist_draws = 0; uint32_t g_draw_in_frame_last = 0;
-ID3D11Texture2D* g_targets_frame[64]; int g_targets_frame_n = 0;   // rtv0 textures bound so far this frame
+ID3D11Texture2D* g_targets_frame[64]; int g_targets_frame_n = 0;   // rtv0 textures some draw has targeted so far this frame
 ID3D11Texture2D* g_cleared_frame[64]; int g_cleared_frame_n = 0;   // colour-cleared so far this frame
 bool g_cur_rtv0_first_use = false;
 ID3D11BlendState* g_opaque_blend = nullptr; ID3D11BlendState* g_nb_saved = nullptr; float g_nb_saved_bf[4]; UINT g_nb_saved_mask = 0; bool g_nb_active = false;
@@ -1304,13 +1304,6 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
     g_cur_dsv = static_cast<ID3D11DepthStencilView*>(dsv);
-    g_cur_rtv0_first_use = false;
-    if (g_cur_rtv_n > 0 && g_cur_rtv[0]) {
-        ID3D11Texture2D* t0 = texture_of(g_cur_rtv[0]);
-        bool seen = false;
-        for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == t0) { seen = true; break; }
-        if (!seen) { g_cur_rtv0_first_use = true; if (g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = t0; }
-    }
     if (!g_frame_live) return;
     char a[96], b[96];
     describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
@@ -2180,28 +2173,41 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
-    // History-blend draw (see g_hist_mode).
+    // History-blend draw (see g_hist_mode): the first draw this frame into a
+    // full-resolution target that was not cleared, with blending on.
     int ret_flags = 0;
-    if (g_stereo && !g_overlay_phase && g_cur_rtv_n == 1 && g_cur_dsv == nullptr && g_cur_rtv0_first_use && g_ctx) {
+    if (g_stereo && !g_overlay_phase && g_cur_rtv_n == 1 && g_cur_dsv == nullptr && g_ctx) {
         ID3D11Texture2D* ht = texture_of(g_cur_rtv[0]);
+        bool first = true;
+        for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == ht) { first = false; break; }
+        if (first && ht && g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = ht;
         D3D11_TEXTURE2D_DESC hd = {}; if (ht) ht->GetDesc(&hd);
-        if (ht && ht != g_backbuffer && hd.SampleDesc.Count == 1 && hd.Width >= 1280) {
+        bool screen_shaped = false;                          // the backbuffer's aspect: shadow atlases (square) stay out
+        if (ht && g_backbuffer) { D3D11_TEXTURE2D_DESC bb; g_backbuffer->GetDesc(&bb); const double r = (double)hd.Width * bb.Height, l = (double)hd.Height * bb.Width; screen_shaped = fabs(r - l) < 0.05 * r; }
+        if (first && ht && ht != g_backbuffer && hd.SampleDesc.Count == 1 && hd.Width >= 1280 && screen_shaped) {
             bool cleared = false;
             for (int i = 0; i < g_cleared_frame_n; ++i) if (g_cleared_frame[i] == ht) { cleared = true; break; }
             if (!cleared) {
                 ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
-                bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
+                bool blend = false; D3D11_BLEND_DESC bd = {}; if (bs) { bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
+                if (g_frame_live) {
+                    FrameEv e; snprintf(e.text, sizeof(e.text), "      draw %d %s into %p %ux%u (uncleared, first draw this frame) blend %d src %d dst %d mode %d",
+                                        idx, blend ? "HISTORY BLEND" : "uncleared-target draw", (void*)ht, hd.Width, hd.Height, blend ? 1 : 0, (int)bd.RenderTarget[0].SrcBlend, (int)bd.RenderTarget[0].DestBlend, g_hist_mode);
+                    std::lock_guard<std::mutex> lock(g_mutex); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+                }
                 if (blend) {
                     g_hist_draws++;
-                    if (g_frame_live) {
-                        FrameEv e; snprintf(e.text, sizeof(e.text), "      draw %d HISTORY BLEND into %p %ux%u (uncleared, first use this frame) mode %d", idx, (void*)ht, hd.Width, hd.Height, g_hist_mode);
-                        std::lock_guard<std::mutex> lock(g_mutex); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
-                    }
                     if (g_hist_mode == 2) return -1;
                     if (g_hist_mode == 1) ret_flags |= 16;
                 }
             }
         }
+    }
+    else if (g_cur_rtv_n > 0 && g_cur_rtv[0]) {            // keep the "already drawn into" list complete for the other passes too
+        ID3D11Texture2D* ht = texture_of(g_cur_rtv[0]);
+        bool first = true;
+        for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == ht) { first = false; break; }
+        if (first && ht && g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = ht;
     }
 
     // Scene-pass draw (multisampled target): the bisect tool and, for draws
