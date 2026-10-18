@@ -51,6 +51,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, void> _fn_xr_pitch_follow;
     private float _xr_pitch_follow = 0.85f;
     private delegate* unmanaged[Cdecl]<int, int, int, float, float, void> _fn_cuts_set;
+    private delegate* unmanaged[Cdecl]<int, int, float, float, int, void> _fn_turn_set;
+    private delegate* unmanaged[Cdecl]<float, void> _fn_turn;
+    private delegate* unmanaged[Cdecl]<uint> _fn_turn_count;
+    private bool _turn_stick = true, _turn_blink = true; private int _turn_mode = 0; private float _turn_snap = 30f, _turn_rate = 90f;
     private delegate* unmanaged[Cdecl]<int> _fn_cut_count;
     private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void> _fn_fp_set;
@@ -219,6 +223,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_pitch_follow");
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cuts_set");
+            _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_set");
+            _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn");
+            _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_count");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
             _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_set");
             _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_set");
@@ -501,6 +508,11 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "seat_forward":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_forward); break;
                     case "cut_recentre":      _cut_recentre = v != "0"; break;
                     case "cut_blink":         _cut_blink = v == "1"; break;
+                    case "turn_stick":        _turn_stick = v != "0"; break;
+                    case "turn_mode":         int.TryParse(v, out _turn_mode); break;
+                    case "turn_snap":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_snap); break;
+                    case "turn_rate":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_rate); break;
+                    case "turn_blink":        _turn_blink = v != "0"; break;
                     case "follow_pans":       _follow_pans = v == "1"; break;
                     case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
                     case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
@@ -535,6 +547,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"seat_forward={_ovr_forward.ToString("F0", ci)}\n" +
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
+            $"turn_stick={(_turn_stick ? 1 : 0)}\n" +
+            $"turn_mode={_turn_mode}\n" +
+            $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
+            $"turn_rate={_turn_rate.ToString("F0", ci)}\n" +
+            $"turn_blink={(_turn_blink ? 1 : 0)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
@@ -598,6 +615,15 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("follow", ref _fp_mode, 2);
         ImGui.SameLine(); ImGui.TextDisabled("End: toggle first person");
         if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = _fp_mode == 1 ? 0 : 1;
+
+        // Turning (first person and seat alike)
+        ImGui.Text("turning:"); ImGui.SameLine();
+        ImGui.Checkbox("right stick", ref _turn_stick); ImGui.SameLine();
+        ImGui.RadioButton("snap", ref _turn_mode, 0); ImGui.SameLine();
+        ImGui.RadioButton("smooth", ref _turn_mode, 1);
+        if (_turn_mode == 0) { ImGui.SliderFloat("snap angle", ref _turn_snap, 15f, 90f, "%.0f deg"); ImGui.SameLine(); ImGui.Checkbox("blink##turn", ref _turn_blink); }
+        else ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
+        ImGui.SameLine(); ImGui.TextDisabled($"Numpad 1/3: snap left/right   turns: {(_fn_turn_count != null ? _fn_turn_count() : 0)}");
         if (_fp_mode != fp_before) {
             if (fp_before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // leaving the authored view: true scale
             else if (_fp_mode == 0) _xr_scale = _scale_before_fp;
@@ -749,6 +775,11 @@ public sealed unsafe class FFXVRModule : FhModule {
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
         if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
+        if (_fn_turn_set != null) _fn_turn_set(_turn_stick ? 1 : 0, _turn_mode, _turn_snap, _turn_rate, _turn_blink ? 1 : 0);
+        if (_fn_turn != null) {
+            if (ImGui.IsKeyPressed(ImGuiKey.Keypad1)) _fn_turn(-_turn_snap);
+            if (ImGui.IsKeyPressed(ImGuiKey.Keypad3)) _fn_turn(_turn_snap);
+        }
     }
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>

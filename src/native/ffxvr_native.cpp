@@ -25,6 +25,7 @@
 #include <d3d11.h>
 #include <d3d11_4.h>   // ID3D11Multithread
 #include <d3dcompiler.h>
+#include <Xinput.h>
 #include "ffxvr_xr.h"
 
 #include <algorithm>
@@ -522,6 +523,14 @@ float g_follow_rate = 20.f;                    // deg/s
 uint32_t g_cut_count = 0; int g_blink_frames = 0;
 float g_cam_prev_pos[3] = {}, g_cam_prev_fwd[3] = {}; bool g_cam_prev_valid = false;
 float g_dt = 1.f / 72.f;
+
+// Turning: the right stick (XInput, read directly) and the turn keys rotate
+// the latched heading, in first person and in the seat alike. Snap turns are
+// a fixed angle per flick (with a blink); smooth turns are degrees per second.
+bool  g_turn_stick = true; int g_turn_mode = 0; float g_turn_snap = 30.f, g_turn_rate = 90.f; bool g_turn_blink = true;
+bool  g_turn_armed = true; uint32_t g_turn_count = 0;
+typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE*);
+PFN_XInputGetState g_xi_get = nullptr; bool g_xi_tried = false; int g_xi_pad = -1; ULONGLONG g_xi_probe = 0;
 // First person / follow: the view is built from the player's position, not
 // the authored camera. Heading latched at toggle (and at recentre); the
 // head owns orientation; the player's own skinned draws are hidden.
@@ -605,6 +614,55 @@ static void xr_apply_poses(const XrFrameOut& f) {
     quat_rotate(ref_inv, de, g_xr_eye_off);
     g_xr_active = true;
     g_xr_fov[0] = f.fov[0]; g_xr_fov[1] = f.fov[1];
+}
+
+/// Turn the current heading by `deg` (positive = right).
+static void turn_by(float deg) {
+    const float d = -deg * 0.0174533f;                   // yaw about +y: positive turns left
+    if (g_fp_mode != 0) { if (g_fp_yaw_latched) g_fp_yaw += d; }
+    else if (g_seat_latched) g_seat_yaw += d;
+    g_turn_count++;
+}
+
+/// Right stick x, in -1..1 with the dead zone removed; 0 without a pad.
+static float right_stick_x() {
+    if (!g_xi_tried) {
+        g_xi_tried = true;
+        HMODULE m = LoadLibraryA("xinput1_4.dll");
+        if (!m) m = LoadLibraryA("xinput1_3.dll");
+        if (!m) m = LoadLibraryA("xinput9_1_0.dll");
+        if (m) g_xi_get = (PFN_XInputGetState)GetProcAddress(m, "XInputGetState");
+        diag("xinput: %s", g_xi_get ? "loaded" : "not available");
+    }
+    if (!g_xi_get) return 0.f;
+    XINPUT_STATE st = {};
+    auto norm = [&]() {
+        float x = st.Gamepad.sThumbRX / 32767.f;
+        const float dz = 0.25f;
+        if (fabsf(x) < dz) return 0.f;
+        return (x - (x > 0 ? dz : -dz)) / (1.f - dz);
+    };
+    if (g_xi_pad >= 0) {
+        if (g_xi_get((DWORD)g_xi_pad, &st) == ERROR_SUCCESS) return norm();
+        g_xi_pad = -1;
+    }
+    const ULONGLONG now = GetTickCount64();                // probing absent pads is slow: every 2 s only
+    if (now < g_xi_probe) return 0.f;
+    g_xi_probe = now + 2000;
+    for (DWORD i = 0; i < 4; ++i)
+        if (g_xi_get(i, &st) == ERROR_SUCCESS) { g_xi_pad = (int)i; diag("xinput: pad %u", i); return norm(); }
+    return 0.f;
+}
+
+/// Per frame: stick turning.
+static void turn_tick() {
+    if (!g_turn_stick) return;
+    const float x = right_stick_x();
+    if (g_turn_mode == 0) {                                // snap: one turn per flick past 0.6, re-armed under 0.3
+        if (g_turn_armed && fabsf(x) > 0.6f) { g_turn_armed = false; turn_by(x > 0 ? g_turn_snap : -g_turn_snap); if (g_turn_blink) g_blink_frames = 3; }
+        else if (!g_turn_armed && fabsf(x) < 0.3f) g_turn_armed = true;
+    }
+    else if (x != 0.f) turn_by(x * g_turn_rate * g_dt);
 }
 
 static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
@@ -3368,6 +3426,11 @@ extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pendin
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate; if (dt > 0.f && dt < 1.f) g_dt = dt;
 }
+extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
+    g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
+}
+extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); if (g_turn_blink && g_turn_mode == 0) g_blink_frames = 3; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
@@ -3437,6 +3500,7 @@ static void detect_cut() {
 static void xr_tick() {
     if (!g_xr_want) return;
     detect_cut();
+    turn_tick();
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
         static bool said = false;
         if (!said) { said = true; diag("xr: forcing override + eye 2 on (were %d/%d)", g_ovr_enabled ? 1 : 0, g_stereo ? 1 : 0); }
