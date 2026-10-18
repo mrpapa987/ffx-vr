@@ -45,6 +45,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int> _fn_xr_set;
     private bool _xr_fov = true, _xr_seat = true;
+    private bool _xr_want = false;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
@@ -618,7 +619,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Separator();
         ImGui.Text("Headset (OpenXR)");
         if (_fn_xr_set != null) {
-            bool want = _xr_on;
+            bool want = _xr_want;
             ImGui.Checkbox("Send to headset", ref want);
             if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
             ImGui.SliderFloat("world scale (game units per metre)", ref _xr_scale, 10f, 300f);
@@ -627,6 +628,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Checkbox("headset field of view (off: the game's 16:9 window)", ref _xr_fov);
             ImGui.Checkbox("seat: head owns orientation, authored camera gives position + heading only", ref _xr_seat);
             _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
+            _xr_want = want;   // keeps asking each frame until the native side accepts (it refuses before the first 3D frame)
             ImGui.Text("virtual screen (2D frames: title, menus, loading, FMV):"); ImGui.SameLine();
             ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
             ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();

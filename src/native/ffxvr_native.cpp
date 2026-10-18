@@ -355,7 +355,7 @@ unsigned g_ovr_mask    = 0;     // union of blocks ever patched: 1 view 2 inv 4 
 struct OvrStat { uint32_t count; unsigned mask_all; unsigned mask_any; };
 std::map<UINT, OvrStat> g_ovr_stats;
 
-std::vector<uint8_t> g_scratch;
+thread_local std::vector<uint8_t> g_scratch;   // per thread: the pointer we hand back is used after the lock is released, and the loader thread uploads too
 
 // ---------------------------------------------------------------------------
 // Second eye
@@ -665,7 +665,8 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
     const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov;
     const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
     const bool fov_ok = std::isfinite(f.l) && std::isfinite(f.r) && std::isfinite(f.u) && std::isfinite(f.d)
-                     && f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f;
+                     && f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f
+                     && fabsf(Pj[0]) > 0.2f && fabsf(Pj[5]) > 0.2f;   // a real camera, not the intro's near-2D projections
     if (fov && fov_ok) {
         static int logged = 0;
         if (logged < 2) {
@@ -3014,6 +3015,7 @@ extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
+        if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe)
         XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
         g_xr_want = xr_start(h);
         g_xr_recenter_pending = true;
@@ -3028,6 +3030,7 @@ extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_sto
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
     const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
+    if (!g_xr_want && (!g_cam_valid || g_backbuffer == nullptr)) { snprintf(buf, static_cast<size_t>(n), "waiting for the game to render a 3D frame before the headset can start"); return; }
     snprintf(buf, static_cast<size_t>(n), "%s%s  yaw %.0f pitch %.0f  pos (%.2f %.2f %.2f) m  eye sep %.2f m = %.1f units  fov L %.0f..%.0f U %.0f..%.0f deg",
              xr_status(), g_xr_active ? " [tracking]" : "",
              atan2f(-d[0], -d[2]) * 57.2958f, asinf(fmaxf(-1.f, fminf(1.f, d[1]))) * 57.2958f,
