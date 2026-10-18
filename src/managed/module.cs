@@ -916,7 +916,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Text("idx  id   enabled  name          position                 dir     moved   head (highest sub-position)");
         for (int i = 0; i < 48; i++) {
             if (!read(actors + i, out Actor a)) break;
-            if (a.chr_enabled == 0) continue;
+            if (!live(a)) continue;
             float d = Vector4.Distance(a.chr_pos_vec, _actor_prev[i]);
             _actor_prev[i] = a.chr_pos_vec;
             _actor_moved[i] = _actor_moved[i] * 0.95f + d;        // a decaying "how much it moves" score
@@ -929,18 +929,24 @@ public sealed unsafe class FFXVRModule : FhModule {
     /// <summary>The player: the enabled field actor whose model name matches (Tidus is c101); index 0
     /// is not reliable. Falls back to actor 0. Render space negates X and Y.</summary>
     private string _fp_actor = "c101"; private int _fp_actor_idx = -1;
+    /// <summary>An actor slot that is really in use. Before the field is up the table is uninitialised memory
+    /// (0xCDCDCDCD fill), so only a plain 1 counts as enabled and the name pointer must look like one.</summary>
+    private static bool live(in Actor a) => a.chr_enabled == 1 && (nint)a.chr_name > 0x10000 && (nint)a.chr_name < 0x7FFF0000;
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
         if (actors == null) { _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; return; }
+        // Before the field is up the table is uninitialised memory (0xCDCDCDCD
+        // fill): only a plain 1 counts as enabled, and a name pointer must look
+        // like one before it is read.
         int pick = -1;
-        if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && cur.chr_enabled != 0 && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
+        if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
         else {
             for (int i = 0; i < 48 && pick < 0; i++) {
                 if (!read(actors + i, out Actor a)) break;
-                if (a.chr_enabled != 0 && actor_name(a.chr_name) == _fp_actor) pick = i;
+                if (live(a) && actor_name(a.chr_name) == _fp_actor) pick = i;
             }
-            if (pick < 0 && read(actors, out Actor a0) && a0.chr_enabled != 0) pick = 0;
+            if (pick < 0 && read(actors, out Actor a0) && live(a0)) pick = 0;
         }
         _fp_actor_idx = pick;
         if (pick >= 0 && read(actors + pick, out Actor p)) _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);

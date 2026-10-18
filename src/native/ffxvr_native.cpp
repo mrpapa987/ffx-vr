@@ -1185,9 +1185,25 @@ extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsign
 // Support for the mod's own in-world markers
 // ---------------------------------------------------------------------------
 
-/// Copies `len` bytes from game memory under SEH. Returns 1 on success, 0 if
-/// the read faulted -- stale battle pointers outside a battle, for instance.
+/// Copies `len` bytes from game memory. Returns 1 on success, 0 if the range
+/// is not readable (stale battle pointers, an uninitialised actor table at
+/// start-up). The pages are checked with VirtualQuery first: Fahrenheit's
+/// stage-0 is a debugger and an access violation is fatal under it even
+/// inside __try, so faulting on purpose is not an option.
 extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
+    if (src == nullptr || dst == nullptr || len == 0) return 0;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(src);
+    if (a < 0x10000 || a + len < a) return 0;
+    uintptr_t p = a;
+    while (p < a + len) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<const void*>(p), &mbi, sizeof(mbi)) == 0) return 0;
+        if (mbi.State != MEM_COMMIT) return 0;
+        const DWORD prot = mbi.Protect & 0xFF;
+        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
+        if (prot != PAGE_READONLY && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READ && prot != PAGE_EXECUTE_READWRITE && prot != PAGE_WRITECOPY && prot != PAGE_EXECUTE_WRITECOPY) return 0;
+        p = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    }
     __try { memcpy(dst, src, len); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
