@@ -1040,7 +1040,17 @@ public sealed unsafe class FFXVRModule : FhModule {
         _markers_drawn++;
     }
 
+    private int _render_faults = 0;
+    /// <summary>Fahrenheit calls this from inside Present. An exception escaping it fail-fasts the whole
+    /// game (exit 0xC0000409, no dump), so everything runs under a catch that logs the stack instead.</summary>
     public override void render_imgui() {
+        try { render_imgui_inner(); }
+        catch (Exception e) {
+            if (_render_faults++ < 5) _logger.Error($"render_imgui fault #{_render_faults}: {e}");
+        }
+    }
+
+    private void render_imgui_inner() {
         _frames++;
 
         try_install_hooks();
@@ -1056,11 +1066,13 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (_window_open && _native_init_done) {
             ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.FirstUseEver);
-            if (ImGui.Begin("FFX VR", ref _window_open)) {
-                draw_main();
-                draw_debug();
+            try {
+                if (ImGui.Begin("FFX VR", ref _window_open)) {
+                    draw_main();
+                    draw_debug();
+                }
             }
-            ImGui.End();
+            finally { ImGui.End(); }
         }
         else if (_native_init_done) {
             push_override_and_stereo();   // state still flows to the native side with the window hidden
