@@ -291,8 +291,9 @@ static bool looks_like_view(const float* m, float out_pos[3]) {
 
 /// Scans one freshly written constant buffer for view-matrix-shaped blocks.
 /// Caller holds g_mutex.
+bool g_scan_uploads = false;   // discovery-phase diagnostic (heartbeat "scanner hits"): walks every upload; off
 static void scan_for_camera(const void* data, UINT size, const char* via) {
-    if (data == nullptr || size < 48) return;
+    if (!g_scan_uploads || data == nullptr || size < 48) return;
 
     // A hit from CreateBuffer was filled once, at area load; one from
     // Map/Unmap or UpdateSubresource was written this frame. Telling them
@@ -2097,8 +2098,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
+    g_draw_in_frame_last = (uint32_t)g_draw_in_frame;
     g_draw_in_frame = 0;
-    g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0; g_draw_in_frame_last = (uint32_t)g_draw_in_frame;
+    g_scene_draws_last = g_scene_draw_idx; g_scene_draw_idx = 0;
     g_targets_frame_n = 0; g_cleared_frame_n = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
