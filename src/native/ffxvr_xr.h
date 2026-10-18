@@ -10,7 +10,7 @@ struct XrHost {
     ID3D11DeviceContext* ctx;
     const wchar_t*       dir;                               // where openxr_loader.dll lives (next to our DLL)
     void (*diag)(const char* fmt, ...);                     // append a line to ffxvr_diag.log
-    bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h);   // stretch copy, alpha 1
+    bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha);   // stretch copy; alpha forced to 1 unless kept
 };
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space
@@ -31,6 +31,12 @@ struct XrScreen {
     float width;                                            // metres; height follows the 16:9 image
 };
 
+/// The UI panel: the game's UI pass on a head-locked, alpha-blended quad.
+struct XrUiPanel {
+    ID3D11Texture2D* tex;                                   // null: no panel this frame
+    float dist, width;                                      // metres; height follows 16:9
+};
+
 bool        xr_start(const XrHost& host);                   // loads the loader, creates instance + session + swapchains
 void        xr_stop();
 bool        xr_active();                                    // session exists (may not be running yet)
@@ -41,4 +47,4 @@ const char* xr_status();                                    // one line for the 
 /// view each was rendered with. Submits them with the poses returned by the
 /// previous call, then waits for the next frame and returns its poses and
 /// the headset's field of view in `next`.
-void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, XrFrameOut* next);
+void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, const XrUiPanel* ui, XrFrameOut* next);

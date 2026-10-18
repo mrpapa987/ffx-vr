@@ -520,6 +520,23 @@ uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this 
 uint32_t g_frames_without_cam = 0;
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
+
+// UI panel. The game's UI pass is the run of draws into the MSAA scene
+// target after a resolve and a depth-only clear (colour kept: the scene is
+// the base). The resolve before it is the clean per-eye image; the UI draws
+// are re-issued into a transparent texture shown on a head-locked quad.
+enum UiState { UI_IDLE = 0, UI_RESOLVED = 1, UI_PASS = 2, UI_DONE = 3 };
+int   g_ui_state = UI_IDLE;
+bool  g_ui_enabled = true;
+float g_ui_dist = 1.5f, g_ui_width = 1.6f;
+ID3D11Texture2D* g_scene_resolved = nullptr;    // the latest resolve destination of the scene target (game's)
+ID3D11Texture2D* g_ui_tex = nullptr; ID3D11RenderTargetView* g_ui_rtv = nullptr;
+ID3D11Texture2D* g_eye1_final = nullptr; ID3D11RenderTargetView* g_eye1_final_rtv = nullptr;
+ID3D11Texture2D* g_eye2_final = nullptr; ID3D11RenderTargetView* g_eye2_final_rtv = nullptr;
+uint32_t g_ui_pass_frame = 0;                   // frame in which a UI pass completed
+uint32_t g_ui_draws_frame = 0, g_ui_draws_report = 0;
+ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
+bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
 
 static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
@@ -1862,6 +1879,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
+    g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
+    if (g_ui_draw_now) { g_ui_draws_frame++; return 1; }   // into the UI texture (eye2_begin handles it)
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
     if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
         g_bb_draws_seen++;
@@ -2480,12 +2499,53 @@ static bool snapshot_if_scene(ID3D11Texture2D* tex, uint32_t how) {
     return true;
 }
 
+/// The UI pass starts: both eye images are the scene resolved just before
+/// it; the UI texture is cleared to transparent for the pass's draws.
+static ID3D11Texture2D* ensure_copy(ID3D11Texture2D*& tex, ID3D11RenderTargetView*& rtv, const D3D11_TEXTURE2D_DESC& like);
+static void ui_pass_begin() {
+    if (g_scene_resolved == nullptr || g_device == nullptr) return;
+    D3D11_TEXTURE2D_DESC d; g_scene_resolved->GetDesc(&d);
+    if (!ensure_copy(g_eye1_final, g_eye1_final_rtv, d) || !ensure_copy(g_eye2_final, g_eye2_final_rtv, d) || !ensure_copy(g_ui_tex, g_ui_rtv, d)) return;
+    if (g_ui_blend == nullptr) {
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;  bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;  bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;   bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        g_device->CreateBlendState(&bd, &g_ui_blend);
+    }
+    ID3D11Texture2D* twin = nullptr;
+    { auto it = g_twins.find(g_scene_resolved); if (it != g_twins.end()) twin = it->second.tex; }
+    {
+        InEye2 guard;
+        g_ctx->CopyResource(g_eye1_final, g_scene_resolved);
+        g_ctx->CopyResource(g_eye2_final, twin ? twin : g_scene_resolved);
+        const float clear[4] = { 0.f, 0.f, 0.f, 0.f };
+        g_ctx->ClearRenderTargetView(g_ui_rtv, clear);
+    }
+    g_ui_state = UI_PASS;
+    g_ui_draws_frame = 0;
+}
+
 /// Switches every current target to its twin, every sampled render texture
 /// to its twin, and uploads the eye-2 image of the object buffer if there is
 /// one. The managed detour then re-issues the draw.
 ID3D11ShaderResourceView* g_saved_ps_srv[16] = {};
+ID3D11BlendState* g_saved_blend = nullptr; float g_saved_blend_factor[4]; UINT g_saved_sample_mask = 0xFFFFFFFF;
+bool g_ui_pass_active_draw = false;
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     (void)pass;
+    if (g_ui_draw_now) {
+        if (g_ui_rtv == nullptr || g_ctx == nullptr) return 0;
+        g_in_eye2 = true; g_ui_pass_active_draw = true;
+        for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
+        for (int i = 0; i < 16; ++i) g_saved_ps_srv[i] = g_cur_ps_srv[i];
+        g_ctx->OMGetBlendState(&g_saved_blend, g_saved_blend_factor, &g_saved_sample_mask);
+        ID3D11RenderTargetView* rts[1] = { g_ui_rtv };
+        g_ctx->OMSetRenderTargets(1, rts, nullptr);            // no depth: draw order is the layering
+        g_ctx->OMSetBlendState(g_ui_blend, nullptr, 0xFFFFFFFF);
+        return 1;
+    }
     if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
     if (g_cur_rtv_n == 0 && g_cur_dsv == nullptr) { g_e2_begin_fail++; return 0; }
 
@@ -2568,6 +2628,13 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     if (!g_in_eye2 || g_ctx == nullptr) return;
     g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
+    if (g_ui_pass_active_draw) {
+        g_ui_pass_active_draw = false;
+        g_ctx->OMSetBlendState(g_saved_blend, g_saved_blend_factor, g_saved_sample_mask);
+        if (g_saved_blend) { g_saved_blend->Release(); g_saved_blend = nullptr; }
+        g_in_eye2 = false;
+        return;
+    }
     g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
     if (!g_debug_leave) {
         for (int sl = 0; sl < 14; ++sl) {
@@ -2617,6 +2684,10 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                 // The first resolve of the scene pass is the finished scene, in a
                 // plain (non-multisampled) texture: that is the eye image.
                 if (src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
+                if (src == g_scene_live_tex && g_scene_live_draws >= 20) {
+                    if (g_ui_state == UI_PASS) { g_ui_state = UI_DONE; g_ui_pass_frame = g_frames; g_ui_draws_report = g_ui_draws_frame; }
+                    else { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
+                }
             }
         }
     }
@@ -2633,9 +2704,15 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, voi
 }
 
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
+static void ui_pass_begin();
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
     if (!depth) snapshot_if_scene(texture_of(static_cast<ID3D11View*>(view)), 3);   // about to be wiped: last chance
+    if (g_scene_live_tex && g_scene_live_draws >= 20) {
+        ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
+        if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
+        else if (depth && bound == g_scene_live_tex && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled) ui_pass_begin();
+    }
     g_in_eye2 = true;
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
     else       { ID3D11RenderTargetView* t = twin_rtv(static_cast<ID3D11RenderTargetView*>(view)); if (t) g_ctx->ClearRenderTargetView(t, color); }
@@ -2884,8 +2961,9 @@ static const char k_copy_hlsl[] =
     "Texture2D t : register(t0); SamplerState s : register(s0);\n"
     "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
     "V vs(uint id : SV_VertexID) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.uv = uv; o.p = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1); return o; }\n"
-    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n";
-ID3D11VertexShader* g_copy_vs = nullptr; ID3D11PixelShader* g_copy_ps = nullptr; ID3D11SamplerState* g_copy_smp = nullptr;
+    "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n"
+    "float4 ps_alpha(V i) : SV_Target { return t.Sample(s, i.uv); }\n";
+ID3D11VertexShader* g_copy_vs = nullptr; ID3D11PixelShader* g_copy_ps = nullptr; ID3D11PixelShader* g_copy_ps_alpha = nullptr; ID3D11SamplerState* g_copy_smp = nullptr;
 bool g_copy_tried = false;
 struct OpaqueCopy { ID3D11Texture2D* tex = nullptr; ID3D11RenderTargetView* rtv = nullptr; ID3D11ShaderResourceView* srv = nullptr; UINT w = 0, h = 0; };
 OpaqueCopy g_opaque[3];
@@ -2907,6 +2985,13 @@ static bool copy_pass_init() {
     hr = g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_copy_vs);
     if (SUCCEEDED(hr)) hr = g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_copy_ps);
     vsb->Release(); psb->Release();
+    {
+        ID3DBlob *pab = nullptr, *err2 = nullptr;
+        HRESULT h2 = compile(k_copy_hlsl, sizeof(k_copy_hlsl) - 1, "copy", nullptr, nullptr, "ps_alpha", "ps_4_0", 0, 0, &pab, &err2);
+        if (SUCCEEDED(h2)) { g_device->CreatePixelShader(pab->GetBufferPointer(), pab->GetBufferSize(), nullptr, &g_copy_ps_alpha); pab->Release(); }
+        else diag("copy pass: ps_alpha compile failed 0x%08X", static_cast<unsigned>(h2));
+        if (err2) err2->Release();
+    }
     if (FAILED(hr)) { diag("copy pass: shader create failed 0x%08X", static_cast<unsigned>(hr)); return false; }
     D3D11_SAMPLER_DESC sd = {};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
@@ -2917,7 +3002,7 @@ static bool copy_pass_init() {
 
 static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
 static void g_plain_srvs_forget(ID3D11Texture2D* t) { auto it = g_plain_srvs.find(t); if (it != g_plain_srvs.end()) { if (it->second) it->second->Release(); g_plain_srvs.erase(it); } }
-bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h);
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha = false);
 
 /// Renders `src` into the opaque copy for `slot` (0..2) and returns its SRV.
 static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
@@ -2948,12 +3033,12 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
         if (FAILED(hr)) diag("preview: srv failed hr=0x%08X", static_cast<unsigned>(hr));
         oc.w = d.Width; oc.h = d.Height;
     }
-    return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h) ? oc.srv : nullptr;
+    return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h, false) ? oc.srv : nullptr;
 }
 
 /// Stretch-copies `src` into `dst` (w x h) with alpha forced to 1, saving
 /// and restoring the pipeline state it touches. Also used for the headset.
-bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h) {
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha) {
     if (src == nullptr || dst == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
     if (!copy_pass_init()) return false;
     ID3D11ShaderResourceView* in = nullptr;
@@ -2990,7 +3075,7 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     g_ctx->OMSetRenderTargets(1, rt, nullptr);
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
     g_ctx->RSSetViewports(1, &vp);
-    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader((keep_alpha && g_copy_ps_alpha) ? g_copy_ps_alpha : g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
     g_ctx->PSSetShaderResources(0, 1, &in); g_ctx->PSSetSamplers(0, 1, &g_copy_smp);
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -3057,6 +3142,8 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     return g_xr_want ? 1 : 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; }
+extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
+extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
@@ -3096,9 +3183,15 @@ static void xr_tick() {
         g_stereo = true; g_ovr_enabled = true;
     }
     // Eye 1: the backbuffer copied into a sampleable texture; eye 2: its twin.
+    // When the frame had a UI pass, the eyes are the scene resolved before
+    // it, and the UI goes on its own panel.
     ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
-    if (g_backbuffer) {
+    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width };
+    const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
+    g_ui_state = UI_IDLE;
+    if (ui_frame) { e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex; }
+    else if (g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex; }
         if (ensure_copy(g_bb_copy, g_bb_copy_rtv, bd)) { InEye2 guard; g_ctx->CopyResource(g_bb_copy, g_backbuffer); e1 = g_bb_copy; }
@@ -3151,7 +3244,7 @@ static void xr_tick() {
         // twinned, its draws re-issued and its texture mistaken for the
         // backbuffer -- which hung the GPU.
         InEye2 guard;
-        xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &out);
+        xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
     }
     xr_apply_poses(out);
     // What the next frame renders with.

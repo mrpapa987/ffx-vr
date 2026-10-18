@@ -46,6 +46,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool _xr_fov = true, _xr_seat = true;
     private bool _xr_want = false;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
+    private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_ui_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_ui_draws;
+    private bool _ui_on = true; private float _ui_dist = 1.5f, _ui_width = 1.6f;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
@@ -197,6 +200,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
             _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
             _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_set");
+            _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_set");
+            _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
@@ -463,6 +468,9 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
                     case "overlay_open":      _window_open = v != "0"; break;
+                    case "ui_panel":          _ui_on = v != "0"; break;
+                    case "ui_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_dist); break;
+                    case "ui_width":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_width); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -483,7 +491,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"screen_mode={_xr_screen_mode}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
-            $"overlay_open={(_window_open ? 1 : 0)}\n";
+            $"overlay_open={(_window_open ? 1 : 0)}\n" +
+            $"ui_panel={(_ui_on ? 1 : 0)}\n" +
+            $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
+            $"ui_width={_ui_width.ToString("F2", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -528,6 +539,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("never", ref _xr_screen_mode, 2);
         if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
+        ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on);
+        if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
 
         ImGui.Separator();
         ImGui.TextDisabled("Home: recentre   F7: hide/show this overlay");
@@ -595,6 +608,13 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
             ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
             if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("UI panel")) {
+            ImGui.SliderFloat("distance (m)", ref _ui_dist, 0.5f, 4f);
+            ImGui.SliderFloat("width (m)", ref _ui_width, 0.5f, 4f);
+            if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
             ImGui.TreePop();
         }
 

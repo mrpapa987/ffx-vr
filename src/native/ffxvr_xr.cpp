@@ -72,7 +72,8 @@ struct Eye {
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
-Eye g_eye[3];                                   // 0/1: the eyes; 2: the virtual screen
+Eye g_eye[4];                                   // 0/1: the eyes; 2: the virtual screen; 3: the UI panel
+XrSpace g_view_space = XR_NULL_HANDLE;           // head-locked space for the UI panel
 DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
 
 void set_status(const char* s) { strncpy_s(g_status, s, _TRUNCATE); }
@@ -123,6 +124,8 @@ void xr_stop() {
         destroy_eyes();
         if (g_space != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_space);
         g_space = XR_NULL_HANDLE;
+        if (g_view_space != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_view_space);
+        g_view_space = XR_NULL_HANDLE;
         if (p_xrDestroySession) p_xrDestroySession(g_session);
         g_session = XR_NULL_HANDLE;
     }
@@ -192,6 +195,9 @@ bool xr_start(const XrHost& host) {
     rsci.poseInReferenceSpace.orientation.w = 1.f;
     r = p_xrCreateReferenceSpace(g_session, &rsci, &g_space);
     if (XR_FAILED(r)) { fail("xrCreateReferenceSpace", r); xr_stop(); return false; }
+    rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    r = p_xrCreateReferenceSpace(g_session, &rsci, &g_view_space);
+    if (XR_FAILED(r)) { fail("xrCreateReferenceSpace (view)", r); xr_stop(); return false; }
 
     // Swapchains: the headset's recommended width, the game's 16:9 aspect.
     uint32_t nviews = 0; XrViewConfigurationView vcv[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
@@ -207,7 +213,7 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
             // The headset's recommended width at the game's 16:9 aspect (the
@@ -216,7 +222,7 @@ bool xr_start(const XrHost& host) {
             e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
             if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
-        else { e.w = 2560; e.h = 1440; }                   // the virtual screen
+        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2) and the UI panel (3)
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
@@ -234,7 +240,7 @@ bool xr_start(const XrHost& host) {
         if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
             set_status("intermediate texture failed"); xr_stop(); return false;
         }
-        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : "screen", i, e.w, e.h, n);
+        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : "ui", i, e.w, e.h, n);
     }
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
@@ -287,7 +293,7 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
     if (r == XR_TIMEOUT_EXPIRED) { g_wait_timeouts++; if (g_wait_timeouts <= 5) g_h.diag("xr: swapchain image wait timed out (eye %d)", i); p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     if (XR_FAILED(r)) { p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     stage(i == 0 ? "copy eye 0" : "copy eye 1");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h)) g_h.ctx->CopyResource(e.images[idx], e.mid);
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3)) g_h.ctx->CopyResource(e.images[idx], e.mid);
     stage("release image");
     p_xrReleaseSwapchainImage(e.sc, &ri);
     return true;
@@ -295,7 +301,7 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
 
 } // namespace
 
-void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, XrFrameOut* next) {
+void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, const XrUiPanel* ui, XrFrameOut* next) {
     if (next) next->have_views = false;
     if (!xr_active()) return;
     stage("poll events");
@@ -332,11 +338,26 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         }
         XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
         layer.space = g_space; layer.viewCount = 2; layer.views = pv;
-        const XrCompositionLayerBaseHeader* layers[1] = { use_screen ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad)
-                                                                     : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer) };
+        // The UI panel: head-locked (VIEW space), alpha-blended over the scene.
+        XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        bool have_ui = false;
+        if (ok && !use_screen && ui != nullptr && ui->tex != nullptr && submit_eye(3, ui->tex)) {
+            have_ui = true;
+            uiq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            uiq.space = g_view_space; uiq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            uiq.subImage.swapchain = g_eye[3].sc;
+            uiq.subImage.imageRect.offset = { 0, 0 };
+            uiq.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[3].w), static_cast<int32_t>(g_eye[3].h) };
+            uiq.pose.orientation = { 0, 0, 0, 1 };
+            uiq.pose.position = { 0, 0, -ui->dist };
+            uiq.size = { ui->width, ui->width * 9.f / 16.f };
+        }
+        const XrCompositionLayerBaseHeader* layers[2] = {
+            use_screen ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad) : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
+            reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq) };
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        end.layerCount = ok ? 1 : 0; end.layers = ok ? layers : nullptr;
+        end.layerCount = ok ? (have_ui ? 2u : 1u) : 0u; end.layers = ok ? layers : nullptr;
         stage("xrEndFrame");
         XrResult r = p_xrEndFrame(g_session, &end);
         g_frame_open = false;
