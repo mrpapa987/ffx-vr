@@ -502,6 +502,13 @@ bool  g_xr_seat     = true;             // head owns orientation; the authored c
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
 bool  g_xr_fov_applied = false;
+// Virtual screen for frames that are not 3D.
+int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
+float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
+uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
+uint32_t g_frames_without_cam = 0;
+bool  g_xr_screen_now = false;          // decided per frame
+float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
 
 static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
@@ -533,6 +540,10 @@ static void xr_apply_poses(const XrFrameOut& f) {
         g_xr_ref_q[0] = 0; g_xr_ref_q[1] = sinf(a * 0.5f); g_xr_ref_q[2] = 0; g_xr_ref_q[3] = cosf(a * 0.5f);
         memcpy(g_xr_ref_p, g_xr_raw_p, sizeof(g_xr_ref_p));
         g_xr_recenter_pending = false;
+        // The virtual screen sits g_xr_screen_dist in front, facing the user.
+        const float ahead[3] = { 0.f, 0.f, -g_xr_screen_dist }; float off[3]; quat_rotate(g_xr_ref_q, ahead, off);
+        g_xr_screen_p[0] = g_xr_ref_p[0] + off[0]; g_xr_screen_p[1] = g_xr_ref_p[1] + off[1]; g_xr_screen_p[2] = g_xr_ref_p[2] + off[2];
+        memcpy(g_xr_screen_q, g_xr_ref_q, sizeof(g_xr_screen_q));
     }
     const float ref_inv[4] = { -g_xr_ref_q[0], -g_xr_ref_q[1], -g_xr_ref_q[2], g_xr_ref_q[3] };
     quat_mul(ref_inv, g_xr_raw_q, g_xr_q);
@@ -1184,6 +1195,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
 
     g_ovr_mask |= mask;
     g_ovr_applied++;
+    if (base != 0) g_cam_uploads_frame++;
     auto it = g_ovr_stats.find(size);
     if (it == g_ovr_stats.end()) g_ovr_stats[size] = { 1, mask, mask };
     else { it->second.count++; it->second.mask_all &= mask; it->second.mask_any |= mask; }
@@ -2997,6 +3009,8 @@ int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F
 uint32_t g_e2_begin_fail_prev = 0;
 static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
 
+extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
+extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
@@ -3068,6 +3082,15 @@ static void xr_tick() {
         g_e2_begin_fail_prev = g_e2_begin_fail;
         g_seq_index++; g_seq_left--;
     }
+    // 2D frame? No perspective camera was uploaded. Two frames of hysteresis
+    // before switching to the screen; back to 3D at once.
+    if (g_cam_uploads_frame == 0) g_frames_without_cam++; else g_frames_without_cam = 0;
+    g_cam_uploads_frame = 0;
+    const bool is2d = g_frames_without_cam >= 2;
+    g_xr_screen_now = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
+    XrScreen screen = {};
+    screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
+    memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
     {
         // The runtime composites on the game's own device context inside
         // these calls (Virtual Desktop binds its 2496x2688 eye textures and
@@ -3075,7 +3098,7 @@ static void xr_tick() {
         // twinned, its draws re-issued and its texture mistaken for the
         // backbuffer -- which hung the GPU.
         InEye2 guard;
-        xr_frame(e1, g_stereo ? e2 : nullptr, used, &out);
+        xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &out);
     }
     xr_apply_poses(out);
     // What the next frame renders with.

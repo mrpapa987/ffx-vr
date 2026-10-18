@@ -45,6 +45,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int> _fn_xr_set;
     private bool _xr_fov = true, _xr_seat = true;
+    private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
+    private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_dump_seq;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
@@ -218,6 +221,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
             _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
             _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
+            _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_set");
+            _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
             _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
@@ -622,6 +627,14 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Checkbox("headset field of view (off: the game's 16:9 window)", ref _xr_fov);
             ImGui.Checkbox("seat: head owns orientation, authored camera gives position + heading only", ref _xr_seat);
             _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
+            ImGui.Text("virtual screen (2D frames: title, menus, loading, FMV):"); ImGui.SameLine();
+            ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
+            ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
+            ImGui.RadioButton("never", ref _xr_screen_mode, 2);
+            ImGui.SliderFloat("screen width (m)", ref _xr_screen_width, 1f, 6f);
+            ImGui.SliderFloat("screen distance (m)", ref _xr_screen_dist, 1f, 6f);
+            if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
+            if (_fn_xr_screen_now != null) ImGui.Text(_fn_xr_screen_now() != 0 ? "showing: virtual screen" : "showing: 3D projection");
             if (_fn_xr_status != null) {
                 byte* buf = stackalloc byte[256];
                 _fn_xr_status(buf, 256);

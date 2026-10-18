@@ -23,6 +23,14 @@ struct XrFrameOut {
     XrFovTan  fov[2];                                       // the headset's field of view per eye
 };
 
+/// The virtual screen: a flat panel in the reference space showing eye 1's
+/// image, used for frames that are not 3D (title, menus, loading, FMV).
+struct XrScreen {
+    bool  on;                                               // submit the screen instead of the projection layers
+    float q[4]; float p[3];                                 // pose of the panel centre in the reference space
+    float width;                                            // metres; height follows the 16:9 image
+};
+
 bool        xr_start(const XrHost& host);                   // loads the loader, creates instance + session + swapchains
 void        xr_stop();
 bool        xr_active();                                    // session exists (may not be running yet)
@@ -33,4 +41,4 @@ const char* xr_status();                                    // one line for the 
 /// view each was rendered with. Submits them with the poses returned by the
 /// previous call, then waits for the next frame and returns its poses and
 /// the headset's field of view in `next`.
-void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], XrFrameOut* next);
+void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, XrFrameOut* next);
