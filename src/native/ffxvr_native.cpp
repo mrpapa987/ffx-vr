@@ -1060,9 +1060,19 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     // The first target bound after our per-frame hook is the overlay's view of
     // the real backbuffer (Fahrenheit binds it to draw ImGui). Re-identified
     // every frame, so a swapchain resize is followed.
-    if (g_overlay_phase && !g_backbuffer_seen_this_frame && n > 0 && rtvs && rtvs[0]) {
+    // The backbuffer is identified by what it is, not by when it is bound:
+    // a swapchain buffer is the only render target the game uses that has no
+    // shader-resource binding (every texture the game renders to has one).
+    // Timing-based identification broke whenever the overlay drew nothing.
+    if (n > 0 && rtvs && rtvs[0]) {
         ID3D11Texture2D* t = texture_of(static_cast<ID3D11View*>(rtvs[0]));
-        if (t) { g_backbuffer = t; g_backbuffer_seen_this_frame = true; }
+        if (t && t != g_backbuffer) {
+            D3D11_TEXTURE2D_DESC d; t->GetDesc(&d);
+            if ((d.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && d.Width >= 640 && d.SampleDesc.Count == 1) {
+                g_backbuffer = t; g_backbuffer_seen_this_frame = true;
+            }
+        }
+        else if (t == g_backbuffer) g_backbuffer_seen_this_frame = true;
     }
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
