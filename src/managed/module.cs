@@ -36,7 +36,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_reads;
     private delegate* unmanaged[Cdecl]<int>       _fn_slot0_count;
     private delegate* unmanaged[Cdecl]<int>       _fn_camera_changes;
-    private delegate* unmanaged[Cdecl]<float*, int> _fn_scan;
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, int> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<nint, void> _fn_draw_ctx;
@@ -46,8 +45,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int> _fn_xr_set;
     private bool _xr_fov = true, _xr_seat = true;
     private bool _xr_want = false;
-    private DateTime _last_mouse_time = DateTime.UtcNow;
-    private bool _overlay_hidden = false;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
@@ -56,9 +53,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
     private bool  _xr_on = false, _xr_rotate = true, _xr_translate = true;
     private float _xr_scale = 94f;
-    private bool _debug_red = false;
-    private bool _debug_leave = false;
-    private int _stereo_scope = 0;
     private delegate* unmanaged[Cdecl]<int, nint> _fn_eye2_srv;
     private int _eye2_source = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_draws;
@@ -66,7 +60,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool  _stereo_on = false;
     private float _ipd = 6f;
     private bool  _eye2_preview = true;
-    private delegate* unmanaged[Cdecl]<int*, int> _fn_diff;
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets_uav;
@@ -78,32 +71,12 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void> _fn_on_clear_twin;
     private delegate* unmanaged[Cdecl]<nint, void> _fn_set_backbuffer;
     private delegate* unmanaged[Cdecl]<nint, uint, uint, uint, uint, nint, uint, nint, int, int> _fn_on_copy;
-    private bool _backbuffer_set;
     private int _frame_census_n = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_measure;
     private int _measure_n = 0;
     private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void> _fn_override_set;
     private delegate* unmanaged[Cdecl]<int> _fn_override_applied;
     private delegate* unmanaged[Cdecl]<int> _fn_override_mask;
-    private delegate* unmanaged[Cdecl]<int> _fn_memscan;
-    private delegate* unmanaged[Cdecl]<nuint, nuint, int> _fn_watch;
-    private delegate* unmanaged[Cdecl]<int> _fn_watch_hits;
-    private delegate* unmanaged[Cdecl]<nuint> _fn_exe_camera;
-    private int _watch_rc = -99;
-    private delegate* unmanaged[Cdecl]<nuint, uint, int> _fn_xrefs;
-    private int _xrefs_n = -99;
-    private delegate* unmanaged[Cdecl]<nuint, uint, int> _fn_ptrscan;
-    private delegate* unmanaged[Cdecl]<nuint> _fn_scan_struct;
-    private int _ptrscan_n = -99;
-    private delegate* unmanaged[Cdecl]<int, nuint, void> _fn_cam_mem_set;
-    private delegate* unmanaged[Cdecl]<int> _fn_cam_mem_writes;
-    private int _cam_mem_mode = 0;
-    private delegate* unmanaged[Cdecl]<int> _fn_dump_structs;
-    private int _structs_dumped = 0;
-    private delegate* unmanaged[Cdecl]<int> _fn_scan_cams;
-    private int _memscan_cams = 0;
-    private delegate* unmanaged[Cdecl]<uint, uint, void> _fn_census_arm;
-    private int _census_n = 0;
     private delegate* unmanaged[Cdecl]<void*, void*, uint, int> _fn_safe_read;
     private delegate* unmanaged[Cdecl]<float, float, float, float*, int> _fn_project;
     private bool  _markers_on    = true;
@@ -111,7 +84,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int   _markers_drawn;
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_world_positions;
     private double _last_pos_log;
-    private int _memscan_last = -99;
 
     // -- camera override state (owned here, pushed to native every frame) ----
     private bool  _ovr_enabled, _ovr_freeze;
@@ -183,6 +155,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     public override bool init(FhModContext mod_context, FileStream global_state_file) {
         _logger.Info("FFX VR module initialized.");
+        settings_load();
         load_native(mod_context);
         return true;
     }
@@ -215,7 +188,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
             _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
             _fn_camera_changes = (delegate* unmanaged[Cdecl]<int>)    NativeLibrary.GetExport(_native_handle, "ffxvr_camera_changes");
-            _fn_scan         = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan");
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_draw_ctx     = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_ctx");
@@ -232,7 +204,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
             _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
-            _fn_diff         = (delegate* unmanaged[Cdecl]<int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_diff");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
             _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
             _fn_on_rendertargets_uav = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets_uav");
@@ -248,18 +219,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
             _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
             _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_mask");
-            _fn_memscan          = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_memscan");
-            _fn_watch            = (delegate* unmanaged[Cdecl]<nuint, nuint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_watch");
-            _fn_watch_hits       = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_watch_hits");
-            _fn_exe_camera       = (delegate* unmanaged[Cdecl]<nuint>)NativeLibrary.GetExport(_native_handle, "ffxvr_exe_camera");
-            _fn_xrefs            = (delegate* unmanaged[Cdecl]<nuint, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xrefs");
-            _fn_ptrscan          = (delegate* unmanaged[Cdecl]<nuint, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ptrscan");
-            _fn_scan_struct      = (delegate* unmanaged[Cdecl]<nuint>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_struct");
-            _fn_cam_mem_set      = (delegate* unmanaged[Cdecl]<int, nuint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cam_mem_set");
-            _fn_cam_mem_writes   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cam_mem_writes");
-            _fn_dump_structs     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_structs");
-            _fn_scan_cams        = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_scan_cams");
-            _fn_census_arm       = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_safe_read");
             _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_project");
             _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_world_positions");
@@ -470,116 +429,197 @@ public sealed unsafe class FFXVRModule : FhModule {
     ///     Translation sits in the last column, so the world position of the
     ///     camera is -R^T * t.
     /// </summary>
-    private void draw_camera() {
-        if (_fn_get_camera == null) return;
+    // -- settings file ---------------------------------------------------------
+    //
+    // ffxvr.ini next to the mod: what a player sets in the main window
+    // persists, so the overlay is not needed once things are configured.
 
-        float* c = stackalloc float[48];
-        if (_fn_get_camera(c) == 0) {
-            ImGui.Text("Camera: not read yet");
+    private string _ini_path = "";
+    private string _ini_last = "";
+    private bool _headset_autostart = false;
+
+    private void settings_load() {
+        try {
+            string dir = Path.GetDirectoryName(typeof(FFXVRModule).Assembly.Location) ?? ".";
+            _ini_path = Path.Combine(dir, "ffxvr.ini");
+            if (!File.Exists(_ini_path)) return;
+            foreach (string raw in File.ReadAllLines(_ini_path)) {
+                string line = raw.Trim();
+                int eq = line.IndexOf('=');
+                if (line.Length == 0 || line[0] == '#' || eq < 0) continue;
+                string k = line[..eq].Trim(), v = line[(eq + 1)..].Trim();
+                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                switch (k) {
+                    case "headset_autostart": _headset_autostart = v == "1"; break;
+                    case "world_scale":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_scale); break;
+                    case "head_position":     _xr_translate = v == "1"; break;
+                    case "seat":              _xr_seat = v == "1"; break;
+                    case "headset_fov":       _xr_fov = v == "1"; break;
+                    case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
+                    case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
+                    case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
+                    case "overlay_open":      _window_open = v != "0"; break;
+                }
+            }
+            if (_headset_autostart) _xr_want = true;
+        }
+        catch (Exception e) { _logger.Warn($"settings: {e.Message}"); }
+    }
+
+    private void settings_save_if_changed() {
+        if (_ini_path.Length == 0) return;
+        var ci = System.Globalization.CultureInfo.InvariantCulture;
+        string text =
+            "# FFX VR settings. Edited by the overlay; hand edits are fine.\n" +
+            $"headset_autostart={(_headset_autostart ? 1 : 0)}\n" +
+            $"world_scale={_xr_scale.ToString("F1", ci)}\n" +
+            $"head_position={(_xr_translate ? 1 : 0)}\n" +
+            $"seat={(_xr_seat ? 1 : 0)}\n" +
+            $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
+            $"screen_mode={_xr_screen_mode}\n" +
+            $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
+            $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
+            $"overlay_open={(_window_open ? 1 : 0)}\n";
+        if (text == _ini_last) return;
+        try { File.WriteAllText(_ini_path, text); _ini_last = text; }
+        catch (Exception e) { _logger.Warn($"settings: {e.Message}"); }
+    }
+
+    // -- main window --------------------------------------------------------------
+
+    private string xr_status_text() {
+        if (_fn_xr_status == null) return "";
+        byte* buf = stackalloc byte[256];
+        _fn_xr_status(buf, 256);
+        return System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)buf) ?? "";
+    }
+
+    /// <summary>What a player touches: headset, comfort, view. Everything else is under Debug.</summary>
+    private void draw_main() {
+        if (_fn_xr_set == null) { ImGui.Text($"Native helper: {_native_status}"); return; }
+
+        // Headset
+        bool want = _xr_want;
+        ImGui.Checkbox("Headset", ref want);
+        ImGui.SameLine(); if (ImGui.Button("Recentre (Home)")) _fn_xr_recenter();
+        ImGui.SameLine(); ImGui.Checkbox("start automatically", ref _headset_autostart);
+        if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
+        _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
+        _xr_want = want;   // asked each frame until the native side accepts (it waits for the first 3D frame)
+        ImGui.TextWrapped(xr_status_text());
+        if (_fn_xr_screen_now != null && _xr_on) ImGui.Text(_fn_xr_screen_now() != 0 ? "showing: virtual screen" : "showing: 3D scene");
+
+        // Comfort
+        ImGui.Separator();
+        ImGui.SliderFloat("world scale", ref _xr_scale, 10f, 300f, "%.0f units/m");
+        ImGui.SameLine(); ImGui.TextDisabled(_xr_scale < 20f ? "life-size" : _xr_scale < 60f ? "large model" : "tabletop diorama");
+        ImGui.Checkbox("head position (lean)", ref _xr_translate); ImGui.SameLine();
+        ImGui.Checkbox("seat (head owns orientation)", ref _xr_seat);
+
+        // View
+        ImGui.Separator();
+        ImGui.Checkbox("headset field of view", ref _xr_fov);
+        ImGui.Text("2D screens:"); ImGui.SameLine();
+        ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
+        ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
+        ImGui.RadioButton("never", ref _xr_screen_mode, 2);
+        if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Home: recentre   F7: hide/show this overlay");
+    }
+
+    /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
+    private void draw_debug() {
+        if (!ImGui.CollapsingHeader("Debug")) {
+            // The override and eye-2 settings must still reach the native side.
+            push_override_and_stereo();
             return;
         }
 
-        ImGui.Separator();
-        ImGui.Text($"Camera reads: {(_fn_camera_reads != null ? _fn_camera_reads() : -1)}"
-                 + $"   slot-0 buffers/frame: {(_fn_slot0_count != null ? _fn_slot0_count() : -1)}");
+        ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {_native_status}   detours: {_detour_status}");
+        if (_fn_counter != null)
+            ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
 
-        // view matrix, world -> view
-        float t0 = c[3], t1 = c[7], t2 = c[11];
-        float px = -(c[0] * t0 + c[4] * t1 + c[8]  * t2);
-        float py = -(c[1] * t0 + c[5] * t1 + c[9]  * t2);
-        float pz = -(c[2] * t0 + c[6] * t1 + c[10] * t2);
-
-        // the inverse view at byte 320 carries the same position directly
-        float qx = c[32 + 3], qy = c[32 + 7], qz = c[32 + 11];
-
-        float yaw   = MathF.Atan2(c[8], c[10]) * 180f / MathF.PI;
-        float pitch = MathF.Asin(Math.Clamp(-c[9], -1f, 1f)) * 180f / MathF.PI;
-        ImGui.Text($"view matrix changed in {(_fn_camera_changes != null ? _fn_camera_changes() : -1)} frames   yaw {yaw,7:F1}  pitch {pitch,6:F1}");
-        ImGui.Text($"position (from view):    {px,9:F2} {py,9:F2} {pz,9:F2}");
-        ImGui.Text($"position (from inverse): {qx,9:F2} {qy,9:F2} {qz,9:F2}");
-
-        float m0 = c[16 + 0], m5 = c[16 + 5];
-        if (MathF.Abs(m0) > 1e-6f && MathF.Abs(m5) > 1e-6f) {
-            float fovy = 2f * MathF.Atan(1f / m5) * 180f / MathF.PI;
-            float fovx = 2f * MathF.Atan(1f / m0) * 180f / MathF.PI;
-            ImGui.Text($"FOV: {fovy:F1} vertical, {fovx:F1} horizontal, aspect {m5 / m0:F3}");
-        }
-
-        if (ImGui.TreeNode("view matrix")) {
-            for (int r = 0; r < 4; r++)
-                ImGui.Text($"{c[r*4+0],10:F4} {c[r*4+1],10:F4} {c[r*4+2],10:F4} {c[r*4+3],10:F4}");
+        if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
+            float* c = stackalloc float[48];
+            if (_fn_get_camera == null || _fn_get_camera(c) == 0) ImGui.Text("not read yet");
+            else {
+                float t0 = c[3], t1 = c[7], t2 = c[11];
+                float px = -(c[0] * t0 + c[4] * t1 + c[8]  * t2);
+                float py = -(c[1] * t0 + c[5] * t1 + c[9]  * t2);
+                float pz = -(c[2] * t0 + c[6] * t1 + c[10] * t2);
+                float yaw   = MathF.Atan2(c[8], c[10]) * 180f / MathF.PI;
+                float pitch = MathF.Asin(Math.Clamp(-c[9], -1f, 1f)) * 180f / MathF.PI;
+                ImGui.Text($"yaw {yaw,7:F1}  pitch {pitch,6:F1}   position {px,9:F2} {py,9:F2} {pz,9:F2}");
+                float m0 = c[16 + 0], m5 = c[16 + 5];
+                if (MathF.Abs(m0) > 1e-6f && MathF.Abs(m5) > 1e-6f)
+                    ImGui.Text($"game FOV: {2f * MathF.Atan(1f / m5) * 180f / MathF.PI:F1} vertical, {2f * MathF.Atan(1f / m0) * 180f / MathF.PI:F1} horizontal");
+                if (ImGui.TreeNode("matrices")) {
+                    for (int r = 0; r < 4; r++) ImGui.Text($"{c[r*4+0],10:F4} {c[r*4+1],10:F4} {c[r*4+2],10:F4} {c[r*4+3],10:F4}");
+                    ImGui.Spacing();
+                    for (int r = 0; r < 4; r++) ImGui.Text($"{c[16+r*4+0],10:F4} {c[16+r*4+1],10:F4} {c[16+r*4+2],10:F4} {c[16+r*4+3],10:F4}");
+                    ImGui.TreePop();
+                }
+            }
             ImGui.TreePop();
         }
-        if (ImGui.TreeNode("projection matrix")) {
-            for (int r = 0; r < 4; r++)
-                ImGui.Text($"{c[16+r*4+0],10:F4} {c[16+r*4+1],10:F4} {c[16+r*4+2],10:F4} {c[16+r*4+3],10:F4}");
+
+        if (ImGui.TreeNode("Camera override")) {
+            ImGui.Checkbox("enabled", ref _ovr_enabled); ImGui.SameLine();
+            ImGui.Checkbox("freeze game camera", ref _ovr_freeze); ImGui.SameLine();
+            if (ImGui.Button("reset")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+            ImGui.SliderFloat("yaw",     ref _ovr_yaw,     -180f, 180f);
+            ImGui.SliderFloat("pitch",   ref _ovr_pitch,    -89f,  89f);
+            ImGui.SliderFloat("right",   ref _ovr_right,  -2000f, 2000f);
+            ImGui.SliderFloat("up",      ref _ovr_up,     -2000f, 2000f);
+            ImGui.SliderFloat("forward", ref _ovr_forward, -2000f, 2000f);
+            int mask = _fn_override_mask != null ? _fn_override_mask() : 0;
+            ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
+                     + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
+                     + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
+                     + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
+            ImGui.TextDisabled("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset");
             ImGui.TreePop();
         }
-    }
 
-
-    /// <summary>
-    ///     Lists every view-matrix-shaped block the native scanner found in the
-    ///     constant buffers written recently, with the camera position each one
-    ///     implies.
-    /// </summary>
-    /// <remarks>
-    ///     The write path is the tell. A <c>CreateBuffer</c> hit was filled once,
-    ///     when the area loaded, so it is expected to sit still while walking. A
-    ///     <c>Map</c> or <c>UpdateSubresource</c> hit was written this frame, so a
-    ///     camera that tracks the player must be one of those.
-    /// </remarks>
-
-    /// <summary>
-    ///     Shows how much of the latched slot-0 buffer changed since the last
-    ///     frame. While walking, a live camera must change something in here;
-    ///     the offsets say where.
-    /// </summary>
-    private void draw_diff() {
-        if (_fn_diff == null) return;
-
-        int* d = stackalloc int[11];
-        _fn_diff(d);
-
-        if (d[1] == 0) {
-            ImGui.Text("Latched buffer:        none yet (no draw with a big slot-0 buffer)");
-            return;
+        if (ImGui.TreeNode("Second eye")) {
+            ImGui.Checkbox("render eye 2", ref _stereo_on);
+            ImGui.SliderFloat("eye separation without headset", ref _ipd, 0f, 30f);
+            ImGui.Checkbox("preview window", ref _eye2_preview); ImGui.SameLine();
+            ImGui.RadioButton("final", ref _eye2_source, 0); ImGui.SameLine();
+            ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
+            ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
+            if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
+            ImGui.TreePop();
         }
 
-        ImGui.Text($"Latched buffer:        {d[1]} bytes, taken at draw #{d[2]} of the frame");
-        ImGui.Text($"Changed since last frame: {d[0]} floats");
-
-        if (d[0] > 0) {
-            var sb = new System.Text.StringBuilder("  at bytes:");
-            for (int i = 0; i < Math.Min(8, d[0]); i++) sb.Append(' ').Append(d[3 + i]);
-            if (d[0] > 8) sb.Append(" ...");
-            ImGui.Text(sb.ToString());
+        if (ImGui.TreeNode("Virtual screen panel")) {
+            ImGui.SliderFloat("width (m)", ref _xr_screen_width, 1f, 6f);
+            ImGui.SliderFloat("distance (m)", ref _xr_screen_dist, 1f, 6f);
+            ImGui.TextDisabled("applied at the next recentre");
+            ImGui.TreePop();
         }
+
+        if (ImGui.TreeNode("Battle markers")) {
+            ImGui.Checkbox("draw target / turn markers", ref _markers_on);
+            ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
+            ImGui.Text($"drawn this frame: {_markers_drawn}");
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
+            if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves"); }
+            if (_fn_measure != null)   { if (ImGui.Button("Measure + images")) { _fn_measure(); _measure_n++; } ImGui.SameLine(); ImGui.Text($"{_measure_n}  ffxvr_diag.log + img_*.bmp: eye 1 vs eye 2"); }
+            if (_fn_dump_seq != null)  { if (ImGui.Button("8-frame sequence")) _fn_dump_seq(8); ImGui.SameLine(); ImGui.Text("seq_*.bmp: both eyes, 8 consecutive frames"); }
+            ImGui.TreePop();
+        }
+
+        push_override_and_stereo();
     }
 
-
-    /// <summary>
-    ///     Camera override controls. Numpad works without focusing the overlay:
-    ///     4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.
-    /// </summary>
-    private void draw_override() {
-        if (_fn_override_set == null) return;
-
-        ImGui.Separator();
-        ImGui.Text("Camera override");
-        ImGui.Checkbox("Enable", ref _ovr_enabled);
-        ImGui.SameLine();
-        ImGui.Checkbox("Freeze game camera", ref _ovr_freeze);
-        ImGui.SameLine();
-        if (ImGui.Button("Reset")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
-
-        ImGui.SliderFloat("yaw",     ref _ovr_yaw,     -180f, 180f);
-        ImGui.SliderFloat("pitch",   ref _ovr_pitch,    -89f,  89f);
-        ImGui.SliderFloat("right",   ref _ovr_right,  -2000f, 2000f);
-        ImGui.SliderFloat("up",      ref _ovr_up,     -2000f, 2000f);
-        ImGui.SliderFloat("forward", ref _ovr_forward, -2000f, 2000f);
-
-        // numpad nudges, scaled by frame time so they feel the same at any fps
+    /// <summary>Numpad nudges and the per-frame push of override + eye-2 state to the native side.</summary>
+    private void push_override_and_stereo() {
         float dt   = ImGui.GetIO().DeltaTime;
         float rot  = 60f  * dt;     // deg/s
         float move = 400f * dt;     // units/s
@@ -593,124 +633,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
         if (ImGui.IsKeyPressed(ImGuiKey.Keypad0))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
-
-        _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
-
-        int mask = _fn_override_mask != null ? _fn_override_mask() : 0;
-        ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
-                 + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
-                 + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
-                 + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
-        ImGui.TextWrapped("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset.");
-
-        ImGui.Separator();
-        ImGui.Text("Second eye");
-        ImGui.Checkbox("Render eye 2 (needs Enable above)", ref _stereo_on);
-        ImGui.SliderFloat("eye separation", ref _ipd, 0f, 30f);
-        ImGui.Text("duplicate:"); ImGui.SameLine();
-        ImGui.RadioButton("all draws", ref _stereo_scope, 0); ImGui.SameLine();
-        ImGui.RadioButton("camera-buffer draws only", ref _stereo_scope, 1); ImGui.SameLine();
-        ImGui.RadioButton("camera + product-only", ref _stereo_scope, 2);
-        ImGui.Checkbox("debug: clear eye-2 scene twin to red", ref _debug_red);
-        ImGui.Checkbox("debug: leave eye-2 camera in place (main view should shift)", ref _debug_leave);
-        if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, _stereo_scope, _debug_red ? 1 : 0, _debug_leave ? 1 : 0);
-        ImGui.Checkbox("preview eye 2", ref _eye2_preview);
-        ImGui.SameLine(); ImGui.RadioButton("final image", ref _eye2_source, 0); ImGui.SameLine(); ImGui.RadioButton("scene target", ref _eye2_source, 1); ImGui.SameLine(); ImGui.RadioButton("scene target, eye 1", ref _eye2_source, 2);
-        if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
-
-        ImGui.Separator();
-        ImGui.Text("Headset (OpenXR)");
-        if (_fn_xr_set != null) {
-            bool want = _xr_want;
-            ImGui.Checkbox("Send to headset", ref want);
-            if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
-            ImGui.SliderFloat("world scale (game units per metre)", ref _xr_scale, 10f, 300f);
-            ImGui.Checkbox("head rotation", ref _xr_rotate); ImGui.SameLine(); ImGui.Checkbox("head position", ref _xr_translate);
-            ImGui.SameLine(); if (ImGui.Button("Recentre") || ImGui.IsKeyPressed(ImGuiKey.Home)) _fn_xr_recenter();
-            ImGui.Checkbox("headset field of view (off: the game's 16:9 window)", ref _xr_fov);
-            ImGui.Checkbox("seat: head owns orientation, authored camera gives position + heading only", ref _xr_seat);
-            _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
-            _xr_want = want;   // keeps asking each frame until the native side accepts (it refuses before the first 3D frame)
-            ImGui.Text("virtual screen (2D frames: title, menus, loading, FMV):"); ImGui.SameLine();
-            ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
-            ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
-            ImGui.RadioButton("never", ref _xr_screen_mode, 2);
-            ImGui.SliderFloat("screen width (m)", ref _xr_screen_width, 1f, 6f);
-            ImGui.SliderFloat("screen distance (m)", ref _xr_screen_dist, 1f, 6f);
-            if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
-            if (_fn_xr_screen_now != null) ImGui.Text(_fn_xr_screen_now() != 0 ? "showing: virtual screen" : "showing: 3D projection");
-            if (_fn_xr_status != null) {
-                byte* buf = stackalloc byte[256];
-                _fn_xr_status(buf, 256);
-                ImGui.TextWrapped(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)buf) ?? "");
-            }
-            ImGui.TextWrapped("Home: recentre. Put the headset on, look at the screen, press Home.");
-        }
-
-        ImGui.Separator();
-        ImGui.Checkbox("Our battle markers (target / turn)", ref _markers_on);
-        ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
-        ImGui.Text($"markers drawn this frame: {_markers_drawn}");
-
-        if (_fn_cam_mem_set != null) {
-            ImGui.Separator();
-            ImGui.Text("Also write the camera into game memory (for CPU-projected UI):");
-            ImGui.RadioButton("off", ref _cam_mem_mode, 0); ImGui.SameLine();
-            ImGui.RadioButton("at first upload", ref _cam_mem_mode, 1); ImGui.SameLine();
-            ImGui.RadioButton("at present", ref _cam_mem_mode, 2); ImGui.SameLine();
-            ImGui.RadioButton("both", ref _cam_mem_mode, 3); ImGui.SameLine();
-            ImGui.RadioButton("array + static, both timings", ref _cam_mem_mode, 7);
-            if (_fn_dump_structs != null) {
-                if (ImGui.IsKeyPressed(ImGuiKey.F8)) { _fn_dump_structs(); _structs_dumped++; }
-                ImGui.Text($"F8: dump the game's camera structs ({_structs_dumped} so far, ffxvr_structs.log)");
-            if (_fn_census_arm != null) {
-                if (ImGui.IsKeyPressed(ImGuiKey.F6)) { _fn_census_arm(16, 512); _census_n++; }
-                ImGui.Text($"F6: record call stacks of 2D-UI uploads for one frame ({_census_n} taken, ffxvr_stacks.log)");
-            if (_fn_frame_arm != null) {
-                if (ImGui.IsKeyPressed(ImGuiKey.F5)) { _fn_frame_arm(); _frame_census_n++; }
-                ImGui.Text($"F5: record one frame's render-target / viewport / draw structure ({_frame_census_n} taken, ffxvr_frame.log)");
-            if (_fn_measure != null) {
-                if (ImGui.IsKeyPressed(ImGuiKey.F4)) { _fn_measure(); _measure_n++; }
-                if (ImGui.IsKeyPressed(ImGuiKey.F3) && _fn_dump_seq != null) _fn_dump_seq(8);
-                ImGui.Text("F3: dump 8 consecutive frames of both eyes (seq_*.bmp)");
-                ImGui.Text($"F4: measure eye 2 against eye 1, final and scene ({_measure_n} taken, ffxvr_native.log)");
-            }
-            }
-            }
-            }
-            nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;
-            _fn_cam_mem_set(_cam_mem_mode, obj);
-            ImGui.Text($"camera object: {(obj != 0 ? $"0x{(nint)obj:X8}" : "none")}   array entries: {_memscan_cams}   writes: {(_fn_cam_mem_writes != null ? _fn_cam_mem_writes() : -1)}   (press F10 first)");
-        }
-
-        if (_fn_memscan != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.F10)) { _memscan_last = _fn_memscan(); if (_fn_scan_cams != null) _memscan_cams = _fn_scan_cams(); }
-            ImGui.Text(_memscan_last == -99 ? "F10: scan memory for the game's camera"
-                     : $"memory scan: {_memscan_last} hits (ffxvr_memscan.log)");
-        }
-
-        if (_fn_watch != null && _fn_exe_camera != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.F11) && _fn_xrefs != null) {
-                // exact matrix, then a wide window, so a struct base that
-                // encloses it shows up with its distance
-                _xrefs_n  = _fn_xrefs(_fn_exe_camera(), 64);
-                _xrefs_n += _fn_xrefs(_fn_exe_camera() - 0x4000, 0x4000 + 0x400);
-            }
-            ImGui.Text(_xrefs_n == -99 ? $"F11: list code touching the game camera at 0x{(nint)_fn_exe_camera():X8}"
-                     : $"code references: {_xrefs_n} (ffxvr_xrefs.log)");
-
-            if (ImGui.IsKeyPressed(ImGuiKey.F12) && _fn_ptrscan != null) {
-                // Pointers to the static matrix (or a struct enclosing it), and to
-                // the heap camera object the F10 scan found, then who reads them.
-                _ptrscan_n  = _fn_ptrscan(_fn_exe_camera(), 0x800);
-                nuint obj = _fn_scan_struct != null ? _fn_scan_struct() : 0;
-                if (obj != 0) _ptrscan_n += _fn_ptrscan(obj, 0x800);
-            }
-            ImGui.Text(_ptrscan_n == -99 ? "F12: find pointers to the camera (run F10 first), then who reads them"
-                     : $"pointer variables found: {_ptrscan_n} (ffxvr_xrefs.log)");
-        }
+        if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
+        if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
     }
-
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
     private void draw_eye2_preview() {
@@ -727,34 +652,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.Image(new ImTextureRef(null, (ImTextureID)(ulong)srv), new Vector2(w * scale, h * scale));
         }
         ImGui.End();
-    }
-
-    private void draw_scan() {
-        if (_fn_scan == null) return;
-
-        float* s = stackalloc float[6 * 6];
-        int n = _fn_scan(s);
-
-        ImGui.Separator();
-        ImGui.Text($"Scanner: {n} view-shaped block(s)");
-
-        if (n == 0) {
-            ImGui.TextWrapped("No rotation-plus-translation block found in any written "
-                            + "constant buffer. The camera may not reach the GPU as a "
-                            + "view matrix at all.");
-            return;
-        }
-
-        for (int i = 0; i < n; i++) {
-            float* h   = s + i * 6;
-            string via = ((int)h[2]) switch {
-                0 => "CreateBuffer (area load)",
-                1 => "Map (per frame)",
-                3 => "latched buffer, read back",
-                _ => "UpdateSubresource (per frame)",
-            };
-            ImGui.Text($"  +{(int)h[0],-5} in {(int)h[1],6}B  {h[3],9:F2} {h[4],9:F2} {h[5],9:F2}  {via}");
-        }
     }
 
 
@@ -856,54 +753,25 @@ public sealed unsafe class FFXVRModule : FhModule {
         // render_imgui from inside Present, so this fires exactly once a frame.
         if (_fn_begin_frame != null) _fn_begin_frame();
 
-        if (!_window_open) return;
+        if (ImGui.IsKeyPressed(ImGuiKey.F7)) _window_open = !_window_open;
+        if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
 
-        if (ImGui.Begin("FFX VR", ref _window_open)) {
-            ImGui.Text($"Frames drawn:  {_frames}");
-            ImGui.Text($"Framerate:     {ImGui.GetIO().Framerate:F1} fps");
-
-            ImGui.Separator();
-            ImGui.Text($"Native helper: {_native_status}");
-
-            if (_game_context != 0) {
-                ImGui.Text($"Game context:  0x{_game_context:X8}");
+        if (_window_open && _native_init_done) {
+            ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.FirstUseEver);
+            if (ImGui.Begin("FFX VR", ref _window_open)) {
+                draw_main();
+                draw_debug();
             }
-
-            if (_fn_buffer_count != null && _native_init_done) {
-                int calls = _fn_hook_calls != null ? _fn_hook_calls() : -1;
-
-                ImGui.Text($"Hooked calls seen:     {calls}");
-                ImGui.Text($"Constant buffers seen: {_fn_buffer_count()}");
-                ImGui.Text($"Dumps written:         {_fn_dump_count()}");
-                if (_fn_frame_writes != null)
-                    ImGui.Text($"Writes in last frame:  {_fn_frame_writes()}");
-
-                ImGui.Text($"Draw detours:          {_detour_status}");
-                if (_fn_counter != null) {
-                    ImGui.Text($"Draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}, "
-                             + $"indexed-inst {_fn_counter(3)}, inst {_fn_counter(4)}   UpdateSubresource {_fn_counter(7)}");
-                }
-                draw_diff();
-                ImGui.Separator();
-
-                draw_camera();
-                draw_override();
-                draw_scan();
-
-                if (calls == 0) {
-                    ImGui.TextWrapped("No hooked call has fired yet. If this stays at zero "
-                                    + "while the game renders, the patch is not on the "
-                                    + "context the game draws with.");
-                }
-                else {
-                    ImGui.TextWrapped("Walk around and watch the numbers. A line that "
-                                    + "tracks you is the live camera; one that only "
-                                    + "changes on area load is a buffer filled at load "
-                                    + "time. F9 still dumps every constant buffer.");
-                }
+            ImGui.End();
+        }
+        else if (_native_init_done) {
+            push_override_and_stereo();   // state still flows to the native side with the window hidden
+            if (_fn_xr_set != null) {
+                bool want = _xr_want;
+                if (want) { _ovr_enabled = true; _stereo_on = true; }
+                _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
             }
         }
-
-        ImGui.End();
+        settings_save_if_changed();
     }
 }
