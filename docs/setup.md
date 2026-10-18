@@ -91,3 +91,33 @@ will be stale against a current `fh.dll`.
 
 Do not touch the sibling `config`, `mods`, `saves`, `state` and `logs` folders.
 `mods\loadorder` lists mod ids to load, one per line; empty means load none.
+
+## Frame rate: the FFX-60fps mod
+
+The game's logic is a fixed 30 Hz step and cannot be uncapped. The VR setup
+uses [peternguyenst/FFX-60fps](https://github.com/peternguyenst/FFX-60fps)
+(Apache-2.0) alongside Fahrenheit: it keeps the logic at 30 Hz and draws N
+frames per logic tick (`fps=60/90/120...`), interpolating the camera and the
+characters, so our hooks see a camera upload - and a head pose - per drawn
+frame. There are no prebuilt releases; `tools\build-fps60.ps1` clones, builds
+(VS toolset v145, or the newest installed) and installs it:
+
+    powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fps60.ps1 -Fps 60
+    powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fps60.ps1 -Uninstall
+
+Files it puts next to FFX.exe: `dbghelp.dll` (proxy loader; the game imports
+dbghelp.dll, so it loads at start), `fps60_ffx.dll`, `fps60.ini`. Fahrenheit
+launches the game through fhstage0.exe and does not use a dbghelp proxy, so the
+two coexist. `fps60.log` (game folder, collected by run-ffx.ps1) says what the
+mod found and enabled.
+
+Bring-up order:
+1. Flat screen, headset off, `fps=60`: the game must play normally and
+   `fps60.log` must report its rows enabled; check `ffxvr_diag.log` perf lines
+   read ~16.7 ms.
+2. Headset on at 60; then `fps=90` with Virtual Desktop at 90 Hz (V-Sync off in
+   the game's Config page is required above 60).
+3. Above 60 the GPU budget matters: 90 fps x 2 eyes at 4K 8x MSAA will not
+   hold on a 3080 Ti; lower the game's render resolution/MSAA first.
+   `PERF-002=0` in fps60.ini stops the mod stepping the rate down on its own
+   (it would read our headset waits as "cannot hold the rate").
