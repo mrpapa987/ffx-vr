@@ -850,23 +850,13 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         try_install_hooks();
         if (_native_init_done) draw_markers();
-        if (_native_init_done && !(_xr_on && _overlay_hidden)) draw_eye2_preview();   // its own top-level window, never nested
+        if (_native_init_done) draw_eye2_preview();   // its own top-level window, never nested
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.
         if (_fn_begin_frame != null) _fn_begin_frame();
 
         if (!_window_open) return;
-
-        // With the headset on, our windows would show up in it (they are drawn
-        // into the eye images like Fahrenheit's save screen). Hide them unless
-        // the mouse moved in the last few seconds.
-        if (_xr_on) {
-            var io = ImGui.GetIO();
-            if (io.MouseDelta.X != 0 || io.MouseDelta.Y != 0) _last_mouse_time = DateTime.UtcNow;
-            if ((DateTime.UtcNow - _last_mouse_time).TotalSeconds > 4) { _overlay_hidden = true; return; }
-        }
-        _overlay_hidden = false;
 
         if (ImGui.Begin("FFX VR", ref _window_open)) {
             ImGui.Text($"Frames drawn:  {_frames}");

@@ -210,14 +210,11 @@ bool xr_start(const XrHost& host) {
     for (int i = 0; i < 3; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
-            // Full game resolution: the game renders 3840x2160 and the runtime
-            // resamples to the display anyway, so an intermediate downscale
-            // here only cost sharpness. Capped by what the runtime allows.
-            e.w = 3840; e.h = 2160;
-            if (e.w > vcv[i].maxImageRectWidth || e.h > vcv[i].maxImageRectHeight) {
-                e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
-                if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
-            }
+            // The headset's recommended width at the game's 16:9 aspect (the
+            // configuration of the long stable run; full 3840x2160 is a
+            // separate experiment).
+            e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
+            if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
         else { e.w = 2560; e.h = 1440; }                   // the virtual screen
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
@@ -310,7 +307,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         const bool use_screen = screen != nullptr && screen->on;
-        bool ok = g_should_render && g_submit_views_valid;
+        bool ok = g_should_render && g_render_views_valid;
         if (ok && use_screen) {
             ok = submit_eye(2, eye1);
             quad.space = g_space; quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -324,7 +321,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         else if (ok) {
             for (int i = 0; i < 2; ++i) {
                 if (!submit_eye(i, i == 0 ? eye1 : (eye2 ? eye2 : eye1))) { ok = false; break; }
-                pv[i].pose = g_submit_views[i].pose;
+                pv[i].pose = g_render_views[i].pose;
                 pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
                 pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
                 pv[i].subImage.swapchain = g_eye[i].sc;
@@ -368,11 +365,6 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     stage("xrLocateViews");
     r = p_xrLocateViews(g_session, &vli, &vs, 2, &n, views);
     const bool valid = XR_SUCCEEDED(r) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
-    // The images submitted at the next call are the frame rendered with the
-    // views located now; the ones submitted at this call were rendered with
-    // the views located last time (one hook of delay, so the overlay drawn
-    // after the hook is included).
-    memcpy(g_submit_views, g_render_views, sizeof(g_submit_views)); g_submit_views_valid = g_render_views_valid;
     g_render_views_valid = valid;
     stage("game");
     if (!valid) return;
