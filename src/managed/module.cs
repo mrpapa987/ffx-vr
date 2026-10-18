@@ -54,10 +54,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int, float, float, int, void> _fn_turn_set;
     private delegate* unmanaged[Cdecl]<float, void> _fn_turn;
     private delegate* unmanaged[Cdecl]<uint> _fn_turn_count;
+    private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_perf_status;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_move_set;
     private delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void> _fn_move_status;
     private bool _move_remap = true, _move_invert = false;
-    private bool _turn_stick = true, _turn_blink = true; private int _turn_mode = 0; private float _turn_snap = 30f, _turn_rate = 90f;
+    private bool _turn_stick = true, _turn_blink = false; private int _turn_mode = 1; private float _turn_snap = 30f, _turn_rate = 90f;
     private delegate* unmanaged[Cdecl]<int> _fn_cut_count;
     private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void> _fn_fp_set;
@@ -229,6 +230,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_set");
             _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_count");
+            _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_perf_status");
             _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
             _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
@@ -628,11 +630,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         // Turning (first person and seat alike)
         ImGui.Text("turning:"); ImGui.SameLine();
         ImGui.Checkbox("right stick", ref _turn_stick); ImGui.SameLine();
-        ImGui.RadioButton("snap", ref _turn_mode, 0); ImGui.SameLine();
-        ImGui.RadioButton("smooth", ref _turn_mode, 1);
-        if (_turn_mode == 0) { ImGui.SliderFloat("snap angle", ref _turn_snap, 15f, 90f, "%.0f deg"); ImGui.SameLine(); ImGui.Checkbox("blink##turn", ref _turn_blink); }
-        else ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
-        ImGui.SameLine(); ImGui.TextDisabled($"Numpad 1/3: snap left/right   turns: {(_fn_turn_count != null ? _fn_turn_count() : 0)}");
+        ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
+        ImGui.SameLine(); ImGui.TextDisabled("Numpad 1/3: turn left/right");
         ImGui.Checkbox("left stick follows where I look (first person)", ref _move_remap); ImGui.SameLine();
         ImGui.Checkbox("invert", ref _move_invert);
         if (_fn_move_status != null) {
@@ -659,6 +658,10 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
 
         ImGui.Separator();
+        if (_fn_perf_status != null) {
+            byte* pb = stackalloc byte[256]; _fn_perf_status(pb, 256);
+            ImGui.TextDisabled(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb) ?? "");
+        }
         ImGui.TextDisabled("Home: recentre   F7: hide/show this overlay");
     }
 
@@ -794,8 +797,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_turn_set != null) _fn_turn_set(_turn_stick ? 1 : 0, _turn_mode, _turn_snap, _turn_rate, _turn_blink ? 1 : 0);
         if (_fn_move_set != null) _fn_move_set(_move_remap ? 1 : 0, _move_invert ? -1f : 1f);
         if (_fn_turn != null) {
-            if (ImGui.IsKeyPressed(ImGuiKey.Keypad1)) _fn_turn(-_turn_snap);
-            if (ImGui.IsKeyPressed(ImGuiKey.Keypad3)) _fn_turn(_turn_snap);
+            float step = _turn_rate * ImGui.GetIO().DeltaTime;
+            if (ImGui.IsKeyDown(ImGuiKey.Keypad1)) _fn_turn(-step);
+            if (ImGui.IsKeyDown(ImGuiKey.Keypad3)) _fn_turn(step);
         }
     }
 

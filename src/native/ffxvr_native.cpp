@@ -24,6 +24,8 @@
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11_4.h>   // ID3D11Multithread
+#include <dxgi1_4.h>    // IDXGIAdapter3: video memory readout
+#include <psapi.h>
 #include <d3dcompiler.h>
 #include <Xinput.h>
 #include "ffxvr_xr.h"
@@ -45,6 +47,7 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
 static void g_plain_srvs_forget(ID3D11Texture2D* t);   // SRV cache, defined below
+static uint32_t g_plain_srvs_count();
 
 namespace {
 
@@ -103,6 +106,7 @@ PFN_CreateBuffer         g_orig_createbuffer   = nullptr;
 struct CbRecord {
     UINT                 size    = 0;
     uint64_t             updates = 0;
+    uint32_t             frame   = 0;      // last update (g_frames), for pruning
     const char*          via     = "?";
     std::vector<uint8_t> data;
 };
@@ -403,6 +407,7 @@ struct Twin {
     ID3D11RenderTargetView* rtv; ID3D11DepthStencilView* dsv;
     std::map<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> srvs;   // game SRV -> twin SRV
     UINT w, h; DXGI_FORMAT fmt;
+    uint32_t last_used;                                                   // g_frames at the last lookup
 };
 std::map<ID3D11Texture2D*, Twin> g_twins;
 ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image
@@ -549,6 +554,7 @@ float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and abo
 float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
 bool  g_fp_hide_body = true; float g_fp_hide_radius = 12.f;
 uint32_t g_fp_hidden_draws = 0;
+uint32_t g_twins_recycled = 0, g_twins_swept = 0, g_twin_srvs_dropped = 0, g_buffers_pruned = 0;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
 bool  g_xr_fov_applied = false;
@@ -714,11 +720,7 @@ static float right_stick_x() {
 static void turn_tick() {
     if (!g_turn_stick) return;
     const float x = right_stick_x();
-    if (g_turn_mode == 0) {                                // snap: one turn per flick past 0.6, re-armed under 0.3
-        if (g_turn_armed && fabsf(x) > 0.6f) { g_turn_armed = false; turn_by(x > 0 ? g_turn_snap : -g_turn_snap); if (g_turn_blink) g_blink_frames = 3; }
-        else if (!g_turn_armed && fabsf(x) < 0.3f) g_turn_armed = true;
-    }
-    else if (x != 0.f) turn_by(x * g_turn_rate * g_dt);
+    if (x != 0.f) turn_by(x * fabsf(x) * g_turn_rate * g_dt);   // smooth, with a gentle curve near centre
 }
 
 static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
@@ -1480,6 +1482,7 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
     rec.size    = size;
     rec.via     = via;
     rec.updates += 1;
+    rec.frame = g_frames;
     rec.data.resize(size);
     memcpy(rec.data.data(), src, size);
     bump(C_CB_CAPTURED);
@@ -1973,6 +1976,63 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 // invokes inside its Present hook. That gives us a true frame boundary, so a
 // capture can span exactly one frame instead of whatever happened to come next.
 static void xr_tick();
+// ---------------------------------------------------------------- housekeeping / perf
+/// Every few hundred frames: drop twins of textures the game stopped
+/// rendering into (area changes free and recreate them; the twin of a
+/// freed texture would otherwise hold its VRAM for good) and constant-buffer
+/// records that stopped being updated.
+static void twin_release(Twin& t);
+static void sweep_caches() {
+    if (g_frames % 300 != 0) return;
+    for (auto it = g_twins.begin(); it != g_twins.end();) {
+        if (it->first != g_backbuffer && g_frames - it->second.last_used > 900) { twin_release(it->second); it = g_twins.erase(it); g_twins_swept++; }
+        else ++it;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (auto it = g_buffers.begin(); it != g_buffers.end();) {
+        if (g_frames - it->second.frame > 3000) { it = g_buffers.erase(it); g_buffers_pruned++; }
+        else ++it;
+    }
+}
+
+struct Perf { double frame_ms, xr_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
+static Perf g_perf = {};
+static LARGE_INTEGER g_qpf = {}, g_t_frame_prev = {}; static double g_acc_frame = 0, g_acc_xr = 0; static int g_acc_n = 0; static ULONGLONG g_perf_log_tick = 0;
+double g_xr_ms_this_frame = 0;
+static IDXGIAdapter3* g_adapter3 = nullptr; static bool g_adapter3_tried = false;
+static void perf_tick() {
+    if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    if (g_t_frame_prev.QuadPart) { g_acc_frame += (now.QuadPart - g_t_frame_prev.QuadPart) * 1000.0 / g_qpf.QuadPart; g_acc_xr += g_xr_ms_this_frame; g_acc_n++; }
+    g_t_frame_prev = now; g_xr_ms_this_frame = 0;
+    if (g_acc_n < 60) return;
+    g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_acc_frame = g_acc_xr = 0; g_acc_n = 0;
+    g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
+    { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
+    g_perf.plain_srvs = g_plain_srvs_count();
+    PROCESS_MEMORY_COUNTERS_EX pm = {}; pm.cb = sizeof(pm);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pm, sizeof(pm))) g_perf.private_mb = pm.PrivateUsage >> 20;
+    if (!g_adapter3_tried && g_device) {
+        g_adapter3_tried = true;
+        IDXGIDevice* dd = nullptr; IDXGIAdapter* ad = nullptr;
+        if (SUCCEEDED(g_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd)) && dd) {
+            if (SUCCEEDED(dd->GetAdapter(&ad)) && ad) { ad->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&g_adapter3); ad->Release(); }
+            dd->Release();
+        }
+    }
+    if (g_adapter3) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO vi = {};
+        if (SUCCEEDED(g_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vi))) { g_perf.vram_mb = vi.CurrentUsage >> 20; g_perf.vram_budget_mb = vi.Budget >> 20; }
+    }
+    const ULONGLONG t = GetTickCount64();
+    if (t - g_perf_log_tick > 30000) {
+        g_perf_log_tick = t;
+        diag("perf: frame %.1f ms (xr %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) in-flight %u plain srvs %u | private %llu MB, vram %llu / %llu MB | eye2 draws %u, hidden %u",
+             g_perf.frame_ms, g_perf.xr_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned, g_perf.in_flight, g_perf.plain_srvs,
+             (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_eye2_draws_report, g_fp_hidden_draws);
+    }
+}
+
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
     bool dump_now = false;
@@ -1997,7 +2057,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    sweep_caches();
     xr_tick();                      // submit the frame just finished, locate the head for the next one
+    perf_tick();
     g_overlay_phase = true;
     g_first_draw_pending = true;
     g_backbuffer_seen_this_frame = false;
@@ -2575,7 +2637,6 @@ static void twin_release(Twin& t) {
     if (t.tex) { g_plain_srvs_forget(t.tex); t.tex->Release(); }
     t.rtv = nullptr; t.dsv = nullptr; t.tex = nullptr;
 }
-uint32_t g_twins_recycled = 0;
 static Twin* twin_of(ID3D11Texture2D* game) {
     if (game == nullptr || g_device == nullptr) return nullptr;
     D3D11_TEXTURE2D_DESC d; game->GetDesc(&d);
@@ -2585,6 +2646,7 @@ static Twin* twin_of(ID3D11Texture2D* game) {
         // texture can land at an old address: the twin must match the
         // texture that is there now.
         Twin& old = it->second;
+        old.last_used = g_frames;
         if (old.tex == nullptr || (old.w == d.Width && old.h == d.Height && old.fmt == d.Format)) return &old;
         twin_release(old);
         g_twins.erase(it);
@@ -2592,7 +2654,7 @@ static Twin* twin_of(ID3D11Texture2D* game) {
         if (g_twins_recycled <= 10) diag("twin recycled: %p now %ux%u fmt %u", static_cast<void*>(game), d.Width, d.Height, static_cast<unsigned>(d.Format));
     }
 
-    Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format;
+    Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format; t.last_used = g_frames;
 
     D3D11_TEXTURE2D_DESC cd = d;
     cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0; cd.MiscFlags = 0;
@@ -2646,6 +2708,10 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
     Twin& t = it->second;
     auto sit = t.srvs.find(v);
     if (sit != t.srvs.end()) return sit->second;
+    if (t.srvs.size() >= 256) {                          // the game recreates SRVs; stale keys would pile up forever
+        for (auto& kv : t.srvs) if (kv.second) kv.second->Release();
+        t.srvs.clear(); g_twin_srvs_dropped++;
+    }
     D3D11_SHADER_RESOURCE_VIEW_DESC sd; v->GetDesc(&sd);
     ID3D11ShaderResourceView* nv = nullptr;
     HRESULT hr = g_device->CreateShaderResourceView(t.tex, &sd, &nv);
@@ -3199,6 +3265,7 @@ static bool copy_pass_init() {
 }
 
 static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
+static uint32_t g_plain_srvs_count() { return (uint32_t)g_plain_srvs.size(); }
 static void g_plain_srvs_forget(ID3D11Texture2D* t) { auto it = g_plain_srvs.find(t); if (it != g_plain_srvs.end()) { if (it->second) it->second->Release(); g_plain_srvs.erase(it); } }
 bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha = false);
 
@@ -3495,8 +3562,13 @@ extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, in
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); if (g_turn_blink && g_turn_mode == 0) g_blink_frames = 3; }
+extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
+extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
+    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (xr %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
+        g_perf.frame_ms, g_perf.xr_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
+        (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
+}
 extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }
 extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, float* yaw_cam_deg, float* delta_deg, uint32_t* hook_calls, int* hooked) {
     if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
@@ -3646,7 +3718,9 @@ static void xr_tick() {
         // twinned, its draws re-issued and its texture mistaken for the
         // backbuffer -- which hung the GPU.
         InEye2 guard;
+        LARGE_INTEGER ta, tb; QueryPerformanceCounter(&ta);
         xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
+        QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
     }
     xr_apply_poses(out);
     // What the next frame renders with.
