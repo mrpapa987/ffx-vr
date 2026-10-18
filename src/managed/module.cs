@@ -666,6 +666,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
 
+        if (ImGui.TreeNode("Actors (field actor table; the one that moves when you walk is the player)")) {
+            draw_actors();
+            ImGui.TreePop();
+        }
+
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
@@ -735,6 +740,31 @@ public sealed unsafe class FFXVRModule : FhModule {
         bool ok = _fn_safe_read != null && _fn_safe_read(src, &tmp, (uint)sizeof(T)) != 0;
         value = tmp;
         return ok;
+    }
+
+    private string actor_name(char* p) {
+        if (p == null) return "";
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 24; i++) { byte b = 0; if (_fn_safe_read == null || _fn_safe_read(((byte*)p) + i, &b, 1) == 0 || b == 0) break; if (b >= 32 && b < 127) sb.Append((char)b); }
+        return sb.ToString();
+    }
+
+    private Vector4[] _actor_prev = new Vector4[64];
+    private float[]   _actor_moved = new float[64];
+    private void draw_actors() {
+        Actor* actors = Globals.actors;
+        if (actors == null) { ImGui.Text("no actor table"); return; }
+        ImGui.Text("idx  id   enabled  name          position                 dir     moved   head (highest sub-position)");
+        for (int i = 0; i < 48; i++) {
+            if (!read(actors + i, out Actor a)) break;
+            if (a.chr_enabled == 0) continue;
+            float d = Vector4.Distance(a.chr_pos_vec, _actor_prev[i]);
+            _actor_prev[i] = a.chr_pos_vec;
+            _actor_moved[i] = _actor_moved[i] * 0.95f + d;        // a decaying "how much it moves" score
+            float hy = float.MinValue; Vector4 head = default;
+            for (int k = 0; k < 26; k++) { Vector4 s = a.chr_optpos[k]; if (s.Y > hy && MathF.Abs(s.X) + MathF.Abs(s.Z) > 0.01f) { hy = s.Y; head = s; } }
+            ImGui.Text($"{i,3} {a.chr_id,4}  {a.chr_enabled,3}    {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1}) {a.chr_direction,6:F2} {_actor_moved[i],7:F1}  ({head.X,7:F1},{head.Y,7:F1},{head.Z,7:F1})");
+        }
     }
 
     private void push_markers() {
