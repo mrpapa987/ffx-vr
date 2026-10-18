@@ -581,6 +581,7 @@ bool  g_xr_fov_applied = false;
 int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
+uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
 uint32_t g_frames_without_cam = 0;
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
@@ -1464,7 +1465,11 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
 
     g_ovr_mask |= mask;
     g_ovr_applied++;
-    if (base != 0) g_cam_uploads_frame++;
+    if (base != 0) {
+        g_cam_uploads_frame++;
+        const float* mp = reinterpret_cast<const float*>(p + base + 192);     // main projection: |P[0]| <= 0.2 is the intro's near-2D camera
+        if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) g_cam3d_uploads_frame++;
+    }
     auto it = g_ovr_stats.find(size);
     if (it == g_ovr_stats.end()) g_ovr_stats[size] = { 1, mask, mask };
     else { it->second.count++; it->second.mask_all &= mask; it->second.mask_any |= mask; }
@@ -3837,25 +3842,25 @@ static void xr_tick() {
         g_e2_begin_fail_prev = g_e2_begin_fail;
         g_seq_index++; g_seq_left--;
     }
-    // 2D frame? No perspective camera was uploaded. Two frames of hysteresis
-    // before switching to the screen; back to 3D at once.
-    // A 3D frame has a scene pass: dozens of draws into one depth-tested
-    // target. The title screen and menus upload a (dummy) camera too, so the
-    // camera count alone is not the test.
-    const bool frame2d = (g_cam_uploads_frame == 0 || g_scene_live_draws < 20);
+    // 2D frame? No real perspective camera was uploaded. Two frames of
+    // hysteresis before switching to the screen; back to 3D at once.
+    // The title screen and menus upload a dummy camera whose projection is
+    // near-2D (|P[0]| <= 0.2), so only real cameras count. A draw-count
+    // threshold of 20 was wrong: a hut interior is a 10-draw scene pass.
+    const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3);
     if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
     const bool is2d = g_frames_without_cam >= 2;
     const bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
     if (screen_next != g_xr_screen_now) {
         static int logged = 0;
-        if (logged++ < 40) {
+        if (logged++ < 400) {
             D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
-            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u, scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
-                 screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
+            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+                 screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_cam3d_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
                  static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
         }
     }
-    g_cam_uploads_frame = 0;
+    g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     XrScreen screen = {};
     screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
