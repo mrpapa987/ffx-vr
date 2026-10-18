@@ -615,7 +615,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_xr_set != null) {
             bool want = _xr_on;
             ImGui.Checkbox("Send to headset", ref want);
-            if (want && !_xr_on) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
+            if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
             ImGui.SliderFloat("world scale (game units per metre)", ref _xr_scale, 10f, 300f);
             ImGui.Checkbox("head rotation", ref _xr_rotate); ImGui.SameLine(); ImGui.Checkbox("head position", ref _xr_translate);
             ImGui.SameLine(); if (ImGui.Button("Recentre") || ImGui.IsKeyPressed(ImGuiKey.Home)) _fn_xr_recenter();

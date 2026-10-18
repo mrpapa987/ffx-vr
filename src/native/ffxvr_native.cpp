@@ -3029,6 +3029,11 @@ extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
 ID3D11Texture2D* g_bb_copy = nullptr;        // the backbuffer, copied into a texture that can be sampled
 static void xr_tick() {
     if (!g_xr_want) return;
+    if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
+        static bool said = false;
+        if (!said) { said = true; diag("xr: forcing override + eye 2 on (were %d/%d)", g_ovr_enabled ? 1 : 0, g_stereo ? 1 : 0); }
+        g_stereo = true; g_ovr_enabled = true;
+    }
     ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
     if (g_backbuffer) {
