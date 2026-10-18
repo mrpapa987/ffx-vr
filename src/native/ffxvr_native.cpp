@@ -373,7 +373,10 @@ ID3D11Buffer* g_imgui_cb = nullptr;   // ImGui's constant buffer: the one bound 
 bool  g_first_draw_pending = false;   // set by the hook; cleared by that first draw
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
-bool  g_in_eye2      = false;         // re-entrancy guard
+bool  g_in_eye2      = false;         // re-entrancy guard: our own GPU work, and everything inside the OpenXR runtime
+struct InEye2 {                        // scoped: sets the guard, restores the previous value (nesting-safe)
+    bool prev; InEye2() : prev(g_in_eye2) { g_in_eye2 = true; } ~InEye2() { g_in_eye2 = prev; }
+};
 // Recent camera-carrying uploads, with both eyes' images, keyed by buffer.
 // The game uploads the next object's buffer before drawing the current one,
 // so the image for a draw is usually not the most recent upload.
@@ -2419,10 +2422,11 @@ static void snapshot_scene(ID3D11Texture2D* game) {
         if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_game))) g_device->CreateShaderResourceView(g_snap_game, nullptr, &g_snap_game_srv);
         g_snap_from = game;
     }
-    g_in_eye2 = true;                                  // our copies must not be mirrored
-    if (g_snap_tex)  g_ctx->CopyResource(g_snap_tex,  src.tex);
-    if (g_snap_game) g_ctx->CopyResource(g_snap_game, game);
-    g_in_eye2 = false;
+    {
+        InEye2 guard;                                  // our copies must not be mirrored
+        if (g_snap_tex)  g_ctx->CopyResource(g_snap_tex,  src.tex);
+        if (g_snap_game) g_ctx->CopyResource(g_snap_game, game);
+    }
     g_snap_frame = g_frames;
 }
 
@@ -2567,9 +2571,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
         if (g_stereo && sit != g_twins.end() && sit->second.tex != nullptr) {
             Twin* dt = twin_of(dst);
             if (dt && dt->tex) {
-                g_in_eye2 = true;
-                g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt));
-                g_in_eye2 = false;
+                { InEye2 guard; g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt)); }
                 g_resolves_mirrored++;
                 // The first resolve of the scene pass is the finished scene, in a
                 // plain (non-multisampled) texture: that is the eye image.
@@ -2674,9 +2676,7 @@ static bool readback_diff(ID3D11Texture2D* a, ID3D11Texture2D* b, double* mean_a
              da.BindFlags, da.MiscFlags, da.SampleDesc.Count, da.MipLevels, db.BindFlags, db.MiscFlags, db.SampleDesc.Count, db.MipLevels);
         if (sa) sa->Release(); if (sb) sb->Release(); return false;
     }
-    g_in_eye2 = true;                                  // our copies must not be mirrored
-    g_ctx->CopyResource(sa, a); g_ctx->CopyResource(sb, b);
-    g_in_eye2 = false;
+    { InEye2 guard; g_ctx->CopyResource(sa, a); g_ctx->CopyResource(sb, b); }   // our copies must not be mirrored
 
     D3D11_MAPPED_SUBRESOURCE ma = {}, mb = {};
     bool ok = SUCCEEDED(g_orig_map(g_ctx, sa, 0, D3D11_MAP_READ, 0, &ma)) && SUCCEEDED(g_orig_map(g_ctx, sb, 0, D3D11_MAP_READ, 0, &mb));
@@ -2717,7 +2717,7 @@ static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name, bool alpha_only 
     ID3D11Texture2D* st = nullptr;
     HRESULT hr = g_device->CreateTexture2D(&sd, nullptr, &st);
     if (FAILED(hr)) { diag("dump %ls: staging failed hr=0x%08X", name, static_cast<unsigned>(hr)); return false; }
-    g_in_eye2 = true; g_ctx->CopyResource(st, tex); g_in_eye2 = false;
+    { InEye2 guard; g_ctx->CopyResource(st, tex); }
     D3D11_MAPPED_SUBRESOURCE m = {};
     if (FAILED(g_orig_map(g_ctx, st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return false; }
     const UINT w = d.Width / 4, h = d.Height / 4, stride = (w * 3 + 3) & ~3u;
@@ -2940,7 +2940,7 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     ID3D11InputLayout* o_il = nullptr; g_ctx->IAGetInputLayout(&o_il);
     D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
 
-    g_in_eye2 = true;                                  // our hooks ignore this pass, restore included
+    InEye2 guard;                                      // our hooks ignore this pass, restore included
     ID3D11RenderTargetView* rt[1] = { dst };
     g_ctx->OMSetRenderTargets(1, rt, nullptr);
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
@@ -2957,7 +2957,6 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
     g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
     g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
-    g_in_eye2 = false;
     for (auto* v : o_rtv) if (v) v->Release();
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_srv) o_srv->Release(); if (o_smp) o_smp->Release(); if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release();
@@ -3049,7 +3048,7 @@ static void xr_tick() {
             td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
             if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_bb_copy))) g_bb_copy = nullptr;
         }
-        if (g_bb_copy) { g_in_eye2 = true; g_ctx->CopyResource(g_bb_copy, g_backbuffer); g_in_eye2 = false; e1 = g_bb_copy; }
+        if (g_bb_copy) { { InEye2 guard; g_ctx->CopyResource(g_bb_copy, g_backbuffer); } e1 = g_bb_copy; }
     }
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;
@@ -3069,7 +3068,15 @@ static void xr_tick() {
         g_e2_begin_fail_prev = g_e2_begin_fail;
         g_seq_index++; g_seq_left--;
     }
-    xr_frame(e1, g_stereo ? e2 : nullptr, used, &out);
+    {
+        // The runtime composites on the game's own device context inside
+        // these calls (Virtual Desktop binds its 2496x2688 eye textures and
+        // draws): none of that must be seen by our hooks, or its targets get
+        // twinned, its draws re-issued and its texture mistaken for the
+        // backbuffer -- which hung the GPU.
+        InEye2 guard;
+        xr_frame(e1, g_stereo ? e2 : nullptr, used, &out);
+    }
     xr_apply_poses(out);
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
