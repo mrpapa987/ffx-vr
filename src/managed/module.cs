@@ -53,6 +53,12 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int, int, float, float, void> _fn_cuts_set;
     private delegate* unmanaged[Cdecl]<int> _fn_cut_count;
     private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
+    private delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void> _fn_fp_set;
+    private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_fp_hidden;
+    private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 12f;
+    private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
+    private const float k_true_scale = 11.4f;   // 20-unit characters = 1.75 m
     private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
     private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
@@ -214,6 +220,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_pitch_follow");
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cuts_set");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
+            _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_set");
+            _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_set");
+            _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_hidden");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
@@ -352,6 +361,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
         int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
+        if (eye2 < 0) return;                       // hidden (the player's own body in first person)
         _o_drawindexed!(ctx, n, start, base_vertex);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_drawindexed!(ctx, n, start, base_vertex); _fn_eye2_end(); }
     }
@@ -360,6 +370,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
         int eye2 = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
+        if (eye2 < 0) return;
         _o_draw!(ctx, n, start);
         for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
     }
@@ -492,6 +503,9 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "cut_blink":         _cut_blink = v == "1"; break;
                     case "follow_pans":       _follow_pans = v == "1"; break;
                     case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
+                    case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
+                    case "follow_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_dist); break;
+                    case "follow_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_h); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -522,7 +536,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
-            $"follow_rate={_follow_rate.ToString("F0", ci)}\n";
+            $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
+            $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
+            $"follow_distance={_fp_follow_dist.ToString("F0", ci)}\n" +
+            $"follow_height={_fp_follow_h.ToString("F0", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -571,6 +588,22 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
         ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+
+        // View mode
+        ImGui.Separator();
+        ImGui.Text("camera:"); ImGui.SameLine();
+        int fp_before = _fp_mode;
+        ImGui.RadioButton("authored (seat)", ref _fp_mode, 0); ImGui.SameLine();
+        ImGui.RadioButton("first person", ref _fp_mode, 1); ImGui.SameLine();
+        ImGui.RadioButton("follow", ref _fp_mode, 2);
+        ImGui.SameLine(); ImGui.TextDisabled("End: toggle first person");
+        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = _fp_mode == 1 ? 0 : 1;
+        if (_fp_mode != fp_before) {
+            if (fp_before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // leaving the authored view: true scale
+            else if (_fp_mode == 0) _xr_scale = _scale_before_fp;
+        }
+        push_player();
+        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
 
         // View
         ImGui.Separator();
@@ -663,6 +696,16 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SliderFloat("width (m)", ref _xr_screen_width, 1f, 6f);
             ImGui.SliderFloat("distance (m)", ref _xr_screen_dist, 1f, 6f);
             ImGui.TextDisabled("applied at the next recentre");
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("First person / follow")) {
+            ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
+            ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
+            ImGui.SliderFloat("follow height", ref _fp_follow_h, 0f, 150f);
+            ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
+            ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 2f, 40f);
+            if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.TreePop();
         }
 
@@ -765,6 +808,14 @@ public sealed unsafe class FFXVRModule : FhModule {
             for (int k = 0; k < 26; k++) { Vector4 s = a.chr_optpos[k]; if (s.Y > hy && MathF.Abs(s.X) + MathF.Abs(s.Z) > 0.01f) { hy = s.Y; head = s; } }
             ImGui.Text($"{i,3} {a.chr_id,4}  {a.chr_enabled,3}    {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1}) {a.chr_direction,6:F2} {_actor_moved[i],7:F1}  ({head.X,7:F1},{head.Y,7:F1},{head.Z,7:F1})");
         }
+    }
+
+    /// <summary>Player = field actor 0 (verified: it is the one that moves). Render space negates X and Y.</summary>
+    private void push_player() {
+        if (_fn_player_set == null) return;
+        Actor* actors = Globals.actors;
+        if (actors != null && read(actors, out Actor a) && a.chr_enabled != 0) _fn_player_set(-a.chr_pos_vec.X, -a.chr_pos_vec.Y, a.chr_pos_vec.Z, 1);
+        else _fn_player_set(0, 0, 0, 0);
     }
 
     private void push_markers() {
@@ -878,6 +929,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
         else if (_native_init_done) {
             push_override_and_stereo();   // state still flows to the native side with the window hidden
+            push_player();
+            if (ImGui.IsKeyPressed(ImGuiKey.End)) { int before = _fp_mode; _fp_mode = _fp_mode == 1 ? 0 : 1; if (before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; } else _xr_scale = _scale_before_fp; }
+            if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
             if (_fn_xr_set != null) {
                 bool want = _xr_want;
                 if (want) { _ovr_enabled = true; _stereo_on = true; }

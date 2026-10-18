@@ -385,7 +385,7 @@ struct InEye2 {                        // scoped: sets the guard, restores the p
 // Recent camera-carrying uploads, with both eyes' images, keyed by buffer.
 // The game uploads the next object's buffer before drawing the current one,
 // so the image for a draw is usually not the most recent upload.
-struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; uint32_t frame; int kind; };
+struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2; uint32_t frame; int kind; bool has_world; float world_pos[3]; };
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
 EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
@@ -522,6 +522,17 @@ float g_follow_rate = 20.f;                    // deg/s
 uint32_t g_cut_count = 0; int g_blink_frames = 0;
 float g_cam_prev_pos[3] = {}, g_cam_prev_fwd[3] = {}; bool g_cam_prev_valid = false;
 float g_dt = 1.f / 72.f;
+// First person / follow: the view is built from the player's position, not
+// the authored camera. Heading latched at toggle (and at recentre); the
+// head owns orientation; the player's own skinned draws are hidden.
+int   g_fp_mode = 0;                           // 0 off, 1 first person, 2 follow
+float g_fp_pos[3] = {};                        // player position, render space
+bool  g_fp_have_pos = false;
+float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units)
+float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
+float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
+bool  g_fp_hide_body = true; float g_fp_hide_radius = 12.f;
+uint32_t g_fp_hidden_draws = 0;
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
 bool  g_xr_fov_applied = false;
@@ -602,6 +613,21 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     float P[3];
     for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
 
+    // First person / follow: replace the base with a view at the player.
+    const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled;
+    if (fp) {
+        if (!g_fp_yaw_latched) {                        // heading: where the authored camera looked when toggled
+            const float f[3] = { -R[6], 0.f, -R[8] };
+            g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
+            g_seat_latched = false;
+        }
+        const float fy[3] = { -sinf(g_fp_yaw), 0.f, -cosf(g_fp_yaw) };
+        const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
+        memcpy(R, Rf, sizeof(R));
+        P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2];
+        if (g_fp_mode == 2) { for (int i = 0; i < 3; ++i) P[i] += Rf[6+i] * g_fp_follow_dist; P[1] += g_fp_follow_h; }   // back along the heading, and up
+    }
+
     // Rotate in view space: R' = Rx(pitch) * Ry(yaw) * R.
     const float yaw = g_ovr_yaw * 0.0174533f, pit = g_ovr_pitch * 0.0174533f;
     const float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pit), sp = sinf(pit);
@@ -670,8 +696,9 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         hx *= g_xr_scale; hy *= g_xr_scale; hz *= g_xr_scale;
     }
     const float* Rm = xr ? Rb : Rn;                      // manual offsets: heading frame with the headset (up stays up), head frame without
+    const float mv[3] = { fp ? 0.f : g_ovr_move[0], fp ? 0.f : g_ovr_move[1], fp ? 0.f : g_ovr_move[2] };   // seat offsets are for the authored view
     for (int i = 0; i < 3; ++i)
-        Pn[i] = P[i] + Rm[0*3+i]*(g_ovr_move[0]) + Rn[0*3+i]*lateral + Rm[1*3+i]*g_ovr_move[1] - Rm[2*3+i]*g_ovr_move[2]
+        Pn[i] = P[i] + Rm[0*3+i]*mv[0] + Rn[0*3+i]*lateral + Rm[1*3+i]*mv[1] - Rm[2*3+i]*mv[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
 
     float tn[3];
@@ -1243,6 +1270,13 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 1;
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
+            // The object's world translation, for hiding the player's own body
+            // in first person: skinned buffers (>= 1872 B) carry it at +640.
+            e.has_world = false;
+            if (size >= 1872 && base + 416 + 160 + 64 <= size) {
+                const float* W = reinterpret_cast<const float*>(p + base + 416 + 160);
+                e.world_pos[0] = W[3]; e.world_pos[1] = W[7]; e.world_pos[2] = W[11]; e.has_world = true;
+            }
 
             // write_camera also publishes the frame's known product for the
             // product-only buffers; that must stay eye 1's, so save and restore.
@@ -1261,7 +1295,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (g_stereo && buf != nullptr) {
             EyeImage& e = g_eye_ring[g_eye_ring_next];
             g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 2;
+            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 2; e.has_world = false;
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
             replace_known_products(e.eye2.data(), size, g_last_PVn2);
@@ -1914,6 +1948,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
+    }
+    if (g_fp_mode == 1 && g_fp_hide_body && g_fp_have_pos && g_xr_want && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+        const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
+        if (dx*dx + dy*dy + dz*dz < g_fp_hide_radius * g_fp_hide_radius) { g_fp_hidden_draws++; return -1; }   // the player's own body: not drawn at all
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
     if (g_ui_draw_now) { g_ui_draws_frame++; return 1; }   // into the UI texture (eye2_begin handles it)
@@ -3326,11 +3364,17 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (!on && g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; }
     return g_xr_want ? 1 : 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; }
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; }
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate; if (dt > 0.f && dt < 1.f) g_dt = dt;
 }
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
+extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
+    if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
+    g_fp_mode = mode; g_fp_eye_h = eye_h; g_fp_follow_dist = follow_dist; g_fp_follow_h = follow_h; g_fp_hide_body = hide_body != 0; g_fp_hide_radius = hide_radius;
+}
+extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) { g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0; }
+extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }
@@ -3379,7 +3423,7 @@ static void detect_cut() {
         const float dist = sqrtf(dp[0]*dp[0] + dp[1]*dp[1] + dp[2]*dp[2]);
         const float dot = fmaxf(-1.f, fminf(1.f, fwd[0]*g_cam_prev_fwd[0] + fwd[1]*g_cam_prev_fwd[1] + fwd[2]*g_cam_prev_fwd[2]));
         const float ang = acosf(dot) * 57.2958f;
-        if (dist > 40.f || ang > 25.f) {
+        if ((dist > 40.f || ang > 25.f) && g_fp_mode == 0) {
             g_cut_count++;
             g_seat_latched = false;
             if (g_cut_recentre) g_xr_recenter_pending = true;
