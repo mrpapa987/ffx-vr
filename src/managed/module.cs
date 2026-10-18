@@ -54,6 +54,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int, float, float, int, void> _fn_turn_set;
     private delegate* unmanaged[Cdecl]<float, void> _fn_turn;
     private delegate* unmanaged[Cdecl]<uint> _fn_turn_count;
+    private delegate* unmanaged[Cdecl]<int, float, void> _fn_move_set;
+    private delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void> _fn_move_status;
+    private bool _move_remap = true, _move_invert = false;
     private bool _turn_stick = true, _turn_blink = true; private int _turn_mode = 0; private float _turn_snap = 30f, _turn_rate = 90f;
     private delegate* unmanaged[Cdecl]<int> _fn_cut_count;
     private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
@@ -226,6 +229,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_set");
             _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_count");
+            _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
+            _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
             _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_set");
             _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_set");
@@ -513,6 +518,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "turn_snap":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_snap); break;
                     case "turn_rate":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_rate); break;
                     case "turn_blink":        _turn_blink = v != "0"; break;
+                    case "move_remap":        _move_remap = v != "0"; break;
+                    case "move_invert":       _move_invert = v == "1"; break;
                     case "follow_pans":       _follow_pans = v == "1"; break;
                     case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
                     case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
@@ -552,6 +559,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
             $"turn_rate={_turn_rate.ToString("F0", ci)}\n" +
             $"turn_blink={(_turn_blink ? 1 : 0)}\n" +
+            $"move_remap={(_move_remap ? 1 : 0)}\n" +
+            $"move_invert={(_move_invert ? 1 : 0)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
@@ -624,6 +633,13 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_turn_mode == 0) { ImGui.SliderFloat("snap angle", ref _turn_snap, 15f, 90f, "%.0f deg"); ImGui.SameLine(); ImGui.Checkbox("blink##turn", ref _turn_blink); }
         else ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
         ImGui.SameLine(); ImGui.TextDisabled($"Numpad 1/3: snap left/right   turns: {(_fn_turn_count != null ? _fn_turn_count() : 0)}");
+        ImGui.Checkbox("left stick follows where I look (first person)", ref _move_remap); ImGui.SameLine();
+        ImGui.Checkbox("invert", ref _move_invert);
+        if (_fn_move_status != null) {
+            float yv, yc, dd; uint calls; int hooked;
+            _fn_move_status(&yv, &yc, &dd, &calls, &hooked);
+            ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
+        }
         if (_fp_mode != fp_before) {
             if (fp_before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // leaving the authored view: true scale
             else if (_fp_mode == 0) _xr_scale = _scale_before_fp;
@@ -776,6 +792,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
         if (_fn_turn_set != null) _fn_turn_set(_turn_stick ? 1 : 0, _turn_mode, _turn_snap, _turn_rate, _turn_blink ? 1 : 0);
+        if (_fn_move_set != null) _fn_move_set(_move_remap ? 1 : 0, _move_invert ? -1f : 1f);
         if (_fn_turn != null) {
             if (ImGui.IsKeyPressed(ImGuiKey.Keypad1)) _fn_turn(-_turn_snap);
             if (ImGui.IsKeyPressed(ImGuiKey.Keypad3)) _fn_turn(_turn_snap);

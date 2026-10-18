@@ -529,8 +529,15 @@ float g_dt = 1.f / 72.f;
 // a fixed angle per flick (with a blink); smooth turns are degrees per second.
 bool  g_turn_stick = true; int g_turn_mode = 0; float g_turn_snap = 30.f, g_turn_rate = 90.f; bool g_turn_blink = true;
 bool  g_turn_armed = true; uint32_t g_turn_count = 0;
+
+// Movement remap: in first person the game still maps the left stick against
+// its own camera, so the stick is rotated by (view heading - game camera
+// heading) inside the game's XInputGetState import. Pure IAT hook.
+bool  g_move_remap = true; float g_move_sign = 1.f; float g_move_delta = 0.f;   // radians
+float g_yaw_view = 0.f, g_yaw_cam = 0.f;
+uint32_t g_xi_hook_calls = 0; bool g_xi_hooked = false;
 typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE*);
-PFN_XInputGetState g_xi_get = nullptr; bool g_xi_tried = false; int g_xi_pad = -1; ULONGLONG g_xi_probe = 0;
+PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = false; int g_xi_pad = -1; ULONGLONG g_xi_probe = 0;
 // First person / follow: the view is built from the player's position, not
 // the authored camera. Heading latched at toggle (and at recentre); the
 // head owns orientation; the player's own skinned draws are hidden.
@@ -616,6 +623,54 @@ static void xr_apply_poses(const XrFrameOut& f) {
     g_xr_fov[0] = f.fov[0]; g_xr_fov[1] = f.fov[1];
 }
 
+static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
+    const DWORD r = g_xi_orig(idx, st);
+    if (r == ERROR_SUCCESS && st) {
+        g_xi_hook_calls++;
+        if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && g_move_delta != 0.f) {
+            const float d = g_move_sign * g_move_delta;
+            const float c = cosf(d), sn = sinf(d);
+            const float sx = (float)st->Gamepad.sThumbLX, sy = (float)st->Gamepad.sThumbLY;
+            const float nx = sx * c - sy * sn, ny = sy * c + sx * sn;
+            st->Gamepad.sThumbLX = (SHORT)fmaxf(-32768.f, fminf(32767.f, nx));
+            st->Gamepad.sThumbLY = (SHORT)fmaxf(-32768.f, fminf(32767.f, ny));
+        }
+    }
+    return r;
+}
+
+/// Replace the game's XInputGetState import with ours (import address table).
+static void install_xinput_hook() {
+    if (g_xi_hooked) return;
+    HMODULE exe = GetModuleHandleA(nullptr);
+    const BYTE* base = (const BYTE*)exe;
+    const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) { diag("xinput hook: no import table"); return; }
+    const IMAGE_IMPORT_DESCRIPTOR* imp = (const IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress);
+    for (; imp->Name; ++imp) {
+        const char* dll = (const char*)(base + imp->Name);
+        if (_strnicmp(dll, "xinput", 6) != 0) continue;
+        const IMAGE_THUNK_DATA* names = (const IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk);
+        IMAGE_THUNK_DATA* iat = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++iat) {
+            if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            const IMAGE_IMPORT_BY_NAME* ibn = (const IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData);
+            if (strcmp(ibn->Name, "XInputGetState") != 0) continue;
+            DWORD old = 0;
+            if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) { diag("xinput hook: VirtualProtect failed"); return; }
+            g_xi_orig = (PFN_XInputGetState)iat->u1.Function;
+            iat->u1.Function = (DWORD_PTR)&xi_get_state_hook;
+            VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
+            g_xi_hooked = true;
+            diag("xinput hook: %s!XInputGetState hooked (orig %p)", dll, (void*)g_xi_orig);
+            return;
+        }
+    }
+    diag("xinput hook: XInputGetState import not found");
+}
+
 /// Turn the current heading by `deg` (positive = right).
 static void turn_by(float deg) {
     const float d = -deg * 0.0174533f;                   // yaw about +y: positive turns left
@@ -632,6 +687,7 @@ static float right_stick_x() {
         if (!m) m = LoadLibraryA("xinput1_3.dll");
         if (!m) m = LoadLibraryA("xinput9_1_0.dll");
         if (m) g_xi_get = (PFN_XInputGetState)GetProcAddress(m, "XInputGetState");
+        if (g_xi_orig) g_xi_get = g_xi_orig;                   // the game's own import, unhooked
         diag("xinput: %s", g_xi_get ? "loaded" : "not available");
     }
     if (!g_xi_get) return 0.f;
@@ -673,6 +729,8 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
 
     // First person / follow: replace the base with a view at the player.
     const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled;
+    const bool primary = (g_eye_shift == 0.f);
+    if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
         if (!g_fp_yaw_latched) {                        // heading: where the authored camera looked when toggled
             const float f[3] = { -R[6], 0.f, -R[8] };
@@ -715,7 +773,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float live_yaw = atan2f(-f[0], -f[2]);
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
             const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
-            if (!g_seat_latched) { g_seat_yaw = live_yaw; g_seat_pitch = live_pitch; g_seat_latched = true; }
+            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = live_pitch; g_seat_latched = true; }   // first person: the fp heading owns the yaw
             else if (g_follow_pans) {
                 // slew the latched yaw toward the live one, rate-limited
                 float d = live_yaw - g_seat_yaw;
@@ -741,6 +799,13 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         mul3(MqT, Rb, Rn);
     }
     else memcpy(Rn, Rb, sizeof(Rn));
+    if (primary) {
+        g_yaw_view = atan2f(Rn[6], Rn[8]);
+        float d = g_yaw_view - g_yaw_cam;
+        while (d >  3.14159265f) d -= 6.2831853f;
+        while (d < -3.14159265f) d += 6.2831853f;
+        g_move_delta = fp ? d : 0.f;
+    }
 
     // Move along the new camera's axes (rows of R'; forward is -row 2). The
     // eye shift is a further lateral offset, used for the second eye. With
@@ -1868,6 +1933,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     void** vt = *reinterpret_cast<void***>(context);
     if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
     g_vt = vt;
+    install_xinput_hook();
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
@@ -3431,6 +3497,11 @@ extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float 
 }
 extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); if (g_turn_blink && g_turn_mode == 0) g_blink_frames = 3; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
+extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }
+extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, float* yaw_cam_deg, float* delta_deg, uint32_t* hook_calls, int* hooked) {
+    if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
+    if (delta_deg) *delta_deg = g_move_delta * 57.29578f; if (hook_calls) *hook_calls = g_xi_hook_calls; if (hooked) *hooked = g_xi_hooked ? 1 : 0;
+}
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
