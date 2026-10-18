@@ -112,12 +112,19 @@ Copy-Item $modDll    (Join-Path $game 'fps60_ffx.dll') -Force; Log "installed $g
 $ini = Join-Path $game 'fps60.ini'
 if (-not (Test-Path $ini)) { Copy-Item (Join-Path $ext 'ship\fps60.ini') $ini; Log "installed $ini (release defaults)" }
 else { Log "kept $ini" }
-if ($Fps -gt 0) {
-    $text = Get-Content $ini -Raw
-    $text = [regex]::Replace($text, '(?m)^fps=\d+', "fps=$Fps")
-    Set-Content $ini $text -NoNewline
-    Log "fps60.ini: fps=$Fps"
+$text = Get-Content $ini -Raw
+if ($Fps -gt 0) { $text = [regex]::Replace($text, '(?m)^fps=\d+', "fps=$Fps"); Log "fps60.ini: fps=$Fps" }
+# VR compatibility: the Config-page Frame Rate row (CFG-MENU) builds its text at
+# install through the game's text-language getter, which faults before the game
+# has created its settings object; under Fahrenheit's stage-0 debugger that
+# fault is fatal (crash at start, fps60_ffx!build_fps_text). The rate is set
+# here, so the row stays off.
+if ($text -notmatch '(?m)^CFG-MENU=') {
+    $text = [regex]::Replace($text, '(?m)^\[rows\]\r?\n', "`$0; VR setup: Config-page Frame Rate row off (install-time text fault under Fahrenheit)`r`nCFG-MENU=0`r`n", 1)
+    Log 'fps60.ini: CFG-MENU=0 (Config-page row off)'
 }
+else { $text = [regex]::Replace($text, '(?m)^CFG-MENU=.*$', 'CFG-MENU=0') }
+Set-Content $ini $text -NoNewline
 Log ''
 Log 'Done. Start the game as usual (run-ffx.ps1); fps60.log in the game folder says what the mod found.'
 Log "Log: $log"
