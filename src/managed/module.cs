@@ -463,7 +463,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             }
             if (_headset_autostart) _xr_want = true;
         }
-        catch (Exception e) { _logger.Warn($"settings: {e.Message}"); }
+        catch (Exception e) { _logger.Info($"settings: {e.Message}"); }
     }
 
     private void settings_save_if_changed() {
@@ -482,7 +482,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"overlay_open={(_window_open ? 1 : 0)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
-        catch (Exception e) { _logger.Warn($"settings: {e.Message}"); }
+        catch (Exception e) { _logger.Info($"settings: {e.Message}"); }
     }
 
     // -- main window --------------------------------------------------------------
