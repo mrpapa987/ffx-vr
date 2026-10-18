@@ -42,6 +42,7 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 #pragma comment(lib, "d3d11.lib")
 
 static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
+static void g_plain_srvs_forget(ID3D11Texture2D* t);   // SRV cache, defined below
 
 namespace {
 
