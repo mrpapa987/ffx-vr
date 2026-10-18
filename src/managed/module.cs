@@ -48,6 +48,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_xr_screen_set;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_ui_set;
     private delegate* unmanaged[Cdecl]<int> _fn_ui_draws;
+    private delegate* unmanaged[Cdecl]<float, void> _fn_xr_pitch_follow;
+    private float _xr_pitch_follow = 0.5f;
     private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
     private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
@@ -206,6 +208,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_set");
             _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_set");
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
+            _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_pitch_follow");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
@@ -477,6 +480,9 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "ui_panel":          _ui_on = v != "0"; break;
                     case "ui_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_dist); break;
                     case "ui_width":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_width); break;
+                    case "pitch_follow":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_pitch_follow); break;
+                    case "seat_height":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_up); break;
+                    case "seat_forward":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_forward); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -500,7 +506,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"overlay_open={(_window_open ? 1 : 0)}\n" +
             $"ui_panel={(_ui_on ? 1 : 0)}\n" +
             $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
-            $"ui_width={_ui_width.ToString("F2", ci)}\n";
+            $"ui_width={_ui_width.ToString("F2", ci)}\n" +
+            $"pitch_follow={_xr_pitch_follow.ToString("F2", ci)}\n" +
+            $"seat_height={_ovr_up.ToString("F0", ci)}\n" +
+            $"seat_forward={_ovr_forward.ToString("F0", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -536,6 +545,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.SameLine(); ImGui.TextDisabled(_xr_scale < 20f ? "life-size" : _xr_scale < 60f ? "large model" : "tabletop diorama");
         ImGui.Checkbox("head position (lean)", ref _xr_translate); ImGui.SameLine();
         ImGui.Checkbox("seat (head owns orientation)", ref _xr_seat);
+        ImGui.SliderFloat("pitch follow", ref _xr_pitch_follow, 0f, 1f, "%.2f");
+        ImGui.SameLine(); ImGui.TextDisabled("0 level horizon .. 1 the original view");
+        if (_fn_xr_pitch_follow != null) _fn_xr_pitch_follow(_xr_pitch_follow);
+        ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
+        ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
+        ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
 
         // View
         ImGui.Separator();

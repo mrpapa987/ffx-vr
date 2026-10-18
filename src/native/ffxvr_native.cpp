@@ -510,6 +510,7 @@ float g_xr_ref_p[3] = {};
 bool  g_xr_recenter_pending = true;     // first valid pose becomes the reference
 bool  g_xr_use_fov  = true;             // replace the game's projection with the headset's per-eye field of view
 bool  g_xr_seat     = true;             // head owns orientation; the authored camera contributes position and heading only
+float g_xr_pitch_follow = 0.5f;         // seat: how much of the authored pitch stays in the reference frame (0 level .. 1 the original view)
 XrFovTan g_xr_fov[2] = { { -1.f, 1.f, 1.f, -1.f }, { -1.f, 1.f, 1.f, -1.f } };   // from the runtime
 XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (submitted with the layers)
 bool  g_xr_fov_applied = false;
@@ -617,7 +618,19 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             f[0] /= len; f[2] /= len;
             const float up[3] = { 0.f, 1.f, 0.f };
             const float right[3] = { f[1]*up[2] - f[2]*up[1], f[2]*up[0] - f[0]*up[2], f[0]*up[1] - f[1]*up[0] };   // f x up
-            const float Rh[9] = { right[0], right[1], right[2],  up[0], up[1], up[2],  -f[0], -f[1], -f[2] };
+            float Rh[9] = { right[0], right[1], right[2],  up[0], up[1], up[2],  -f[0], -f[1], -f[2] };
+            // Pitch follow: a fraction of the authored pitch kept in the frame,
+            // so "straight ahead" leans toward where the director pointed.
+            const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
+            const float authored_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1])));   // + looks up
+            const float pf = authored_pitch * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
+            if (fabsf(pf) > 1e-4f) {
+                // rotate the frame about its right axis: rows up and back mix
+                const float cp = cosf(pf), sp = sinf(pf);
+                float nu[3], nb[3];
+                for (int k = 0; k < 3; ++k) { nu[k] = Rh[3+k] * cp + Rh[6+k] * sp; nb[k] = -Rh[3+k] * sp + Rh[6+k] * cp; }
+                for (int k = 0; k < 3; ++k) { Rh[3+k] = nu[k]; Rh[6+k] = nb[k]; }
+            }
             memcpy(Rb, Rh, sizeof(Rh));                          // position offsets follow the heading frame too
         }
         mul3(MqT, Rb, Rn);
@@ -635,8 +648,9 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         if (eye2) { hx += g_xr_eye_off[0]; hy += g_xr_eye_off[1]; hz += g_xr_eye_off[2]; }
         hx *= g_xr_scale; hy *= g_xr_scale; hz *= g_xr_scale;
     }
+    const float* Rm = xr ? Rb : Rn;                      // manual offsets: heading frame with the headset (up stays up), head frame without
     for (int i = 0; i < 3; ++i)
-        Pn[i] = P[i] + Rn[0*3+i]*(g_ovr_move[0] + lateral) + Rn[1*3+i]*g_ovr_move[1] - Rn[2*3+i]*g_ovr_move[2]
+        Pn[i] = P[i] + Rm[0*3+i]*(g_ovr_move[0]) + Rn[0*3+i]*lateral + Rm[1*3+i]*g_ovr_move[1] - Rm[2*3+i]*g_ovr_move[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
 
     float tn[3];
@@ -3278,6 +3292,7 @@ static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
+extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
