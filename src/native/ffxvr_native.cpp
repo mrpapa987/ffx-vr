@@ -1924,7 +1924,7 @@ extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, 
 extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze, float yaw, float pitch,
                                                           float right, float up, float forward) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    g_ovr_enabled = enabled != 0;
+    g_ovr_enabled = (enabled != 0) || g_xr_want;   // the headset needs the override: the overlay cannot turn it off
     g_ovr_freeze  = freeze  != 0;
     g_ovr_yaw     = yaw;
     g_ovr_pitch   = pitch;
@@ -2852,7 +2852,10 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
     return nv;
 }
 
-extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope, int red, int leave) { g_stereo = on != 0; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; g_debug_leave = leave != 0; }
+extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int scope, int red, int leave) {
+    // While the headset is on, eye 2 is on: the overlay cannot turn it off.
+    g_stereo = (on != 0) || g_xr_want; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; g_debug_leave = leave != 0;
+}
 /// A twin's plain SRV (whole texture), created on demand; null if none.
 static void* twin_plain_srv(ID3D11Texture2D* game) {
     if (game == nullptr) return nullptr;
@@ -3142,8 +3145,8 @@ static void xr_tick() {
         static int logged = 0;
         if (logged++ < 40) {
             D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
-            diag("mode -> %s at frame %u: camera uploads %u, scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
-                 screen_next ? "SCREEN" : "3D", g_frames, g_cam_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
+            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u, scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+                 screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
                  static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
         }
     }
