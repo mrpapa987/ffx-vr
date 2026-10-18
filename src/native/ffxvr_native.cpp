@@ -152,6 +152,9 @@ constexpr UINT CAM_INV_OFFSET  = 320;
 constexpr UINT CAM_MIN_SIZE    = CAM_INV_OFFSET + 64;
 
 ID3D11Device*        g_device       = nullptr;
+DWORD                g_render_tid   = 0;          // the thread that runs the per-frame hook
+uint32_t             g_other_thread_calls = 0;   // hook entries from other threads
+DWORD                g_other_thread_last = 0;
 ID3D11DeviceContext* g_ctx          = nullptr;
 ID3D11Buffer*        g_slot0_cur    = nullptr;   // actually bound to VS slot 0 right now
 ID3D11Buffer*        g_vs_cb[14]    = {};        // every VS constant buffer slot, as bound
@@ -1756,6 +1759,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 // capture can span exactly one frame instead of whatever happened to come next.
 static void xr_tick();
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
+    g_render_tid = GetCurrentThreadId();
     bool dump_now = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -1840,6 +1844,7 @@ extern "C" __declspec(dllexport) void ffxvr_draw_ctx(void* ctx) {
 
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
+    { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
 
@@ -1903,6 +1908,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
 /// the target is a constant buffer being replaced whole.
 extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, const void* box, const void* src) {
     bump(C_UPDATESUB);
+    { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
     if (g_in_eye2) { g_e2_reentered_updates++; return src; }
     if (resource == nullptr || src == nullptr || box != nullptr) return src;
 
@@ -2792,6 +2798,7 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         for (int sl = 0; sl < 14; ++sl) l += snprintf(line + l, sizeof(line) - l, " s%d:%u", sl, g_slot_binds[sl]);
         diag("    VS constant buffer slot binds:%s", line);
     }
+    diag("    hook entries from threads other than the render thread (%lu): %u (last %lu)", g_render_tid, g_other_thread_calls, g_other_thread_last);
     diag("    resolves %u (mirrored %u), UAV-variant target binds %u, snapshot trigger %s", g_resolves, g_resolves_mirrored, g_omrt_uav_calls,
          g_snap_by == 1 ? "SRV bind" : g_snap_by == 2 ? "copy/resolve" : g_snap_by == 3 ? "clear" : "none");
     for (int k = 0; k < 32; ++k) {
@@ -3034,6 +3041,20 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (on && !g_xr_want) {
         if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe)
+        // The runtime and the game's loader thread may touch the device while
+        // the render thread is mid-frame; the D3D11 context is not thread-safe
+        // unless asked. Cheap, and the intermittent driver-thread crashes at
+        // session start look like exactly that race.
+        {
+            ID3D11Multithread* mt = nullptr;
+            if (SUCCEEDED(g_ctx->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt))) && mt) {
+                const BOOL was = mt->GetMultithreadProtected();
+                mt->SetMultithreadProtected(TRUE);
+                diag("xr: context multithread protection %s -> on", was ? "was on" : "was off");
+                mt->Release();
+            }
+            else diag("xr: ID3D11Multithread not available on this context");
+        }
         XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
         g_xr_want = xr_start(h);
         g_xr_recenter_pending = true;
