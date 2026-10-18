@@ -41,6 +41,8 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 #pragma comment(lib, "d3d11.lib")
 
+static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
+
 namespace {
 
 // ID3D11DeviceContext vtable indices.
