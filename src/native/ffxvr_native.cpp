@@ -647,8 +647,19 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
     // direction with tangent t, so P[0] = 2/(r-l), P[2] = (r+l)/(r-l).
     float Pjn[16]; memcpy(Pjn, Pj, sizeof(Pjn));
     const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov;
-    if (fov) {
-        const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
+    const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
+    const bool fov_ok = std::isfinite(f.l) && std::isfinite(f.r) && std::isfinite(f.u) && std::isfinite(f.d)
+                     && f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f;
+    if (fov && fov_ok) {
+        static int logged = 0;
+        if (logged < 2) {
+            logged++;
+            diag("fov apply (eye %d): tan l %.3f r %.3f u %.3f d %.3f; original near-variant proj row0 (%.4f %.4f %.4f %.4f) row1 (%.4f %.4f %.4f %.4f) row2 (%.4f %.4f %.4f %.4f) row3 (%.4f %.4f %.4f %.4f)",
+                 (g_eye_shift != 0.f) ? 2 : 1, f.l, f.r, f.u, f.d, Pj[0], Pj[1], Pj[2], Pj[3], Pj[4], Pj[5], Pj[6], Pj[7], Pj[8], Pj[9], Pj[10], Pj[11], Pj[12], Pj[13], Pj[14], Pj[15]);
+            if (size >= o_proj + 64) { const float* Pm = reinterpret_cast<const float*>(orig + o_proj);
+                diag("    main proj row0 (%.4f %.4f %.4f %.4f) row1 (%.4f %.4f %.4f %.4f) row2 (%.4f %.4f %.4f %.4f) row3 (%.4f %.4f %.4f %.4f)",
+                     Pm[0], Pm[1], Pm[2], Pm[3], Pm[4], Pm[5], Pm[6], Pm[7], Pm[8], Pm[9], Pm[10], Pm[11], Pm[12], Pm[13], Pm[14], Pm[15]); }
+        }
         auto apply = [&](float* P) {
             const float sx = (P[0] < 0.f) ? -1.f : 1.f, sy = (P[5] < 0.f) ? -1.f : 1.f;
             P[0] = sx * 2.f / (f.r - f.l);  P[2] = sx * (f.r + f.l) / (f.r - f.l);
@@ -2854,7 +2865,15 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
         td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         HRESULT hr = g_device->CreateTexture2D(&td, nullptr, &oc.tex);
-        if (FAILED(hr)) { diag("preview: texture %ux%u failed hr=0x%08X", d.Width, d.Height, static_cast<unsigned>(hr)); oc.tex = nullptr; return nullptr; }
+        if (FAILED(hr)) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                diag("preview: texture %ux%u failed hr=0x%08X", d.Width, d.Height, static_cast<unsigned>(hr));
+                if (hr == DXGI_ERROR_DEVICE_REMOVED) diag("DEVICE REMOVED, reason 0x%08X (hung 0x887A0006, reset 0x887A0007, internal 0x887A0020, invalid call 0x887A0001)", static_cast<unsigned>(g_device->GetDeviceRemovedReason()));
+            }
+            oc.tex = nullptr; return nullptr;
+        }
         hr = g_device->CreateRenderTargetView(oc.tex, nullptr, &oc.rtv);
         if (FAILED(hr)) diag("preview: rtv failed hr=0x%08X", static_cast<unsigned>(hr));
         hr = g_device->CreateShaderResourceView(oc.tex, nullptr, &oc.srv);
