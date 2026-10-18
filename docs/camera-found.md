@@ -247,3 +247,25 @@ onto the twins. What made it finally work, in the order found:
 
 Diagnostics: F4 writes `img_*.bmp` (quarter size, plus alpha-only variants)
 next to the native DLL; `tools/run-ffx.ps1` collects them with the logs.
+
+## Headset (OpenXR) lessons
+
+- Runtime: Virtual Desktop's VDXR (not SteamVR); 32-bit loader from the
+  OpenXR.Loader NuGet package, headers from OpenXR.Headers; loaded by full
+  path next to the mod DLL, entry points via xrGetInstanceProcAddr.
+- **The runtime composites on the game's immediate context inside
+  xrEndFrame**, i.e. inside our per-frame hook. Everything our hooks see
+  during the OpenXR calls must be ignored (the re-entrancy guard covers the
+  whole xr_frame call), or the runtime's targets get twinned, its constant
+  buffers go through the override and its 2496x2688 eye texture is taken for
+  the backbuffer -> GPU reset (DEVICE_REMOVED with reason DEVICE_REMOVED).
+- The swapchain backbuffer has no shader-resource bind: eye 1 is copied into
+  a plain texture first. Never create a view on it (d3d11 throws internally
+  and the loader dumps core every frame).
+- Session teardown must happen before ExitProcess (hooked), or the runtime
+  crashes during DLL unload.
+- Finite swapchain waits (250 ms) and a stall watchdog ("STALL in stage X")
+  turn a hang into a log line.
+- Each eye's layer must be submitted with the FOV it was rendered with:
+  the headset's asymmetric per-eye FOV written into both projection
+  variants (x/y scale and offset only), or the game's symmetric one.
