@@ -585,6 +585,8 @@ int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
 // overridden. g_backdrop_mode: 1 = the whole frame on the virtual screen
 // while such draws are present (default), 0 = 3D props over the flat backdrop.
 int   g_backdrop_mode = 1; uint32_t g_bg_uploads_frame = 0, g_bg_uploads_total = 0;
+bool  g_ovr_suspend = false;            // the frame goes to the virtual screen: render it exactly as the game does
+bool  g_backdrop_room = false;          // last frame had painted-backdrop draws: first person makes no sense here
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
@@ -757,7 +759,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
 
     // First person / follow: replace the base with a view at the player.
-    const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled;
+    const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled && !g_backdrop_room;
     const bool primary = (g_eye_shift == 0.f);
     if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
@@ -1448,9 +1450,69 @@ static void dump_cb_layout(const uint8_t* p, UINT size, UINT base, const char* v
     if (size % 64) diag("  +%4u: %u trailing bytes", nb * 64, size % 64);
 }
 
+/// The 2D layer system's dummy camera, given the head's rotation only (the
+/// painting hangs at its authored direction, world-fixed, no parallax) and
+/// the eye's field of view. Everything derived from the view in the buffer
+/// (its inverse, proj*view, proj*view*X for the layer transforms X) is
+/// recomputed; nothing else is touched. `orig` is the game's upload, `p`
+/// the copy being rewritten; the eye is picked by g_eye_shift like write_camera.
+static void write_backdrop_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT base) {
+    const float* V = reinterpret_cast<const float*>(orig + base);
+    float Mq[9], MqT[9]; quat_to_mat(g_xr_q, Mq);
+    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) MqT[r*3+c] = Mq[c*3+r];
+    const float R[9] = { V[0], V[1], V[2], V[4], V[5], V[6], V[8], V[9], V[10] };
+    float Rn[9]; mul3(MqT, R, Rn);
+    const float t[3] = { V[3], V[7], V[11] };
+    float tn[3]; for (int i = 0; i < 3; ++i) tn[i] = MqT[i*3+0]*t[0] + MqT[i*3+1]*t[1] + MqT[i*3+2]*t[2];   // rotate about the camera position
+    float Vn[16] = { Rn[0], Rn[1], Rn[2], tn[0],  Rn[3], Rn[4], Rn[5], tn[1],  Rn[6], Rn[7], Rn[8], tn[2],  0, 0, 0, 1 };
+    // inverse of a rigid transform: R^T, -R^T t
+    float In[16] = { Rn[0], Rn[3], Rn[6], 0,  Rn[1], Rn[4], Rn[7], 0,  Rn[2], Rn[5], Rn[8], 0,  0, 0, 0, 1 };
+    In[3]  = -(Rn[0]*tn[0] + Rn[3]*tn[1] + Rn[6]*tn[2]);
+    In[7]  = -(Rn[1]*tn[0] + Rn[4]*tn[1] + Rn[7]*tn[2]);
+    In[11] = -(Rn[2]*tn[0] + Rn[5]*tn[1] + Rn[8]*tn[2]);
+    memcpy(p + base, Vn, 64);
+    if (size >= base + 256 + 64) memcpy(p + base + 256, In, 64);
+    // projections: both variants get the eye's frustum
+    float Pjn[16]; memcpy(Pjn, orig + base + 64, 64);
+    float Pmn[16]; const bool have_pm = size >= base + 192 + 64; if (have_pm) memcpy(Pmn, orig + base + 192, 64);
+    const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov;
+    const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
+    const bool fov_ok = std::isfinite(f.l) && std::isfinite(f.r) && std::isfinite(f.u) && std::isfinite(f.d) && f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f;
+    auto apply = [&](float* P) {
+        const float sx = (P[0] < 0.f) ? -1.f : 1.f, sy = (P[5] < 0.f) ? -1.f : 1.f;
+        P[0] = sx * 2.f / (f.r - f.l);  P[2] = sx * (f.r + f.l) / (f.r - f.l);
+        P[5] = sy * 2.f / (f.u - f.d);  P[6] = sy * (f.u + f.d) / (f.u - f.d);
+    };
+    if (fov && fov_ok) { apply(Pjn); memcpy(p + base + 64, Pjn, 64); if (have_pm) { apply(Pmn); memcpy(p + base + 192, Pmn, 64); } g_xr_fov_applied = true; }
+    // derived blocks: anything equal to P*V or P*V*X (X an affine block of this buffer) for either projection
+    const float* Pj = reinterpret_cast<const float*>(orig + base + 64);
+    const float* Pm = have_pm ? reinterpret_cast<const float*>(orig + base + 192) : nullptr;
+    float PV[16], PVn[16], PmV[16] = {}, PmVn[16] = {};
+    mul4(Pj, V, PV); mul4(Pjn, Vn, PVn);
+    if (Pm) { mul4(Pm, V, PmV); mul4(Pmn, Vn, PmVn); }
+    const UINT nb = size / 64;
+    for (UINT b = 0; b < nb; ++b) {
+        const UINT off = b * 64;
+        if (off == base || off == base + 64 || off == base + 192 || off == base + 256) continue;
+        const float* M = reinterpret_cast<const float*>(orig + off);
+        if (same4(M, PV)) { memcpy(p + off, PVn, 64); continue; }
+        if (Pm && same4(M, PmV)) { memcpy(p + off, PmVn, 64); continue; }
+        bool done = false;
+        for (UINT c = 0; c < nb && !done; ++c) {
+            if (c == b) continue;
+            const float* X = reinterpret_cast<const float*>(orig + c * 64);
+            if (!(X[12] == 0.f && X[13] == 0.f && X[14] == 0.f && fabsf(X[15] - 1.f) < 1e-4f)) continue;
+            float t1[16], t2[16];
+            mul4(PV, X, t1);
+            if (same4(M, t1)) { mul4(PVn, X, t2); memcpy(p + off, t2, 64); done = true; break; }
+            if (Pm) { mul4(PmV, X, t1); if (same4(M, t1)) { mul4(PmVn, X, t2); memcpy(p + off, t2, 64); done = true; break; } }
+        }
+    }
+}
+
 static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf) {
     if (g_in_eye2) return src;
-    if (!g_ovr_enabled || size < 64) return src;
+    if (!g_ovr_enabled || g_ovr_suspend || size < 64) return src;
 
     const uint8_t* p = static_cast<const uint8_t*>(src);
 
@@ -1483,7 +1545,26 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
                         && fabsf(v[4]) < 1e-3f && fabsf(v[5] - 1.f) < 1e-3f && fabsf(v[6]) < 1e-3f
                         && fabsf(v[8]) < 1e-3f && fabsf(v[9]) < 1e-3f && fabsf(v[10] + 1.f) < 1e-3f
                         && fabsf(v[3]) < 1e-3f && fabsf(v[7]) < 1e-3f && fabsf(v[11] + 1.f) < 1e-3f;
-        if (dummy) { g_bg_uploads_frame++; g_bg_uploads_total++; return src; }
+        if (dummy) {
+            g_bg_uploads_frame++; g_bg_uploads_total++;
+            if (g_backdrop_mode != 0 || !g_xr_active || !g_xr_rotate) return src;      // screen mode: the game's own frame
+            // props-over-backdrop: the painting turns with the world, not the head
+            if (g_scratch.size() < size) g_scratch.resize(size);
+            memcpy(g_scratch.data(), p, size);
+            write_backdrop_camera(p, g_scratch.data(), size, base);
+            if (g_stereo && buf != nullptr) {
+                EyeImage& e = g_eye_ring[g_eye_ring_next];
+                g_eye_ring_next = (g_eye_ring_next + 1) % 32;
+                e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 1; e.has_world = false;
+                e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
+                e.eye2.assign(p, p + size);
+                g_eye_shift = (g_ipd != 0.f) ? g_ipd : 1e-6f;
+                write_backdrop_camera(p, e.eye2.data(), size, base);
+                g_eye_shift = 0.f;
+            }
+            g_ovr_applied++;
+            return g_scratch.data();
+        }
     }
 
     if (g_scratch.size() < size) g_scratch.resize(size);
@@ -2265,7 +2346,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
-    if (g_fp_mode == 1 && g_fp_hide_body && g_fp_have_pos && g_xr_want && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+    if (g_fp_mode == 1 && g_fp_hide_body && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
         if (dx*dx + dy*dy + dz*dz < g_fp_hide_radius * g_fp_hide_radius) { g_fp_hidden_draws++; return -1; }   // the player's own body: not drawn at all
     }
@@ -3939,8 +4020,10 @@ static void xr_tick() {
                  static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
         }
     }
+    g_backdrop_room = g_bg_uploads_frame > 0;
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
+    g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
     XrScreen screen = {};
     screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
