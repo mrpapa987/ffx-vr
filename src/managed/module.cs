@@ -85,6 +85,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
     private int _backdrop_mode = 1;
+    private delegate* unmanaged[Cdecl]<int, float, void> _fn_cull_set;
+    private delegate* unmanaged[Cdecl]<float*, uint*, void> _fn_camblk_get;
+    private int _cull_mode = 0; private float _cull_fov = 1.5f;
     private delegate* unmanaged[Cdecl]<int, void> _fn_backdrop_set;
     private delegate* unmanaged[Cdecl]<uint> _fn_backdrop_draws;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
@@ -277,6 +280,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
             _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
+            _fn_cull_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_set");
+            _fn_camblk_get   = (delegate* unmanaged[Cdecl]<float*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_camblk_get");
             _fn_backdrop_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_draws");
             _fn_measure      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_measure");
             _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_ps_srvs");
@@ -536,6 +541,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "headset_fov":       _xr_fov = v == "1"; break;
                     case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
                     case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
+                    case "cull_mode":         int.TryParse(v, out _cull_mode); break;
+                    case "cull_fov":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _cull_fov); break;
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
                     case "overlay_open":      _window_open = v != "0"; break;
@@ -581,6 +588,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
             $"screen_mode={_xr_screen_mode}\n" +
             $"backdrop_mode={_backdrop_mode}\n" +
+            $"cull_mode={_cull_mode}\n" +
+            $"cull_fov={_cull_fov.ToString("F3", ci)}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
             $"overlay_open={(_window_open ? 1 : 0)}\n" +
@@ -803,6 +812,20 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
+
+        if (ImGui.TreeNode("Culling (the game's own camera FOV field)")) {
+            ImGui.TextWrapped("The game decides what to draw from its own camera blocks (FFX-60fps research: gva 0x01137000, stride 0x1C0, FOV/aspect at +0x10/+0x14/+0x1C). Writing a wider value into +0x10 should make it submit everything the headset can see; the picture stays ours. Read the live fields first to learn what the value means, then override.");
+            if (_fn_camblk_get != null) {
+                float* f = stackalloc float[9]; uint writes;
+                _fn_camblk_get(f, &writes);
+                ImGui.Text($"block 0: +10 {f[0]:F4}  +14 {f[1]:F4}  +1C {f[2]:F4}    block 1: {f[3]:F4} {f[4]:F4} {f[5]:F4}    block 2: {f[6]:F4} {f[7]:F4} {f[8]:F4}   writes {writes}");
+            }
+            bool cull_on = _cull_mode != 0; ImGui.Checkbox("override field +10 with", ref cull_on); _cull_mode = cull_on ? 1 : 0; ImGui.SameLine();
+            ImGui.SetNextItemWidth(120); ImGui.InputFloat("##cullfov", ref _cull_fov, 0.05f, 0.5f, "%.3f");
+            ImGui.SameLine(); ImGui.TextDisabled("every frame, all three blocks; untick to stop");
+            ImGui.TreePop();
+        }
+        if (_fn_cull_set != null) _fn_cull_set(_cull_mode != 0 ? 1 : 0, _cull_fov);
 
         if (ImGui.TreeNode("Find a draw (bisect scene draws)")) {
             int total = _fn_scene_draws != null ? (int)_fn_scene_draws() : 0;

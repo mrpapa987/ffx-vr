@@ -591,6 +591,38 @@ float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
 UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer layout dump (ffxvr_dump_cb)
+// The game's own camera blocks (from the FFX-60fps mod's research, verified by
+// its signatures every run: viewport blocks at gva 0x01137000, stride 0x1C0,
+// FOV/aspect fields at +0x10/+0x14/+0x1C, MsCommitCameraFovAspect(idx) builds
+// the projection from them). Culling experiment: the game decides what to
+// draw from its own camera; a wider FOV field makes it draw what the headset
+// can see, while the matrices the GPU gets are still ours.
+constexpr uintptr_t k_cam_blocks_gva = 0x01137000, k_exe_gva_base = 0x400000;
+int   g_cull_mode = 0;                   // 0 off, 1 write g_cull_fov into field +0x10 of every block each frame
+float g_cull_fov = 0.f;                  // the value written (what the field means is read off the live readout first)
+float g_camblk_last[3][3] = {};          // live readout: fields +0x10/+0x14/+0x1C of blocks 0..2
+uint32_t g_cull_writes = 0;
+static uint8_t* cam_blocks() {
+    static uint8_t* p = nullptr; static bool tried = false;
+    if (!tried) { tried = true; const uint8_t* base = (const uint8_t*)GetModuleHandleA(nullptr); if (base) p = const_cast<uint8_t*>(base) + (k_cam_blocks_gva - k_exe_gva_base); }
+    return p;
+}
+static void cam_blocks_tick() {
+    uint8_t* b = cam_blocks(); if (!b) return;
+    MEMORY_BASIC_INFORMATION mbi; if (VirtualQuery(b, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return;
+    for (int vp = 0; vp < 3; ++vp) {
+        float* f = reinterpret_cast<float*>(b + vp * 0x1C0);
+        g_camblk_last[vp][0] = f[4]; g_camblk_last[vp][1] = f[5]; g_camblk_last[vp][2] = f[7];     // +0x10, +0x14, +0x1C
+        if (g_cull_mode == 1 && g_cull_fov > 0.f && std::isfinite(f[4]) && (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY))) { f[4] = g_cull_fov; g_cull_writes++; }
+    }
+    static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
+    if (now >= next) {
+        next = now + 10000;
+        diag("camblk: vp0 +10 %.4f +14 %.4f +1C %.4f | vp1 %.4f %.4f %.4f | vp2 %.4f %.4f %.4f | upload proj P0 %.4f P5 %.4f (cull mode %d value %.3f writes %u)",
+             g_camblk_last[0][0], g_camblk_last[0][1], g_camblk_last[0][2], g_camblk_last[1][0], g_camblk_last[1][1], g_camblk_last[1][2],
+             g_camblk_last[2][0], g_camblk_last[2][1], g_camblk_last[2][2], g_cam[16], g_cam[21], g_cull_mode, g_cull_fov, g_cull_writes);
+    }
+}
 uint32_t g_frames_without_cam = 0;
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
@@ -2266,6 +2298,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
+    cam_blocks_tick();
     sweep_caches();
     xr_tick();                      // submit the frame just finished, locate the head for the next one
     perf_tick();
@@ -3833,6 +3866,8 @@ static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
+extern "C" __declspec(dllexport) void ffxvr_cull_set(int mode, float fov) { g_cull_mode = mode; g_cull_fov = fov; }
+extern "C" __declspec(dllexport) void ffxvr_camblk_get(float* out9, uint32_t* writes) { memcpy(out9, g_camblk_last, sizeof(g_camblk_last)); if (writes) *writes = g_cull_writes; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
