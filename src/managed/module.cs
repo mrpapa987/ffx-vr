@@ -84,6 +84,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool _ui_on = true; private float _ui_dist = 1.5f, _ui_width = 1.6f;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
+    private int _backdrop_mode = 1;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_backdrop_set;
+    private delegate* unmanaged[Cdecl]<uint> _fn_backdrop_draws;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
     private delegate* unmanaged[Cdecl]<int, void> _fn_dump_seq;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_xr_status;
@@ -273,6 +276,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
             _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
+            _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
+            _fn_backdrop_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_draws");
             _fn_measure      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_measure");
             _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_ps_srvs");
             _fn_on_clear_twin = (delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear_twin");
@@ -530,6 +535,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "seat":              _xr_seat = v == "1"; break;
                     case "headset_fov":       _xr_fov = v == "1"; break;
                     case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
+                    case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
                     case "overlay_open":      _window_open = v != "0"; break;
@@ -574,6 +580,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"seat={(_xr_seat ? 1 : 0)}\n" +
             $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
             $"screen_mode={_xr_screen_mode}\n" +
+            $"backdrop_mode={_backdrop_mode}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
             $"overlay_open={(_window_open ? 1 : 0)}\n" +
@@ -686,6 +693,11 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("never", ref _xr_screen_mode, 2);
         if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
+        ImGui.Text("painted-backdrop rooms (hut interiors):"); ImGui.SameLine();
+        ImGui.RadioButton("whole room on the screen", ref _backdrop_mode, 1); ImGui.SameLine();
+        ImGui.RadioButton("3D props over the flat backdrop", ref _backdrop_mode, 0);
+        if (_fn_backdrop_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}"); }
+        if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on);
         ImGui.Text("frame blending (water areas):"); ImGui.SameLine();
         ImGui.RadioButton("off (no trails)", ref _hist_mode, 1); ImGui.SameLine();

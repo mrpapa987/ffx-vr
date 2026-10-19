@@ -579,6 +579,12 @@ XrFovTan g_xr_fov_used[2] = {};         // what this frame is rendered with (sub
 bool  g_xr_fov_applied = false;
 // Virtual screen for frames that are not 3D.
 int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
+// Layered-2D backdrop rooms (Besaid hut interiors): the walls are painted
+// layers drawn through a dummy camera (identity view at (0,0,-1), fixed
+// projection, 512x448 PS2-space transforms further down the buffer). Never
+// overridden. g_backdrop_mode: 1 = the whole frame on the virtual screen
+// while such draws are present (default), 0 = 3D props over the flat backdrop.
+int   g_backdrop_mode = 1; uint32_t g_bg_uploads_frame = 0, g_bg_uploads_total = 0;
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
@@ -1470,6 +1476,15 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
     }
 
     if (g_dump_cb_left > 0 && size == g_dump_cb_size) { g_dump_cb_left--; dump_cb_layout(p, size, base, "upload"); }
+
+    // The 2D layer system's dummy camera: rows (-1 0 0)(0 1 0)(0 0 -1), position (0,0,-1). Not ours to move.
+    if (base != 0) {
+        const bool dummy = fabsf(v[0] + 1.f) < 1e-3f && fabsf(v[1]) < 1e-3f && fabsf(v[2]) < 1e-3f
+                        && fabsf(v[4]) < 1e-3f && fabsf(v[5] - 1.f) < 1e-3f && fabsf(v[6]) < 1e-3f
+                        && fabsf(v[8]) < 1e-3f && fabsf(v[9]) < 1e-3f && fabsf(v[10] + 1.f) < 1e-3f
+                        && fabsf(v[3]) < 1e-3f && fabsf(v[7]) < 1e-3f && fabsf(v[11] + 1.f) < 1e-3f;
+        if (dummy) { g_bg_uploads_frame++; g_bg_uploads_total++; return src; }
+    }
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
@@ -3735,6 +3750,8 @@ uint32_t g_e2_begin_fail_prev = 0;
 static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
+extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
@@ -3908,7 +3925,8 @@ static void xr_tick() {
     // The title screen and menus upload a dummy camera whose projection is
     // near-2D (|P[0]| <= 0.2), so only real cameras count. A draw-count
     // threshold of 20 was wrong: a hut interior is a 10-draw scene pass.
-    const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3);
+    const bool backdrop = (g_bg_uploads_frame > 0 && g_backdrop_mode == 1);
+    const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3 || backdrop);
     if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
     const bool is2d = g_frames_without_cam >= 2;
     const bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
@@ -3916,12 +3934,12 @@ static void xr_tick() {
         static int logged = 0;
         if (logged++ < 400) {
             D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
-            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
-                 screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_cam3d_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
+            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u, backdrop %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+                 screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_cam3d_uploads_frame, g_bg_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
                  static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
         }
     }
-    g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0;
+    g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     XrScreen screen = {};
     screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;

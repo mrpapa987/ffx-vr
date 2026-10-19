@@ -206,3 +206,23 @@ guess) and finger tracking (button-driven hand poses are enough).
 Order: Stage 1 first (quick, and it tells us whether a body at true scale
 feels right - Tidus at ~20 units is a 1.75 m man), then controllers, then
 arms.
+
+## Painted-backdrop rooms (Besaid hut interiors; found 18 Oct 2026)
+
+Hut interiors are not 3D rooms. The walls are the game's layered-2D
+background system: 1456-byte constant buffers with a dummy camera (identity
+view at (0,0,-1), fixed projection P[0]=2.5), the backbuffer size at +384,
+and scale/offset transforms in 512x448 PS2-framebuffer space further down.
+The props and characters in the room are ordinary 3D draws. Overriding the
+dummy camera smeared the layers across the room; it is now recognised and
+left alone.
+
+Treatment today (overlay setting, "painted-backdrop rooms"): the whole frame
+on the virtual screen while such draws are present (default), or 3D props in
+stereo over the flat backdrop (FF7-style, head rotation moves the props but
+not the painting).
+
+Later: a 2.5D diorama. The layer transforms carry a depth (block 11/14 z),
+so each painted layer could be placed as a plane at its depth in front of
+the authored camera, giving parallax between layers and letting the props
+sit among them. Needs the layer order and depth convention from a few rooms.
