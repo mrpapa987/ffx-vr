@@ -1357,6 +1357,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
     frame_event(t);
 }
 
+extern "C" __declspec(dllexport) void ffxvr_dump_cb(unsigned size, int count) { g_dump_cb_size = size; g_dump_cb_left = count; }
 extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_frame_ev.clear();
@@ -1383,6 +1384,64 @@ extern "C" __declspec(dllexport) int ffxvr_cam_mem_writes() { return static_cast
 
 /// If the override is on and this write carries a camera, returns a patched
 /// private copy of the bytes to upload instead; otherwise returns src.
+// ---------------------------------------------------------------- buffer layout dump
+// One-shot diagnostic: the next upload of exactly `g_dump_cb_size` bytes is
+// written to ffxvr_diag.log block by block (16 floats each), each block
+// annotated with what it looks like: the view at the detected base, the
+// projection variants, products of those with other affine blocks in the
+// same buffer, the inverse view, or just an affine matrix with its
+// translation. For layouts we have not met (hut walls: 1456 B).
+UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;
+static void dump_cb_layout(const uint8_t* p, UINT size, UINT base, const char* via) {
+    diag("cb layout dump: %u bytes via %s, view base %u (0 = no camera found)", size, via, base);
+    const UINT nb = size / 64;
+    const float* V = base ? reinterpret_cast<const float*>(p + base) : nullptr;
+    const float* Pj = base ? reinterpret_cast<const float*>(p + base + 64) : nullptr;      // near variant
+    const float* Pm = (base && size >= base + 192 + 64) ? reinterpret_cast<const float*>(p + base + 192) : nullptr;
+    float PV[16] = {}, PmV[16] = {};
+    if (V && Pj) mul4(Pj, V, PV);
+    if (V && Pm) mul4(Pm, V, PmV);
+    for (UINT b = 0; b < nb; ++b) {
+        const UINT off = b * 64;
+        const float* M = reinterpret_cast<const float*>(p + off);
+        char what[200] = "";
+        auto add = [&](const char* t) { if (what[0]) strncat_s(what, ", ", _TRUNCATE); strncat_s(what, t, _TRUNCATE); };
+        const bool affine = (M[12] == 0.f && M[13] == 0.f && M[14] == 0.f && fabsf(M[15] - 1.f) < 1e-4f);
+        const bool persp = (fabsf(M[14] + 1.f) < 0.01f && fabsf(M[15]) < 1e-4f);
+        if (V && off == base) add("VIEW");
+        if (Pj && off == base + 64) add("PROJ(near variant)");
+        if (Pm && off == base + 192) add("PROJ(main)");
+        if (V && same4(M, V) && off != base) add("= view (copy)");
+        if (V && same4(M, PV)) add("= projn*view");
+        if (V && Pm && same4(M, PmV)) add("= projm*view");
+        if (base && size >= base + 256 + 64 && off == base + 256) add("INV VIEW slot");
+        if (V) {
+            float pos[3]; if (looks_like_view(M, pos) && off != base) { char t[64]; snprintf(t, sizeof(t), "looks like a view, pos (%.1f %.1f %.1f)", pos[0], pos[1], pos[2]); add(t); }
+            // products with other affine blocks X in the buffer
+            for (UINT c = 0; c < nb; ++c) {
+                if (c == b) continue;
+                const float* X = reinterpret_cast<const float*>(p + c * 64);
+                if (!(X[12] == 0.f && X[13] == 0.f && X[14] == 0.f && fabsf(X[15] - 1.f) < 1e-4f)) continue;
+                float t1[16], t2[16], t3[16];
+                mul4(V, X, t1); if (same4(M, t1)) { char t[48]; snprintf(t, sizeof(t), "= view*block%u", c); add(t); }
+                mul4(PV, X, t2); if (same4(M, t2)) { char t[48]; snprintf(t, sizeof(t), "= projn*view*block%u", c); add(t); }
+                if (Pm) { mul4(PmV, X, t3); if (same4(M, t3)) { char t[48]; snprintf(t, sizeof(t), "= projm*view*block%u", c); add(t); } }
+            }
+        }
+        if (!what[0]) {
+            if (persp) add("perspective-shaped");
+            else if (affine) { char t[80]; snprintf(t, sizeof(t), "affine, t=(%.1f %.1f %.1f)", M[3], M[7], M[11]); add(t); }
+            else {
+                bool zero = true; for (int i = 0; i < 16; ++i) if (M[i] != 0.f) { zero = false; break; }
+                add(zero ? "zeros" : "data");
+            }
+        }
+        diag("  +%4u block %2u: %-40s  [%.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f | %.3f %.3f %.3f %.3f]",
+             off, b, what, M[0], M[1], M[2], M[3], M[4], M[5], M[6], M[7], M[8], M[9], M[10], M[11], M[12], M[13], M[14], M[15]);
+    }
+    if (size % 64) diag("  +%4u: %u trailing bytes", nb * 64, size % 64);
+}
+
 static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf) {
     if (g_in_eye2) return src;
     if (!g_ovr_enabled || size < 64) return src;
@@ -1409,6 +1468,8 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         base = cand;
         break;
     }
+
+    if (g_dump_cb_left > 0 && size == g_dump_cb_size) { g_dump_cb_left--; dump_cb_layout(p, size, base, "upload"); }
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
