@@ -3885,6 +3885,39 @@ static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
 extern "C" __declspec(dllexport) void ffxvr_cull_set(int mode, float scale) { g_cull_mode = mode; g_cull_scale = scale; }
+
+// ---------------------------------------------------------------- code patches
+// Small in-place patches of the game's code, each verified against the bytes
+// expected there before anything is written, restorable. Addresses are
+// Ghidra-base (0x400000) virtual addresses, relocated at runtime.
+struct CodePatch { const char* name; uintptr_t gva; uint8_t orig[8]; uint8_t patch[8]; int len; bool on; };
+// 0: the render-command interpreter's "draw model" case (0x615752) skips the
+// draw on two per-part byte flags (jne at 0x6157A0 / 0x6157B8). NOPed, every
+// model whose command reached the list is drawn.
+CodePatch g_patches[] = {
+    { "draw-model skip A (0x6157A0 jne)", 0x6157A0, { 0x75, 0x35 }, { 0x90, 0x90 }, 2, false },
+    { "draw-model skip B (0x6157B8 jne)", 0x6157B8, { 0x75, 0x1D }, { 0x90, 0x90 }, 2, false },
+};
+static uint8_t* gva_to_rt(uintptr_t gva) { const uint8_t* base = (const uint8_t*)GetModuleHandleA(nullptr); return base ? const_cast<uint8_t*>(base) + (gva - k_exe_gva_base) : nullptr; }
+static int patch_apply(int i, bool on) {
+    if (i < 0 || i >= (int)(sizeof(g_patches) / sizeof(g_patches[0]))) return -1;
+    CodePatch& p = g_patches[i];
+    if (p.on == on) return 0;
+    uint8_t* at = gva_to_rt(p.gva); if (!at) return -2;
+    const uint8_t* expect = on ? p.orig : p.patch;
+    if (memcmp(at, expect, p.len) != 0) { diag("patch %s: bytes at %p are not the expected ones (%02X %02X), not touched", p.name, (void*)at, at[0], at[1]); return -3; }
+    DWORD old = 0;
+    if (!VirtualProtect(at, p.len, PAGE_EXECUTE_READWRITE, &old)) return -4;
+    memcpy(at, on ? p.patch : p.orig, p.len);
+    VirtualProtect(at, p.len, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, p.len);
+    p.on = on;
+    diag("patch %s: %s", p.name, on ? "ON" : "off");
+    return 0;
+}
+extern "C" __declspec(dllexport) int ffxvr_patch_set(int i, int on) { return patch_apply(i, on != 0); }
+extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g_patches) / sizeof(g_patches[0])); }
+extern "C" __declspec(dllexport) const char* ffxvr_patch_name(int i) { return (i >= 0 && i < ffxvr_patch_count()) ? g_patches[i].name : ""; }
 extern "C" __declspec(dllexport) void ffxvr_camblk_get(float* out9, uint32_t* writes) { memcpy(out9, g_camblk_last, sizeof(g_camblk_last)); if (writes) *writes = g_cull_writes; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }

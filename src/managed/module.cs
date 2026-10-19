@@ -88,6 +88,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_cull_set;
     private delegate* unmanaged[Cdecl]<float*, uint*, void> _fn_camblk_get;
     private int _cull_mode = 0; private float _cull_fov = 0.4f;
+    private delegate* unmanaged[Cdecl]<int, int, int> _fn_patch_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_patch_count;
+    private delegate* unmanaged[Cdecl]<int, byte*> _fn_patch_name;
+    private bool[] _patch_on = new bool[8];
     private delegate* unmanaged[Cdecl]<int, void> _fn_backdrop_set;
     private delegate* unmanaged[Cdecl]<uint> _fn_backdrop_draws;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
@@ -284,6 +288,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
             _fn_cull_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_set");
             _fn_camblk_get   = (delegate* unmanaged[Cdecl]<float*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_camblk_get");
+            _fn_patch_set    = (delegate* unmanaged[Cdecl]<int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_set");
+            _fn_patch_count  = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_count");
+            _fn_patch_name   = (delegate* unmanaged[Cdecl]<int, byte*>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_name");
             _fn_backdrop_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_draws");
             _fn_measure      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_measure");
             _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_ps_srvs");
@@ -825,6 +832,15 @@ public sealed unsafe class FFXVRModule : FhModule {
             bool cull_on = _cull_mode != 0; ImGui.Checkbox("widen the game's camera: scale", ref cull_on); _cull_mode = cull_on ? 1 : 0; ImGui.SameLine();
             ImGui.SetNextItemWidth(160); ImGui.SliderFloat("##cullscale", ref _cull_fov, 0.1f, 1.0f, "%.2f");
             ImGui.SameLine(); ImGui.TextDisabled("0.4 = about 2.5x wider each axis; untick to hand the values back");
+            if (_fn_patch_set != null && _fn_patch_count != null) {
+                ImGui.Separator(); ImGui.Text("code patches (verified before writing; untick restores):");
+                int np = Math.Min(_fn_patch_count(), _patch_on.Length);
+                for (int i = 0; i < np; i++) {
+                    string name = System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) ?? $"patch {i}";
+                    bool on = _patch_on[i];
+                    if (ImGui.Checkbox(name, ref on)) { if (_fn_patch_set(i, on ? 1 : 0) == 0) _patch_on[i] = on; }
+                }
+            }
             ImGui.TreePop();
         }
         if (_fn_cull_set != null) _fn_cull_set(_cull_mode != 0 ? 1 : 0, _cull_fov);
