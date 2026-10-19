@@ -110,6 +110,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<nint, int, void> _fn_on_clear;
     private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
     private delegate* unmanaged[Cdecl]<uint, int, void> _fn_dump_cb; private int _dump_cb_size = 1456;
+    private delegate* unmanaged[Cdecl]<uint, uint, void> _fn_census_arm;
     private delegate* unmanaged[Cdecl]<uint, uint, nint*, void> _fn_on_ps_srvs;
     private delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void> _fn_on_clear_twin;
     private delegate* unmanaged[Cdecl]<nint, void> _fn_set_backbuffer;
@@ -279,6 +280,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
             _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
+            _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
             _fn_cull_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_set");
             _fn_camblk_get   = (delegate* unmanaged[Cdecl]<float*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_camblk_get");
@@ -871,6 +873,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
             if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves"); }
+            if (_fn_census_arm != null) { if (ImGui.Button("Stack census (character draws)")) _fn_census_arm(1872, 16384); ImGui.SameLine(); ImGui.Text("ffxvr_stacks.log: the game's call chains behind one frame's skinned-character uploads (where the draw/cull loop lives)"); }
             if (_fn_dump_cb != null) {
                 ImGui.SetNextItemWidth(90); ImGui.InputInt("##cbsize", ref _dump_cb_size, 0); ImGui.SameLine();
                 if (ImGui.Button("Dump buffer layout")) _fn_dump_cb((uint)Math.Max(_dump_cb_size, 64), 2);
