@@ -100,7 +100,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
     private int _backdrop_mode = 1;
-    private delegate* unmanaged[Cdecl]<int, float, void> _fn_cull_set;
     private delegate* unmanaged[Cdecl]<int, int> _fn_cull_dist_set;
     private delegate* unmanaged[Cdecl]<int> _fn_cull_dist_get;
     private bool _cull_dist = true; private int _cull_dist_rc = 0;
@@ -121,8 +120,6 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, void> _fn_msaa_set;
     private delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void> _fn_msaa_status;
     private int _msaa = 4;   // 0 = game default (8x), 2, 4
-    private delegate* unmanaged[Cdecl]<float*, uint*, void> _fn_camblk_get;
-    private int _cull_mode = 0; private float _cull_fov = 0.4f;
     private delegate* unmanaged[Cdecl]<int, int, int> _fn_patch_set;
     private delegate* unmanaged[Cdecl]<int> _fn_patch_count;
     private delegate* unmanaged[Cdecl]<int, byte*> _fn_patch_name;
@@ -325,7 +322,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
             _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
-            _fn_cull_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_set");
             _fn_cull_dist_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_set");
             _fn_cull_dist_get = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_get");
             _fn_cull_scene_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_scene_set");
@@ -342,7 +338,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_body_set");
             _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_parts");
             _fn_msaa_status  = (delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_msaa_status");
-            _fn_camblk_get   = (delegate* unmanaged[Cdecl]<float*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_camblk_get");
             _fn_patch_set    = (delegate* unmanaged[Cdecl]<int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_set");
             _fn_patch_count  = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_count");
             _fn_patch_name   = (delegate* unmanaged[Cdecl]<int, byte*>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_name");
@@ -605,7 +600,6 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "headset_fov":       _xr_fov = v == "1"; break;
                     case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
                     case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
-                    case "cull_mode":         int.TryParse(v, out _cull_mode); break;
                     case "cull_dist":         _cull_dist = v != "0"; break;
                     case "cull_scene":        _cull_scene = v != "0"; break;
                     case "msaa":              int.TryParse(v, out _msaa); break;
@@ -621,7 +615,6 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "fp_head_smooth":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_smooth); break;
                     case "fp_head_fwd":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_fwd); break;
                     case "fp_head_parts":     _fp_head_parts = v; break;
-                    case "cull_fov":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _cull_fov); break;
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
                     case "overlay_open":      _window_open = v != "0"; break;
@@ -667,7 +660,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
             $"screen_mode={_xr_screen_mode}\n" +
             $"backdrop_mode={_backdrop_mode}\n" +
-            $"cull_mode={_cull_mode}\n" +
             $"cull_dist={(_cull_dist ? 1 : 0)}\n" +
             $"cull_scene={(_cull_scene ? 1 : 0)}\n" +
             $"msaa={_msaa}\n" +
@@ -683,7 +675,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"fp_head_smooth={_fp_head_smooth.ToString("F2", ci)}\n" +
             $"fp_head_fwd={_fp_head_fwd.ToString("F2", ci)}\n" +
             $"fp_head_parts={_fp_head_parts}\n" +
-            $"cull_fov={_cull_fov.ToString("F3", ci)}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
             $"overlay_open={(_window_open ? 1 : 0)}\n" +
@@ -945,18 +936,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
 
-        if (ImGui.TreeNode("Culling (the game's own camera FOV field)")) {
-            ImGui.TextWrapped("The game decides what to draw from its own camera blocks (gva 0x01137000, stride 0x1C0). +10 is a horizontal projection scale (nominal 0.8), +1C the focal length in PS2 pixels (800..1024 by area); larger = narrower. The override writes the game's own values scaled by the factor below (smaller = wider), so the game submits what the headset can see; the picture stays ours.");
-            if (_fn_camblk_get != null) {
-                float* f = stackalloc float[9]; uint writes;
-                _fn_camblk_get(f, &writes);
-                ImGui.Text($"block 0: +10 {f[0]:F4}  +14 {f[1]:F4}  +1C {f[2]:F4}    block 1: {f[3]:F4} {f[4]:F4} {f[5]:F4}    block 2: {f[6]:F4} {f[7]:F4} {f[8]:F4}   writes {writes}");
-            }
-            bool cull_on = _cull_mode != 0; ImGui.Checkbox("widen the game's camera: scale", ref cull_on); _cull_mode = cull_on ? 1 : 0; ImGui.SameLine();
-            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("##cullscale", ref _cull_fov, 0.1f, 1.0f, "%.2f");
-            ImGui.SameLine(); ImGui.TextDisabled("0.4 = about 2.5x wider each axis; untick to hand the values back");
+        if (ImGui.TreeNode("Culling (code patches)")) {
+            ImGui.TextWrapped("Patches to the game's visibility tests, verified against the expected bytes before writing; untick restores. The two checkboxes above (characters, scene) are the normal way to drive these.");
             if (_fn_patch_set != null && _fn_patch_count != null) {
-                ImGui.Separator(); ImGui.Text("code patches (verified before writing; untick restores):");
                 int np = Math.Min(_fn_patch_count(), _patch_on.Length);
                 for (int i = 0; i < np; i++) {
                     string name = System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) ?? $"patch {i}";
@@ -966,7 +948,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             }
             ImGui.TreePop();
         }
-        if (_fn_cull_set != null) _fn_cull_set(_cull_mode != 0 ? 1 : 0, _cull_fov);
 
         if (ImGui.TreeNode("Find a draw (bisect scene draws)")) {
             int total = _fn_scene_draws != null ? (int)_fn_scene_draws() : 0;
@@ -1014,7 +995,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
 
-        draw_probe();
         if (ImGui.TreeNode("Actors (field actor table; the one that moves when you walk is the player)")) {
             draw_actors();
             ImGui.TreePop();
@@ -1072,7 +1052,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_cull_dist_set != null && _fn_cull_dist_get != null && (_fn_cull_dist_get() != 0) != _cull_dist) {
             _cull_dist_rc = _fn_cull_dist_set(_cull_dist ? 1 : 0);
             if (_cull_dist_rc != 0) _cull_dist = _fn_cull_dist_get() != 0;      // could not be applied: show the real state
-            if (_patch_on.Length > 4) { _patch_on[2] = _patch_on[3] = _patch_on[4] = _fn_cull_dist_get() != 0; }
+            if (_patch_on.Length > 2) { _patch_on[0] = _patch_on[1] = _patch_on[2] = _fn_cull_dist_get() != 0; }
         }
         if (_fn_msaa_set != null) _fn_msaa_set(_msaa);
         if (_fn_vrpad_set != null) _fn_vrpad_set(_vrpad ? 1 : 0);
@@ -1089,7 +1069,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_cull_scene_set != null && _fn_cull_scene_get != null && (_fn_cull_scene_get() != 0) != _cull_scene) {
             _cull_scene_rc = _fn_cull_scene_set(_cull_scene ? 1 : 0);
             if (_cull_scene_rc != 0) _cull_scene = _fn_cull_scene_get() != 0;
-            if (_patch_on.Length > 6) _patch_on[5] = _patch_on[6] = _fn_cull_scene_get() != 0;
+            if (_patch_on.Length > 4) _patch_on[3] = _patch_on[4] = _fn_cull_scene_get() != 0;
         }
         if (_fn_turn != null) {
             float step = _turn_rate * ImGui.GetIO().DeltaTime;
@@ -1141,21 +1121,6 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private Vector4[] _actor_prev = new Vector4[64];
     private float[]   _actor_moved = new float[64];
-    // ---------------------------------------------------------------- visibility probe
-    // Which byte of the actor struct says "drawn"? Per frame, each live actor is
-    // marked drawn if a skinned draw landed within 3 units of it. At the frame
-    // its drawn state flips, the bytes that changed since the previous frame are
-    // counted (flip histogram); bytes that change on ordinary frames are counted
-    // too (noise histogram, sampled). The offset with many flips and little
-    // noise is the visibility flag; a write-watch on it then names the writer.
-    private bool _probe_on = false;
-    private readonly byte[][] _probe_prev = new byte[48][];
-    private readonly bool[] _probe_drawn = new bool[48];
-    private readonly bool[] _probe_valid = new bool[48];
-    private readonly int[] _probe_flip = new int[0x880];
-    private readonly int[] _probe_noise = new int[0x880];
-    private int _probe_flips = 0, _probe_frames = 0;
-    private string _probe_last = "";
     /// <summary>Every 10 s: which live actors had no draw at their position this frame, with the
     /// state bytes that decide it (hide byte +180, flag words, model visible byte). Evidence for the
     /// culling work without anyone pressing a button.</summary>
@@ -1182,71 +1147,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         _actors_last_log = now;
         if (live_n > 0) _logger.Info($"actors: live {live_n} drawn {drawn_n} uploads {nwp} | not drawn:{sb}");
     }
-    private void probe_tick() {
-        actors_auto_log();
-        if (!_probe_on || _fn_world_positions == null || _fn_safe_read == null) return;
-        Actor* actors = Globals.actors; if (actors == null) return;
-        float* wp = stackalloc float[128 * 3];
-        int n = _fn_world_positions(wp, 128);
-        _probe_frames++;
-        bool sample_noise = (_probe_frames % 8) == 0;
-        for (int i = 0; i < 48; i++) {
-            byte[] cur = new byte[0x880];
-            bool ok;
-            fixed (byte* pc = cur) ok = _fn_safe_read(actors + i, pc, 0x880) != 0;
-            if (!ok) { _probe_valid[i] = false; continue; }
-            Actor a = System.Runtime.CompilerServices.Unsafe.As<byte, Actor>(ref cur[0]);
-            if (!live(a)) { _probe_valid[i] = false; continue; }
-            // render space negates X and Y
-            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z;
-            bool drawn = false;
-            for (int k = 0; k < n; k++) {
-                float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz;
-                if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; }
-            }
-            if (_probe_valid[i] && _probe_prev[i] != null) {
-                bool flip = drawn != _probe_drawn[i];
-                if (flip || sample_noise) {
-                    byte[] prev = _probe_prev[i];
-                    for (int o = 0; o < 0x880; o++) {
-                        if (cur[o] == prev[o]) continue;
-                        if (flip) _probe_flip[o]++; else _probe_noise[o]++;
-                    }
-                    if (flip) { _probe_flips++; _probe_last = $"actor {i} {actor_name(a.chr_name)}: {(drawn ? "appeared" : "vanished")} at frame {_probe_frames}"; }
-                }
-            }
-            _probe_prev[i] = cur; _probe_drawn[i] = drawn; _probe_valid[i] = true;
-        }
-        // The table goes to the module log every 10 s while there is something in it.
-        double now = ImGui.GetTime();
-        if (_probe_flips > 0 && now - _probe_last_log > 10.0) {
-            _probe_last_log = now;
-            var idx = new int[0x880]; for (int o = 0; o < 0x880; o++) idx[o] = o;
-            Array.Sort(idx, (x, y) => _probe_flip[y].CompareTo(_probe_flip[x]));
-            var sb = new System.Text.StringBuilder($"visibility probe: flips {_probe_flips} frames {_probe_frames} | offset:flips/noise");
-            for (int r = 0; r < 16; r++) { int o = idx[r]; if (_probe_flip[o] == 0) break; sb.Append($"  0x{o:X3}:{_probe_flip[o]}/{_probe_noise[o]}"); }
-            sb.Append($"  | last: {_probe_last}");
-            _logger.Info(sb.ToString());
-        }
-    }
-    private double _probe_last_log = 0;
-    private void draw_probe() {
-        if (!ImGui.TreeNode("Visibility probe (which actor byte says 'drawn')")) return;
-        ImGui.TextWrapped("Walk around until actors pop in and out. Offsets that change on flips but rarely otherwise are the candidates.");
-        ImGui.Checkbox("probe on", ref _probe_on); ImGui.SameLine();
-        if (ImGui.Button("reset")) { Array.Clear(_probe_flip); Array.Clear(_probe_noise); _probe_flips = 0; _probe_frames = 0; _probe_last = ""; }
-        ImGui.Text($"flips seen: {_probe_flips}   frames: {_probe_frames}   last: {_probe_last}");
-        // top offsets by flip count, with the noise count beside
-        var idx = new int[0x880]; for (int o = 0; o < 0x880; o++) idx[o] = o;
-        Array.Sort(idx, (x, y) => _probe_flip[y].CompareTo(_probe_flip[x]));
-        ImGui.Text("offset   flips   noise   (known: 0x2 enabled, 0xC pos, 0x154 speed, 0x158 rot, 0x194 flags, 0x330.. shade, 0x354 transparency, 0x524.. limbs)");
-        for (int r = 0; r < 24; r++) {
-            int o = idx[r]; if (_probe_flip[o] == 0) break;
-            ImGui.Text($"0x{o:X3}    {_probe_flip[o],5}   {_probe_noise[o],5}");
-        }
-        ImGui.TreePop();
-    }
-
     private void draw_actors() {
         Actor* actors = Globals.actors;
         if (actors == null) { ImGui.Text("no actor table"); return; }
@@ -1439,7 +1339,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         try_install_hooks();
         if (_native_init_done) draw_markers();
-        if (_native_init_done) probe_tick();
+        if (_native_init_done) actors_auto_log();
         if (_native_init_done) draw_eye2_preview();   // its own top-level window, never nested
 
         // Marks the frame boundary for the native helper. Fahrenheit calls

@@ -264,8 +264,8 @@ tied to the save-menu flow; the export tool is `tools/export-save-to-steam.ps1`
   `hits880.txt` (139 sites using the 0x880 actor stride), per-function dumps
   `f*.txt`.
 - Runtime evidence: `ffxvr_diag.log` (`patch ...` lines, `perf:` with GPU
-  time, `camblk:`), the module log (`actor table:` on demand, `actors:` every
-  10 s with hide bytes, `visibility probe:`), `ffxvr_frame.log` (frame census),
+  time), the module log (`actor table:` on demand, `actors:` every 10 s with
+  hide bytes), `ffxvr_frame.log` (frame census),
   `ffxvr_stacks.log` (stack census: which game function uploads a buffer).
 - FFX-60fps (`_ext/FFX-60fps`, Apache-2.0) is the best external source of
   names and signatures: `src/x/sigs.cpp` (symbols), `src/x/rows/SMOOTH-00*.cpp`

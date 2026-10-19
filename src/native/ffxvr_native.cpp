@@ -253,21 +253,6 @@ bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_s
 // implies, so watching which entry moves while walking identifies the live one.
 // ---------------------------------------------------------------------------
 
-struct ScanHit {
-    uint32_t offset;
-    uint32_t size;
-    int      via;        // 0 CreateBuffer, 1 Map/Unmap, 2 UpdateSubresource
-    float    pos[3];
-};
-
-constexpr int kScanMax = 6;
-
-// All of these are touched only under g_mutex.
-ScanHit g_scan_live[kScanMax]   = {};
-int     g_scan_live_n           = 0;
-ScanHit g_scan_report[kScanMax] = {};
-int     g_scan_report_n         = 0;
-
 inline bool near_one(float v)  { return v > 0.985f && v < 1.015f; }
 inline bool near_zero(float v) { return v > -0.015f && v < 0.015f; }
 
@@ -299,51 +284,6 @@ static bool looks_like_view(const float* m, float out_pos[3]) {
         out_pos[i] = -(r[0][i]*t[0] + r[1][i]*t[1] + r[2][i]*t[2]);
     }
     return true;
-}
-
-/// Scans one freshly written constant buffer for view-matrix-shaped blocks.
-/// Caller holds g_mutex.
-bool g_scan_uploads = false;   // discovery-phase diagnostic (heartbeat "scanner hits"): walks every upload; off
-static void scan_for_camera(const void* data, UINT size, const char* via) {
-    if (!g_scan_uploads || data == nullptr || size < 48) return;
-
-    // A hit from CreateBuffer was filled once, at area load; one from
-    // Map/Unmap or UpdateSubresource was written this frame. Telling them
-    // apart is the whole point of the scan.
-    const int via_code = (via != nullptr && via[0] == 'C') ? 0
-                       : (via != nullptr && via[0] == 'M') ? 1
-                       : (via != nullptr && via[0] == 'R') ? 3 : 2;
-
-    const char* base = static_cast<const char*>(data);
-
-    // Constant buffer registers are 16-byte aligned, so a matrix never starts
-    // off that grid.
-    for (UINT off = 0; off + 48 <= size; off += 16) {
-        float m[12];
-        memcpy(m, base + off, sizeof(m));
-
-        float pos[3];
-        if (!looks_like_view(m, pos)) continue;
-
-        bool seen = false;
-        for (int i = 0; i < g_scan_live_n; ++i) {
-            if (g_scan_live[i].offset == off && g_scan_live[i].size == size) {
-                g_scan_live[i].via = via_code;
-                memcpy(g_scan_live[i].pos, pos, sizeof(pos));   // refresh
-                seen = true;
-                break;
-            }
-        }
-        if (seen) continue;
-
-        if (g_scan_live_n < kScanMax) {
-            ScanHit& h = g_scan_live[g_scan_live_n++];
-            h.offset   = off;
-            h.size     = size;
-            h.via      = via_code;
-            memcpy(h.pos, pos, sizeof(pos));
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -462,21 +402,6 @@ float g_world_live[k_world_max][3];   int g_world_live_n = 0;
 float g_world_report[k_world_max][3]; int g_world_report_n = 0;
 static void census_write(UINT size);   // defined with the census code below
 
-// Memory-scan results (see ffxvr_memscan below).
-struct MemHit { uintptr_t addr; const char* kind; };
-uintptr_t g_scan_struct = 0;   // heap camera object found by the scan (position at +0, view at +12)
-std::vector<MemHit> g_scan_hits;   // every hit of the last scan
-std::vector<uintptr_t> g_scan_cams; // camera-state array entries: position at +0, column-major view at +0x10
-
-// Write-watch state (see ffxvr_watch below; kept for completeness, the stage-0
-// debugger swallows the exceptions so the static xref scan is what we use).
-struct Writer { uintptr_t eip; uint32_t count; };
-Writer   g_writers[32] = {};
-int      g_writers_n   = 0;
-uint32_t g_watch_hits  = 0;
-uintptr_t g_watch_addr[2] = {};
-DWORD    g_main_tid    = 0;
-void*    g_veh         = nullptr;
 
 static void mul3(const float a[9], const float b[9], float out[9]) {
     for (int r = 0; r < 3; ++r)
@@ -515,9 +440,6 @@ static bool same4(const float* a, const float* b) {
 bool  g_xr_want     = false;       // the user asked for the headset
 ID3D11Texture2D* g_bb_copy = nullptr;        // eye 1: the backbuffer copied at the hook, then the overlay drawn on top
 ID3D11RenderTargetView* g_bb_copy_rtv = nullptr;
-ID3D11Texture2D* g_e2_copy = nullptr;        // eye 2: the backbuffer twin copied at the hook, then the overlay drawn on top
-ID3D11RenderTargetView* g_e2_copy_rtv = nullptr;
-bool g_copies_complete = false;              // both hold a finished frame (game + overlay) ready to submit
 
 bool  g_xr_active   = false;       // poses valid this frame
 bool  g_xr_rotate   = true, g_xr_translate = true;
@@ -547,7 +469,7 @@ float g_dt = 1.f / 72.f;
 // the latched heading, in first person and in the seat alike. Snap turns are
 // a fixed angle per flick (with a blink); smooth turns are degrees per second.
 bool  g_turn_stick = true; int g_turn_mode = 0; float g_turn_snap = 30.f, g_turn_rate = 90.f; bool g_turn_blink = true;
-bool  g_turn_armed = true; uint32_t g_turn_count = 0;
+uint32_t g_turn_count = 0;
 
 // Movement remap: in first person the game still maps the left stick against
 // its own camera, so the stick is rotated by (view heading - game camera
@@ -607,7 +529,6 @@ int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 int g_hist_mode = 1; uint32_t g_hist_draws = 0; uint32_t g_draw_in_frame_last = 0;
 ID3D11Texture2D* g_targets_frame[64]; int g_targets_frame_n = 0;   // rtv0 textures some draw has targeted so far this frame
 ID3D11Texture2D* g_cleared_frame[64]; int g_cleared_frame_n = 0;   // colour-cleared so far this frame
-bool g_cur_rtv0_first_use = false;
 ID3D11BlendState* g_opaque_blend = nullptr; ID3D11BlendState* g_nb_saved = nullptr; float g_nb_saved_bf[4]; UINT g_nb_saved_mask = 0; bool g_nb_active = false;
 int g_bisect_mode = 0, g_bisect_a = 0, g_bisect_b = 0; int g_scene_census_lines = 0; uint32_t g_scene_draw_idx = 0, g_scene_draws_last = 0;
 uint32_t g_twins_recycled = 0, g_twins_swept = 0, g_twin_srvs_dropped = 0, g_buffers_pruned = 0;
@@ -628,56 +549,6 @@ float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
 UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer layout dump (ffxvr_dump_cb)
-// The game's own camera blocks (from the FFX-60fps mod's research, verified by
-// its signatures every run: viewport blocks at gva 0x01137000, stride 0x1C0,
-// FOV/aspect fields at +0x10/+0x14/+0x1C, MsCommitCameraFovAspect(idx) builds
-// the projection from them). Culling experiment: the game decides what to
-// draw from its own camera; a wider FOV field makes it draw what the headset
-// can see, while the matrices the GPU gets are still ours.
-constexpr uintptr_t k_cam_blocks_gva = 0x01137000, k_exe_gva_base = 0x400000;
-// Field meanings (read off the live values): +0x10 is a horizontal scale on
-// the projection (P0 = k * field, nominal 0.8), +0x14 an aspect factor
-// (0.9333), +0x1C the focal length in PS2 pixels (P5 = field / 240; 800, 900,
-// 1024 by area). Larger = narrower. The game sets them per camera, so the
-// override remembers the game's own value and writes it scaled by
-// g_cull_scale (< 1 widens): the GPU still renders with our matrices.
-int   g_cull_mode = 0;                   // 0 off, 1 scale fields +0x10 and +0x1C of every block each frame
-float g_cull_scale = 0.4f;               // 0.4 = about 2.5x wider on both axes
-float g_camblk_last[3][3] = {};          // live readout: fields +0x10/+0x14/+0x1C of blocks 0..2
-float g_camblk_game[3][2] = {};          // the game's own +0x10 / +0x1C (last values not written by us)
-float g_camblk_ours[3][2] = {};          // what we last wrote
-uint32_t g_cull_writes = 0;
-static uint8_t* cam_blocks() {
-    static uint8_t* p = nullptr; static bool tried = false;
-    if (!tried) { tried = true; const uint8_t* base = (const uint8_t*)GetModuleHandleA(nullptr); if (base) p = const_cast<uint8_t*>(base) + (k_cam_blocks_gva - k_exe_gva_base); }
-    return p;
-}
-static void cam_blocks_tick() {
-    uint8_t* b = cam_blocks(); if (!b) return;
-    MEMORY_BASIC_INFORMATION mbi; if (VirtualQuery(b, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return;
-    for (int vp = 0; vp < 3; ++vp) {
-        float* f = reinterpret_cast<float*>(b + vp * 0x1C0);
-        g_camblk_last[vp][0] = f[4]; g_camblk_last[vp][1] = f[5]; g_camblk_last[vp][2] = f[7];     // +0x10, +0x14, +0x1C
-        // A value that is not the one we wrote is the game's: remember it as the base.
-        if (f[4] != g_camblk_ours[vp][0]) g_camblk_game[vp][0] = f[4];
-        if (f[7] != g_camblk_ours[vp][1]) g_camblk_game[vp][1] = f[7];
-        const bool writable = (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) != 0;
-        if (g_cull_mode == 1 && g_cull_scale > 0.05f && g_cull_scale < 1.f && writable && std::isfinite(g_camblk_game[vp][0]) && g_camblk_game[vp][0] > 0.f && g_camblk_game[vp][1] > 0.f) {
-            g_camblk_ours[vp][0] = g_camblk_game[vp][0] * g_cull_scale; g_camblk_ours[vp][1] = g_camblk_game[vp][1] * g_cull_scale;
-            f[4] = g_camblk_ours[vp][0]; f[7] = g_camblk_ours[vp][1]; g_cull_writes++;
-        }
-        else if (writable && g_camblk_ours[vp][0] != 0.f && f[4] == g_camblk_ours[vp][0]) {   // switched off (or scale 1): hand the game's values back
-            f[4] = g_camblk_game[vp][0]; f[7] = g_camblk_game[vp][1]; g_camblk_ours[vp][0] = g_camblk_ours[vp][1] = 0.f;
-        }
-    }
-    static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
-    if (now >= next) {
-        next = now + 10000;
-        diag("camblk: vp0 +10 %.4f +14 %.4f +1C %.4f | vp1 %.4f %.4f %.4f | vp2 %.4f %.4f %.4f | upload proj P0 %.4f P5 %.4f (cull mode %d value %.3f writes %u)",
-             g_camblk_last[0][0], g_camblk_last[0][1], g_camblk_last[0][2], g_camblk_last[1][0], g_camblk_last[1][1], g_camblk_last[1][2],
-             g_camblk_last[2][0], g_camblk_last[2][1], g_camblk_last[2][2], g_cam[16], g_cam[21], g_cull_mode, g_cull_scale, g_cull_writes);
-    }
-}
 uint32_t g_frames_without_cam = 0;
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
@@ -1174,10 +1045,6 @@ float g_last_PVn2[16] = {};   // the same product for eye 2
 bool  g_have_PV      = false;
 
 // Game-memory camera write (defined below, used by write_camera).
-int       g_cam_mem_mode = 0;          // 0 off, 1 at first upload, 2 at present, 3 both
-uintptr_t g_cam_mem_obj  = 0;          // heap camera object (position at +0)
-uint32_t  g_cam_mem_writes = 0;
-static void write_game_camera();
 
 /// Rewrites every camera-derived block in a buffer image. `orig` is the
 /// untouched original, `p` the copy being patched, `base` the byte offset of
@@ -1239,7 +1106,6 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         memcpy(p + o_vp, PVn, 64);  mask |= 8;
         memcpy(g_last_PV,  PV,  sizeof(PV));
         memcpy(g_last_PVn, PVn, sizeof(PVn));
-        if (!g_have_PV && g_ovr_enabled && (g_cam_mem_mode & 1)) write_game_camera();
         g_have_PV = true;
     }
 
@@ -1325,81 +1191,6 @@ static int replace_known_products(uint8_t* p, UINT size, const float* PVn) {
 // UI projection picks it up -- and when in the frame it runs.
 // ---------------------------------------------------------------------------
 
-
-static void write_game_camera() {
-    if (!g_cam_valid) return;
-
-    float v[12];
-    memcpy(v, g_cam, sizeof(v));                 // the game's own view (recorded before override)
-    if (g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v));
-
-    float Vn[16], In[16], Pn[3];
-    build_override_view(v, Vn, In, Pn);
-
-    float col[16] = {};
-    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) col[c*4 + r] = Vn[r*4 + c];
-    col[12] = Vn[3]; col[13] = Vn[7]; col[14] = Vn[11]; col[15] = 1.f;
-
-    HMODULE exe = GetModuleHandleW(nullptr);
-    if (exe != nullptr) {
-        float* st = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(exe) + 0x88FD3C);
-        memcpy(st, col, sizeof(col));
-    }
-    if (g_cam_mem_obj != 0) {
-        uint8_t* o = reinterpret_cast<uint8_t*>(g_cam_mem_obj);
-        memcpy(o + 0,    Pn, 12);                // position
-        memcpy(o + 12,   Vn, 48);                // row-major 3x4
-        memcpy(o + 0x60, col, 64);               // column-major 4x4
-    }
-    if (g_cam_mem_mode & 4) {                    // the camera-state array: position, column-major view
-        for (uintptr_t a : g_scan_cams) {
-            uint8_t* o = reinterpret_cast<uint8_t*>(a);
-            memcpy(o,        Pn,  12);
-            memcpy(o + 0x10, col, 60);
-        }
-    }
-    g_cam_mem_writes++;
-}
-
-/// Dumps the game's static camera struct (FFX.exe+0x88FB78, 0x400 bytes) and
-/// the heap camera object (-0x100..+0x300) as floats, so what they store
-/// besides the matrix -- position, target, angles -- can be worked out.
-extern "C" __declspec(dllexport) int ffxvr_dump_structs() {
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_structs.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -1;
-
-    const float* c = g_cam;
-    const float t0 = c[3], t1 = c[7], t2 = c[11];
-    fprintf(f, "tick %lu  game camera pos %.3f %.3f %.3f  yaw %.1f\n", GetTickCount(),
-            -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
-            atan2f(c[8], c[10]) * 57.2958f);
-
-    struct Range { const char* name; uintptr_t base; size_t len; } ranges[2];
-    HMODULE exe = GetModuleHandleW(nullptr);
-    ranges[0] = { "static struct FFX.exe+88FB78", exe ? reinterpret_cast<uintptr_t>(exe) + 0x88FB78 : 0, 0x400 };
-    ranges[1] = { "heap object", g_scan_struct ? g_scan_struct - 0x100 : 0, 0x400 };
-
-    for (const Range& r : ranges) {
-        if (r.base == 0) continue;
-        fprintf(f, "  == %s @ %08X ==\n", r.name, static_cast<unsigned>(r.base));
-        const uint8_t* p = reinterpret_cast<const uint8_t*>(r.base);
-        for (size_t off = 0; off < r.len; off += 16) {
-            float v[4]; memcpy(v, p + off, 16);
-            uint32_t u[4]; memcpy(u, p + off, 16);
-            fprintf(f, "  +%03X:", static_cast<unsigned>(off));
-            for (int i = 0; i < 4; ++i) {
-                if (std::isfinite(v[i]) && fabsf(v[i]) > 1e-6f && fabsf(v[i]) < 1e7f) fprintf(f, " %12.4f", v[i]);
-                else fprintf(f, "   0x%08X", u[i]);
-            }
-            fprintf(f, "\n");
-        }
-    }
-    fprintf(f, "\n");
-    fclose(f);
-    return 0;
-}
 
 // ---------------------------------------------------------------------------
 // Call-stack census of 2D UI uploads
@@ -1684,11 +1475,6 @@ static void frame_dump() {
     fclose(f);
 }
 
-extern "C" __declspec(dllexport) void ffxvr_cam_mem_set(int mode, uintptr_t obj) {
-    g_cam_mem_mode = mode;
-    g_cam_mem_obj  = obj;
-}
-extern "C" __declspec(dllexport) int ffxvr_cam_mem_writes() { return static_cast<int>(g_cam_mem_writes); }
 
 /// If the override is on and this write carries a camera, returns a patched
 /// private copy of the bytes to upload instead; otherwise returns src.
@@ -1961,7 +1747,6 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
     census_write(size);     // all write paths: Map/Unmap carries the 2D UI buffers
 
     camera_from_write(src, size);
-    scan_for_camera(src, size, via);
 
     if (size >= 1872 && size < 16384) {
         const float* W = reinterpret_cast<const float*>(static_cast<const uint8_t*>(src) + 640);
@@ -2109,17 +1894,6 @@ void heartbeat(bool force) {
                 -(c[0]*t0 + c[4]*t1 + c[8]*t2), -(c[1]*t0 + c[5]*t1 + c[9]*t2), -(c[2]*t0 + c[6]*t1 + c[10]*t2),
                 c[32+3], c[32+7], c[32+11]);
     }
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        static const char* const via_name[4] = { "CreateBuffer", "Map", "UpdateSubresource", "Readback" };
-        fprintf(f, "  scanner hits (last frame with any): %d\n", g_scan_report_n);
-        for (int i = 0; i < g_scan_report_n; ++i) {
-            const ScanHit& h = g_scan_report[i];
-            fprintf(f, "      +%-5u in %6u B  %9.2f %9.2f %9.2f  via %s\n",
-                    h.offset, h.size, h.pos[0], h.pos[1], h.pos[2],
-                    via_name[(h.via >= 0 && h.via < 4) ? h.via : 2]);
-        }
-    }
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2136,14 +1910,6 @@ void heartbeat(bool force) {
         }
     }
 
-    if (g_watch_addr[0] || g_watch_addr[1]) {
-        fprintf(f, "\n  write watch on %08X / %08X: %u hits\n",
-                static_cast<unsigned>(g_watch_addr[0]), static_cast<unsigned>(g_watch_addr[1]), g_watch_hits);
-        for (int i = 0; i < g_writers_n; ++i) {
-            char where[160]; describe_address(reinterpret_cast<void*>(g_writers[i].eip), where, sizeof(where));
-            fprintf(f, "    writer eip %s  x%u\n", where, g_writers[i].count);
-        }
-    }
 
     fprintf(f, "\n  eye 2: stereo=%d twins=%u backbuffer=%p draws last frame=%u\n", g_stereo ? 1 : 0,
             g_twin_count, static_cast<void*>(g_backbuffer), g_eye2_draws_report);
@@ -2423,7 +2189,6 @@ void read_camera() {
 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        scan_for_camera(g_full.data(), static_cast<UINT>(g_full.size()), "Readback");
     }
 }
 
@@ -2482,7 +2247,6 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 
     g_installed       = true;
     g_patched_context = game_context;
-    g_main_tid        = GetCurrentThreadId();
 
     {   // start this run's trace fresh
         wchar_t tpath[MAX_PATH];
@@ -2639,7 +2403,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         }
     }
     read_camera();
-    cam_blocks_tick();
     sweep_caches();
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     xr_tick();                      // submit the frame just finished, locate the head for the next one
@@ -2654,7 +2417,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (g_stacks_live) { g_stacks_live = false; census_dump(); }
         if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
     }
-    if (g_ovr_enabled && (g_cam_mem_mode & 2)) { std::lock_guard<std::mutex> lock(g_mutex); write_game_camera(); }
     g_latched      = false;
     g_draw_in_frame_last = (uint32_t)g_draw_in_frame;
     g_draw_in_frame = 0;
@@ -2689,11 +2451,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             g_world_report_n = g_world_live_n;
         }
         g_world_live_n = 0;
-        if (g_scan_live_n > 0) {     // keep the last frame that had any hits
-            memcpy(g_scan_report, g_scan_live, sizeof(g_scan_report));
-            g_scan_report_n = g_scan_live_n;
-        }
-        g_scan_live_n = 0;
     }
 
     if (dump_now) dump_capture();
@@ -2900,393 +2657,6 @@ extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze
     g_ovr_pitch   = pitch;
     g_ovr_move[0] = right; g_ovr_move[1] = up; g_ovr_move[2] = forward;
     if (!g_ovr_freeze) g_ovr_have_base = false;
-}
-
-// ---------------------------------------------------------------------------
-// Memory scan: where does the game keep the camera?
-//
-// The view matrix we receive through UpdateSubresource is a copy of something
-// the game owns. Finding the original lets us drive the camera at the source,
-// so the CPU-side projection used by the battle cursor, damage numbers and the
-// like follows -- and so does culling. We search every committed, writable,
-// private region for the exact bits of the current view, in the row-major
-// 3x4/4x4 layout we see uploaded and in a column-major 4x4 layout, plus the
-// bare camera position. Results go to ffxvr_memscan.log.
-// ---------------------------------------------------------------------------
-
-
-/// Searches one region for float-aligned needles, reporting hits through the
-/// callback. Runs under SEH so a page that faults despite VirtualQuery's word
-/// (decommitted mid-scan, an odd section) skips the region instead of taking
-/// the process down. No C++ objects live in here: __try forbids them.
-typedef void (*HitFn)(void* ctx, uintptr_t addr, int pat);
-static int search_region(const uint8_t* base, size_t len, const uint8_t* const* needles,
-                         const size_t* nbytes, int npat, uintptr_t skip_lo, uintptr_t skip_hi,
-                         HitFn on_hit, void* ctx) {
-    __try {
-        for (int pi = 0; pi < npat; ++pi) {
-            const size_t nb = nbytes[pi];
-            if (nb > len) continue;
-            for (size_t off = 0; off + nb <= len; off += 4) {
-                if (memcmp(base + off, needles[pi], nb) != 0) continue;
-                const uintptr_t at = reinterpret_cast<uintptr_t>(base + off);
-                if (at >= skip_lo && at <= skip_hi) continue;
-                on_hit(ctx, at, pi);
-            }
-        }
-        return 1;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-}
-
-static bool region_ok(const MEMORY_BASIC_INFORMATION& mbi) {
-    if (mbi.State != MEM_COMMIT) return false;
-    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
-    const DWORD rw = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & rw) != 0;
-}
-
-static void describe_region(uintptr_t a, char* out, size_t n) {
-    HMODULE mod = nullptr;
-    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(a), &mod) && mod != nullptr) {
-        wchar_t path[MAX_PATH] = L""; GetModuleFileNameW(mod, path, MAX_PATH);
-        const wchar_t* base = wcsrchr(path, L'\\'); base = base ? base + 1 : path;
-        snprintf(out, n, "%ls+0x%X", base, static_cast<unsigned>(a - reinterpret_cast<uintptr_t>(mod)));
-    }
-    else snprintf(out, n, "heap");
-}
-
-extern "C" __declspec(dllexport) int ffxvr_memscan() {
-    float v[12];
-    float pos[3];
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_cam_valid) return -1;
-        memcpy(v, g_cam, sizeof(v));                        // game's view, rows 0..2 (3x4)
-        pos[0] = g_cam[32+3]; pos[1] = g_cam[32+7]; pos[2] = g_cam[32+11];
-    }
-
-    // Patterns. Row-major 3x4 as uploaded; column-major 4x4 (translation in
-    // floats 12..14); and the bare position.
-    float colmajor[16] = {};
-    for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) colmajor[c*4 + r] = v[r*4 + c];
-    colmajor[12] = v[3]; colmajor[13] = v[7]; colmajor[14] = v[11]; colmajor[15] = 1.f;
-
-    struct Pat { const char* kind; const float* data; size_t bytes; } pats[] = {
-        { "view row-major 3x4",      v,        sizeof(v) },
-        { "view column-major (t at 12..14)", colmajor, 15 * sizeof(float) },
-        { "camera position float3", pos,      sizeof(pos) },
-    };
-
-    std::vector<MemHit> hits;
-    int faulted = 0;
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
-    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
-    const uintptr_t self = reinterpret_cast<uintptr_t>(&g_cam[0]);
-
-    const uint8_t* needles[3]; size_t nbytes[3];
-    for (int i = 0; i < 3; ++i) { needles[i] = reinterpret_cast<const uint8_t*>(pats[i].data); nbytes[i] = pats[i].bytes; }
-
-    struct Ctx { std::vector<MemHit>* hits; const Pat* pats; };
-    Ctx ctx = { &hits, pats };
-    HitFn on_hit = [](void* c, uintptr_t addr, int pi) {
-        Ctx* cx = static_cast<Ctx*>(c);
-        if (cx->hits->size() < 2000) cx->hits->push_back({ addr, cx->pats[pi].kind });
-    };
-
-    while (a < end) {
-        MEMORY_BASIC_INFORMATION mbi = {};
-        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
-        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        if (next <= a) break;
-        if (region_ok(mbi) && mbi.Type != MEM_MAPPED && mbi.RegionSize < (256u << 20)) {
-            if (!search_region(static_cast<const uint8_t*>(mbi.BaseAddress), mbi.RegionSize,
-                               needles, nbytes, 3, self - 4096, self + 4096, on_hit, &ctx)) faulted++;
-        }
-        a = next;
-    }
-
-    { std::lock_guard<std::mutex> lock(g_mutex); g_scan_hits = hits; }
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_scan_struct = 0;
-        g_scan_cams.clear();
-        for (const MemHit& h : hits) {
-            if (strcmp(h.kind, "camera position float3") != 0) continue;
-            bool row12 = false, col16 = false, col60 = false;
-            for (const MemHit& k : hits) {
-                if (k.addr == h.addr + 12   && strncmp(k.kind, "view row-major", 14) == 0)    row12 = true;
-                if (k.addr == h.addr + 0x10 && strncmp(k.kind, "view column-major", 17) == 0) col16 = true;
-                if (k.addr == h.addr + 0x60 && strncmp(k.kind, "view column-major", 17) == 0) col60 = true;
-            }
-            if (col16) g_scan_cams.push_back(h.addr);                       // array entry: pos, then col-major at +0x10
-            if (row12 && col60 && g_scan_struct == 0) g_scan_struct = h.addr; // the three-way object, if any
-        }
-    }
-
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_memscan.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "memscan at tick %lu: view t=(%.3f %.3f %.3f) pos=(%.3f %.3f %.3f)  %zu hits, %d regions faulted; camera object %08X, %zu array entries\n",
-            GetTickCount(), v[3], v[7], v[11], pos[0], pos[1], pos[2], hits.size(), faulted, static_cast<unsigned>(g_scan_struct), g_scan_cams.size());
-    size_t logged = 0;
-    for (const MemHit& h : hits) {
-        if (logged++ >= 250) break;
-        char where[128]; describe_region(h.addr, where, sizeof(where));
-        fprintf(f, "  %08X  %-36s %s\n", static_cast<unsigned>(h.addr), h.kind, where);
-    }
-    fprintf(f, "\n");
-    fclose(f);
-    return static_cast<int>(hits.size());
-}
-
-// ---------------------------------------------------------------------------
-// Write watch: who writes the game's camera?
-//
-// A hardware data breakpoint (DR0/DR1, write, 4 bytes) on an address, set on
-// the game's main thread from a helper thread, with a vectored exception
-// handler that records the writing instruction's address and continues. The
-// resulting table names the function that computes the camera each frame --
-// the place to hook so that UI projection, rendering and culling all follow.
-// ---------------------------------------------------------------------------
-
-
-static LONG CALLBACK watch_veh(EXCEPTION_POINTERS* ep) {
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
-    CONTEXT* c = ep->ContextRecord;
-    if ((c->Dr6 & 0x3) == 0) return EXCEPTION_CONTINUE_SEARCH;     // not one of ours
-
-    const uintptr_t eip = c->Eip;   // instruction after the write
-    g_watch_hits++;
-    bool found = false;
-    for (int i = 0; i < g_writers_n; ++i) if (g_writers[i].eip == eip) { g_writers[i].count++; found = true; break; }
-    if (!found && g_writers_n < 32) g_writers[g_writers_n++] = { eip, 1 };
-
-    c->Dr6 = 0;
-    return EXCEPTION_CONTINUE_EXECUTION;
-}
-
-struct WatchJob { DWORD tid; uintptr_t a0; uintptr_t a1; int result; };
-
-static DWORD WINAPI watch_thread(LPVOID arg) {
-    WatchJob* job = static_cast<WatchJob*>(arg);
-    HANDLE t = OpenThread(THREAD_ALL_ACCESS, FALSE, job->tid);
-    if (t == nullptr) { job->result = -1; return 0; }
-
-    if (SuspendThread(t) == (DWORD)-1) { CloseHandle(t); job->result = -2; return 0; }
-    CONTEXT c = {};
-    c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-    if (!GetThreadContext(t, &c)) { ResumeThread(t); CloseHandle(t); job->result = -3; return 0; }
-
-    c.Dr0 = job->a0;
-    c.Dr1 = job->a1;
-    c.Dr7 = 0;
-    if (job->a0) c.Dr7 |= (1u << 0) | (0b01u << 16) | (0b11u << 18);   // L0, write, 4 bytes
-    if (job->a1) c.Dr7 |= (1u << 2) | (0b01u << 20) | (0b11u << 22);   // L1, write, 4 bytes
-    c.Dr6 = 0;
-    const BOOL ok = SetThreadContext(t, &c);
-    ResumeThread(t);
-    CloseHandle(t);
-    job->result = ok ? 0 : -4;
-    return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Static cross-references: which instructions touch the game's camera?
-//
-// Fahrenheit's stage-0 debugger swallows first-chance exceptions, so a
-// hardware breakpoint never reaches us. But 32-bit code addresses a global
-// with a literal imm32, so scanning the executable's code for the matrix's
-// addresses finds every instruction that reads or writes it. The bytes just
-// before the immediate say which.
-// ---------------------------------------------------------------------------
-
-struct XrefKind { const uint8_t* pat; int len; int imm_at; const char* name; };
-
-static const char* classify_xref(const uint8_t* at) {
-    // `at` points at the imm32. Look at up to 4 preceding bytes.
-    const uint8_t b1 = at[-1], b2 = at[-2], b3 = at[-3], b4 = at[-4];
-    // modrm with mod=00 rm=101 (disp32, no base) has low 3 bits 101 and top 2 bits 00
-    const bool modrm_disp32 = (b1 & 0xC7) == 0x05;
-    if (!modrm_disp32) {
-        if (b1 >= 0xB8 && b1 <= 0xBF) return "mov r32, imm (address taken)";
-        if (b1 == 0x68)                return "push imm (address taken)";
-        return "other";
-    }
-    // SSE stores / loads
-    if (b3 == 0x0F && b2 == 0x11) return "STORE movups/movss [g], xmm";
-    if (b3 == 0x0F && b2 == 0x29) return "STORE movaps [g], xmm";
-    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x11) return "STORE movss [g], xmm";
-    if (b3 == 0x0F && b2 == 0x10) return "load movups [g]";
-    if (b3 == 0x0F && b2 == 0x28) return "load movaps [g]";
-    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x10) return "load movss [g]";
-    if (b3 == 0x0F && b2 == 0x58) return "load addps [g]";
-    if (b3 == 0x0F && b2 == 0x59) return "load mulps [g]";
-    if (b4 == 0xF3 && b3 == 0x0F && b2 == 0x59) return "load mulss [g]";
-    // integer / x87
-    if (b2 == 0x89) return "STORE mov [g], r32";
-    if (b2 == 0xC7) return "STORE mov [g], imm32";
-    if (b2 == 0x8B) return "load mov r32, [g]";
-    if (b2 == 0x8D) return "lea r32, [g] (address taken)";
-    if (b2 == 0xD9 && (b1 & 0x38) == 0x18) return "STORE fstp [g]";
-    if (b2 == 0xD9 && (b1 & 0x38) == 0x00) return "load fld [g]";
-    if (b2 == 0xFF && (b1 & 0x38) == 0x30) return "push [g]";
-    return "modrm disp32 (unclassified)";
-}
-
-/// Scans the executable's code sections for references to [addr, addr+span)
-/// and logs each with its classification. Returns the number found.
-extern "C" __declspec(dllexport) int ffxvr_xrefs(uintptr_t addr, unsigned span) {
-    HMODULE exe = GetModuleHandleW(nullptr);
-    if (exe == nullptr) return -1;
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(exe);
-    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    const IMAGE_NT_HEADERS* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_xrefs.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "xrefs to %08X..%08X (FFX.exe+%X)\n", static_cast<unsigned>(addr), static_cast<unsigned>(addr + span),
-            static_cast<unsigned>(addr - reinterpret_cast<uintptr_t>(base)));
-
-    int n = 0;
-    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
-        const uint8_t* cs = base + sec[i].VirtualAddress;
-        const size_t   cl = sec[i].Misc.VirtualSize;
-        for (size_t off = 4; off + 4 <= cl; ++off) {
-            uint32_t imm; memcpy(&imm, cs + off, 4);
-            if (imm < addr || imm >= addr + span) continue;
-            const uint8_t* at = cs + off;
-            fprintf(f, "  code FFX.exe+%08X  -> data FFX.exe+%06X (%+d from matrix)  %s   bytes:",
-                    static_cast<unsigned>(at - base), static_cast<unsigned>(imm - reinterpret_cast<uintptr_t>(base)),
-                    static_cast<int>(static_cast<intptr_t>(imm) - static_cast<intptr_t>(reinterpret_cast<uintptr_t>(base) + 0x88FD3C)),
-                    classify_xref(at));
-            for (int k = -6; k < 4; ++k) fprintf(f, " %02X", at[k]);
-            fprintf(f, "\n");
-            n++;
-            if (n >= 400) break;
-        }
-    }
-    fprintf(f, "  %d references\n\n", n);
-    fclose(f);
-    return n;
-}
-
-// ---------------------------------------------------------------------------
-// Pointer scan: which variables point at the camera?
-//
-// Code that never names the matrix reaches it through a pointer. Search the
-// executable's data sections (and, separately counted, the heap) for 4-byte
-// values in [target - below, target], then cross-reference each pointer
-// variable found in the executable, since those are the camera accessors.
-// ---------------------------------------------------------------------------
-
-/// Heap half of the pointer scan, in a plain function so it can use SEH.
-static int ptrscan_heap(FILE* f, uintptr_t target, unsigned below) {
-    int heap_n = 0;
-    SYSTEM_INFO si; GetSystemInfo(&si);
-    uintptr_t a = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
-    const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
-    while (a < end) {
-        MEMORY_BASIC_INFORMATION mbi = {};
-        if (VirtualQuery(reinterpret_cast<LPCVOID>(a), &mbi, sizeof(mbi)) == 0) break;
-        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        if (next <= a) break;
-        if (region_ok(mbi) && mbi.Type == MEM_PRIVATE && mbi.RegionSize < (256u << 20)) {
-            const uint8_t* rb = static_cast<const uint8_t*>(mbi.BaseAddress);
-            __try {
-                for (size_t off = 0; off + 4 <= mbi.RegionSize; off += 4) {
-                    uint32_t v; memcpy(&v, rb + off, 4);
-                    if (v + below < target || v > target) continue;
-                    const uintptr_t at = reinterpret_cast<uintptr_t>(rb + off);
-                    if (at >= target - 0x1000 && at <= target + 0x1000) continue;   // inside the object itself
-                    if (heap_n < 12) fprintf(f, "  heap %08X holds %08X (target%+d)\n", static_cast<unsigned>(at), v,
-                                             static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
-                    heap_n++;
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-        a = next;
-    }
-    return heap_n;
-}
-
-extern "C" __declspec(dllexport) int ffxvr_ptrscan(uintptr_t target, unsigned below) {
-    HMODULE exe = GetModuleHandleW(nullptr);
-    if (exe == nullptr || target == 0) return -1;
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(exe);
-    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    const IMAGE_NT_HEADERS* nt  = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
-
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_xrefs.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return -2;
-    fprintf(f, "pointers into [%08X-%u, %08X]:\n", static_cast<unsigned>(target), below, static_cast<unsigned>(target));
-
-    std::vector<uintptr_t> ptr_vars;
-    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) continue;
-        const uint8_t* ds = base + sec[i].VirtualAddress;
-        const size_t   dl = sec[i].Misc.VirtualSize;
-        for (size_t off = 0; off + 4 <= dl; off += 4) {
-            uint32_t v; memcpy(&v, ds + off, 4);
-            if (v + below < target || v > target) continue;
-            const uintptr_t at = reinterpret_cast<uintptr_t>(ds + off);
-            fprintf(f, "  exe data FFX.exe+%06X holds %08X (target%+d)\n", static_cast<unsigned>(at - reinterpret_cast<uintptr_t>(base)),
-                    v, static_cast<int>(static_cast<intptr_t>(v) - static_cast<intptr_t>(target)));
-            if (ptr_vars.size() < 32) ptr_vars.push_back(at);
-        }
-    }
-
-    // Heap: count only, with the first few, so a pointer field inside another object shows up.
-    const int heap_n = ptrscan_heap(f, target, below);
-    fprintf(f, "  %zu pointer variables in the exe, %d on the heap\n\n", ptr_vars.size(), heap_n);
-    fclose(f);
-
-    // Chain: who reads each pointer variable?
-    for (uintptr_t pv : ptr_vars) ffxvr_xrefs(pv, 4);
-    return static_cast<int>(ptr_vars.size());
-}
-
-extern "C" __declspec(dllexport) uintptr_t ffxvr_scan_struct() { return g_scan_struct; }
-extern "C" __declspec(dllexport) int ffxvr_scan_cams() { std::lock_guard<std::mutex> lock(g_mutex); return static_cast<int>(g_scan_cams.size()); }
-
-/// Arms write watches on up to two addresses (0 = none) on the game's main
-/// thread. Returns 0 on success.
-extern "C" __declspec(dllexport) int ffxvr_watch(uintptr_t a0, uintptr_t a1) {
-    if (g_main_tid == 0) return -10;
-    if (g_veh == nullptr) g_veh = AddVectoredExceptionHandler(1, watch_veh);
-
-    g_writers_n  = 0;
-    g_watch_hits = 0;
-    g_watch_addr[0] = a0; g_watch_addr[1] = a1;
-
-    WatchJob job = { g_main_tid, a0, a1, -99 };
-    HANDLE h = CreateThread(nullptr, 0, watch_thread, &job, 0, nullptr);
-    if (h == nullptr) return -11;
-    WaitForSingleObject(h, 5000);
-    CloseHandle(h);
-    return job.result;
-}
-
-extern "C" __declspec(dllexport) int ffxvr_watch_hits() { return static_cast<int>(g_watch_hits); }
-
-/// The address of the game's static camera matrix (column-major view),
-/// found by the memory scan: FFX.exe + 0x88FD3C.
-extern "C" __declspec(dllexport) uintptr_t ffxvr_exe_camera() {
-    HMODULE exe = GetModuleHandleW(nullptr);
-    return exe ? reinterpret_cast<uintptr_t>(exe) + 0x88FD3C : 0;
 }
 
 extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_cast<int>(g_ovr_applied); }
@@ -4249,17 +3619,13 @@ static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
-extern "C" __declspec(dllexport) void ffxvr_cull_set(int mode, float scale) { g_cull_mode = mode; g_cull_scale = scale; }
 
 // ---------------------------------------------------------------- code patches
 // Small in-place patches of the game's code, each verified against the bytes
 // expected there before anything is written, restorable. Addresses are
 // Ghidra-base (0x400000) virtual addresses, relocated at runtime.
 struct CodePatch { const char* name; uintptr_t gva; uint8_t orig[8]; uint8_t patch[8]; int len; bool on; };
-// 0: the render-command interpreter's "draw model" case (0x615752) skips the
-// draw on two per-part byte flags (jne at 0x6157A0 / 0x6157B8). NOPed, every
-// model whose command reached the list is drawn.
-// 2, 3: the character distance cull. Ch_DrawMain (0x82ED50) calls
+// 0, 1: the character distance cull. Ch_DrawMain (0x82ED50) calls
 // Ch_VisibleTest (0x82E220) per actor: it measures the actor's distance to
 // the camera (stored at actor+0x178) and, when that exceeds the actor's own
 // cull distance (+0x174), sets bit 0x20 of actor+0x180 and returns 1, on
@@ -4267,23 +3633,21 @@ struct CodePatch { const char* name; uintptr_t gva; uint8_t orig[8]; uint8_t pat
 // "within range" branch (jne -> jmp: always within range); 0x82E378 is the
 // same test on one map's special path (je -> nop).
 CodePatch g_patches[] = {
-    { "draw-model skip A (0x6157A0 jne)", 0x6157A0, { 0x75, 0x35 }, { 0x90, 0x90 }, 2, false },
-    { "draw-model skip B (0x6157B8 jne)", 0x6157B8, { 0x75, 0x1D }, { 0x90, 0x90 }, 2, false },
     { "characters: no distance cull (0x82E32A)", 0x82E32A, { 0x75, 0x1C }, { 0xEB, 0x1C }, 2, false },
     { "characters: no distance cull, map special case (0x82E378)", 0x82E378, { 0x74, 0xB2 }, { 0x90, 0x90 }, 2, false },
-    // 4: the character frustum cull. Ch_VisibleTest also calls 0x63B230(model),
+    // 2: the character frustum cull. Ch_VisibleTest also calls 0x63B230(model),
     // which asks the renderer (0x6603C0, this = 0xCCB9D8) per model part whether
     // the part's scene node intersects the game camera's frustum (0x663CC0,
     // frustum at renderer->[0xDC]+0x74); no part in view -> bit 0x08 of
     // actor+0x180 -> hidden. 0x6603C0 returns "visible" without testing when
     // renderer+0x10D8C (a debug camera mode) is set: jne -> jmp makes it always do so.
     { "characters: no frustum cull (0x6603D1)", 0x6603D1, { 0x75, 0x1B }, { 0xEB, 0x1B }, 2, false },
-    // 5: the scene frustum cull. 0x663CC0(node, frustum) is the node-vs-frustum
+    // 3: the scene frustum cull. 0x663CC0(node, frustum) is the node-vs-frustum
     // test used by the model parts above and by the scene renderer's two node
     // lists (0x652D35, 0x652EBC: geometry and effects). Entry replaced by
     // `mov al,1; ret 4`: everything registered in the scene is submitted.
     { "scene: no frustum cull at all (0x663CC0 returns visible)", 0x663CC0, { 0x55, 0x8B, 0xEC, 0x81, 0xEC }, { 0xB0, 0x01, 0xC2, 0x04, 0x00 }, 5, false },
-    // 6: the bounding-volume test itself. 0x663A30(node, frustum) is what
+    // 4: the bounding-volume test itself. 0x663A30(node, frustum) is what
     // 0x663CC0 ends in, and it is also called directly by the renderer's third
     // node list (0x6505D6, frustum of the camera at renderer+0x654), by a
     // visibility aggregate (0x6C8236/0x6C8294/0x6C83B0) and by another scene
@@ -4291,7 +3655,8 @@ CodePatch g_patches[] = {
     // every bounding test in the engine answers "in view".
     { "scene: bounding test always passes (0x663A30)", 0x663A30, { 0x55, 0x8B, 0xEC, 0x81, 0xEC }, { 0xB0, 0x01, 0xC2, 0x04, 0x00 }, 5, false },
 };
-constexpr int k_patch_dist_a = 2, k_patch_dist_b = 3, k_patch_chr_frustum = 4, k_patch_scene_frustum = 5, k_patch_bounds = 6;
+constexpr int k_patch_dist_a = 0, k_patch_dist_b = 1, k_patch_chr_frustum = 2, k_patch_scene_frustum = 3, k_patch_bounds = 4;
+constexpr uintptr_t k_exe_gva_base = 0x400000;   // Ghidra base of FFX.exe; the image is relocated at runtime
 static uint8_t* gva_to_rt(uintptr_t gva) { const uint8_t* base = (const uint8_t*)GetModuleHandleA(nullptr); return base ? const_cast<uint8_t*>(base) + (gva - k_exe_gva_base) : nullptr; }
 static int patch_apply(int i, bool on) {
     if (i < 0 || i >= (int)(sizeof(g_patches) / sizeof(g_patches[0]))) return -1;
@@ -4328,7 +3693,6 @@ extern "C" __declspec(dllexport) int ffxvr_cull_scene_set(int keep_all) { return
 extern "C" __declspec(dllexport) int ffxvr_cull_scene_get() { return (g_patches[k_patch_scene_frustum].on && g_patches[k_patch_bounds].on) ? 1 : 0; }
 extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g_patches) / sizeof(g_patches[0])); }
 extern "C" __declspec(dllexport) const char* ffxvr_patch_name(int i) { return (i >= 0 && i < ffxvr_patch_count()) ? g_patches[i].name : ""; }
-extern "C" __declspec(dllexport) void ffxvr_camblk_get(float* out9, uint32_t* writes) { memcpy(out9, g_camblk_last, sizeof(g_camblk_last)); if (writes) *writes = g_cull_writes; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
@@ -4625,38 +3989,12 @@ static void xr_tick() {
     if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
 }
 
-extern "C" __declspec(dllexport) int ffxvr_diff(int* out) {
-    if (out == nullptr) return 0;
-    out[0] = g_diff_count;
-    out[1] = static_cast<int>(g_full.size());
-    out[2] = g_draws_latched_at;
-    for (int i = 0; i < 8; ++i) out[3 + i] = static_cast<int>(g_diff_offs[i]);
-    return g_diff_count;
-}
 
 /// Reads one hook counter by index, so the overlay can show whether a specific
 /// draw path fires at all rather than only the aggregate.
 extern "C" __declspec(dllexport) int ffxvr_counter(int i) {
     if (i < 0 || i >= C_COUNT) return -1;
     return static_cast<int>(g_counters[i]);
-}
-
-/// Fills out[] with kScanMax * 6 floats -- offset, buffer size, write path
-/// (0 CreateBuffer, 1 Map/Unmap, 2 UpdateSubresource), then x, y, z of the
-/// camera position each candidate implies -- and returns the hit count.
-extern "C" __declspec(dllexport) int ffxvr_scan(float* out) {
-    if (out == nullptr) return 0;
-
-    std::lock_guard<std::mutex> lock(g_mutex);
-    for (int i = 0; i < kScanMax; ++i) {
-        out[i*6 + 0] = static_cast<float>(g_scan_report[i].offset);
-        out[i*6 + 1] = static_cast<float>(g_scan_report[i].size);
-        out[i*6 + 2] = static_cast<float>(g_scan_report[i].via);
-        out[i*6 + 3] = g_scan_report[i].pos[0];
-        out[i*6 + 4] = g_scan_report[i].pos[1];
-        out[i*6 + 5] = g_scan_report[i].pos[2];
-    }
-    return g_scan_report_n;
 }
 
 extern "C" __declspec(dllexport) int ffxvr_frame_writes() {
