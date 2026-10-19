@@ -3266,7 +3266,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
     if (g_scene_live_tex && g_scene_live_draws >= 20) {
         ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
-        else if (depth && bound == g_scene_live_tex && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled) ui_pass_begin();
+        else if (depth && bound == g_scene_live_tex && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin();   // screen frames keep their UI (subtitles) in the frame
     }
     g_in_eye2 = true;
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
