@@ -39,3 +39,8 @@ _ext/
 # Native build output
 src/native/bin/
 src/native/obj/
+
+# downloads (texture packs etc.)
+*.7z
+*.7z.*
+*.crdownload

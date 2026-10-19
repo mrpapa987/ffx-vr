@@ -35,7 +35,24 @@ struct XrScreen {
 struct XrUiPanel {
     ID3D11Texture2D* tex;                                   // null: no panel this frame
     float dist, width;                                      // metres; height follows 16:9
+    ID3D11Texture2D* tex2;                                  // a second head-locked quad (the ImGui layer: Fahrenheit's menus, our overlay); null: none
 };
+
+/// Controller input through the OpenXR action system (Touch controllers;
+/// khr/simple as the fallback). Values are the last xrSyncActions result.
+struct XrHand {
+    bool  active;                                           // the runtime reports a controller bound for this hand
+    float stick[2];                                         // thumbstick x (right +), y (up +), -1..1
+    bool  stick_click;
+    bool  primary, secondary;                               // A / B on the right, X / Y on the left
+    float trigger, squeeze;                                 // 0..1
+    bool  menu;                                             // left controller's menu button (the right one's is the system button)
+    bool  grip_valid; float grip_q[4], grip_p[3];           // grip pose in the reference space (orientation x,y,z,w; metres)
+    bool  aim_valid;  float aim_q[4],  aim_p[3];            // aim pose (the pointing ray)
+};
+struct XrInput { bool ready; XrHand hand[2]; char profile[2][64]; };   // 0 left, 1 right; profile: the bound interaction profile per hand
+void        xr_input_get(XrInput* out);                     // copies the state synced at the last xr_frame
+void        xr_haptic(int hand, float amplitude, float seconds);   // 0 left, 1 right
 
 bool        xr_start(const XrHost& host);                   // loads the loader, creates instance + session + swapchains
 void        xr_stop();

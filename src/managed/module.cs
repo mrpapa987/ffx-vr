@@ -73,9 +73,24 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool _cut_recentre = true, _cut_blink = false, _follow_pans = false; private float _follow_rate = 20f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void> _fn_fp_set;
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_set;
+    private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_head_set;
+    private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_anchor_override;
+    private bool _battle_anchor = true; private int _battle_anchor_n = 0;
+    private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
+    private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
+    private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
     private delegate* unmanaged[Cdecl]<int> _fn_fp_hidden;
-    private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 3f;
+    private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 0.75f;
     private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
+    private int _fp_body_mode = 0; private string _fp_head_parts = "0,1,2,3,9"; private int _fp_solo = -1;   // 0 = whole body hidden (default). Tidus (c101): parts 0-3 hair, 9 face/head, kept for later   // 0 hide all, 1 hide head parts only, 2 show all
+    private delegate* unmanaged[Cdecl]<int, uint, int, void> _fn_fp_body_set;
+    private delegate* unmanaged[Cdecl]<uint> _fn_fp_parts;
+    private static uint parse_mask(string list) {
+        uint m = 0;
+        foreach (var tok in list.Split(new[] { ',', ' ', ';' }, StringSplitOptions.RemoveEmptyEntries))
+            if (int.TryParse(tok.Trim(), out int i) && i >= 0 && i < 32) m |= 1u << i;
+        return m;
+    }
     private const float k_true_scale = 11.4f;   // 20-unit characters = 1.75 m
     private delegate* unmanaged[Cdecl]<float*, uint*, int, void> _fn_markers_set;
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
@@ -86,6 +101,26 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
     private int _backdrop_mode = 1;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_cull_set;
+    private delegate* unmanaged[Cdecl]<int, int> _fn_cull_dist_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_cull_dist_get;
+    private bool _cull_dist = true; private int _cull_dist_rc = 0;
+    private delegate* unmanaged[Cdecl]<int, int> _fn_cull_scene_set;
+    private delegate* unmanaged[Cdecl]<int> _fn_cull_scene_get;
+    private bool _cull_scene = true; private int _cull_scene_rc = 0;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_vrpad_set;
+    private delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int> _fn_vrpad_status;
+    private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_haptic;
+    private bool _vrpad = true;
+    private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_imgui_layer_set; private delegate* unmanaged[Cdecl]<uint> _fn_imgui_draws; private bool _imgui_layer = true; private int _imgui_min_draws = 12;
+    /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal): 0 closed, 1 opening, 2 open.</summary>
+    private static byte save_screen_state() { try { return FhUtil.get_at<byte>(0x8CB994); } catch { return 0; } }
+    private delegate* unmanaged[Cdecl]<int, float, void> _fn_gesture_set;
+    private delegate* unmanaged[Cdecl]<void> _fn_gesture_reset;
+    private delegate* unmanaged[Cdecl]<float*, float*, int*, uint> _fn_gesture_poll;
+    private bool _chord_toggle_pending = false; private bool _gestures = true; private float _gest_tilt = 1f; private float _gest_scale_mul = 1f; private int _gest_active = 0; private float _gest_move_x, _gest_move_y, _gest_move_z;
+    private delegate* unmanaged[Cdecl]<int, void> _fn_msaa_set;
+    private delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void> _fn_msaa_status;
+    private int _msaa = 4;   // 0 = game default (8x), 2, 4
     private delegate* unmanaged[Cdecl]<float*, uint*, void> _fn_camblk_get;
     private int _cull_mode = 0; private float _cull_fov = 0.4f;
     private delegate* unmanaged[Cdecl]<int, int, int> _fn_patch_set;
@@ -266,6 +301,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
             _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_set");
             _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_set");
+            _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_head_set");
+            _fn_anchor_override = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_anchor_override");
+            _fn_floor_set    = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_floor_set");
+            _fn_fp_head_set  = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_head_set");
             _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_hidden");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
@@ -287,6 +326,22 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
             _fn_cull_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_set");
+            _fn_cull_dist_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_set");
+            _fn_cull_dist_get = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_get");
+            _fn_cull_scene_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_scene_set");
+            _fn_cull_scene_get = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_scene_get");
+            _fn_msaa_set     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_msaa_set");
+            _fn_vrpad_set    = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_vrpad_set");
+            _fn_imgui_layer_set = (delegate* unmanaged[Cdecl]<int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_imgui_layer_set");
+            _fn_imgui_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_imgui_draws");
+            _fn_vrpad_status = (delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_vrpad_status");
+            _fn_haptic       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_haptic");
+            _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_set");
+            _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_reset");
+            _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_poll");
+            _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_body_set");
+            _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_parts");
+            _fn_msaa_status  = (delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_msaa_status");
             _fn_camblk_get   = (delegate* unmanaged[Cdecl]<float*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_camblk_get");
             _fn_patch_set    = (delegate* unmanaged[Cdecl]<int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_set");
             _fn_patch_count  = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_count");
@@ -551,6 +606,21 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
                     case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
                     case "cull_mode":         int.TryParse(v, out _cull_mode); break;
+                    case "cull_dist":         _cull_dist = v != "0"; break;
+                    case "cull_scene":        _cull_scene = v != "0"; break;
+                    case "msaa":              int.TryParse(v, out _msaa); break;
+                    case "vrpad":             _vrpad = v != "0"; break;
+                    case "imgui_layer":       _imgui_layer = v != "0"; break;
+                    case "gestures":          _gestures = v != "0"; break;
+                    case "gest_tilt":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _gest_tilt); break;
+                    case "fp_body_mode":      int.TryParse(v, out _fp_body_mode); break;
+                    case "battle_anchor":     _battle_anchor = v != "0"; break;
+                    case "diorama_floor":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _diorama_floor); break;
+                    case "fp_head_anchor":    if (!int.TryParse(v, out _fp_head_anchor)) _fp_head_anchor = v != "0" ? 2 : 0; break;
+                    case "fp_head_up":        float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_up); break;
+                    case "fp_head_smooth":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_smooth); break;
+                    case "fp_head_fwd":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_fwd); break;
+                    case "fp_head_parts":     _fp_head_parts = v; break;
                     case "cull_fov":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _cull_fov); break;
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
@@ -598,6 +668,21 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"screen_mode={_xr_screen_mode}\n" +
             $"backdrop_mode={_backdrop_mode}\n" +
             $"cull_mode={_cull_mode}\n" +
+            $"cull_dist={(_cull_dist ? 1 : 0)}\n" +
+            $"cull_scene={(_cull_scene ? 1 : 0)}\n" +
+            $"msaa={_msaa}\n" +
+            $"vrpad={(_vrpad ? 1 : 0)}\n" +
+            $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
+            $"gestures={(_gestures ? 1 : 0)}\n" +
+            $"gest_tilt={_gest_tilt.ToString("F2", ci)}\n" +
+            $"fp_body_mode={_fp_body_mode}\n" +
+            $"fp_head_anchor={_fp_head_anchor}\n" +
+            $"battle_anchor={(_battle_anchor ? 1 : 0)}\n" +
+            $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
+            $"fp_head_up={_fp_head_up.ToString("F2", ci)}\n" +
+            $"fp_head_smooth={_fp_head_smooth.ToString("F2", ci)}\n" +
+            $"fp_head_fwd={_fp_head_fwd.ToString("F2", ci)}\n" +
+            $"fp_head_parts={_fp_head_parts}\n" +
             $"cull_fov={_cull_fov.ToString("F3", ci)}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
@@ -654,6 +739,28 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.TextWrapped(xr_status_text());
         if (_fn_xr_screen_now != null && _xr_on) ImGui.Text(_fn_xr_screen_now() != 0 ? "showing: virtual screen" : "showing: 3D scene");
 
+        // Controllers
+        ImGui.Separator();
+        ImGui.Checkbox("Quest controllers as the gamepad", ref _vrpad); ImGui.SameLine();
+        ImGui.TextDisabled("A/B/X/Y, sticks, triggers = LT/RT, grips = LB/RB (first person), left menu = Start, left stick click = Select");
+        if (_fn_vrpad_status != null) {
+            float* st = stackalloc float[24]; byte* pl = stackalloc byte[64]; byte* pr = stackalloc byte[64]; uint frames;
+            int ready = _fn_vrpad_status(st, pl, pr, 64, &frames);
+            if (ready == 0) ImGui.TextDisabled(_xr_on ? "controllers: no input this frame (headset not focused, or no bindings)" : "controllers: headset off");
+            else {
+                ImGui.Text($"controllers: syncing ({frames} frames)   left: {System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pl)}   right: {System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pr)}");
+                for (int h = 0; h < 2; h++) {
+                    float* o = st + h * 12;
+                    ImGui.Text($"  {(h == 0 ? "L" : "R")}: {(o[0] > 0 ? "on " : "off")} stick ({o[1],5:F2},{o[2],5:F2}){(o[3] > 0 ? "*" : " ")}  {(h == 0 ? "X" : "A")}{(o[4] > 0 ? "#" : "-")} {(h == 0 ? "Y" : "B")}{(o[5] > 0 ? "#" : "-")}  trig {o[6]:F2} grip {o[7]:F2}  {(h == 0 ? (o[8] > 0 ? "menu#" : "menu-") : "     ")}  pose {(o[9] > 0 ? "grip" : "----")}/{(o[10] > 0 ? "aim" : "---")}");
+                }
+                if (_fn_haptic != null) { if (ImGui.SmallButton("buzz left")) _fn_haptic(0, 0.5f, 0.1f); ImGui.SameLine(); if (ImGui.SmallButton("buzz right")) _fn_haptic(1, 0.5f, 0.1f); }
+            }
+        }
+        ImGui.Checkbox("grips grab the world in the seat view (one hand pans; two hands pan, turn, tilt and zoom)", ref _gestures);
+        ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("tilt (wrist roll) gain", ref _gest_tilt, -2f, 2f, "%.1f");
+        ImGui.TextDisabled($"right grip + right stick click: first person on/off.   {(_gest_active != 0 ? "GRABBING   " : "")}world scale now {_xr_scale * _gest_scale_mul:F0} units/m (base {_xr_scale:F0} x {_gest_scale_mul:F2}), grab offset ({_gest_move_x:F0}, {_gest_move_y:F0}, {_gest_move_z:F0})");
+        ImGui.SameLine(); if (ImGui.SmallButton("reset grab")) { if (_fn_gesture_reset != null) _fn_gesture_reset(); }
+
         // Comfort
         ImGui.Separator();
         ImGui.SliderFloat("world scale", ref _xr_scale, 10f, 300f, "%.0f units/m");
@@ -680,9 +787,10 @@ public sealed unsafe class FFXVRModule : FhModule {
         int fp_before = _fp_mode;
         ImGui.RadioButton("authored (seat)", ref _fp_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("first person", ref _fp_mode, 1); ImGui.SameLine();
-        ImGui.RadioButton("follow", ref _fp_mode, 2);
-        ImGui.SameLine(); ImGui.TextDisabled("End: toggle first person");
-        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = _fp_mode == 1 ? 0 : 1;
+        ImGui.RadioButton("diorama (follows the player)", ref _fp_mode, 2);
+        ImGui.SameLine(); ImGui.TextDisabled("End / right grip + stick click: first person <-> diorama");
+        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = _fp_mode == 1 ? 2 : 1;
+        if (_chord_toggle_pending) { _chord_toggle_pending = false; _fp_mode = _fp_mode == 1 ? 2 : 1; }
 
         // Turning (first person and seat alike)
         ImGui.Text("turning:"); ImGui.SameLine();
@@ -697,8 +805,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
         }
         if (_fp_mode != fp_before) {
-            if (fp_before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // leaving the authored view: true scale
-            else if (_fp_mode == 0) _xr_scale = _scale_before_fp;
+            if (_fp_mode == 1) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // first person: true scale
+            else if (fp_before == 1) _xr_scale = _scale_before_fp;                           // back to a seat or the diorama: the scale from before
         }
         push_player();
         if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
@@ -716,7 +824,22 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("3D props over the flat backdrop", ref _backdrop_mode, 0);
         if (_fn_backdrop_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}"); }
         if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
-        ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on);
+        ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
+        ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
+        if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
+        ImGui.Checkbox("keep characters drawn (no distance or frustum cull of characters)", ref _cull_dist);
+        if (_fn_cull_dist_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_dist_get() != 0 ? "patched" : (_cull_dist_rc != 0 ? $"not applied (rc {_cull_dist_rc}, see diag log)" : "off")); }
+        ImGui.Checkbox("keep all geometry drawn (no frustum cull of the scene; costs GPU time)", ref _cull_scene);
+        if (_fn_cull_scene_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_scene_get() != 0 ? "patched" : (_cull_scene_rc != 0 ? $"not applied (rc {_cull_scene_rc}, see diag log)" : "off")); }
+        ImGui.Text("MSAA for the scene targets:"); ImGui.SameLine();
+        ImGui.RadioButton("game default (8x)", ref _msaa, 0); ImGui.SameLine();
+        ImGui.RadioButton("4x", ref _msaa, 4); ImGui.SameLine();
+        ImGui.RadioButton("2x", ref _msaa, 2);
+        if (_fn_msaa_status != null) {
+            uint seen, changed, lw, lh, ln; _fn_msaa_status(&seen, &changed, &lw, &lh, &ln);
+            ImGui.SameLine();
+            ImGui.TextDisabled(seen == 0 ? "takes effect when the game next creates its scene targets" : $"targets created: {seen} (overridden {changed}), last {lw}x{lh} @ {ln} samples");
+        }
         ImGui.Text("frame blending (water areas):"); ImGui.SameLine();
         ImGui.RadioButton("off (no trails)", ref _hist_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("game default", ref _hist_mode, 0); ImGui.SameLine();
@@ -730,7 +853,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             byte* pb = stackalloc byte[256]; _fn_perf_status(pb, 256);
             ImGui.TextDisabled(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb) ?? "");
         }
-        ImGui.TextDisabled("Home: recentre   F7: hide/show this overlay");
+        ImGui.TextDisabled("Home: recentre   F8: hide/show this overlay (F7 is Fahrenheit's own mod-settings menu)");
     }
 
     /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
@@ -862,11 +985,29 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
 
         if (ImGui.TreeNode("First person / follow")) {
-            ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
+            ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
+            ImGui.SliderFloat("diorama floor: never below this many units above the player's feet (0 = off; suspended while a grip is held)", ref _diorama_floor, 0f, 40f, "%.0f");
+            ImGui.Text("eye height:"); ImGui.SameLine();
+            ImGui.RadioButton("fixed", ref _fp_head_anchor, 0); ImGui.SameLine();
+            ImGui.RadioButton("head bone height (swimming, crouching)", ref _fp_head_anchor, 1); ImGui.SameLine();
+            ImGui.RadioButton("full head bone (leans too)", ref _fp_head_anchor, 2);
+            if (_fp_head_anchor != 0) {
+                ImGui.SliderFloat("eye offset above the head bone", ref _fp_head_up, -5f, 10f);
+                ImGui.SliderFloat("head smoothing (1 = none, 0.1 = heavy)", ref _fp_head_smooth, 0.05f, 1f);
+                if (_fp_head_anchor == 2) ImGui.SliderFloat("eye offset forward of the head bone (the bone is the neck joint)", ref _fp_head_fwd, 0f, 6f);
+            }
+            else ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
             ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
             ImGui.SliderFloat("follow height", ref _fp_follow_h, 0f, 150f);
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
-            ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.5f, 12f); ImGui.SameLine(); ImGui.TextDisabled("small: the player's parts share the actor's exact position; NPCs at talking distance are 5+ units away");
+            ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.1f, 12f); ImGui.SameLine(); ImGui.TextDisabled("the player's parts sit exactly on the actor position; an NPC you talk to is 1+ units away, so keep this small");
+            ImGui.Text("in first person:"); ImGui.SameLine();
+            ImGui.RadioButton("hide my whole body", ref _fp_body_mode, 0); ImGui.SameLine();
+            ImGui.RadioButton("show my body, hide the head parts", ref _fp_body_mode, 1); ImGui.SameLine();
+            ImGui.RadioButton("show everything", ref _fp_body_mode, 2);
+            ImGui.SetNextItemWidth(160); ImGui.InputText("head parts (indices, e.g. 2,3)", ref _fp_head_parts, 64); ImGui.SameLine();
+            ImGui.TextDisabled($"player parts drawn into the scene last frame: {(_fn_fp_parts != null ? _fn_fp_parts() : 0)}");
+            ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.InputText("player model name", ref _fp_actor, 16); ImGui.SameLine();
             ImGui.TextDisabled(_fp_actor_idx >= 0 ? $"actor {_fp_actor_idx}" : "not found (using actor 0)");
@@ -904,6 +1045,12 @@ public sealed unsafe class FFXVRModule : FhModule {
     }
 
     /// <summary>Numpad nudges and the per-frame push of override + eye-2 state to the native side.</summary>
+    /// First person <-> diorama (the chord and the End key). Entering first person
+    /// goes to true scale; leaving it restores the diorama scale.
+    private void toggle_first_person() {
+        int before = _fp_mode; _fp_mode = _fp_mode == 1 ? 2 : 1;
+        if (before != 1) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; } else _xr_scale = _scale_before_fp;
+    }
     private void push_override_and_stereo() {
         float dt   = ImGui.GetIO().DeltaTime;
         float rot  = 60f  * dt;     // deg/s
@@ -916,12 +1063,34 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.IsKeyDown(ImGuiKey.KeypadSubtract)) _ovr_forward -= move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad9))        _ovr_up      += move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
-        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; if (_fn_gesture_reset != null) _fn_gesture_reset(); }
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
         if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
         if (_fn_turn_set != null) _fn_turn_set(_turn_stick ? 1 : 0, _turn_mode, _turn_snap, _turn_rate, _turn_blink ? 1 : 0);
         if (_fn_move_set != null) _fn_move_set(_move_remap ? 1 : 0, _move_invert ? -1f : 1f);
+        if (_fn_cull_dist_set != null && _fn_cull_dist_get != null && (_fn_cull_dist_get() != 0) != _cull_dist) {
+            _cull_dist_rc = _fn_cull_dist_set(_cull_dist ? 1 : 0);
+            if (_cull_dist_rc != 0) _cull_dist = _fn_cull_dist_get() != 0;      // could not be applied: show the real state
+            if (_patch_on.Length > 4) { _patch_on[2] = _patch_on[3] = _patch_on[4] = _fn_cull_dist_get() != 0; }
+        }
+        if (_fn_msaa_set != null) _fn_msaa_set(_msaa);
+        if (_fn_vrpad_set != null) _fn_vrpad_set(_vrpad ? 1 : 0);
+        if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || save_screen_state() != 0) ? 1 : 0, _imgui_min_draws);
+        if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
+        if (_fn_gesture_poll != null) {
+            float mv0, mv1, mv2; float* mv = stackalloc float[3]; float mul; int act;
+            uint toggles = _fn_gesture_poll(mv, &mul, &act);
+            mv0 = mv[0]; mv1 = mv[1]; mv2 = mv[2];
+            _gest_move_x = mv0; _gest_move_y = mv1; _gest_move_z = mv2; _gest_scale_mul = mul; _gest_active = act;
+            if ((toggles & 1) != 0) { if (_window_open) _chord_toggle_pending = true; else toggle_first_person(); }
+        }
+        if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, parse_mask(_fp_head_parts), _fp_solo);
+        if (_fn_cull_scene_set != null && _fn_cull_scene_get != null && (_fn_cull_scene_get() != 0) != _cull_scene) {
+            _cull_scene_rc = _fn_cull_scene_set(_cull_scene ? 1 : 0);
+            if (_cull_scene_rc != 0) _cull_scene = _fn_cull_scene_get() != 0;
+            if (_patch_on.Length > 6) _patch_on[5] = _patch_on[6] = _fn_cull_scene_get() != 0;
+        }
         if (_fn_turn != null) {
             float step = _turn_rate * ImGui.GetIO().DeltaTime;
             if (ImGui.IsKeyDown(ImGuiKey.Keypad1)) _fn_turn(-step);
@@ -987,11 +1156,38 @@ public sealed unsafe class FFXVRModule : FhModule {
     private readonly int[] _probe_noise = new int[0x880];
     private int _probe_flips = 0, _probe_frames = 0;
     private string _probe_last = "";
+    /// <summary>Every 10 s: which live actors had no draw at their position this frame, with the
+    /// state bytes that decide it (hide byte +180, flag words, model visible byte). Evidence for the
+    /// culling work without anyone pressing a button.</summary>
+    private double _actors_last_log = 0;
+    private void actors_auto_log() {
+        if (_fn_world_positions == null || _fn_safe_read == null) return;
+        double now = ImGui.GetTime(); if (now - _actors_last_log < 10.0) return;
+        Actor* actors = Globals.actors; if (actors == null) return;
+        float* wp = stackalloc float[128 * 3]; int nwp = _fn_world_positions(wp, 128);
+        int live_n = 0, drawn_n = 0; var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 48; i++) {
+            if (!read(actors + i, out Actor a)) break;
+            if (!live(a)) continue;
+            live_n++;
+            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z; bool drawn = false;
+            for (int k = 0; k < nwp; k++) { float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz; if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; } }
+            if (drawn) { drawn_n++; continue; }
+            byte* raw = (byte*)(actors + i); byte hide = 0; uint f194 = 0, f198 = 0; float dist = 0; nint model = 0; byte mv = 0xFF;
+            _fn_safe_read(raw + 0x180, &hide, 1); _fn_safe_read(raw + 0x194, &f194, 4); _fn_safe_read(raw + 0x198, &f198, 4); _fn_safe_read(raw + 0x178, &dist, 4); _fn_safe_read(raw + 0x830, &model, 4);
+            if (model > 0x10000 && model < 0x7FFF0000) _fn_safe_read((void*)(model + 0x14), &mv, 1);
+            bool at_origin = MathF.Abs(a.chr_pos_vec.X) + MathF.Abs(a.chr_pos_vec.Y) + MathF.Abs(a.chr_pos_vec.Z) < 0.01f;
+            sb.Append($"  {i}:{actor_name(a.chr_name)} hide {hide:X2} f194 {f194:X8} f198 {f198:X8} d {dist:F0} mv {mv:X2}{(at_origin ? " (at origin)" : "")}");
+        }
+        _actors_last_log = now;
+        if (live_n > 0) _logger.Info($"actors: live {live_n} drawn {drawn_n} uploads {nwp} | not drawn:{sb}");
+    }
     private void probe_tick() {
+        actors_auto_log();
         if (!_probe_on || _fn_world_positions == null || _fn_safe_read == null) return;
         Actor* actors = Globals.actors; if (actors == null) return;
-        float* wp = stackalloc float[32 * 3];
-        int n = _fn_world_positions(wp, 32);
+        float* wp = stackalloc float[128 * 3];
+        int n = _fn_world_positions(wp, 128);
         _probe_frames++;
         bool sample_noise = (_probe_frames % 8) == 0;
         for (int i = 0; i < 48; i++) {
@@ -1054,17 +1250,33 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void draw_actors() {
         Actor* actors = Globals.actors;
         if (actors == null) { ImGui.Text("no actor table"); return; }
-        ImGui.Text("idx  id   enabled  name          position                 dir     moved   head (highest sub-position)");
+        bool log_it = ImGui.Button("log this table"); ImGui.SameLine();
+        ImGui.TextDisabled("drawn = a draw at the actor's position this frame; hide = byte +180; f194/f198 = flag words; cd = cull distance (+174), d = distance to the game camera (+178); a = alpha (+354); mv = model visible byte");
+        ImGui.Text("idx  id   name          position                 drawn hide  f194      f198     cd      d      a   mv");
+        float* wp = stackalloc float[128 * 3];
+        int nwp = _fn_world_positions != null ? _fn_world_positions(wp, 128) : 0;
+        var sb = log_it ? new System.Text.StringBuilder("actor table:") : null;
         for (int i = 0; i < 48; i++) {
             if (!read(actors + i, out Actor a)) break;
             if (!live(a)) continue;
             float d = Vector4.Distance(a.chr_pos_vec, _actor_prev[i]);
             _actor_prev[i] = a.chr_pos_vec;
             _actor_moved[i] = _actor_moved[i] * 0.95f + d;        // a decaying "how much it moves" score
-            float hy = float.MinValue; Vector4 head = default;
-            for (int k = 0; k < 26; k++) { Vector4 s = a.chr_optpos[k]; if (s.Y > hy && MathF.Abs(s.X) + MathF.Abs(s.Z) > 0.01f) { hy = s.Y; head = s; } }
-            ImGui.Text($"{i,3} {a.chr_id,4}  {a.chr_enabled,3}    {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1}) {a.chr_direction,6:F2} {_actor_moved[i],7:F1}  ({head.X,7:F1},{head.Y,7:F1},{head.Z,7:F1})");
+            byte* raw = (byte*)(actors + i);
+            byte hide = 0; uint f194 = 0, f198 = 0; float cd = 0, dist = 0, alpha = 0; nint model = 0; byte mv = 0xFF;
+            if (_fn_safe_read != null) {
+                _fn_safe_read(raw + 0x180, &hide, 1); _fn_safe_read(raw + 0x194, &f194, 4); _fn_safe_read(raw + 0x198, &f198, 4);
+                _fn_safe_read(raw + 0x174, &cd, 4); _fn_safe_read(raw + 0x178, &dist, 4); _fn_safe_read(raw + 0x354, &alpha, 4);
+                _fn_safe_read(raw + 0x830, &model, 4);
+                if (model > 0x10000 && model < 0x7FFF0000) _fn_safe_read((void*)(model + 0x14), &mv, 1);
+            }
+            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z; bool drawn = false;
+            for (int k = 0; k < nwp; k++) { float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz; if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; } }
+            string line = $"{i,3} {a.chr_id,4}  {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1})  {(drawn ? "yes" : " no"),4}  {hide:X2}  {f194:X8} {f198:X8} {cd,6:F1} {dist,6:F1} {alpha,5:F2}  {mv:X2}";
+            ImGui.Text(line);
+            sb?.Append("\n  ").Append(line);
         }
+        if (sb != null) _logger.Info(sb.ToString());
     }
 
     /// <summary>The player: the enabled field actor whose model name matches (Tidus is c101); index 0
@@ -1073,6 +1285,24 @@ public sealed unsafe class FFXVRModule : FhModule {
     /// <summary>An actor slot that is really in use. Before the field is up the table is uninitialised memory
     /// (0xCDCDCDCD fill), so only a plain 1 counts as enabled and the name pointer must look like one.</summary>
     private static bool live(in Actor a) => a.chr_enabled == 1 && (nint)a.chr_name > 0x10000 && (nint)a.chr_name < 0x7FFF0000;
+    /// <summary>In battle the diorama anchors to the centre of the combatants (party and monsters
+    /// from the battle lists, whoever is in the fight), not the player, who may be swapped out.</summary>
+    private void push_battle_anchor() {
+        if (_fn_anchor_override == null) return;
+        _battle_anchor_n = 0;
+        if (!_battle_anchor) { _fn_anchor_override(0, 0, 0, 0); return; }
+        Btl* btl = Globals.Battle.btl;
+        if (!read(btl, out Btl btl_v) || btl_v.battle_state == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
+        Chr* mons = Globals.Battle.monster_characters; Chr* plys = Globals.Battle.player_characters;
+        float sx = 0, sy = 0, sz = 0; int n = 0;
+        for (int i = 0; i < 16; i++) {
+            if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa) && live(pa)) { sx += pa.chr_pos_vec.X; sy += pa.chr_pos_vec.Y; sz += pa.chr_pos_vec.Z; n++; }
+            if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma) && live(ma) && mc.stat_visible != 0) { sx += ma.chr_pos_vec.X; sy += ma.chr_pos_vec.Y; sz += ma.chr_pos_vec.Z; n++; }
+        }
+        _battle_anchor_n = n;
+        if (n == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
+        _fn_anchor_override(-sx / n, -sy / n, sz / n, 1);   // render space negates X and Y
+    }
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
@@ -1090,8 +1320,21 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (pick < 0 && read(actors, out Actor a0) && live(a0)) pick = 0;
         }
         _fp_actor_idx = pick;
-        if (pick >= 0 && read(actors + pick, out Actor p)) _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);
-        else _fn_player_set(0, 0, 0, 0);
+        if (pick >= 0 && read(actors + pick, out Actor p)) {
+            _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);
+            // The head: the highest sub-position that is not at the origin. Actor
+            // space has Y pointing down (render space negates it), so the head is
+            // the one with the LOWEST actor-space Y.
+            float hy = float.MaxValue; Vector4 head = default; bool have = false;
+            for (int k = 0; k < 26; k++) { Vector4 sp = p.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = sp; have = true; } }
+            // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
+            if (have && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
+            if (_fn_player_head_set != null) _fn_player_head_set(-head.X, -head.Y, head.Z, have ? 1 : 0);
+        }
+        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); }
+        if (_fn_fp_head_set != null) _fn_fp_head_set(_fp_head_anchor, _fp_head_up, _fp_head_smooth, _fp_head_fwd);
+        push_battle_anchor();
+        if (_fn_floor_set != null) _fn_floor_set(_diorama_floor);
     }
 
     private void push_markers() {
@@ -1131,8 +1374,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa))
                     sb.Append($" ply{i}[id={pc.id} chr_id={pc.chr_id}]=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
             }
-            float* wp = stackalloc float[32 * 3];
-            int n = _fn_world_positions(wp, 32);
+            float* wp = stackalloc float[128 * 3];
+            int n = _fn_world_positions(wp, 128);
             sb.Append($"  | rendered skinned world positions ({n}):");
             for (int i = 0; i < n; i++) sb.Append($" ({wp[i*3]:F1},{wp[i*3+1]:F1},{wp[i*3+2]:F1})");
             _logger.Info(sb.ToString());
@@ -1203,7 +1446,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         // render_imgui from inside Present, so this fires exactly once a frame.
         if (_fn_begin_frame != null) _fn_begin_frame();
 
-        if (ImGui.IsKeyPressed(ImGuiKey.F7)) _window_open = !_window_open;
+        if (ImGui.IsKeyPressed(ImGuiKey.F8)) _window_open = !_window_open;
         if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
 
         if (_window_open && _native_init_done) {
@@ -1219,7 +1462,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         else if (_native_init_done) {
             push_override_and_stereo();   // state still flows to the native side with the window hidden
             push_player();
-            if (ImGui.IsKeyPressed(ImGuiKey.End)) { int before = _fp_mode; _fp_mode = _fp_mode == 1 ? 0 : 1; if (before == 0) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; } else _xr_scale = _scale_before_fp; }
+            if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
             if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
             if (_fn_xr_set != null) {
                 bool want = _xr_want;

@@ -226,3 +226,311 @@ Later: a 2.5D diorama. The layer transforms carry a depth (block 11/14 z),
 so each painted layer could be placed as a plane at its depth in front of
 the authored camera, giving parallax between layers and letting the props
 sit among them. Needs the layer order and depth convention from a few rooms.
+
+## Character culling: where the game decides (found 18 Oct 2026)
+
+Characters are not culled by the render-command interpreter (0x615550; NOPing
+its two draw-model skips changed nothing) and not by the camera FOV fields
+(0x01137000 blocks; scaling them widens nothing we could see). The decision is
+in `Ch_DrawMain` (0x82ED50, the actor draw walk the FFX-60fps mod also hooks):
+
+- loop 1 skips an actor when `chr_enabled` (+2) is 0, byte +0x180 is non-zero
+  or bit 0x20 of the dword at +0x198 is set (0x827700 sets that bit when the
+  actor's model is released: a permanent hide, not a per-frame cull);
+- loop 3 calls `Ch_VisibleTest` (0x82E220) per actor, then hides the model
+  (`0x63C390(model, 0)`) when it returns non-zero, when +0x354 (the actor's
+  alpha) is 0, or when byte +0x180 is non-zero; otherwise `0x63C390(model, 1)`
+  and the draw submit `0x63BB30(model, actor, scale...)`.
+
+`Ch_VisibleTest(actor)` clears bits 0x08/0x20 of +0x180, reads the camera
+position (`0x7BD470(1, &pos)`), stores the actor's distance to it at +0x178
+and returns 1 (hidden) when +0x180 is already set, when the model is not
+loaded (bit 0x800 of +0x194 and `0x63B230(model)` == 0 -> bit 0x08), or when
+the distance exceeds the actor's own cull distance at +0x174 (-> bit 0x20).
++0x174 is copied from the actor template (0x828758) and set by a script
+setter (0x82B171). `0x641CC0()` non-zero disables the distance test entirely
+(a battle/menu state). One map (id 0x24F9) tests a scaled distance instead.
+
+The distance patches alone changed nothing: the actor table (Debug, with the
+new state columns) showed every hidden NPC with hide byte 0x08, not 0x20. Bit
+0x08 is the other branch of `Ch_VisibleTest`: `0x63B230(model)` walks the
+model's parts and asks the renderer (`0x6603C0`, this = `0xCCB9D8`) whether
+the part's scene node (part+0x1C, linked/unlinked by `0x66D910`) intersects
+the game camera's frustum (`0x663CC0(node, renderer->[0xDC]+0x74)` ->
+`0x663A30` bounding test, after the node's transform). No part in view ->
+bit 0x08 -> hidden. The same `0x663CC0` is what the scene renderer runs on its
+two node lists (0x652D35, 0x652EBC) before submitting (`0x5B9A70`): that is
+the geometry cull. `0x6603C0` skips the test when renderer+0x10D8C is set (a
+debug camera mode that also swaps the camera, so not usable as a switch).
+
+Patches (verified bytes, restorable; main window):
+- "keep characters drawn": 0x82E32A `jne`->`jmp` and 0x82E378 `je`->nop (the
+  distance cull), 0x6603D1 `jne`->`jmp` (0x6603C0 always answers "visible").
+- "keep all geometry drawn": 0x663CC0 entry -> `mov al,1; ret 4`, so every
+  node in the scene lists is submitted. Costs GPU time (everything behind the
+  authored camera is drawn too); the PC has the budget, and the headset needs
+  it since the eyes look where the authored camera does not.
+
+Second pass (19 Oct 2026, static, after the first set changed nothing visible):
+the engine (Phyre, the renderer object at 0xCCB9D8) runs its bounding test in
+more places than the two node lists. The "frustum" is a 4x4 matrix at
+camera+0x74 (the camera lives at renderer+0xDC; a second camera at +0x654),
+and the test proper is `0x663A30(node, matrix)` (thiscall, ret 4), which
+transforms the node's bounds (node+0xC transform, 0x4CA360) and answers in/out.
+Every caller found:
+- 0x663CC0 (the wrapper patched above): node lists 1 and 2 (0x652D35,
+  0x652EBC) and the model parts via 0x6603C0;
+- 0x6505D6: a third node list (renderer+0x3874, count +0x386C) tested against
+  the second camera and submitted with 0x5B9A90 - probably the dynamic /
+  skinned objects, which would explain why characters stayed hidden with the
+  first set on;
+- 0x6C8236 / 0x6C8294 / 0x6C83B0: an "anything visible?" aggregate over a
+  node's parts (flags on the stack), run before the expensive work;
+- 0x9F3275: another scene traversal (lights or particles).
+No other reader of the frustum matrix exists in .text (the two remaining
+users, 0x6527A1 and 0x65E6ED, only copy it with 0x453340 for the sites above).
+So the one switch that covers everything is 0x663A30 itself: entry ->
+`mov al,1; ret 4`. "keep all geometry drawn" now applies 0x663CC0 and 0x663A30
+as a set. What this cannot reach: anything the game never registers in the
+scene at all (the field system at 0x1876E00 decides what it hands to the
+engine; nothing camera-dependent was found in its draw entry 0x90BF10, which
+builds light / fog / material packets, and the actor walk has no other hide
+path than +0x180 / +0x198).
+
+The automatic actor log (module log, every 10 s: live / drawn counts and the
+state of every actor without a draw) and the GPU time in the `perf:` line are
+there to settle what remains with evidence rather than more reading.
+
+## First person: showing the body, hiding the head (19 Oct 2026)
+
+The player's parts are the skinned draws whose world translation (+640 of
+the 1872 B+ buffer) sits on the actor position; nothing else is that close
+(an NPC in conversation is 1+ units away), so the hide radius is 0.75 now,
+not 3 - the old value also caught NPCs at talking distance. Within that match
+the draws come in the game's part order, stable from frame to frame, so a
+part is addressed by its index among the player's draws into the scene
+target (shadow / reflection passes are not counted). Three modes: hide the
+whole body (every pass, as before), show the body and hide the parts listed
+as the head, or show everything. "show only part #" (works in third person
+too) is the finder: step through the indices, note which ones are the head,
+hair and face, and type them into the head list. The list is saved per ini,
+not per model yet; Tidus is the only first-person model so far. Tidus (c101):
+parts 0, 1, 2, 3 are the hair, 9 the face/head - the default is `0,1,2,3,9`
+with "show my body, hide the head parts" on.
+
+Later: the arms follow the Quest controllers (see "First person: the
+player's body, arms and hands").
+
+### Eyes on the head bone (19 Oct 2026)
+
+With the body visible, an eye fixed at actor origin + 18 units shows the
+neck and shoulders sliding out under the camera whenever the run animation
+tips the torso forward. The eye is now anchored to the head bone - the
+highest of the actor's 26 sub-positions (`chr_optpos`), passed each frame in
+render space - plus an offset (default 2 units up), smoothed with a per-frame
+blend (default 0.35) so the run cycle's bob does not reach the headset. This
+also makes the swimming pose right by construction (the eye follows the head
+down to the surface). The old fixed eye height remains as the fallback and as
+an option.
+
+Second pass: the head sub-position is the neck joint (back of the skull), so
+the eye also goes a head-length forward of it (default 1.5 units), along the
+lean - the horizontal part of the head offset from the actor origin - or the
+heading when upright. The offset, not the absolute position, is what gets
+smoothed, so the eye never trails a sprint. The movement direction was tried
+first and shifted the eye sideways: not worth chasing why.
+
+Swimming, resolved the easy way (19 Oct 2026, later): with the body hidden
+the forward lean no longer matters, so the eye takes only the head bone's
+HEIGHT (smoothed offset from the actor origin + the up offset) and keeps the
+actor origin horizontally. Prone in the water puts the eye at the surface;
+crouches and kneels follow too; nothing is ever in front of the camera.
+"eye height" in the overlay: fixed / head bone height (default) / full head
+bone (the lean experiment, kept for the body view later).
+
+Outcome of the body view (19 Oct 2026): parked. With the body shown and the eye on the head
+bone, the run lean still left part of the neck in view at some angles, and
+the tuning was not converging. Default is back to hiding the whole body with
+the fixed eye height; the part map (hair 0-3, face 9), the head-bone anchor
+and the offsets stay in the overlay for when the controller-driven arms come
+(generic arms and hands drawn by the mod, not the game's model - see "First
+person: the player's body, arms and hands").
+
+## Quest controllers (phase 1, 19 Oct 2026)
+
+The game reads pads through one import, `XInputGetState`, which the mod
+already owns (the left-stick remap). So the controllers come in through the
+OpenXR action system (`ffxvr_xr.cpp`: one action set, both hand subaction
+paths, bindings for `oculus/touch_controller` with `khr/simple_controller` as
+the fallback, synced right after `xrWaitFrame` at the frame's display time)
+and are turned into the XInput state the game asks for, merged with a
+physical pad when one is present (buttons OR, the stick with more deflection
+wins, triggers max). The right controller's menu button is the system button
+and never reaches applications, so Start is the left menu button.
+
+Default map: A/B/X/Y as labelled, left stick = movement (the first-person
+remap still applies), right stick = smooth turn (and whatever the game does
+with it), triggers = LT/RT, grips = LB/RB, left menu = Start, left stick
+click = Select, right stick click = right thumb. Grip and aim poses and
+haptics are read/available for phase 2 (world grab, Demeo-style scale and
+rotate, mode chords - `g_vrpad_suppress` already blanks the game's view of
+the pad while a gesture is in progress) and phase 3 (hands and arms).
+
+Virtual Desktop's own gamepad emulation must stay off, or the sticks arrive
+twice. The overlay shows the live state of every action and the bound
+profile per hand; "buzz" buttons test haptics.
+
+### Phase 2: chords and the world grab (19 Oct 2026)
+
+- Both stick clicks (press edge): first person on / off, with the same scale
+  save / restore as the End key. Haptic tick on both hands.
+- Seat view, gestures on: the grips are the grab and are not forwarded as
+  LB/RB (first person keeps them). One grip pans: the world follows the hand,
+  i.e. the seat offset moves by minus the hand's motion in the heading frame,
+  scaled to units. Two grips: pan with the midpoint, zoom with the distance
+  (hands apart = fewer units per metre = bigger world; floor 5, ceiling
+  2000), rotate with the angle between the hands about the midpoint (yaw
+  only; hands clockwise from above = world clockwise = seat yaw grows). Zoom
+  and rotate solve for the offset that keeps the world point under the
+  midpoint fixed, head position included when "head position (lean)" is on.
+- The results are `g_gest_move` (added to the manual numpad offset),
+  `g_gest_scale` (multiplies the overlay's world scale) and the seat yaw
+  itself; numpad 5 / "reset grab" clear the first two. While a grip is held
+  the game sees no pad input at all (`g_vrpad_suppress`).
+- Poses are in the runtime's reference space and go through the same
+  recentre transform as the head (`hand_to_ref`).
+
+Revisions (same day): the chord is right grip + right stick click (both
+stick clicks is Virtual Desktop's performance overlay). Two hands also tilt:
+the mean pitch of the two grip poses' forward axes, wrists rolling together,
+changes the seat pitch about the midpoint (far edge of the "tray" up = the
+seat looks down at it; "tilt gain" slider, negative inverts), solved together
+with the yaw so the midpoint stays put. First person ignores the gesture
+scale multiplier: it is always true scale; the diorama scale comes back
+with the seat view.
+
+## UI panel: double resolve on the boat (19 Oct 2026)
+
+On the boat to Kilika the subtitles and dialogue choices came back in double
+vision. The census showed why: the scene target is resolved once after the
+depth clear that opens the UI pass and before any UI draw, then again after
+the UI draws (81 of them). The UI state machine took the first resolve as
+the end of the pass, so the real UI draws were re-issued as scene. Now a
+resolve ends the pass only when UI draws have happened; an earlier one just
+becomes the newer base (the pass reopens at the next depth clear), and once
+the pass is done, later resolves leave it done. The `ui:` diag line (every
+10 s) reports frames with / without a captured pass and the resolve / depth
+clear counts the detector saw, so this class of problem shows up without a
+census.
+
+## The diorama is the follow view (19 Oct 2026)
+
+The authored-camera seat latched its heading across cuts but kept the
+camera's position, so every cut teleported the viewer; and the authored
+cameras often start nearly side-on. The diorama is now the follow mode
+(`fp_mode 2`): anchored to the player's position (smoothed, 0.5 per frame,
+since the actor table moves at 30 Hz under 60 Hz rendering), heading latched
+and turned by the stick (which orbits the seat around the player, as the
+offset lives in the heading frame), pitch from the tilt gesture (starts 20
+degrees down), offset from the grab gestures (starts behind and above:
+follow distance / height). Camera cuts are ignored entirely, as in first
+person. The chord and End toggle first person <-> diorama; the authored seat
+remains as the third radio button. The grab math is shared: yaw / pitch /
+base offset are taken from whichever mode is active.
+
+## Pending: Re-Remastered texture pack (noted 19 Oct 2026)
+
+Nexus mod 244, FFX **Medium** (2.5x) archive chosen; downloading on a free
+account (hours). When it lands: `tools\install-texture-pack.ps1 -Archive
+<the .7z> -Compress`, launch, check `Fahrenheit.Runtime.FhFileLoaderModule.log`
+for "replaces file" lines and the `perf:` vram figure. No EFL DLL, no UPX.
+
+### Battle: the diorama centres on the fight (19 Oct 2026)
+
+In battle the party leader may be swapped out, so the diorama anchors to the
+centre of all combatants (the battle's player and monster lists, actors with
+a live position; monsters only while visible), passed from the managed side
+as an anchor override and smoothed slowly (0.05 per frame) so the table is
+near-static. Battle start and end snap the anchor. First person is left as it
+is (watching from where Tidus stands, even when he is out of the fight, is
+part of the fun).
+
+### Diorama floor (19 Oct 2026)
+
+No terrain collision is available (the walkmesh pointers in Fahrenheit's
+Globals.Map are still commented out), so the floor is relative to the
+anchor: the final eye position is clamped to at least N units (default 8)
+above the player's feet / the fight's centre, except while a grip is held, so
+a deliberate drag below ground works and the clamp returns on release. 0
+turns it off. Hills rising behind the player can still put the seat inside
+terrain; that needs the walkmesh.
+
+## Pending: the follow view as an adjustable third person (noted 19 Oct 2026)
+
+The diorama (follow) view wants to grow into a proper adjustable third-person
+mode: a blend between first person and the tabletop - close behind the
+player at true-ish scale, orbit / distance / height adjustable, with the
+floor and (eventually) walkmesh collision. Revisit after the save screen and
+the texture pack.
+
+## The save screen, and ImGui in the headset (19 Oct 2026)
+
+The save screen was black in the headset because it is not the game's: the
+Fahrenheit runtime replaces it with its own ImGui window (FhSaveUiX), and
+Fahrenheit renders all ImGui - its menus and our overlay - into the
+backbuffer after calling the modules' render_imgui, i.e. after our frame
+capture, inside the same Present. The game draws nothing meanwhile, so the
+virtual screen showed its black backbuffer; the menu only ever existed on
+the monitor (the captures: the final backbuffer image is all zeros).
+
+Fix: the draws into the backbuffer during the "overlay phase" (between our
+hook and the game's first clear) are re-issued into an ImGui-layer texture,
+the same way the game's UI pass is captured (alpha-blended, no depth), and
+submitted as a third composition layer - a head-locked quad at 95% of the UI
+panel's distance, shown with the virtual screen too. One frame of latency.
+Side effect, welcome: the mod's own overlay is now visible in the headset
+(F8 hides it; F7 is Fahrenheit's own mod-settings menu, which takes input from the game while open). Checkbox "Fahrenheit menus (save screen) and this overlay in
+the headset", ini `imgui_layer`.
+
+Follow-ups (19 Oct 2026): with the overlay hidden a sliver of ImGui still
+reached the headset (Fahrenheit draws small things of its own), so the layer
+is shown only when the overlay window is open, the save screen is open
+(state word at 0x8CB994: 0 closed / 1 opening / 2 open) or at least 12 draws
+were made (a real menu); the `ui:` line logs the layer's draw count. Pending:
+the opening cutscene's credits were in double vision - the only place the UI
+pass is missed since the boat fix; needs a census at the intro.
+
+## Eye 2 blank: twin reuse ignored the sample count (19 Oct 2026)
+
+After the ImGui-layer build eye 2 showed only its clear colour. The census
+showed the mirrored clear of the 4x scene target landing on a non-MSAA twin:
+the twin lookup reused an existing twin on width / height / format alone,
+so when the game freed a plain 3840x2160 texture and allocated the MSAA
+scene target at the same address, the 1-sample twin was kept and every eye-2
+draw (colour twin 1 sample, depth twin 4) was refused by D3D11. Latent since
+the twins were written; the extra ImGui-layer texture changed the allocation
+pattern enough to trigger it. The reuse check now compares sample count,
+mip count and bind flags too.
+
+## Pending: arms and hands on the controllers (phase 3 plan, 19 Oct 2026)
+
+The game splits the model into parts by material and PS2 bone budget, so an
+arm is spread across several parts and a part can hold torso triangles too -
+hiding parts never isolates an arm (seen with the part finder). Drive BONES,
+not parts: replace the forearm and hand matrices in every part's bone palette
+with ones built from the controller grip pose; every arm triangle in every
+part follows the hand, the rest stays as animated. Steps:
+1. Palette layout in the 1872+ byte buffer (bones from about +960; size and
+   row order), and the per-part slot -> skeleton bone mapping (read from the
+   part data, or inferred each frame by matching slot translations to the
+   actor's sub-positions in `chr_optpos`, which include hands and elbows).
+   Start with a capture of Tidus's buffers in a known pose.
+2. Arm chain: hand from the grip pose (already in game space), elbow from
+   the shoulder sub-position + arm length, forearm aimed at the hand (two-bone
+   IK, floating-forearm style).
+3. Write the matrices into the buffers we already rewrite per frame.
+Plan B if the palette stays opaque: the ripped PS2 Tidus OBJ (user's local
+folder; 4,877 verts, T-pose, parts by material; cut forearm+hand by vertex x
+beyond the elbow, ~500 tris per arm, PS2 textures) drawn by our own shader at
+the grip poses, scaled to the 18-unit Tidus. Square Enix assets: never in the
+repo; loaded from a user folder.

@@ -49,6 +49,8 @@ static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
 static void g_plain_srvs_forget(ID3D11Texture2D* t);   // SRV cache, defined below
 static uint32_t g_plain_srvs_count();
 
+static void gpu_timing_start_span();   // GPU-time span starts at the game's first clear (defined with perf_tick)
+static void gpu_timing_end_span();     // ... and closes at Present, before the runtime wait
 namespace {
 
 // ID3D11DeviceContext vtable indices.
@@ -100,6 +102,16 @@ PFN_Map                  g_orig_map            = nullptr;
 PFN_Unmap                g_orig_unmap          = nullptr;
 PFN_UpdateSubresource    g_orig_updatesub      = nullptr;
 PFN_CreateBuffer         g_orig_createbuffer   = nullptr;
+typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateTexture2D)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
+PFN_CreateTexture2D      g_orig_createtex2d    = nullptr;
+// MSAA override (VR): the game's scene colour/depth targets are created at
+// 8 samples (GameSetting.ini's MSAA key is ignored on the Fahrenheit launch
+// path). When the game (re)creates a large multisampled texture, the sample
+// count is replaced by g_msaa_override (2 or 4; 0 = leave alone). Never 1: the
+// game's ResolveSubresource calls need a multisampled source.
+int      g_msaa_override = 0;
+uint32_t g_msaa_seen = 0, g_msaa_changed = 0;   // large MS textures created since init / of those, overridden
+uint32_t g_msaa_last_w = 0, g_msaa_last_h = 0, g_msaa_last_n = 0;
 
 // ---------------------------------------------------------------- state
 
@@ -407,7 +419,7 @@ struct Twin {
     ID3D11Texture2D* game; ID3D11Texture2D* tex;
     ID3D11RenderTargetView* rtv; ID3D11DepthStencilView* dsv;
     std::map<ID3D11ShaderResourceView*, ID3D11ShaderResourceView*> srvs;   // game SRV -> twin SRV
-    UINT w, h; DXGI_FORMAT fmt;
+    UINT w, h; DXGI_FORMAT fmt; UINT samples, mips, bind;                 // the game texture's description the twin was made for
     uint32_t last_used;                                                   // g_frames at the last lookup
 };
 std::map<ID3D11Texture2D*, Twin> g_twins;
@@ -445,8 +457,9 @@ ID3D11DepthStencilView* g_cur_dsv    = nullptr;
 // World positions of skinned objects this frame (translation column of the
 // world matrix at +640 in the 1872 B+ family), for comparing against the
 // game's own actor positions.
-float g_world_live[32][3];   int g_world_live_n = 0;
-float g_world_report[32][3]; int g_world_report_n = 0;
+constexpr int k_world_max = 128;
+float g_world_live[k_world_max][3];   int g_world_live_n = 0;
+float g_world_report[k_world_max][3]; int g_world_report_n = 0;
 static void census_write(UINT size);   // defined with the census code below
 
 // Memory-scan results (see ffxvr_memscan below).
@@ -550,11 +563,35 @@ PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = fa
 int   g_fp_mode = 0;                           // 0 off, 1 first person, 2 follow
 float g_fp_pos[3] = {};                        // player position, render space
 bool  g_fp_have_pos = false;
-float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units)
+float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units), when not anchored to the head
+// Eye anchored to the head bone (the highest of the actor's sub-positions):
+// the eye leans and bobs with the body, so the neck stays below the view
+// when the run animation tips the torso forward. Smoothed to take the bob out.
+int   g_fp_head_anchor = 1; float g_fp_head_up = 1.5f;   // 0 fixed eye height, 1 the head bone's HEIGHT only (swimming, crouching; no lean), 2 the full head bone
+float g_fp_head_smooth = 0.35f;   // per-frame blend toward the raw head position (1 = raw)
+// The head bone's origin is the neck joint at the back of the skull; the eyes
+// are a head-length forward of it. The offset goes along the movement
+// direction while moving (that is where the body leans), else the heading.
+float g_fp_head_fwd = 1.5f; float g_fp_move_dir[3] = {}; bool g_fp_move_dir_valid = false;
+float g_fp_head[3] = {}; bool g_fp_have_head = false; float g_fp_head_s[3] = {}; bool g_fp_head_s_valid = false;
 float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
 float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
-bool  g_fp_hide_body = true; float g_fp_hide_radius = 3.f;   // the player's own parts sit on the actor position; NPCs you talk to are 5+ units off
+bool  g_fp_hide_body = true; float g_fp_hide_radius = 0.75f;  // the player's own parts sit on the actor position; an NPC you talk to is 1+ units off
 uint32_t g_fp_hidden_draws = 0;
+// Which of the player's parts to hide in first person. The player's skinned
+// draws (world translation on the actor position) come in the game's part
+// order, stable from frame to frame, so a part is addressed by its index among
+// those draws into the scene target. Mode 0 hides every player draw (also in
+// shadow / reflection passes); mode 1 hides only the parts in g_fp_head_mask
+// (the head, so the body stays visible below the eyes); mode 2 hides nothing.
+// g_fp_solo >= 0 shows only that part (to find the head's indices by eye).
+int      g_fp_body_mode = 0; uint32_t g_fp_head_mask = 0; int g_fp_solo = -1;
+// While the actor moves, the FFX-60fps mod draws the model at a position
+// interpolated between logic ticks, up to one step away from the actor's
+// stored position: the match radius grows with the last step and shrinks
+// back a few frames after the actor stops (when NPCs are close, you stand).
+float    g_fp_step = 0.f; int g_fp_still_frames = 0;
+uint32_t g_fp_part_idx = 0, g_fp_parts_last = 0;
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
 // eyes, 1 eye 1 only, 2 hide in both.
@@ -629,7 +666,7 @@ static void cam_blocks_tick() {
             g_camblk_ours[vp][0] = g_camblk_game[vp][0] * g_cull_scale; g_camblk_ours[vp][1] = g_camblk_game[vp][1] * g_cull_scale;
             f[4] = g_camblk_ours[vp][0]; f[7] = g_camblk_ours[vp][1]; g_cull_writes++;
         }
-        else if (g_cull_mode != 1 && writable && g_camblk_ours[vp][0] != 0.f && f[4] == g_camblk_ours[vp][0]) {   // switched off: hand the game's values back
+        else if (writable && g_camblk_ours[vp][0] != 0.f && f[4] == g_camblk_ours[vp][0]) {   // switched off (or scale 1): hand the game's values back
             f[4] = g_camblk_game[vp][0]; f[7] = g_camblk_game[vp][1]; g_camblk_ours[vp][0] = g_camblk_ours[vp][1] = 0.f;
         }
     }
@@ -656,10 +693,18 @@ float g_ui_dist = 1.5f, g_ui_width = 1.6f;
 bool  g_markers_3d = true;             // our battle markers as 3D geometry in the eye images
 ID3D11Texture2D* g_scene_resolved = nullptr;    // the latest resolve destination of the scene target (game's)
 ID3D11Texture2D* g_ui_tex = nullptr; ID3D11RenderTargetView* g_ui_rtv = nullptr;
+// The ImGui layer: everything drawn into the backbuffer between our frame
+// hook and the real Present (Fahrenheit's own menus such as the save screen,
+// and our overlay) is re-issued into this texture and shown on a head-locked
+// quad. Cleared after each submit; one frame of latency.
+ID3D11Texture2D* g_imgui_tex = nullptr; ID3D11RenderTargetView* g_imgui_rtv = nullptr;
+bool g_imgui_draw_now = false; bool g_imgui_layer = true; uint32_t g_imgui_draws_frame = 0, g_imgui_draws_last = 0;
+bool g_imgui_force = false; uint32_t g_imgui_min_draws = 12;   // shown when the managed side says so (overlay open, save screen) or when there is a real menu's worth of draws
 ID3D11Texture2D* g_eye1_final = nullptr; ID3D11RenderTargetView* g_eye1_final_rtv = nullptr;
 ID3D11Texture2D* g_eye2_final = nullptr; ID3D11RenderTargetView* g_eye2_final_rtv = nullptr;
 uint32_t g_ui_pass_frame = 0;                   // frame in which a UI pass completed
 uint32_t g_ui_draws_frame = 0, g_ui_draws_report = 0;
+uint32_t g_ui_frames_with_pass = 0, g_ui_frames_3d = 0, g_ui_resolves_frame = 0, g_ui_depth_clears_frame = 0; bool g_ui_last_frame_had_pass = false;   // 10 s tallies for the ui: diag line
 ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
 bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
@@ -681,6 +726,18 @@ static void quat_rotate(const float q[4], const float v[3], float o[3]) {
     for (int i = 0; i < 3; ++i) o[i] = M[i*3+0]*v[0] + M[i*3+1]*v[1] + M[i*3+2]*v[2];
 }
 
+static void seat_frame(float yaw, float pitch, float Rh[9]) {   // rows: right, up, back - the seat's heading frame
+    const float fy[3] = { -sinf(yaw), 0.f, -cosf(yaw) };
+    const float right[3] = { -fy[2], 0.f, fy[0] };
+    float R[9] = { right[0], right[1], right[2],  0.f, 1.f, 0.f,  -fy[0], -fy[1], -fy[2] };
+    if (fabsf(pitch) > 1e-4f) {
+        const float cp = cosf(pitch), sp = sinf(pitch); float nu[3], nb[3];
+        for (int k = 0; k < 3; ++k) { nu[k] = R[3+k] * cp + R[6+k] * sp; nb[k] = -R[3+k] * sp + R[6+k] * cp; }
+        for (int k = 0; k < 3; ++k) { R[3+k] = nu[k]; R[6+k] = nb[k]; }
+    }
+    memcpy(Rh, R, sizeof(R));
+}
+static void gesture_tick();
 /// Takes the located poses for the frame about to render and derives the
 /// relative pose the override uses.
 static void xr_apply_poses(const XrFrameOut& f) {
@@ -708,8 +765,65 @@ static void xr_apply_poses(const XrFrameOut& f) {
     g_xr_fov[0] = f.fov[0]; g_xr_fov[1] = f.fov[1];
 }
 
+// Quest controllers as the gamepad: the OpenXR action state, synced once a
+// frame, becomes the XInput state the game asks for (merged with a physical
+// pad if one is connected: buttons OR, the stick with more deflection wins).
+bool     g_vrpad_enabled = true;
+XrInput  g_vrpad = {};                       // copied from the XR layer each frame
+uint32_t g_vrpad_frames = 0, g_vrpad_packet = 1;
+bool     g_vrpad_suppress = false;           // a mod gesture is using the controllers: the game sees nothing this frame
+// Diorama gestures (seat view, not first person): a grip grabs the world -
+// one hand pans, two hands pan with the midpoint, rotate with the angle
+// between them and zoom with their distance, all about the midpoint. The
+// results are an extra seat offset (heading frame, units), a yaw added to the
+// seat, and a multiplier on the world scale. Chord: both stick clicks =
+// toggle first person (counted; the managed side performs the toggle).
+bool     g_gest_enabled = true;
+float    g_gest_move[3] = {};                // right, up, forward (units), added to the manual seat offset
+float    g_gest_scale = 1.f;                 // multiplies g_xr_scale
+float    g_gest_pitch = 0.f;                 // diorama (follow) view: the seat's pitch, set by the tilt gesture (radians, + looks up)
+// Diorama anchor: the player's position smoothed over a couple of frames,
+// since the actor table moves at the logic rate (30 Hz) under a 60 Hz render.
+float    g_fp_anchor[3] = {}; bool g_fp_anchor_valid = false; float g_fp_anchor_k = 0.5f;
+// Battle: the diorama anchors to the centre of the combatants (set by the
+// managed side from the battle lists), smoothed slowly so it is near-static.
+float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was = false; float g_anchor_ovr_k = 0.05f;
+// Diorama floor: the eye never goes below this many units above the anchor
+// (the player's feet / the fight's centre), except while a grip is held so a
+// deliberate drag below is possible; 0 = off.
+float    g_diorama_floor = 8.f;
+bool     g_gest_grab[2] = { false, false };  // grip held last frame
+float    g_gest_last_p[2][3] = {};           // hand positions (reference space, m) last frame
+float    g_gest_last_tilt = 0.f;             // mean grip pitch last frame (two-hand tilt)
+float    g_gest_tilt_gain = 1.f;             // seat pitch change per radian of wrist roll (negative inverts)
+uint32_t g_gest_toggle_fp = 0;               // chord events, read and cleared by the managed side
+bool     g_gest_chord_down = false;
+bool     g_gest_active = false;              // a grab is in progress this frame (overlay)
+static SHORT stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return (SHORT)(v * 32767.f); }
+static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
+    const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
+    if (!had_pad) memset(st, 0, sizeof(*st));
+    XINPUT_GAMEPAD& g = st->Gamepad;
+    if (g_vrpad_suppress) { if (!had_pad) st->dwPacketNumber = g_vrpad_packet; return; }
+    WORD b = 0;
+    if (R.primary) b |= XINPUT_GAMEPAD_A;  if (R.secondary) b |= XINPUT_GAMEPAD_B;
+    if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
+    if (L.squeeze > 0.5f) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (R.squeeze > 0.5f) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+    if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
+    g.wButtons |= b;
+    const BYTE lt = (BYTE)(L.trigger * 255.f), rt = (BYTE)(R.trigger * 255.f);
+    if (lt > g.bLeftTrigger) g.bLeftTrigger = lt; if (rt > g.bRightTrigger) g.bRightTrigger = rt;
+    auto merge = [](SHORT& x, SHORT& y, const float* v) {
+        const float m_pad = (float)x * (float)x + (float)y * (float)y, m_vr = (v[0]*v[0] + v[1]*v[1]) * 32767.f * 32767.f;
+        if (m_vr > m_pad) { x = stick_s(v[0]); y = stick_s(v[1]); }
+    };
+    merge(g.sThumbLX, g.sThumbLY, L.stick); merge(g.sThumbRX, g.sThumbRY, R.stick);
+    st->dwPacketNumber = g_vrpad_packet;
+}
 static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
-    const DWORD r = g_xi_orig(idx, st);
+    DWORD r = g_xi_orig(idx, st);
+    const bool vr = g_vrpad_enabled && g_xr_active && g_vrpad.ready && idx == 0 && st != nullptr;
+    if (vr) { vrpad_apply(st, r == ERROR_SUCCESS); r = ERROR_SUCCESS; }
     if (r == ERROR_SUCCESS && st) {
         g_xi_hook_calls++;
         if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && g_move_delta != 0.f) {
@@ -722,6 +836,106 @@ static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
         }
     }
     return r;
+}
+
+/// Hand position relative to the recentred reference, like the head.
+static void hand_to_ref(const float* p, float* out) {
+    const float ref_inv[4] = { -g_xr_ref_q[0], -g_xr_ref_q[1], -g_xr_ref_q[2], g_xr_ref_q[3] };
+    const float dp[3] = { p[0] - g_xr_ref_p[0], p[1] - g_xr_ref_p[1], p[2] - g_xr_ref_p[2] };
+    quat_rotate(ref_inv, dp, out);
+}
+/// Pitch of a grip's forward axis (-Z of the grip pose) above the horizon, radians.
+static float grip_pitch(const float* q) {
+    const float ref_inv[4] = { -g_xr_ref_q[0], -g_xr_ref_q[1], -g_xr_ref_q[2], g_xr_ref_q[3] };
+    float qr[4]; quat_mul(ref_inv, q, qr);
+    const float fwd[3] = { 0.f, 0.f, -1.f }; float d[3]; quat_rotate(qr, fwd, d);
+    return asinf(fmaxf(-1.f, fminf(1.f, d[1])));
+}
+static void gesture_tick() {
+    g_vrpad_suppress = false; g_gest_active = false;
+    if (!g_vrpad.ready || !g_vrpad_enabled || !g_xr_active) { g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = false; return; }
+    const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
+    // Chord: right grip + right stick click -> toggle first person (on the press edge).
+    // (Both stick clicks is Virtual Desktop's own performance overlay.)
+    const bool chord = R.squeeze > 0.5f && R.stick_click;
+    if (chord && !g_gest_chord_down) { g_gest_toggle_fp++; xr_haptic(0, 0.6f, 0.08f); xr_haptic(1, 0.6f, 0.08f); }
+    g_gest_chord_down = chord;
+    if (chord) g_vrpad_suppress = true;
+    // Grabs: seat view only, gestures on, both poses needed for two hands.
+    const bool diorama = g_fp_mode == 2 && g_fp_yaw_latched && !g_ovr_suspend;
+    const bool seat = (g_xr_seat && g_seat_latched && g_fp_mode == 0 && !g_ovr_suspend) || diorama;
+    float& yaw_ref = diorama ? g_fp_yaw : g_seat_yaw;
+    float& pitch_ref = diorama ? g_gest_pitch : g_seat_pitch;
+    const float ovr[3] = { diorama ? 0.f : g_ovr_move[0], diorama ? 0.f : g_ovr_move[1], diorama ? 0.f : g_ovr_move[2] };
+    bool grab[2] = { seat && g_gest_enabled && L.squeeze > 0.5f && L.grip_valid, seat && g_gest_enabled && R.squeeze > 0.5f && R.grip_valid };
+    float hp[2][3]; hand_to_ref(L.grip_p, hp[0]); hand_to_ref(R.grip_p, hp[1]);
+    const bool was[2] = { g_gest_grab[0], g_gest_grab[1] };
+    const int n = (grab[0] ? 1 : 0) + (grab[1] ? 1 : 0), nwas = (was[0] ? 1 : 0) + (was[1] ? 1 : 0);
+    if (n > 0) { g_gest_active = true; g_vrpad_suppress = true; }
+    if (seat && g_gest_enabled && (L.squeeze > 0.5f || R.squeeze > 0.5f)) g_vrpad_suppress = true;   // the grips are the grab, not LB/RB, in the seat
+    for (int h = 0; h < 2; ++h) if (grab[h] && !was[h]) xr_haptic(h, 0.3f, 0.04f);
+    if (n == 2 && nwas < 2) g_gest_last_tilt = (grip_pitch(L.grip_q) + grip_pitch(R.grip_q)) * 0.5f;
+    if (n > 0 && n == nwas && grab[0] == was[0] && grab[1] == was[1]) {
+        const float sc = g_xr_scale * g_gest_scale;
+        float Rb[9]; seat_frame(yaw_ref, pitch_ref, Rb);
+        // Reference-space vectors (x right, y up, z back) -> the seat offset convention (right, up, forward).
+        auto to_mv = [](const float* v, float* mv) { mv[0] = v[0]; mv[1] = v[1]; mv[2] = -v[2]; };
+        if (n == 1) {
+            const int h = grab[0] ? 0 : 1;
+            const float d[3] = { hp[h][0] - g_gest_last_p[h][0], hp[h][1] - g_gest_last_p[h][1], hp[h][2] - g_gest_last_p[h][2] };
+            float dm[3]; to_mv(d, dm);                              // the world follows the hand: the seat moves the other way
+            for (int i = 0; i < 3; ++i) g_gest_move[i] -= dm[i] * sc;
+        }
+        else {
+            const float m0[3] = { (g_gest_last_p[0][0] + g_gest_last_p[1][0]) * 0.5f, (g_gest_last_p[0][1] + g_gest_last_p[1][1]) * 0.5f, (g_gest_last_p[0][2] + g_gest_last_p[1][2]) * 0.5f };
+            const float m1[3] = { (hp[0][0] + hp[1][0]) * 0.5f, (hp[0][1] + hp[1][1]) * 0.5f, (hp[0][2] + hp[1][2]) * 0.5f };
+            const float v0[3] = { g_gest_last_p[1][0] - g_gest_last_p[0][0], 0.f, g_gest_last_p[1][2] - g_gest_last_p[0][2] };
+            const float v1[3] = { hp[1][0] - hp[0][0], 0.f, hp[1][2] - hp[0][2] };
+            const float d0 = sqrtf((g_gest_last_p[1][0]-g_gest_last_p[0][0])*(g_gest_last_p[1][0]-g_gest_last_p[0][0]) + (g_gest_last_p[1][1]-g_gest_last_p[0][1])*(g_gest_last_p[1][1]-g_gest_last_p[0][1]) + (g_gest_last_p[1][2]-g_gest_last_p[0][2])*(g_gest_last_p[1][2]-g_gest_last_p[0][2]));
+            const float d1 = sqrtf((hp[1][0]-hp[0][0])*(hp[1][0]-hp[0][0]) + (hp[1][1]-hp[0][1])*(hp[1][1]-hp[0][1]) + (hp[1][2]-hp[0][2])*(hp[1][2]-hp[0][2]));
+            // 1. pan with the midpoint
+            const float d[3] = { m1[0] - m0[0], m1[1] - m0[1], m1[2] - m0[2] }; float dm[3]; to_mv(d, dm);
+            for (int i = 0; i < 3; ++i) g_gest_move[i] -= dm[i] * sc;
+            // 2. zoom: hands apart = world bigger = fewer units per metre; the midpoint stays put
+            if (d0 > 0.05f && d1 > 0.05f) {
+                const float ratio = d1 / d0;
+                const float sc_new = fmaxf(5.f, fminf(2000.f, sc / ratio));
+                const float* anchor = m1;                                            // the midpoint in reference metres
+                float head[3] = { g_xr_translate ? g_xr_p[0] : 0.f, g_xr_translate ? g_xr_p[1] : 0.f, g_xr_translate ? g_xr_p[2] : 0.f };
+                const float a[3] = { anchor[0] + head[0], anchor[1] + head[1], anchor[2] + head[2] };
+                float am[3]; to_mv(a, am);
+                for (int i = 0; i < 3; ++i) g_gest_move[i] += am[i] * (sc - sc_new);
+                g_gest_scale = sc_new / g_xr_scale;
+            }
+            // 3. rotate about the midpoint: yaw from the angle between the hands
+            //    (clockwise from above = world clockwise = seat yaw grows), pitch
+            //    from both wrists rolling together (the far edge of the "tray"
+            //    coming up = the seat pitches down to look at it).
+            const float a0 = atan2f(v0[0], -v0[2]), a1 = atan2f(v1[0], -v1[2]);
+            float dyaw = a1 - a0; while (dyaw > 3.14159265f) dyaw -= 6.2831853f; while (dyaw < -3.14159265f) dyaw += 6.2831853f;
+            const float tilt = (grip_pitch(L.grip_q) + grip_pitch(R.grip_q)) * 0.5f;
+            float dpitch = -(tilt - g_gest_last_tilt) * g_gest_tilt_gain;
+            g_gest_last_tilt = tilt;
+            if (fabsf(dyaw) > 1e-5f || fabsf(dpitch) > 1e-5f) {
+                const float sc2 = g_xr_scale * g_gest_scale;
+                const float head[3] = { g_xr_translate ? g_xr_p[0] : 0.f, g_xr_translate ? g_xr_p[1] : 0.f, g_xr_translate ? g_xr_p[2] : 0.f };
+                // world point under the midpoint, before: the offsets are applied along the seat frame's rows, c = (mv + (head+m)*sc) as (right, up, -back)
+                float c[3] = { ovr[0] + g_gest_move[0] + (head[0] + m1[0]) * sc2, ovr[1] + g_gest_move[1] + (head[1] + m1[1]) * sc2, ovr[2] + g_gest_move[2] - (head[2] + m1[2]) * sc2 };
+                float W[3]; for (int i = 0; i < 3; ++i) W[i] = Rb[0*3+i]*c[0] + Rb[1*3+i]*c[1] - Rb[2*3+i]*c[2];
+                const float yaw_new = yaw_ref + dyaw;
+                const float pitch_new = fmaxf(-1.5f, fminf(1.5f, pitch_ref + dpitch));
+                float Rn[9]; seat_frame(yaw_new, pitch_new, Rn);
+                // the same world point after: rows are orthonormal, so c' = (W.row0, W.row1, -W.row2)
+                float cn[3] = { W[0]*Rn[0]+W[1]*Rn[1]+W[2]*Rn[2], W[0]*Rn[3]+W[1]*Rn[4]+W[2]*Rn[5], -(W[0]*Rn[6]+W[1]*Rn[7]+W[2]*Rn[8]) };
+                g_gest_move[0] = cn[0] - ovr[0] - (head[0] + m1[0]) * sc2;
+                g_gest_move[1] = cn[1] - ovr[1] - (head[1] + m1[1]) * sc2;
+                g_gest_move[2] = cn[2] - ovr[2] + (head[2] + m1[2]) * sc2;
+                yaw_ref = yaw_new; pitch_ref = pitch_new;
+            }
+        }
+    }
+    memcpy(g_gest_last_p, hp, sizeof(hp));
+    g_gest_grab[0] = grab[0]; g_gest_grab[1] = grab[1];
 }
 
 /// Replace the game's XInputGetState import with ours (import address table).
@@ -766,6 +980,11 @@ static void turn_by(float deg) {
 
 /// Right stick x, in -1..1 with the dead zone removed; 0 without a pad.
 static float right_stick_x() {
+    if (g_vrpad_enabled && g_xr_active && g_vrpad.ready && g_vrpad.hand[1].active && !g_vrpad_suppress) {
+        float x = g_vrpad.hand[1].stick[0]; const float dz = 0.2f;
+        if (fabsf(x) >= dz) return (x - (x > 0 ? dz : -dz)) / (1.f - dz);
+        // fall through: a physical pad may still be turning
+    }
     if (!g_xi_tried) {
         g_xi_tried = true;
         HMODULE m = LoadLibraryA("xinput1_4.dll");
@@ -821,8 +1040,34 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         const float fy[3] = { -sinf(g_fp_yaw), 0.f, -cosf(g_fp_yaw) };
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
-        P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2];
-        if (g_fp_mode == 2) { for (int i = 0; i < 3; ++i) P[i] += Rf[6+i] * g_fp_follow_dist; P[1] += g_fp_follow_h; }   // back along the heading, and up
+        if (g_fp_head_anchor == 1 && g_fp_have_head && g_fp_head_s_valid) {
+            // Height from the head bone (prone when swimming, low when crouching),
+            // horizontal position from the actor origin: no lean, nothing to see.
+            P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2];
+        }
+        else if (g_fp_head_anchor == 2 && g_fp_have_head && g_fp_head_s_valid) {
+            // g_fp_head_s is the smoothed head offset from the actor origin; the
+            // eye is the current origin plus that, so it never trails a sprint.
+            P[0] = g_fp_pos[0] + g_fp_head_s[0]; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2] + g_fp_head_s[2];
+            // Forward = the way the torso leans (the horizontal part of that
+            // offset), which is the facing while moving; the heading when upright.
+            const float lx = g_fp_head_s[0], lz = g_fp_head_s[2], ll = sqrtf(lx*lx + lz*lz);
+            float d[3] = { fy[0], 0.f, fy[2] };
+            if (ll > 0.3f) { d[0] = lx / ll; d[2] = lz / ll; }
+            P[0] += d[0] * g_fp_head_fwd; P[2] += d[2] * g_fp_head_fwd;
+        }
+        else { P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2]; }
+        if (g_fp_mode == 2) {
+            // Diorama: anchored to the player (smoothed), the offset lives in the
+            // heading frame as g_gest_move (right, up, forward; behind = negative
+            // forward) and is what the grab gestures and the reset set.
+            const float* target = g_anchor_ovr_valid ? g_anchor_ovr : g_fp_pos;
+            const float k = g_anchor_ovr_valid ? g_anchor_ovr_k : g_fp_anchor_k;
+            if (g_anchor_ovr_valid != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = g_anchor_ovr_valid; }   // battle start / end: snap
+            if (!g_fp_anchor_valid) { memcpy(g_fp_anchor, target, sizeof(g_fp_anchor)); g_fp_anchor_valid = true; }
+            else for (int i = 0; i < 3; ++i) g_fp_anchor[i] += (target[i] - g_fp_anchor[i]) * k;
+            P[0] = g_fp_anchor[0]; P[1] = g_fp_anchor[1]; P[2] = g_fp_anchor[2];
+        }
     }
 
     // Rotate in view space: R' = Rx(pitch) * Ry(yaw) * R.
@@ -854,7 +1099,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float live_yaw = atan2f(-f[0], -f[2]);
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
             const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
-            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = live_pitch; g_seat_latched = true; }   // first person: the fp heading owns the yaw
+            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode == 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's
             else if (g_follow_pans) {
                 // slew the latched yaw toward the live one, rate-limited
                 float d = live_yaw - g_seat_yaw;
@@ -897,13 +1142,17 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     if (xr) {
         if (g_xr_translate) { hx = g_xr_p[0]; hy = g_xr_p[1]; hz = g_xr_p[2]; }
         if (eye2) { hx += g_xr_eye_off[0]; hy += g_xr_eye_off[1]; hz += g_xr_eye_off[2]; }
-        hx *= g_xr_scale; hy *= g_xr_scale; hz *= g_xr_scale;
+        const float sc = g_xr_scale * (g_fp_mode == 1 ? 1.f : g_gest_scale); hx *= sc; hy *= sc; hz *= sc;   // first person is always true scale
     }
     const float* Rm = xr ? Rb : Rn;                      // manual offsets: heading frame with the headset (up stays up), head frame without
-    const float mv[3] = { fp ? 0.f : g_ovr_move[0], fp ? 0.f : g_ovr_move[1], fp ? 0.f : g_ovr_move[2] };   // seat offsets are for the authored view
+    float mv[3] = { 0.f, 0.f, 0.f };
+    if (g_fp_mode == 0)      { for (int i = 0; i < 3; ++i) mv[i] = g_ovr_move[i] + g_gest_move[i]; }   // authored seat: numpad + grab
+    else if (g_fp_mode == 2) { for (int i = 0; i < 3; ++i) mv[i] = g_gest_move[i]; }                  // diorama: the grab offset from the player
     for (int i = 0; i < 3; ++i)
         Pn[i] = P[i] + Rm[0*3+i]*mv[0] + Rn[0*3+i]*lateral + Rm[1*3+i]*mv[1] - Rm[2*3+i]*mv[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
+
+    if (g_fp_mode == 2 && g_diorama_floor > 0.f && !g_gest_active && Pn[1] < P[1] + g_diorama_floor) Pn[1] = P[1] + g_diorama_floor;   // diorama floor
 
     float tn[3];
     for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
@@ -1407,7 +1656,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float 
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
-    if (!g_in_eye2) g_overlay_phase = false;
+    if (!g_in_eye2) { if (g_overlay_phase) gpu_timing_start_span(); g_overlay_phase = false; }
     if (!g_frame_live) return;
     char a[96]; describe_view(static_cast<ID3D11View*>(view), a, sizeof(a));
     char t[160];
@@ -1722,7 +1971,7 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
             for (int i = 0; i < g_world_live_n; ++i) {
                 if (fabsf(g_world_live[i][0]-t[0]) < 0.5f && fabsf(g_world_live[i][1]-t[1]) < 0.5f && fabsf(g_world_live[i][2]-t[2]) < 0.5f) { seen = true; break; }
             }
-            if (!seen && g_world_live_n < 32) { memcpy(g_world_live[g_world_live_n++], t, sizeof(t)); }
+            if (!seen && g_world_live_n < k_world_max) { memcpy(g_world_live[g_world_live_n++], t, sizeof(t)); }
         }
     }
 
@@ -2023,6 +2272,31 @@ HRESULT STDMETHODCALLTYPE hk_CreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_
     return hr;
 }
 
+HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
+                                             const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
+    if (desc != nullptr && desc->SampleDesc.Count > 1 && desc->Width >= 1280 && desc->Height >= 720
+        && (desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0) {
+        g_msaa_seen++;
+        g_msaa_last_w = desc->Width; g_msaa_last_h = desc->Height; g_msaa_last_n = desc->SampleDesc.Count;
+        const int want = g_msaa_override;
+        if ((want == 2 || want == 4) && (UINT)want < desc->SampleDesc.Count) {
+            UINT levels = 0;
+            if (SUCCEEDED(dev->CheckMultisampleQualityLevels(desc->Format, (UINT)want, &levels)) && levels > 0) {
+                D3D11_TEXTURE2D_DESC d = *desc; d.SampleDesc.Count = (UINT)want; d.SampleDesc.Quality = 0;
+                const HRESULT hr = g_orig_createtex2d(dev, &d, init, out);
+                if (SUCCEEDED(hr)) {
+                    g_msaa_changed++; g_msaa_last_n = (UINT)want;
+                    diag("msaa: %ux%u fmt %d bind 0x%X: %u samples -> %d (override)", desc->Width, desc->Height, (int)desc->Format, (unsigned)desc->BindFlags, (unsigned)desc->SampleDesc.Count, want);
+                    return hr;
+                }
+                diag("msaa: override to %d failed (0x%08X) for %ux%u fmt %d; creating as the game asked", want, (unsigned)hr, desc->Width, desc->Height, (int)desc->Format);
+            }
+        }
+        else diag("msaa: %ux%u fmt %d bind 0x%X created at %u samples (override %d)", desc->Width, desc->Height, (int)desc->Format, (unsigned)desc->BindFlags, (unsigned)desc->SampleDesc.Count, want);
+    }
+    return g_orig_createtex2d(dev, desc, init, out);
+}
+
 void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT i, INT v) {
     bump(C_DRAWINDEXED);
     tick();
@@ -2198,6 +2472,9 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
         if (dvt != nullptr && !IsBadReadPtr(dvt, sizeof(void*) * 8)) {
             patch(dvt, 3, reinterpret_cast<void*>(&hk_CreateBuffer),
                   reinterpret_cast<void**>(&g_orig_createbuffer), "CreateBuffer (device)");
+            // ID3D11Device vtable index 5: CreateTexture2D (MSAA override).
+            patch(dvt, 5, reinterpret_cast<void*>(&hk_CreateTexture2D),
+                  reinterpret_cast<void**>(&g_orig_createtex2d), "CreateTexture2D (device)");
         }
     }
 
@@ -2247,11 +2524,55 @@ static void sweep_caches() {
     }
 }
 
-struct Perf { double frame_ms, xr_ms, frame_max_ms, wait_ms, end_ms, e2_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
+struct Perf { double frame_ms, xr_ms, frame_max_ms, wait_ms, end_ms, e2_ms, gpu_ms, gpu_max_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
 static Perf g_perf = {};
 static LARGE_INTEGER g_qpf = {}, g_t_frame_prev = {}; static double g_acc_frame = 0, g_acc_xr = 0; static int g_acc_n = 0; static ULONGLONG g_perf_log_tick = 0;
 double g_xr_ms_this_frame = 0; double g_e2_ms_this_frame = 0; static double g_acc_wait = 0, g_acc_end = 0, g_acc_e2 = 0, g_acc_max = 0; LARGE_INTEGER g_e2_t0 = {};
 static IDXGIAdapter3* g_adapter3 = nullptr; static bool g_adapter3_tried = false;
+// GPU time per frame: a ring of timestamp-disjoint queries spanning Present to
+// Present, read back a few frames late so the readback never stalls.
+constexpr int k_gpuq_ring = 6;
+static ID3D11Query* g_gpuq_disjoint[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_t0[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_t1[k_gpuq_ring] = {};
+static int g_gpuq_cur = -1; static uint32_t g_gpuq_frames = 0; static bool g_gpuq_failed = false;
+static double g_acc_gpu = 0, g_acc_gpu_max = 0; static int g_acc_gpu_n = 0;
+static bool g_gpuq_t0_pending = false;    // t0 is stamped at the game's first clear, so the idle before it is left out
+static void gpu_timing_start_span() {
+    if (!g_gpuq_t0_pending || g_gpuq_cur < 0 || !g_ctx) return;
+    g_gpuq_t0_pending = false;
+    g_ctx->End(g_gpuq_t0[g_gpuq_cur]);
+}
+// The span closes at Present, before xrWaitFrame: a timestamp issued after
+// the wait would be reached late by an idle GPU and count the wait as GPU time.
+static bool g_gpuq_span_closed = false;
+static void gpu_timing_end_span() {
+    if (g_gpuq_failed || !g_ctx || g_gpuq_cur < 0 || g_gpuq_span_closed) return;
+    if (g_gpuq_t0_pending) gpu_timing_start_span();
+    g_ctx->End(g_gpuq_t1[g_gpuq_cur]); g_ctx->End(g_gpuq_disjoint[g_gpuq_cur]);
+    g_gpuq_span_closed = true;
+}
+static void gpu_timing_tick() {
+    if (g_gpuq_failed || !g_device || !g_ctx) return;
+    if (!g_gpuq_disjoint[0]) {
+        D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, ts = { D3D11_QUERY_TIMESTAMP, 0 };
+        for (int i = 0; i < k_gpuq_ring; ++i)
+            if (FAILED(g_device->CreateQuery(&dj, &g_gpuq_disjoint[i])) || FAILED(g_device->CreateQuery(&ts, &g_gpuq_t0[i])) || FAILED(g_device->CreateQuery(&ts, &g_gpuq_t1[i]))) { g_gpuq_failed = true; return; }
+    }
+    gpu_timing_end_span();
+    g_gpuq_span_closed = false;
+    g_gpuq_frames++;
+    // Read the slot that is about to be reused (k_gpuq_ring - 1 frames old).
+    const int next = (g_gpuq_cur + 1) % k_gpuq_ring;
+    if (g_gpuq_frames > (uint32_t)k_gpuq_ring) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {}; UINT64 t0 = 0, t1 = 0;
+        if (g_ctx->GetData(g_gpuq_disjoint[next], &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency &&
+            g_ctx->GetData(g_gpuq_t0[next], &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && g_ctx->GetData(g_gpuq_t1[next], &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && t1 >= t0) {
+            const double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
+            g_acc_gpu += ms; if (ms > g_acc_gpu_max) g_acc_gpu_max = ms; g_acc_gpu_n++;
+        }
+    }
+    g_gpuq_cur = next;
+    g_ctx->Begin(g_gpuq_disjoint[g_gpuq_cur]); g_gpuq_t0_pending = true;
+}
 static void perf_tick() {
     if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
     LARGE_INTEGER now; QueryPerformanceCounter(&now);
@@ -2261,10 +2582,12 @@ static void perf_tick() {
         double w = 0, e = 0; xr_timing(&w, &e); g_acc_wait += w; g_acc_end += e;
     }
     g_t_frame_prev = now; g_xr_ms_this_frame = 0; g_e2_ms_this_frame = 0;
+    gpu_timing_tick();
     if (g_acc_n < 60) return;
     g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_perf.frame_max_ms = g_acc_max;
     g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
     g_acc_frame = g_acc_xr = g_acc_wait = g_acc_end = g_acc_e2 = g_acc_max = 0; g_acc_n = 0;
+    if (g_acc_gpu_n > 0) { g_perf.gpu_ms = g_acc_gpu / g_acc_gpu_n; g_perf.gpu_max_ms = g_acc_gpu_max; g_acc_gpu = g_acc_gpu_max = 0; g_acc_gpu_n = 0; }
     g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
     { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
     g_perf.plain_srvs = g_plain_srvs_count();
@@ -2286,8 +2609,8 @@ static void perf_tick() {
     const bool slow = g_perf.frame_ms > 40.0;
     if (t - g_perf_log_tick > (slow ? 5000ULL : 30000ULL)) {
         g_perf_log_tick = t;
-        diag("perf: frame %.1f ms (max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u hidden %u hist %u",
-             g_perf.frame_ms, g_perf.frame_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u hidden %u hist %u",
+             g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_fp_hidden_draws, g_hist_draws);
     }
 }
@@ -2318,6 +2641,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     read_camera();
     cam_blocks_tick();
     sweep_caches();
+    gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     xr_tick();                      // submit the frame just finished, locate the head for the next one
     perf_tick();
     g_overlay_phase = true;
@@ -2338,6 +2662,22 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_targets_frame_n = 0; g_cleared_frame_n = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
+    g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
+    {   // UI pass health: how many 3D frames had a captured UI pass, and the frame structure the detector saw
+        static uint32_t resolves_acc = 0, clears_acc = 0, no_pass_acc = 0;
+        if (g_xr_active && !g_ovr_suspend) {
+            g_ui_frames_3d++; resolves_acc += g_ui_resolves_frame; clears_acc += g_ui_depth_clears_frame;
+            if (g_ui_last_frame_had_pass) g_ui_frames_with_pass++; else no_pass_acc++;
+        }
+        g_ui_resolves_frame = 0; g_ui_depth_clears_frame = 0;
+        static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
+        if (now >= next) {
+            next = now + 10000;
+            if (g_ui_frames_3d) diag("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u)",
+                g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws);
+            g_ui_frames_3d = g_ui_frames_with_pass = 0; resolves_acc = clears_acc = no_pass_acc = 0;
+        }
+    }
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
     g_slot0_report = g_slot0_seen;   // snapshot before the reset, so the UI sees it
     g_slot0_seen   = 0;
@@ -2398,12 +2738,24 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (e.cb == g_slot0_cur && e.frame == g_frames) { g_eye2_cur = &e; break; }
         }
     }
-    if (g_fp_mode == 1 && g_fp_hide_body && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+    const bool fp_hiding = g_fp_mode == 1 && g_fp_hide_body;
+    if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
-        if (dx*dx + dy*dy + dz*dz < g_fp_hide_radius * g_fp_hide_radius) { g_fp_hidden_draws++; return -1; }   // the player's own body: not drawn at all
+        const float r = g_fp_hide_radius + 1.5f * g_fp_step;
+        if (dx*dx + dy*dy + dz*dz < r * r) {   // one of the player's own parts
+            const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && texture_of(g_cur_rtv[0]) == g_scene_tex;
+            if (fp_hiding && g_fp_body_mode == 0 && g_fp_solo < 0) { g_fp_hidden_draws++; return -1; }       // the whole body, in every pass
+            if (scene) {
+                const uint32_t idx = g_fp_part_idx++;
+                if (g_fp_solo >= 0) { if ((int)idx != g_fp_solo) { g_fp_hidden_draws++; return -1; } }
+                else if (fp_hiding && g_fp_body_mode == 1 && idx < 32 && ((g_fp_head_mask >> idx) & 1u)) { g_fp_hidden_draws++; return -1; }   // a head part
+            }
+        }
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
     if (g_ui_draw_now) { g_ui_draws_frame++; return 1; }   // into the UI texture (eye2_begin handles it)
+    g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer);
+    if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
     if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
         g_bb_draws_seen++;
@@ -2983,14 +3335,17 @@ static Twin* twin_of(ID3D11Texture2D* game) {
         // texture that is there now.
         Twin& old = it->second;
         old.last_used = g_frames;
-        if (old.tex == nullptr || (old.w == d.Width && old.h == d.Height && old.fmt == d.Format)) return &old;
+        // Same size and format is not enough: a plain texture freed and an
+        // MSAA one allocated at its address would get a 1-sample twin, and
+        // every draw into it with the MSAA depth twin is refused (eye 2 blank).
+        if (old.tex == nullptr || (old.w == d.Width && old.h == d.Height && old.fmt == d.Format && old.samples == d.SampleDesc.Count && old.mips == d.MipLevels && old.bind == d.BindFlags)) return &old;
         twin_release(old);
         g_twins.erase(it);
         g_twins_recycled++;
-        if (g_twins_recycled <= 10) diag("twin recycled: %p now %ux%u fmt %u", static_cast<void*>(game), d.Width, d.Height, static_cast<unsigned>(d.Format));
+        if (g_twins_recycled <= 10) diag("twin recycled: %p now %ux%u fmt %u samples %u mips %u bind 0x%X", static_cast<void*>(game), d.Width, d.Height, static_cast<unsigned>(d.Format), d.SampleDesc.Count, d.MipLevels, d.BindFlags);
     }
 
-    Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format; t.last_used = g_frames;
+    Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format; t.samples = d.SampleDesc.Count; t.mips = d.MipLevels; t.bind = d.BindFlags; t.last_used = g_frames;
 
     D3D11_TEXTURE2D_DESC cd = d;
     cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0; cd.MiscFlags = 0;
@@ -3136,13 +3491,14 @@ bool g_ui_pass_active_draw = false;
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     QueryPerformanceCounter(&g_e2_t0);
     (void)pass;
-    if (g_ui_draw_now) {
-        if (g_ui_rtv == nullptr || g_ctx == nullptr) return 0;
+    if (g_ui_draw_now || g_imgui_draw_now) {
+        ID3D11RenderTargetView* target = g_imgui_draw_now ? g_imgui_rtv : g_ui_rtv;
+        if (target == nullptr || g_ctx == nullptr) return 0;
         g_in_eye2 = true; g_ui_pass_active_draw = true;
         for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
         for (int i = 0; i < 16; ++i) g_saved_ps_srv[i] = g_cur_ps_srv[i];
         g_ctx->OMGetBlendState(&g_saved_blend, g_saved_blend_factor, &g_saved_sample_mask);
-        ID3D11RenderTargetView* rts[1] = { g_ui_rtv };
+        ID3D11RenderTargetView* rts[1] = { target };
         g_ctx->OMSetRenderTargets(1, rts, nullptr);            // no depth: draw order is the layering
         g_ctx->OMSetBlendState(g_ui_blend, nullptr, 0xFFFFFFFF);
         return 1;
@@ -3287,8 +3643,17 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                 // plain (non-multisampled) texture: that is the eye image.
                 if (src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
                 if (src == g_scene_live_tex && g_scene_live_draws >= 20) {
-                    if (g_ui_state == UI_PASS) { g_ui_state = UI_DONE; g_ui_pass_frame = g_frames; g_ui_draws_report = g_ui_draws_frame; }
-                    else { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
+                    g_ui_resolves_frame++;
+                    // The UI pass ends at the resolve AFTER its draws. Some areas
+                    // (the boat to Kilika) resolve once more between the depth
+                    // clear that opens the pass and the first UI draw: that
+                    // resolve is just a newer base, the pass reopens at the next
+                    // depth clear. Once done, done: later resolves do not reopen.
+                    if (g_ui_state == UI_PASS) {
+                        if (g_ui_draws_frame > 0) { g_ui_state = UI_DONE; g_ui_pass_frame = g_frames; g_ui_draws_report = g_ui_draws_frame; }
+                        else { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
+                    }
+                    else if (g_ui_state != UI_DONE) { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
                 }
             }
         }
@@ -3317,7 +3682,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
     if (g_scene_live_tex && g_scene_live_draws >= 20) {
         ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
-        else if (depth && bound == g_scene_live_tex && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin();   // screen frames keep their UI (subtitles) in the frame
+        else if (depth && bound == g_scene_live_tex) { g_ui_depth_clears_frame++; if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin(); }   // screen frames keep their UI (subtitles) in the frame
     }
     g_in_eye2 = true;
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
@@ -3894,10 +4259,39 @@ struct CodePatch { const char* name; uintptr_t gva; uint8_t orig[8]; uint8_t pat
 // 0: the render-command interpreter's "draw model" case (0x615752) skips the
 // draw on two per-part byte flags (jne at 0x6157A0 / 0x6157B8). NOPed, every
 // model whose command reached the list is drawn.
+// 2, 3: the character distance cull. Ch_DrawMain (0x82ED50) calls
+// Ch_VisibleTest (0x82E220) per actor: it measures the actor's distance to
+// the camera (stored at actor+0x178) and, when that exceeds the actor's own
+// cull distance (+0x174), sets bit 0x20 of actor+0x180 and returns 1, on
+// which Ch_DrawMain hides the model (0x63C390(model, 0)). 0x82E32A is the
+// "within range" branch (jne -> jmp: always within range); 0x82E378 is the
+// same test on one map's special path (je -> nop).
 CodePatch g_patches[] = {
     { "draw-model skip A (0x6157A0 jne)", 0x6157A0, { 0x75, 0x35 }, { 0x90, 0x90 }, 2, false },
     { "draw-model skip B (0x6157B8 jne)", 0x6157B8, { 0x75, 0x1D }, { 0x90, 0x90 }, 2, false },
+    { "characters: no distance cull (0x82E32A)", 0x82E32A, { 0x75, 0x1C }, { 0xEB, 0x1C }, 2, false },
+    { "characters: no distance cull, map special case (0x82E378)", 0x82E378, { 0x74, 0xB2 }, { 0x90, 0x90 }, 2, false },
+    // 4: the character frustum cull. Ch_VisibleTest also calls 0x63B230(model),
+    // which asks the renderer (0x6603C0, this = 0xCCB9D8) per model part whether
+    // the part's scene node intersects the game camera's frustum (0x663CC0,
+    // frustum at renderer->[0xDC]+0x74); no part in view -> bit 0x08 of
+    // actor+0x180 -> hidden. 0x6603C0 returns "visible" without testing when
+    // renderer+0x10D8C (a debug camera mode) is set: jne -> jmp makes it always do so.
+    { "characters: no frustum cull (0x6603D1)", 0x6603D1, { 0x75, 0x1B }, { 0xEB, 0x1B }, 2, false },
+    // 5: the scene frustum cull. 0x663CC0(node, frustum) is the node-vs-frustum
+    // test used by the model parts above and by the scene renderer's two node
+    // lists (0x652D35, 0x652EBC: geometry and effects). Entry replaced by
+    // `mov al,1; ret 4`: everything registered in the scene is submitted.
+    { "scene: no frustum cull at all (0x663CC0 returns visible)", 0x663CC0, { 0x55, 0x8B, 0xEC, 0x81, 0xEC }, { 0xB0, 0x01, 0xC2, 0x04, 0x00 }, 5, false },
+    // 6: the bounding-volume test itself. 0x663A30(node, frustum) is what
+    // 0x663CC0 ends in, and it is also called directly by the renderer's third
+    // node list (0x6505D6, frustum of the camera at renderer+0x654), by a
+    // visibility aggregate (0x6C8236/0x6C8294/0x6C83B0) and by another scene
+    // traversal (0x9F3275). thiscall, ret 4. Entry -> `mov al,1; ret 4`:
+    // every bounding test in the engine answers "in view".
+    { "scene: bounding test always passes (0x663A30)", 0x663A30, { 0x55, 0x8B, 0xEC, 0x81, 0xEC }, { 0xB0, 0x01, 0xC2, 0x04, 0x00 }, 5, false },
 };
+constexpr int k_patch_dist_a = 2, k_patch_dist_b = 3, k_patch_chr_frustum = 4, k_patch_scene_frustum = 5, k_patch_bounds = 6;
 static uint8_t* gva_to_rt(uintptr_t gva) { const uint8_t* base = (const uint8_t*)GetModuleHandleA(nullptr); return base ? const_cast<uint8_t*>(base) + (gva - k_exe_gva_base) : nullptr; }
 static int patch_apply(int i, bool on) {
     if (i < 0 || i >= (int)(sizeof(g_patches) / sizeof(g_patches[0]))) return -1;
@@ -3905,7 +4299,7 @@ static int patch_apply(int i, bool on) {
     if (p.on == on) return 0;
     uint8_t* at = gva_to_rt(p.gva); if (!at) return -2;
     const uint8_t* expect = on ? p.orig : p.patch;
-    if (memcmp(at, expect, p.len) != 0) { diag("patch %s: bytes at %p are not the expected ones (%02X %02X), not touched", p.name, (void*)at, at[0], at[1]); return -3; }
+    if (memcmp(at, expect, p.len) != 0) { diag("patch %s: bytes at %p are not the expected ones (%02X %02X %02X %02X %02X), not touched", p.name, (void*)at, at[0], at[1], at[2], at[3], at[4]); return -3; }
     DWORD old = 0;
     if (!VirtualProtect(at, p.len, PAGE_EXECUTE_READWRITE, &old)) return -4;
     memcpy(at, on ? p.patch : p.orig, p.len);
@@ -3916,6 +4310,22 @@ static int patch_apply(int i, bool on) {
     return 0;
 }
 extern "C" __declspec(dllexport) int ffxvr_patch_set(int i, int on) { return patch_apply(i, on != 0); }
+// Character distance cull on/off as one switch (both patches).
+// "Keep characters drawn": the distance cull (both sites) and the character
+// frustum cull together. Applied as a set; a failure undoes the set.
+static int patch_set_apply(const int* idx, int n, bool on) {
+    for (int i = 0; i < n; ++i) {
+        int rc = patch_apply(idx[i], on);
+        if (rc != 0) { for (int j = 0; j < i; ++j) patch_apply(idx[j], !on); return rc; }
+    }
+    return 0;
+}
+static const int k_set_chr[] = { k_patch_dist_a, k_patch_dist_b, k_patch_chr_frustum };
+extern "C" __declspec(dllexport) int ffxvr_cull_dist_set(int keep_all) { return patch_set_apply(k_set_chr, 3, keep_all != 0); }
+extern "C" __declspec(dllexport) int ffxvr_cull_dist_get() { return (g_patches[k_patch_dist_a].on && g_patches[k_patch_dist_b].on && g_patches[k_patch_chr_frustum].on) ? 1 : 0; }
+static const int k_set_scene[] = { k_patch_scene_frustum, k_patch_bounds };
+extern "C" __declspec(dllexport) int ffxvr_cull_scene_set(int keep_all) { return patch_set_apply(k_set_scene, 2, keep_all != 0); }
+extern "C" __declspec(dllexport) int ffxvr_cull_scene_get() { return (g_patches[k_patch_scene_frustum].on && g_patches[k_patch_bounds].on) ? 1 : 0; }
 extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g_patches) / sizeof(g_patches[0])); }
 extern "C" __declspec(dllexport) const char* ffxvr_patch_name(int i) { return (i >= 0 && i < ffxvr_patch_count()) ? g_patches[i].name : ""; }
 extern "C" __declspec(dllexport) void ffxvr_camblk_get(float* out9, uint32_t* writes) { memcpy(out9, g_camblk_last, sizeof(g_camblk_last)); if (writes) *writes = g_cull_writes; }
@@ -3944,11 +4354,49 @@ extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float 
 extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
-    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
-        g_perf.frame_ms, g_perf.frame_max_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
+    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
+        g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
         (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
 }
+extern "C" __declspec(dllexport) void ffxvr_imgui_layer_set(int on, int force_show, int min_draws) { g_imgui_layer = on != 0; g_imgui_force = force_show != 0; g_imgui_min_draws = (uint32_t)(min_draws < 1 ? 1 : min_draws); }
+extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_draws() { return g_imgui_draws_last; }
+extern "C" __declspec(dllexport) void ffxvr_msaa_set(int samples) { g_msaa_override = (samples == 2 || samples == 4) ? samples : 0; }
+extern "C" __declspec(dllexport) void ffxvr_msaa_status(uint32_t* seen, uint32_t* changed, uint32_t* last_w, uint32_t* last_h, uint32_t* last_n) {
+    if (seen) *seen = g_msaa_seen; if (changed) *changed = g_msaa_changed; if (last_w) *last_w = g_msaa_last_w; if (last_h) *last_h = g_msaa_last_h; if (last_n) *last_n = g_msaa_last_n;
+}
 extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }
+extern "C" __declspec(dllexport) void ffxvr_vrpad_set(int enabled) { g_vrpad_enabled = enabled != 0; }
+extern "C" __declspec(dllexport) void ffxvr_gesture_set(int enabled, float tilt_gain) { g_gest_enabled = enabled != 0; g_gest_tilt_gain = tilt_gain; }
+/// Reset the grab: the authored seat goes back to its camera; the diorama goes back behind and above the player.
+extern "C" __declspec(dllexport) void ffxvr_gesture_reset() {
+    g_gest_scale = 1.f; g_gest_pitch = (g_fp_mode == 2) ? -0.35f : 0.f;
+    if (g_fp_mode == 2) { g_gest_move[0] = 0.f; g_gest_move[1] = g_fp_follow_h; g_gest_move[2] = -g_fp_follow_dist; }
+    else g_gest_move[0] = g_gest_move[1] = g_gest_move[2] = 0.f;
+}
+extern "C" __declspec(dllexport) void ffxvr_anchor_set(float k) { g_fp_anchor_k = k; }
+extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_floor = units; }
+/// Diorama anchor override (render space): the centre of the battle while one is on; valid = 0 hands it back to the player.
+extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; }
+/// Chord events since the last call (cleared), plus the gesture state for the overlay.
+extern "C" __declspec(dllexport) uint32_t ffxvr_gesture_poll(float* move3, float* scale_mul, int* active) {
+    const uint32_t n = g_gest_toggle_fp; g_gest_toggle_fp = 0;
+    if (move3) { move3[0] = g_gest_move[0]; move3[1] = g_gest_move[1]; move3[2] = g_gest_move[2]; }
+    if (scale_mul) *scale_mul = g_gest_scale; if (active) *active = g_gest_active ? 1 : 0;
+    return n;
+}
+/// The controller state for the overlay: 2 hands x 12 floats (active, stick x, stick y, stick click, primary, secondary, trigger, squeeze, menu, grip valid, aim valid, 0), profiles as strings.
+extern "C" __declspec(dllexport) int ffxvr_vrpad_status(float* out24, char* prof_l, char* prof_r, int n, uint32_t* frames) {
+    if (frames) *frames = g_vrpad_frames;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& hd = g_vrpad.hand[h]; float* o = out24 + h * 12;
+        o[0] = hd.active ? 1.f : 0.f; o[1] = hd.stick[0]; o[2] = hd.stick[1]; o[3] = hd.stick_click ? 1.f : 0.f; o[4] = hd.primary ? 1.f : 0.f; o[5] = hd.secondary ? 1.f : 0.f;
+        o[6] = hd.trigger; o[7] = hd.squeeze; o[8] = hd.menu ? 1.f : 0.f; o[9] = hd.grip_valid ? 1.f : 0.f; o[10] = hd.aim_valid ? 1.f : 0.f; o[11] = 0.f;
+    }
+    if (prof_l && n > 0) strncpy_s(prof_l, (size_t)n, g_vrpad.profile[0], _TRUNCATE);
+    if (prof_r && n > 0) strncpy_s(prof_r, (size_t)n, g_vrpad.profile[1], _TRUNCATE);
+    return g_vrpad.ready ? 1 : 0;
+}
+extern "C" __declspec(dllexport) void ffxvr_haptic(int hand, float amplitude, float seconds) { xr_haptic(hand, amplitude, seconds); }
 extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, float* yaw_cam_deg, float* delta_deg, uint32_t* hook_calls, int* hooked) {
     if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
     if (delta_deg) *delta_deg = g_move_delta * 57.29578f; if (hook_calls) *hook_calls = g_xi_hook_calls; if (hooked) *hooked = g_xi_hooked ? 1 : 0;
@@ -3956,9 +4404,40 @@ extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, flo
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
+    const int mode_before = g_fp_mode;
     g_fp_mode = mode; g_fp_eye_h = eye_h; g_fp_follow_dist = follow_dist; g_fp_follow_h = follow_h; g_fp_hide_body = hide_body != 0; g_fp_hide_radius = hide_radius;
+    if (mode != mode_before) {   // the grab offset means something different per mode: start each mode from its default
+        g_gest_scale = 1.f; g_gest_pitch = (mode == 2) ? -0.35f : 0.f; g_fp_anchor_valid = false;   // the diorama starts looking down at the player a little
+        if (mode == 2) { g_gest_move[0] = 0.f; g_gest_move[1] = g_fp_follow_h; g_gest_move[2] = -g_fp_follow_dist; }
+        else g_gest_move[0] = g_gest_move[1] = g_gest_move[2] = 0.f;
+    }
 }
-extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) { g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0; }
+extern "C" __declspec(dllexport) void ffxvr_fp_body_set(int mode, uint32_t head_mask, int solo) { g_fp_body_mode = mode; g_fp_head_mask = head_mask; g_fp_solo = solo; }
+extern "C" __declspec(dllexport) uint32_t ffxvr_fp_parts() { return g_fp_parts_last; }
+extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {
+    if (valid && g_fp_have_pos) {
+        const float dx = x - g_fp_pos[0], dy = y - g_fp_pos[1], dz = z - g_fp_pos[2];
+        const float d = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (d > 0.01f && d < 50.f) {                                                 // a logic step (a warp is not a step)
+            g_fp_step = d; g_fp_still_frames = 0;
+            const float h = sqrtf(dx*dx + dz*dz);
+            if (h > 0.01f) { g_fp_move_dir[0] = dx / h; g_fp_move_dir[1] = 0.f; g_fp_move_dir[2] = dz / h; g_fp_move_dir_valid = true; }
+        }
+        else if (++g_fp_still_frames > 6) g_fp_step = 0.f;                          // stood still for a few frames
+    }
+    g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0;
+}
+extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {
+    g_fp_have_head = valid != 0;
+    if (!g_fp_have_head) { g_fp_head_s_valid = false; return; }
+    // Stored and smoothed as the offset from the actor origin (player_set is called first).
+    g_fp_head[0] = x - g_fp_pos[0]; g_fp_head[1] = y - g_fp_pos[1]; g_fp_head[2] = z - g_fp_pos[2];
+    const float dx = g_fp_head[0] - g_fp_head_s[0], dy = g_fp_head[1] - g_fp_head_s[1], dz = g_fp_head[2] - g_fp_head_s[2];
+    if (!g_fp_head_s_valid || dx*dx + dy*dy + dz*dz > 50.f * 50.f) { memcpy(g_fp_head_s, g_fp_head, sizeof(g_fp_head)); g_fp_head_s_valid = true; return; }   // first value, or a warp
+    const float k = g_fp_head_smooth < 0.02f ? 0.02f : (g_fp_head_smooth > 1.f ? 1.f : g_fp_head_smooth);
+    for (int i = 0; i < 3; ++i) g_fp_head_s[i] += (g_fp_head[i] - g_fp_head_s[i]) * k;
+}
+extern "C" __declspec(dllexport) void ffxvr_fp_head_set(int anchor, float up, float smooth, float fwd) { g_fp_head_anchor = anchor; g_fp_head_up = up; g_fp_head_smooth = smooth; g_fp_head_fwd = fwd; }
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
 extern "C" __declspec(dllexport) void ffxvr_noimg_set(int mode) { g_noimg_mode = mode; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_noimg_draws() { return g_noimg_draws; }
@@ -4054,9 +4533,16 @@ static void xr_tick() {
     // it, and the UI goes on its own panel.
     ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
-    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width };
+    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width, nullptr };
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
-    g_ui_state = UI_IDLE;
+    // The ImGui layer: what Fahrenheit drew after our hook last Present.
+    g_imgui_draws_last = g_imgui_draws_frame; g_imgui_draws_frame = 0;
+    if (g_imgui_layer && g_backbuffer) {
+        D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+        ensure_copy(g_imgui_tex, g_imgui_rtv, bd);
+        if (g_imgui_tex && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;
+    }
+    g_ui_state = UI_IDLE; g_ui_last_frame_had_pass = ui_frame;
     if (ui_frame) {
         e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex;
         if (g_markers_3d) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);
@@ -4075,7 +4561,8 @@ static void xr_tick() {
     else { used[0] = used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
     XrFrameOut out = {};
     g_xr_fov_applied = false;
-    if (e1 == nullptr) return;
+    auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
+    if (e1 == nullptr) { clear_imgui(); return; }
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
@@ -4129,6 +4616,9 @@ static void xr_tick() {
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
     }
     xr_apply_poses(out);
+    clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
+    xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
+    gesture_tick();
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
     else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }

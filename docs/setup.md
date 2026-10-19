@@ -121,3 +121,36 @@ Bring-up order:
    hold on a 3080 Ti; lower the game's render resolution/MSAA first.
    `PERF-002=0` in fps60.ini stops the mod stepping the rate down on its own
    (it would read our headset waits as "cannot hold the rate").
+
+### 60 fps in the headset (settled 19 Oct 2026)
+
+The runtime (VDXR) paces frames to whole refresh slots, so the reachable
+rates are refresh / N. At 90 Hz that is 90 / 45 / 30 and the mod's PERF-002
+measures ~22 ms (45 fps), calls 60 "not held" and drops to 30. **Set Virtual
+Desktop to 120 Hz**: 60 fps is then exactly two slots, and with the GPU span
+under 16.7 ms PERF-002 holds it (`fps60.log`: "60 fps retry holds").
+
+The GPU span (the `gpu` figure on the status line / `perf:` diag lines, measured
+with timestamp queries from the game's first clear to Present) is 11-17 ms in
+Besaid village at 3840x2160 with the scene target at 8x MSAA, drawn for both
+eyes. The margin is thin. `MSAA=` in `GameSetting.ini` is ignored on the
+Fahrenheit launch path (0 and 2 both left the target at 8 samples); AA has to
+be changed through `FFX&X-2_LAUNCHER.exe` or, later, by the mod itself.
+
+## Texture packs (External File Loader style) under Fahrenheit
+
+Loose-file texture packs for this game (e.g. HitokageWorshipper's
+"Re-Remastered", Nexus mod 244) are written for ffgriever's External File
+Loader, which serves files from `data\mods\ffx_data\...` mirroring the VBF.
+**Do not install that loader next to Fahrenheit**: Fahrenheit's own
+`FhFileLoaderModule` hooks the same game functions and would fight it.
+Fahrenheit supports file-only mods: a folder under `fahrenheit\mods\<id>\`
+with `<id>.manifest.json` and the files under `efl\x\FFX_Data\...` (same tree
+as EFL's `ffx_data`), listed in `fahrenheit\mods\loadorder`.
+
+`tools\install-texture-pack.ps1 -Archive <downloaded .7z> [-Compress]` does
+exactly that: extracts with 7-Zip, finds the VBF root in the archive, moves
+it into the mod folder, adds the mod to the load order before ffxvr, and can
+turn on NTFS compression (about half the size). `-Uninstall` removes it. The
+Fahrenheit file-loader log lists every replaced file at launch, which is the
+check that the files are being served.

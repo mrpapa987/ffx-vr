@@ -51,6 +51,10 @@ XRFN(xrEnumerateSwapchainImages) XRFN(xrPollEvent) XRFN(xrBeginSession) XRFN(xrE
 XRFN(xrWaitFrame) XRFN(xrBeginFrame) XRFN(xrEndFrame) XRFN(xrLocateViews)
 XRFN(xrAcquireSwapchainImage) XRFN(xrWaitSwapchainImage) XRFN(xrReleaseSwapchainImage) XRFN(xrResultToString)
 XRFN(xrGetD3D11GraphicsRequirementsKHR)
+XRFN(xrStringToPath) XRFN(xrPathToString) XRFN(xrCreateActionSet) XRFN(xrDestroyActionSet) XRFN(xrCreateAction) XRFN(xrDestroyAction)
+XRFN(xrSuggestInteractionProfileBindings) XRFN(xrAttachSessionActionSets) XRFN(xrCreateActionSpace) XRFN(xrSyncActions)
+XRFN(xrGetActionStateBoolean) XRFN(xrGetActionStateFloat) XRFN(xrGetActionStateVector2f) XRFN(xrGetActionStatePose)
+XRFN(xrLocateSpace) XRFN(xrApplyHapticFeedback) XRFN(xrGetCurrentInteractionProfile)
 #undef XRFN
 
 XrInstance   g_instance = XR_NULL_HANDLE;
@@ -74,9 +78,167 @@ struct Eye {
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
-Eye g_eye[4];                                   // 0/1: the eyes; 2: the virtual screen; 3: the UI panel
+Eye g_eye[5];                                   // 0/1: the eyes; 2: the virtual screen; 3: the UI panel; 4: the ImGui layer
 XrSpace g_view_space = XR_NULL_HANDLE;           // head-locked space for the UI panel
 DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
+
+const char* res_str(XrResult r);                 // below
+
+// ---------------------------------------------------------------- input
+// One action set; every action has both hand subaction paths. Bindings are
+// suggested for the Touch controllers and for khr/simple; the runtime picks.
+XrActionSet g_aset = XR_NULL_HANDLE;
+XrAction g_a_stick = XR_NULL_HANDLE, g_a_stick_click = XR_NULL_HANDLE, g_a_primary = XR_NULL_HANDLE, g_a_secondary = XR_NULL_HANDLE;
+XrAction g_a_trigger = XR_NULL_HANDLE, g_a_squeeze = XR_NULL_HANDLE, g_a_menu = XR_NULL_HANDLE;
+XrAction g_a_grip = XR_NULL_HANDLE, g_a_aim = XR_NULL_HANDLE, g_a_haptic = XR_NULL_HANDLE;
+XrPath   g_hand_path[2] = {};
+XrSpace  g_grip_space[2] = {}, g_aim_space[2] = {};
+bool     g_input_ok = false, g_input_attached = false;
+XrInput  g_input = {};
+uint32_t g_sync_fail = 0;
+
+XrPath path(const char* s) { XrPath p = XR_NULL_PATH; if (p_xrStringToPath) p_xrStringToPath(g_instance, s, &p); return p; }
+
+bool make_action(XrAction& a, const char* name, const char* label, XrActionType type) {
+    XrActionCreateInfo ci = { XR_TYPE_ACTION_CREATE_INFO };
+    ci.actionType = type; ci.countSubactionPaths = 2; ci.subactionPaths = g_hand_path;
+    strncpy_s(ci.actionName, name, _TRUNCATE); strncpy_s(ci.localizedActionName, label, _TRUNCATE);
+    XrResult r = p_xrCreateAction(g_aset, &ci, &a);
+    if (XR_FAILED(r)) { a = XR_NULL_HANDLE; g_h.diag("xr: action %s: %s", name, res_str(r)); return false; }
+    return true;
+}
+
+/// Instance-level part: action set, actions, suggested bindings. Needs only the instance.
+bool input_create() {
+    if (!p_xrCreateActionSet) return false;
+    g_hand_path[0] = path("/user/hand/left"); g_hand_path[1] = path("/user/hand/right");
+    XrActionSetCreateInfo si = { XR_TYPE_ACTION_SET_CREATE_INFO };
+    strncpy_s(si.actionSetName, "ffxvr", _TRUNCATE); strncpy_s(si.localizedActionSetName, "FFX VR", _TRUNCATE); si.priority = 0;
+    XrResult r = p_xrCreateActionSet(g_instance, &si, &g_aset);
+    if (XR_FAILED(r)) { g_aset = XR_NULL_HANDLE; g_h.diag("xr: xrCreateActionSet: %s", res_str(r)); return false; }
+    bool ok = true;
+    ok &= make_action(g_a_stick,       "thumbstick",       "Thumbstick",        XR_ACTION_TYPE_VECTOR2F_INPUT);
+    ok &= make_action(g_a_stick_click, "thumbstick_click", "Thumbstick click",  XR_ACTION_TYPE_BOOLEAN_INPUT);
+    ok &= make_action(g_a_primary,     "primary",          "A / X",             XR_ACTION_TYPE_BOOLEAN_INPUT);
+    ok &= make_action(g_a_secondary,   "secondary",        "B / Y",             XR_ACTION_TYPE_BOOLEAN_INPUT);
+    ok &= make_action(g_a_trigger,     "trigger",          "Trigger",           XR_ACTION_TYPE_FLOAT_INPUT);
+    ok &= make_action(g_a_squeeze,     "squeeze",          "Grip",              XR_ACTION_TYPE_FLOAT_INPUT);
+    ok &= make_action(g_a_menu,        "menu",             "Menu",              XR_ACTION_TYPE_BOOLEAN_INPUT);
+    ok &= make_action(g_a_grip,        "grip_pose",        "Grip pose",         XR_ACTION_TYPE_POSE_INPUT);
+    ok &= make_action(g_a_aim,         "aim_pose",         "Aim pose",          XR_ACTION_TYPE_POSE_INPUT);
+    ok &= make_action(g_a_haptic,      "haptic",           "Haptic",            XR_ACTION_TYPE_VIBRATION_OUTPUT);
+    if (!ok) return false;
+
+    struct B { XrAction a; const char* p; };
+    // Touch controllers: the right controller's menu button is the system button and never delivered.
+    const B touch[] = {
+        { g_a_stick, "/user/hand/left/input/thumbstick" },          { g_a_stick, "/user/hand/right/input/thumbstick" },
+        { g_a_stick_click, "/user/hand/left/input/thumbstick/click" }, { g_a_stick_click, "/user/hand/right/input/thumbstick/click" },
+        { g_a_primary, "/user/hand/left/input/x/click" },           { g_a_primary, "/user/hand/right/input/a/click" },
+        { g_a_secondary, "/user/hand/left/input/y/click" },         { g_a_secondary, "/user/hand/right/input/b/click" },
+        { g_a_trigger, "/user/hand/left/input/trigger/value" },     { g_a_trigger, "/user/hand/right/input/trigger/value" },
+        { g_a_squeeze, "/user/hand/left/input/squeeze/value" },     { g_a_squeeze, "/user/hand/right/input/squeeze/value" },
+        { g_a_menu, "/user/hand/left/input/menu/click" },
+        { g_a_grip, "/user/hand/left/input/grip/pose" },            { g_a_grip, "/user/hand/right/input/grip/pose" },
+        { g_a_aim, "/user/hand/left/input/aim/pose" },              { g_a_aim, "/user/hand/right/input/aim/pose" },
+        { g_a_haptic, "/user/hand/left/output/haptic" },            { g_a_haptic, "/user/hand/right/output/haptic" },
+    };
+    const B simple[] = {
+        { g_a_primary, "/user/hand/left/input/select/click" },      { g_a_primary, "/user/hand/right/input/select/click" },
+        { g_a_menu, "/user/hand/left/input/menu/click" },           { g_a_menu, "/user/hand/right/input/menu/click" },
+        { g_a_grip, "/user/hand/left/input/grip/pose" },            { g_a_grip, "/user/hand/right/input/grip/pose" },
+        { g_a_aim, "/user/hand/left/input/aim/pose" },              { g_a_aim, "/user/hand/right/input/aim/pose" },
+        { g_a_haptic, "/user/hand/left/output/haptic" },            { g_a_haptic, "/user/hand/right/output/haptic" },
+    };
+    auto suggest = [&](const char* profile, const B* b, size_t n) {
+        std::vector<XrActionSuggestedBinding> v;
+        for (size_t i = 0; i < n; ++i) { XrActionSuggestedBinding sb = { b[i].a, path(b[i].p) }; if (sb.binding != XR_NULL_PATH) v.push_back(sb); }
+        XrInteractionProfileSuggestedBinding sbi = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+        sbi.interactionProfile = path(profile); sbi.countSuggestedBindings = (uint32_t)v.size(); sbi.suggestedBindings = v.data();
+        XrResult rr = p_xrSuggestInteractionProfileBindings(g_instance, &sbi);
+        g_h.diag("xr: bindings for %s: %s (%u)", profile, XR_SUCCEEDED(rr) ? "ok" : res_str(rr), (unsigned)v.size());
+        return XR_SUCCEEDED(rr);
+    };
+    bool any = suggest("/interaction_profiles/oculus/touch_controller", touch, sizeof(touch) / sizeof(touch[0]));
+    any |= suggest("/interaction_profiles/khr/simple_controller", simple, sizeof(simple) / sizeof(simple[0]));
+    return any;
+}
+
+/// Session-level part: action spaces and the one-time attach.
+bool input_attach() {
+    if (g_aset == XR_NULL_HANDLE || g_session == XR_NULL_HANDLE) return false;
+    for (int h = 0; h < 2; ++h) {
+        XrActionSpaceCreateInfo asci = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+        asci.poseInActionSpace.orientation.w = 1.f; asci.subactionPath = g_hand_path[h];
+        asci.action = g_a_grip; if (XR_FAILED(p_xrCreateActionSpace(g_session, &asci, &g_grip_space[h]))) g_grip_space[h] = XR_NULL_HANDLE;
+        asci.action = g_a_aim;  if (XR_FAILED(p_xrCreateActionSpace(g_session, &asci, &g_aim_space[h])))  g_aim_space[h]  = XR_NULL_HANDLE;
+    }
+    XrSessionActionSetsAttachInfo ai = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO }; ai.countActionSets = 1; ai.actionSets = &g_aset;
+    XrResult r = p_xrAttachSessionActionSets(g_session, &ai);
+    if (XR_FAILED(r)) { g_h.diag("xr: xrAttachSessionActionSets: %s", res_str(r)); return false; }
+    g_input_attached = true;
+    g_h.diag("xr: action set attached");
+    return true;
+}
+
+void input_destroy() {
+    for (int h = 0; h < 2; ++h) {
+        if (g_grip_space[h] != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_grip_space[h]);
+        if (g_aim_space[h] != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_aim_space[h]);
+        g_grip_space[h] = g_aim_space[h] = XR_NULL_HANDLE;
+    }
+    if (g_aset != XR_NULL_HANDLE && p_xrDestroyActionSet) p_xrDestroyActionSet(g_aset);   // destroys its actions
+    g_aset = XR_NULL_HANDLE;
+    g_a_stick = g_a_stick_click = g_a_primary = g_a_secondary = g_a_trigger = g_a_squeeze = g_a_menu = g_a_grip = g_a_aim = g_a_haptic = XR_NULL_HANDLE;
+    g_input_ok = g_input_attached = false; g_input = {};
+}
+
+/// Once per frame after the wait: sync and read every action, locate the hands at the frame's display time.
+void input_sync(XrTime t) {
+    if (!g_input_attached) { g_input.ready = false; return; }
+    XrActiveActionSet aas = { g_aset, XR_NULL_PATH };
+    XrActionsSyncInfo si = { XR_TYPE_ACTIONS_SYNC_INFO }; si.countActiveActionSets = 1; si.activeActionSets = &aas;
+    XrResult r = p_xrSyncActions(g_session, &si);
+    if (r == XR_SESSION_NOT_FOCUSED) { g_input.ready = false; return; }     // another app has the controllers (the Quest home, say)
+    if (XR_FAILED(r)) { if (++g_sync_fail <= 3) g_h.diag("xr: xrSyncActions: %s", res_str(r)); g_input.ready = false; return; }
+    g_input.ready = true;
+    for (int h = 0; h < 2; ++h) {
+        XrHand& hd = g_input.hand[h];
+        XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO }; gi.subactionPath = g_hand_path[h];
+        XrActionStateVector2f v2 = { XR_TYPE_ACTION_STATE_VECTOR2F }; gi.action = g_a_stick;
+        if (XR_SUCCEEDED(p_xrGetActionStateVector2f(g_session, &gi, &v2)) && v2.isActive) { hd.stick[0] = v2.currentState.x; hd.stick[1] = v2.currentState.y; } else hd.stick[0] = hd.stick[1] = 0.f;
+        auto getb = [&](XrAction a, bool& out) { XrActionStateBoolean b = { XR_TYPE_ACTION_STATE_BOOLEAN }; gi.action = a; out = XR_SUCCEEDED(p_xrGetActionStateBoolean(g_session, &gi, &b)) && b.isActive && b.currentState == XR_TRUE; return b.isActive == XR_TRUE; };
+        auto getf = [&](XrAction a, float& out) { XrActionStateFloat f = { XR_TYPE_ACTION_STATE_FLOAT }; gi.action = a; out = (XR_SUCCEEDED(p_xrGetActionStateFloat(g_session, &gi, &f)) && f.isActive) ? f.currentState : 0.f; return f.isActive == XR_TRUE; };
+        bool active = v2.isActive == XR_TRUE;
+        active |= getb(g_a_stick_click, hd.stick_click); active |= getb(g_a_primary, hd.primary); active |= getb(g_a_secondary, hd.secondary);
+        active |= getf(g_a_trigger, hd.trigger); active |= getf(g_a_squeeze, hd.squeeze); getb(g_a_menu, hd.menu);
+        XrActionStatePose ps = { XR_TYPE_ACTION_STATE_POSE }; gi.action = g_a_grip;
+        const bool grip_active = XR_SUCCEEDED(p_xrGetActionStatePose(g_session, &gi, &ps)) && ps.isActive;
+        active |= grip_active;
+        hd.active = active;
+        auto locate = [&](XrSpace sp, bool& valid, float* q, float* p) {
+            valid = false; if (sp == XR_NULL_HANDLE) return;
+            XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
+            if (XR_FAILED(p_xrLocateSpace(sp, g_space, t, &loc))) return;
+            const bool o = (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0, pp = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+            if (!o || !pp) return;
+            q[0] = loc.pose.orientation.x; q[1] = loc.pose.orientation.y; q[2] = loc.pose.orientation.z; q[3] = loc.pose.orientation.w;
+            p[0] = loc.pose.position.x; p[1] = loc.pose.position.y; p[2] = loc.pose.position.z; valid = true;
+        };
+        locate(g_grip_space[h], hd.grip_valid, hd.grip_q, hd.grip_p);
+        locate(g_aim_space[h],  hd.aim_valid,  hd.aim_q,  hd.aim_p);
+        // Which profile the runtime bound (for the overlay), refreshed every 2 s.
+        static ULONGLONG next_profile = 0; const ULONGLONG now = GetTickCount64();
+        if (now >= next_profile && p_xrGetCurrentInteractionProfile) {
+            if (h == 1) next_profile = now + 2000;
+            XrInteractionProfileState ips = { XR_TYPE_INTERACTION_PROFILE_STATE };
+            if (XR_SUCCEEDED(p_xrGetCurrentInteractionProfile(g_session, g_hand_path[h], &ips)) && ips.interactionProfile != XR_NULL_PATH) {
+                uint32_t n = 0; p_xrPathToString(g_instance, ips.interactionProfile, sizeof(g_input.profile[h]), &n, g_input.profile[h]);
+            }
+            else strncpy_s(g_input.profile[h], "(none)", _TRUNCATE);
+        }
+    }
+}
 
 void set_status(const char* s) { strncpy_s(g_status, s, _TRUNCATE); }
 
@@ -123,6 +285,7 @@ void xr_stop() {
         }
         if (g_running && p_xrEndSession) { p_xrEndSession(g_session); g_running = false; }
         g_submit_views_valid = false;
+        input_destroy();
         destroy_eyes();
         if (g_space != XR_NULL_HANDLE && p_xrDestroySpace) p_xrDestroySpace(g_space);
         g_space = XR_NULL_HANDLE;
@@ -131,6 +294,7 @@ void xr_stop() {
         if (p_xrDestroySession) p_xrDestroySession(g_session);
         g_session = XR_NULL_HANDLE;
     }
+    input_destroy();
     if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance) { p_xrDestroyInstance(g_instance); g_instance = XR_NULL_HANDLE; }
     g_state = XR_SESSION_STATE_UNKNOWN; g_render_views_valid = false; g_running = false;
     set_status("off");
@@ -168,11 +332,18 @@ bool xr_start(const XrHost& host) {
     L(xrCreateSwapchain) L(xrDestroySwapchain) L(xrEnumerateSwapchainImages) L(xrPollEvent) L(xrBeginSession) L(xrEndSession)
     L(xrRequestExitSession) L(xrWaitFrame) L(xrBeginFrame) L(xrEndFrame) L(xrLocateViews) L(xrAcquireSwapchainImage)
     L(xrWaitSwapchainImage) L(xrReleaseSwapchainImage) L(xrResultToString) L(xrGetD3D11GraphicsRequirementsKHR)
+    L(xrStringToPath) L(xrPathToString) L(xrCreateActionSet) L(xrDestroyActionSet) L(xrCreateAction) L(xrDestroyAction)
+    L(xrSuggestInteractionProfileBindings) L(xrAttachSessionActionSets) L(xrCreateActionSpace) L(xrSyncActions)
+    L(xrGetActionStateBoolean) L(xrGetActionStateFloat) L(xrGetActionStateVector2f) L(xrGetActionStatePose)
+    L(xrLocateSpace) L(xrApplyHapticFeedback) L(xrGetCurrentInteractionProfile)
 #undef L
 
     XrInstanceProperties ip = { XR_TYPE_INSTANCE_PROPERTIES };
     if (XR_SUCCEEDED(p_xrGetInstanceProperties(g_instance, &ip)))
         g_h.diag("xr: runtime %s %u.%u.%u", ip.runtimeName, XR_VERSION_MAJOR(ip.runtimeVersion), XR_VERSION_MINOR(ip.runtimeVersion), XR_VERSION_PATCH(ip.runtimeVersion));
+
+    g_input_ok = input_create();          // actions + suggested bindings (instance level); input stays off if this fails
+    if (!g_input_ok) g_h.diag("xr: controller input not available");
 
     XrSystemGetInfo sgi = { XR_TYPE_SYSTEM_GET_INFO }; sgi.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     r = p_xrGetSystem(g_instance, &sgi, &g_system);
@@ -200,6 +371,7 @@ bool xr_start(const XrHost& host) {
     rsci.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     r = p_xrCreateReferenceSpace(g_session, &rsci, &g_view_space);
     if (XR_FAILED(r)) { fail("xrCreateReferenceSpace (view)", r); xr_stop(); return false; }
+    if (g_input_ok && !input_attach()) g_input_ok = false;
 
     // Swapchains: the headset's recommended width, the game's 16:9 aspect.
     uint32_t nviews = 0; XrViewConfigurationView vcv[2] = { { XR_TYPE_VIEW_CONFIGURATION_VIEW }, { XR_TYPE_VIEW_CONFIGURATION_VIEW } };
@@ -215,7 +387,7 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
             // The headset's recommended width at the game's 16:9 aspect (the
@@ -224,7 +396,7 @@ bool xr_start(const XrHost& host) {
             e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
             if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
-        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2) and the UI panel (3)
+        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2), the UI panel (3), the ImGui layer (4)
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
@@ -242,7 +414,7 @@ bool xr_start(const XrHost& host) {
         if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
             set_status("intermediate texture failed"); xr_stop(); return false;
         }
-        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : "ui", i, e.w, e.h, n);
+        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : "imgui", i, e.w, e.h, n);
     }
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
@@ -295,7 +467,7 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
     if (r == XR_TIMEOUT_EXPIRED) { g_wait_timeouts++; if (g_wait_timeouts <= 5) g_h.diag("xr: swapchain image wait timed out (eye %d)", i); p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     if (XR_FAILED(r)) { p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     stage(i == 0 ? "copy eye 0" : "copy eye 1");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3)) g_h.ctx->CopyResource(e.images[idx], e.mid);
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i >= 3)) g_h.ctx->CopyResource(e.images[idx], e.mid);
     stage("release image");
     p_xrReleaseSwapchainImage(e.sc, &ri);
     return true;
@@ -354,12 +526,28 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             uiq.pose.position = { 0, 0, -ui->dist };
             uiq.size = { ui->width, ui->width * 9.f / 16.f };
         }
-        const XrCompositionLayerBaseHeader* layers[2] = {
+        XrCompositionLayerQuad imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        bool have_imgui = false;
+        if (ok && ui != nullptr && ui->tex2 != nullptr && submit_eye(4, ui->tex2)) {
+            have_imgui = true;
+            imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
+            imq.space = g_view_space; imq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            imq.subImage.swapchain = g_eye[4].sc;
+            imq.subImage.imageRect.offset = { 0, 0 };
+            imq.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[4].w), static_cast<int32_t>(g_eye[4].h) };
+            imq.pose.orientation = { 0, 0, 0, 1 };
+            imq.pose.position = { 0, 0, -(ui->dist * 0.95f) };
+            imq.size = { ui->width * 0.95f, ui->width * 0.95f * 9.f / 16.f };
+        }
+        const XrCompositionLayerBaseHeader* layers[3] = {
             use_screen ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad) : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
-            reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq) };
+            nullptr, nullptr };
+        uint32_t nl = 1;
+        if (have_ui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq);
+        if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        end.layerCount = ok ? (have_ui ? 2u : 1u) : 0u; end.layers = ok ? layers : nullptr;
+        end.layerCount = ok ? nl : 0u; end.layers = ok ? layers : nullptr;
         stage("xrEndFrame");
         const double t_end0 = qpc_ms();
         XrResult r = p_xrEndFrame(g_session, &end);
@@ -383,6 +571,8 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     g_frame_open = true;
     g_render_time = fs.predictedDisplayTime;
     g_should_render = fs.shouldRender == XR_TRUE;
+    stage("xrSyncActions");
+    input_sync(g_render_time);
 
     XrViewLocateInfo vli = { XR_TYPE_VIEW_LOCATE_INFO };
     vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = g_render_time; vli.space = g_space;
@@ -409,6 +599,14 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             next->fov[i].u = tanf(views[i].fov.angleUp);   next->fov[i].d = tanf(views[i].fov.angleDown);
         }
     }
+}
+
+void xr_input_get(XrInput* out) { if (out) *out = g_input; }
+void xr_haptic(int hand, float amplitude, float seconds) {
+    if (!g_input_attached || hand < 0 || hand > 1 || !p_xrApplyHapticFeedback) return;
+    XrHapticVibration hv = { XR_TYPE_HAPTIC_VIBRATION }; hv.amplitude = amplitude; hv.duration = (XrDuration)(seconds * 1e9); hv.frequency = XR_FREQUENCY_UNSPECIFIED;
+    XrHapticActionInfo hai = { XR_TYPE_HAPTIC_ACTION_INFO }; hai.action = g_a_haptic; hai.subactionPath = g_hand_path[hand];
+    p_xrApplyHapticFeedback(g_session, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&hv));
 }
 
 void xr_timing(double* wait_ms, double* end_ms) { if (wait_ms) *wait_ms = g_t_wait_ms; if (end_ms) *end_ms = g_t_end_ms; }

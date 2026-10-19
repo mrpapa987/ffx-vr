@@ -18,7 +18,11 @@ on all of them:
 | Pre-rendered FMVs | Movie screen in its own environment |
 | Blitzball | Game's own camera on a panel first; tabletop sphere later |
 
-See [docs/design.md](docs/design.md) for the reasoning behind each choice.
+See [docs/design.md](docs/design.md) for the reasoning behind each choice,
+[docs/design-notes.md](docs/design-notes.md) for the running log of findings,
+[docs/camera-found.md](docs/camera-found.md) for the constant-buffer camera,
+and [docs/exe-analysis.md](docs/exe-analysis.md) for everything known about
+FFX.exe itself (addresses, structures, cull sites, patches, leads).
 
 ## Layout
 
