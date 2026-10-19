@@ -765,7 +765,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                      + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
                      + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
                      + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
-            ImGui.TextDisabled("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 0 reset");
+            ImGui.TextDisabled("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 5 reset (numpad 0 is the fps mod's turbo)");
             ImGui.TreePop();
         }
 
@@ -873,7 +873,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.IsKeyDown(ImGuiKey.KeypadSubtract)) _ovr_forward -= move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad9))        _ovr_up      += move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
-        if (ImGui.IsKeyPressed(ImGuiKey.Keypad0))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
         if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
