@@ -1512,7 +1512,7 @@ static void write_backdrop_camera(const uint8_t* orig, uint8_t* p, UINT size, UI
 
 static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf) {
     if (g_in_eye2) return src;
-    if (!g_ovr_enabled || g_ovr_suspend || size < 64) return src;
+    if (!g_ovr_enabled || size < 64) return src;
 
     const uint8_t* p = static_cast<const uint8_t*>(src);
 
@@ -1565,7 +1565,13 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             g_ovr_applied++;
             return g_scratch.data();
         }
+        // Counted here, before anything can return early: the frame-type decision
+        // (3D or screen) reads these, and a suspended override must still count.
+        g_cam_uploads_frame++;
+        const float* mp = reinterpret_cast<const float*>(p + base + 192);     // main projection: |P[0]| <= 0.2 is the intro's near-2D camera
+        if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) g_cam3d_uploads_frame++;
     }
+    if (g_ovr_suspend) return src;              // the frame goes to the virtual screen: the game's own camera
 
     if (g_scratch.size() < size) g_scratch.resize(size);
     memcpy(g_scratch.data(), p, size);
@@ -1622,11 +1628,6 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
 
     g_ovr_mask |= mask;
     g_ovr_applied++;
-    if (base != 0) {
-        g_cam_uploads_frame++;
-        const float* mp = reinterpret_cast<const float*>(p + base + 192);     // main projection: |P[0]| <= 0.2 is the intro's near-2D camera
-        if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) g_cam3d_uploads_frame++;
-    }
     auto it = g_ovr_stats.find(size);
     if (it == g_ovr_stats.end()) g_ovr_stats[size] = { 1, mask, mask };
     else { it->second.count++; it->second.mask_all &= mask; it->second.mask_any |= mask; }
