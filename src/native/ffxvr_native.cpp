@@ -598,9 +598,17 @@ UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer l
 // draw from its own camera; a wider FOV field makes it draw what the headset
 // can see, while the matrices the GPU gets are still ours.
 constexpr uintptr_t k_cam_blocks_gva = 0x01137000, k_exe_gva_base = 0x400000;
-int   g_cull_mode = 0;                   // 0 off, 1 write g_cull_fov into field +0x10 of every block each frame
-float g_cull_fov = 0.f;                  // the value written (what the field means is read off the live readout first)
+// Field meanings (read off the live values): +0x10 is a horizontal scale on
+// the projection (P0 = k * field, nominal 0.8), +0x14 an aspect factor
+// (0.9333), +0x1C the focal length in PS2 pixels (P5 = field / 240; 800, 900,
+// 1024 by area). Larger = narrower. The game sets them per camera, so the
+// override remembers the game's own value and writes it scaled by
+// g_cull_scale (< 1 widens): the GPU still renders with our matrices.
+int   g_cull_mode = 0;                   // 0 off, 1 scale fields +0x10 and +0x1C of every block each frame
+float g_cull_scale = 0.4f;               // 0.4 = about 2.5x wider on both axes
 float g_camblk_last[3][3] = {};          // live readout: fields +0x10/+0x14/+0x1C of blocks 0..2
+float g_camblk_game[3][2] = {};          // the game's own +0x10 / +0x1C (last values not written by us)
+float g_camblk_ours[3][2] = {};          // what we last wrote
 uint32_t g_cull_writes = 0;
 static uint8_t* cam_blocks() {
     static uint8_t* p = nullptr; static bool tried = false;
@@ -613,14 +621,24 @@ static void cam_blocks_tick() {
     for (int vp = 0; vp < 3; ++vp) {
         float* f = reinterpret_cast<float*>(b + vp * 0x1C0);
         g_camblk_last[vp][0] = f[4]; g_camblk_last[vp][1] = f[5]; g_camblk_last[vp][2] = f[7];     // +0x10, +0x14, +0x1C
-        if (g_cull_mode == 1 && g_cull_fov > 0.f && std::isfinite(f[4]) && (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY))) { f[4] = g_cull_fov; g_cull_writes++; }
+        // A value that is not the one we wrote is the game's: remember it as the base.
+        if (f[4] != g_camblk_ours[vp][0]) g_camblk_game[vp][0] = f[4];
+        if (f[7] != g_camblk_ours[vp][1]) g_camblk_game[vp][1] = f[7];
+        const bool writable = (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) != 0;
+        if (g_cull_mode == 1 && g_cull_scale > 0.05f && g_cull_scale < 1.f && writable && std::isfinite(g_camblk_game[vp][0]) && g_camblk_game[vp][0] > 0.f && g_camblk_game[vp][1] > 0.f) {
+            g_camblk_ours[vp][0] = g_camblk_game[vp][0] * g_cull_scale; g_camblk_ours[vp][1] = g_camblk_game[vp][1] * g_cull_scale;
+            f[4] = g_camblk_ours[vp][0]; f[7] = g_camblk_ours[vp][1]; g_cull_writes++;
+        }
+        else if (g_cull_mode != 1 && writable && g_camblk_ours[vp][0] != 0.f && f[4] == g_camblk_ours[vp][0]) {   // switched off: hand the game's values back
+            f[4] = g_camblk_game[vp][0]; f[7] = g_camblk_game[vp][1]; g_camblk_ours[vp][0] = g_camblk_ours[vp][1] = 0.f;
+        }
     }
     static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
     if (now >= next) {
         next = now + 10000;
         diag("camblk: vp0 +10 %.4f +14 %.4f +1C %.4f | vp1 %.4f %.4f %.4f | vp2 %.4f %.4f %.4f | upload proj P0 %.4f P5 %.4f (cull mode %d value %.3f writes %u)",
              g_camblk_last[0][0], g_camblk_last[0][1], g_camblk_last[0][2], g_camblk_last[1][0], g_camblk_last[1][1], g_camblk_last[1][2],
-             g_camblk_last[2][0], g_camblk_last[2][1], g_camblk_last[2][2], g_cam[16], g_cam[21], g_cull_mode, g_cull_fov, g_cull_writes);
+             g_camblk_last[2][0], g_camblk_last[2][1], g_camblk_last[2][2], g_cam[16], g_cam[21], g_cull_mode, g_cull_scale, g_cull_writes);
     }
 }
 uint32_t g_frames_without_cam = 0;
@@ -3866,7 +3884,7 @@ static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
-extern "C" __declspec(dllexport) void ffxvr_cull_set(int mode, float fov) { g_cull_mode = mode; g_cull_fov = fov; }
+extern "C" __declspec(dllexport) void ffxvr_cull_set(int mode, float scale) { g_cull_mode = mode; g_cull_scale = scale; }
 extern "C" __declspec(dllexport) void ffxvr_camblk_get(float* out9, uint32_t* writes) { memcpy(out9, g_camblk_last, sizeof(g_camblk_last)); if (writes) *writes = g_cull_writes; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }

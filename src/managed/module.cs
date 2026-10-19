@@ -87,7 +87,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _backdrop_mode = 1;
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_cull_set;
     private delegate* unmanaged[Cdecl]<float*, uint*, void> _fn_camblk_get;
-    private int _cull_mode = 0; private float _cull_fov = 1.5f;
+    private int _cull_mode = 0; private float _cull_fov = 0.4f;
     private delegate* unmanaged[Cdecl]<int, void> _fn_backdrop_set;
     private delegate* unmanaged[Cdecl]<uint> _fn_backdrop_draws;
     private delegate* unmanaged[Cdecl]<void> _fn_xr_recenter;
@@ -814,15 +814,15 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
 
         if (ImGui.TreeNode("Culling (the game's own camera FOV field)")) {
-            ImGui.TextWrapped("The game decides what to draw from its own camera blocks (FFX-60fps research: gva 0x01137000, stride 0x1C0, FOV/aspect at +0x10/+0x14/+0x1C). Writing a wider value into +0x10 should make it submit everything the headset can see; the picture stays ours. Read the live fields first to learn what the value means, then override.");
+            ImGui.TextWrapped("The game decides what to draw from its own camera blocks (gva 0x01137000, stride 0x1C0). +10 is a horizontal projection scale (nominal 0.8), +1C the focal length in PS2 pixels (800..1024 by area); larger = narrower. The override writes the game's own values scaled by the factor below (smaller = wider), so the game submits what the headset can see; the picture stays ours.");
             if (_fn_camblk_get != null) {
                 float* f = stackalloc float[9]; uint writes;
                 _fn_camblk_get(f, &writes);
                 ImGui.Text($"block 0: +10 {f[0]:F4}  +14 {f[1]:F4}  +1C {f[2]:F4}    block 1: {f[3]:F4} {f[4]:F4} {f[5]:F4}    block 2: {f[6]:F4} {f[7]:F4} {f[8]:F4}   writes {writes}");
             }
-            bool cull_on = _cull_mode != 0; ImGui.Checkbox("override field +10 with", ref cull_on); _cull_mode = cull_on ? 1 : 0; ImGui.SameLine();
-            ImGui.SetNextItemWidth(120); ImGui.InputFloat("##cullfov", ref _cull_fov, 0.05f, 0.5f, "%.3f");
-            ImGui.SameLine(); ImGui.TextDisabled("every frame, all three blocks; untick to stop");
+            bool cull_on = _cull_mode != 0; ImGui.Checkbox("widen the game's camera: scale", ref cull_on); _cull_mode = cull_on ? 1 : 0; ImGui.SameLine();
+            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("##cullscale", ref _cull_fov, 0.1f, 1.0f, "%.2f");
+            ImGui.SameLine(); ImGui.TextDisabled("0.4 = about 2.5x wider each axis; untick to hand the values back");
             ImGui.TreePop();
         }
         if (_fn_cull_set != null) _fn_cull_set(_cull_mode != 0 ? 1 : 0, _cull_fov);
