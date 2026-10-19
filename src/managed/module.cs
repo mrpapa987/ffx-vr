@@ -1002,7 +1002,19 @@ public sealed unsafe class FFXVRModule : FhModule {
             }
             _probe_prev[i] = cur; _probe_drawn[i] = drawn; _probe_valid[i] = true;
         }
+        // The table goes to the module log every 10 s while there is something in it.
+        double now = ImGui.GetTime();
+        if (_probe_flips > 0 && now - _probe_last_log > 10.0) {
+            _probe_last_log = now;
+            var idx = new int[0x880]; for (int o = 0; o < 0x880; o++) idx[o] = o;
+            Array.Sort(idx, (x, y) => _probe_flip[y].CompareTo(_probe_flip[x]));
+            var sb = new System.Text.StringBuilder($"visibility probe: flips {_probe_flips} frames {_probe_frames} | offset:flips/noise");
+            for (int r = 0; r < 16; r++) { int o = idx[r]; if (_probe_flip[o] == 0) break; sb.Append($"  0x{o:X3}:{_probe_flip[o]}/{_probe_noise[o]}"); }
+            sb.Append($"  | last: {_probe_last}");
+            _logger.Info(sb.ToString());
+        }
     }
+    private double _probe_last_log = 0;
     private void draw_probe() {
         if (!ImGui.TreeNode("Visibility probe (which actor byte says 'drawn')")) return;
         ImGui.TextWrapped("Walk around until actors pop in and out. Offsets that change on flips but rarely otherwise are the candidates.");
