@@ -855,6 +855,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
 
+        draw_probe();
         if (ImGui.TreeNode("Actors (field actor table; the one that moves when you walk is the player)")) {
             draw_actors();
             ImGui.TreePop();
@@ -952,6 +953,73 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private Vector4[] _actor_prev = new Vector4[64];
     private float[]   _actor_moved = new float[64];
+    // ---------------------------------------------------------------- visibility probe
+    // Which byte of the actor struct says "drawn"? Per frame, each live actor is
+    // marked drawn if a skinned draw landed within 3 units of it. At the frame
+    // its drawn state flips, the bytes that changed since the previous frame are
+    // counted (flip histogram); bytes that change on ordinary frames are counted
+    // too (noise histogram, sampled). The offset with many flips and little
+    // noise is the visibility flag; a write-watch on it then names the writer.
+    private bool _probe_on = false;
+    private readonly byte[][] _probe_prev = new byte[48][];
+    private readonly bool[] _probe_drawn = new bool[48];
+    private readonly bool[] _probe_valid = new bool[48];
+    private readonly int[] _probe_flip = new int[0x880];
+    private readonly int[] _probe_noise = new int[0x880];
+    private int _probe_flips = 0, _probe_frames = 0;
+    private string _probe_last = "";
+    private void probe_tick() {
+        if (!_probe_on || _fn_world_positions == null || _fn_safe_read == null) return;
+        Actor* actors = Globals.actors; if (actors == null) return;
+        float* wp = stackalloc float[32 * 3];
+        int n = _fn_world_positions(wp, 32);
+        _probe_frames++;
+        bool sample_noise = (_probe_frames % 8) == 0;
+        for (int i = 0; i < 48; i++) {
+            byte[] cur = new byte[0x880];
+            bool ok;
+            fixed (byte* pc = cur) ok = _fn_safe_read(actors + i, pc, 0x880) != 0;
+            if (!ok) { _probe_valid[i] = false; continue; }
+            Actor a = System.Runtime.CompilerServices.Unsafe.As<byte, Actor>(ref cur[0]);
+            if (!live(a)) { _probe_valid[i] = false; continue; }
+            // render space negates X and Y
+            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z;
+            bool drawn = false;
+            for (int k = 0; k < n; k++) {
+                float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz;
+                if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; }
+            }
+            if (_probe_valid[i] && _probe_prev[i] != null) {
+                bool flip = drawn != _probe_drawn[i];
+                if (flip || sample_noise) {
+                    byte[] prev = _probe_prev[i];
+                    for (int o = 0; o < 0x880; o++) {
+                        if (cur[o] == prev[o]) continue;
+                        if (flip) _probe_flip[o]++; else _probe_noise[o]++;
+                    }
+                    if (flip) { _probe_flips++; _probe_last = $"actor {i} {actor_name(a.chr_name)}: {(drawn ? "appeared" : "vanished")} at frame {_probe_frames}"; }
+                }
+            }
+            _probe_prev[i] = cur; _probe_drawn[i] = drawn; _probe_valid[i] = true;
+        }
+    }
+    private void draw_probe() {
+        if (!ImGui.TreeNode("Visibility probe (which actor byte says 'drawn')")) return;
+        ImGui.TextWrapped("Walk around until actors pop in and out. Offsets that change on flips but rarely otherwise are the candidates.");
+        ImGui.Checkbox("probe on", ref _probe_on); ImGui.SameLine();
+        if (ImGui.Button("reset")) { Array.Clear(_probe_flip); Array.Clear(_probe_noise); _probe_flips = 0; _probe_frames = 0; _probe_last = ""; }
+        ImGui.Text($"flips seen: {_probe_flips}   frames: {_probe_frames}   last: {_probe_last}");
+        // top offsets by flip count, with the noise count beside
+        var idx = new int[0x880]; for (int o = 0; o < 0x880; o++) idx[o] = o;
+        Array.Sort(idx, (x, y) => _probe_flip[y].CompareTo(_probe_flip[x]));
+        ImGui.Text("offset   flips   noise   (known: 0x2 enabled, 0xC pos, 0x154 speed, 0x158 rot, 0x194 flags, 0x330.. shade, 0x354 transparency, 0x524.. limbs)");
+        for (int r = 0; r < 24; r++) {
+            int o = idx[r]; if (_probe_flip[o] == 0) break;
+            ImGui.Text($"0x{o:X3}    {_probe_flip[o],5}   {_probe_noise[o],5}");
+        }
+        ImGui.TreePop();
+    }
+
     private void draw_actors() {
         Actor* actors = Globals.actors;
         if (actors == null) { ImGui.Text("no actor table"); return; }
@@ -1097,6 +1165,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         try_install_hooks();
         if (_native_init_done) draw_markers();
+        if (_native_init_done) probe_tick();
         if (_native_init_done) draw_eye2_preview();   // its own top-level window, never nested
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
