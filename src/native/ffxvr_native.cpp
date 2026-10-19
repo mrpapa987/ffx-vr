@@ -4024,6 +4024,9 @@ static void xr_tick() {
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
+    // The stick remap angle is refreshed by the override; whenever first person is not in effect it must be
+    // zero, or a stale angle from outside keeps rotating the stick (a hut after a 150-degree doorway: "no control").
+    if (g_ovr_suspend || g_backdrop_room || g_fp_mode == 0 || !g_xr_active) g_move_delta = 0.f;
     XrScreen screen = {};
     screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
