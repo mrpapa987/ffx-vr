@@ -582,6 +582,7 @@ int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
+UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer layout dump (ffxvr_dump_cb)
 uint32_t g_frames_without_cam = 0;
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
@@ -1391,7 +1392,6 @@ extern "C" __declspec(dllexport) int ffxvr_cam_mem_writes() { return static_cast
 // projection variants, products of those with other affine blocks in the
 // same buffer, the inverse view, or just an affine matrix with its
 // translation. For layouts we have not met (hut walls: 1456 B).
-UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;
 static void dump_cb_layout(const uint8_t* p, UINT size, UINT base, const char* via) {
     diag("cb layout dump: %u bytes via %s, view base %u (0 = no camera found)", size, via, base);
     const UINT nb = size / 64;
