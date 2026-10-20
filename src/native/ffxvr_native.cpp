@@ -475,6 +475,7 @@ uint32_t g_turn_count = 0;
 // its own camera, so the stick is rotated by (view heading - game camera
 // heading) inside the game's XInputGetState import. Pure IAT hook.
 bool  g_move_remap = true; float g_move_sign = 1.f; float g_move_delta = 0.f;   // radians
+float g_move_delta_hold = 0.f; bool g_move_held = false;   // third person: the remap latched while the stick is pushed (see the hook)
 float g_yaw_view = 0.f, g_yaw_cam = 0.f;
 uint32_t g_xi_hook_calls = 0; bool g_xi_hooked = false;
 typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE*);
@@ -482,7 +483,7 @@ PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = fa
 // First person / follow: the view is built from the player's position, not
 // the authored camera. Heading latched at toggle (and at recentre); the
 // head owns orientation; the player's own skinned draws are hidden.
-int   g_fp_mode = 0;                           // 0 off, 1 first person, 2 follow
+int   g_fp_mode = 0;                           // 0 off, 1 first person, 2 diorama (follow), 3 third person
 float g_fp_pos[3] = {};                        // player position, render space
 bool  g_fp_have_pos = false;
 float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units), when not anchored to the head
@@ -497,6 +498,11 @@ float g_fp_head_smooth = 0.35f;   // per-frame blend toward the raw head positio
 float g_fp_head_fwd = 1.5f; float g_fp_move_dir[3] = {}; bool g_fp_move_dir_valid = false;
 float g_fp_head[3] = {}; bool g_fp_have_head = false; float g_fp_head_s[3] = {}; bool g_fp_head_s_valid = false;
 float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
+// Third person: life-size, the camera just behind and above the player; the
+// heading slews round behind the direction he runs (rate-limited, 0 = fixed),
+// the grips pan / zoom (distance, not world scale) / rotate / tilt, and the
+// reset chord puts it back behind him.
+float g_tp_dist = 24.f, g_tp_h = 22.f, g_tp_pitch = -0.15f, g_tp_follow_rate = 0.f;    // units, units, radians, deg/s cap (0 = the heading is fixed, as in first person)
 float g_fp_yaw = 0.f; bool g_fp_yaw_latched = false;
 bool  g_fp_hide_body = true; float g_fp_hide_radius = 0.75f;  // the player's own parts sit on the actor position; an NPC you talk to is 1+ units off
 uint32_t g_fp_hidden_draws = 0;
@@ -668,8 +674,22 @@ float    g_gest_last_p[2][3] = {};           // hand positions (reference space,
 float    g_gest_last_tilt = 0.f;             // mean grip pitch last frame (two-hand tilt)
 float    g_gest_tilt_gain = 1.f;             // seat pitch change per radian of wrist roll (negative inverts)
 uint32_t g_gest_toggle_fp = 0;               // chord events, read and cleared by the managed side
-bool     g_gest_chord_down = false;
+bool     g_gest_chord_down = false, g_gest_reset_down = false;
 bool     g_gest_active = false;              // a grab is in progress this frame (overlay)
+/// Each mode's default view offset / pitch / scale.
+static void view_defaults(int mode) {
+    g_gest_scale = 1.f; g_gest_pitch = (mode == 2) ? -0.35f : (mode == 3) ? g_tp_pitch : 0.f;
+    if (mode == 2)      { g_gest_move[0] = 0.f; g_gest_move[1] = g_fp_follow_h; g_gest_move[2] = -g_fp_follow_dist; }
+    else if (mode == 3) { g_gest_move[0] = 0.f; g_gest_move[1] = g_tp_h;        g_gest_move[2] = -g_tp_dist; }
+    else g_gest_move[0] = g_gest_move[1] = g_gest_move[2] = 0.f;
+}
+/// Reset the grab: the authored seat goes back to its camera; the diorama and
+/// third person go back behind and above the player (third person: behind the
+/// way he last went).
+static void view_reset() {
+    view_defaults(g_fp_mode);
+    if (g_fp_mode == 3 && g_fp_yaw_latched && g_fp_move_dir_valid) g_fp_yaw = atan2f(-g_fp_move_dir[0], -g_fp_move_dir[2]);
+}
 static SHORT stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return (SHORT)(v * 32767.f); }
 static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
@@ -697,8 +717,22 @@ static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
     if (vr) { vrpad_apply(st, r == ERROR_SUCCESS); r = ERROR_SUCCESS; }
     if (r == ERROR_SUCCESS && st) {
         g_xi_hook_calls++;
-        if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && g_move_delta != 0.f) {
-            const float d = g_move_sign * g_move_delta;
+        // Third person with the heading following the run (off by default):
+        // a remap against the live view would chase itself (push sideways: he
+        // turns with the camera, the camera turns after him, round and round),
+        // so the remap is latched when the stick leaves centre and held until
+        // it returns. With a fixed heading the control is first person's.
+        float delta = g_move_delta;
+        if (g_fp_mode == 3 && g_tp_follow_rate > 0.f) {
+            const float sx = (float)st->Gamepad.sThumbLX / 32767.f, sy = (float)st->Gamepad.sThumbLY / 32767.f;
+            const bool pushed = sx * sx + sy * sy > 0.25f * 0.25f;
+            if (pushed && !g_move_held) g_move_delta_hold = g_move_delta;
+            g_move_held = pushed;
+            if (pushed) delta = g_move_delta_hold;
+        }
+        else g_move_held = false;
+        if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && delta != 0.f) {
+            const float d = g_move_sign * delta;
             const float c = cosf(d), sn = sinf(d);
             const float sx = (float)st->Gamepad.sThumbLX, sy = (float)st->Gamepad.sThumbLY;
             const float nx = sx * c - sy * sn, ny = sy * c + sx * sn;
@@ -732,8 +766,15 @@ static void gesture_tick() {
     if (chord && !g_gest_chord_down) { g_gest_toggle_fp++; xr_haptic(0, 0.6f, 0.08f); xr_haptic(1, 0.6f, 0.08f); }
     g_gest_chord_down = chord;
     if (chord) g_vrpad_suppress = true;
+    // Reset chord: left grip + left stick click -> the view back to its default
+    // (the authored seat to its camera, the diorama / third person behind the player).
+    const bool rchord = L.squeeze > 0.5f && L.stick_click;
+    if (rchord && !g_gest_reset_down) { view_reset(); xr_haptic(0, 0.6f, 0.08f); }
+    g_gest_reset_down = rchord;
+    if (rchord) g_vrpad_suppress = true;
     // Grabs: seat view only, gestures on, both poses needed for two hands.
-    const bool diorama = g_fp_mode == 2 && g_fp_yaw_latched && !g_ovr_suspend;
+    const bool diorama = g_fp_mode >= 2 && g_fp_yaw_latched && !g_ovr_suspend;
+    const bool third = g_fp_mode == 3;
     const bool seat = (g_xr_seat && g_seat_latched && g_fp_mode == 0 && !g_ovr_suspend) || diorama;
     float& yaw_ref = diorama ? g_fp_yaw : g_seat_yaw;
     float& pitch_ref = diorama ? g_gest_pitch : g_seat_pitch;
@@ -768,7 +809,12 @@ static void gesture_tick() {
             const float d[3] = { m1[0] - m0[0], m1[1] - m0[1], m1[2] - m0[2] }; float dm[3]; to_mv(d, dm);
             for (int i = 0; i < 3; ++i) g_gest_move[i] -= dm[i] * sc;
             // 2. zoom: hands apart = world bigger = fewer units per metre; the midpoint stays put
-            if (d0 > 0.05f && d1 > 0.05f) {
+            if (third && d0 > 0.05f && d1 > 0.05f) {
+                // third person: hands apart = closer; the offset from the player shrinks, the scale stays life-size
+                const float len = sqrtf(g_gest_move[0]*g_gest_move[0] + g_gest_move[1]*g_gest_move[1] + g_gest_move[2]*g_gest_move[2]);
+                if (len > 1e-3f) { const float nl = fmaxf(4.f, fminf(400.f, len * d0 / d1)); for (int i = 0; i < 3; ++i) g_gest_move[i] *= nl / len; }
+            }
+            else if (d0 > 0.05f && d1 > 0.05f) {
                 const float ratio = d1 / d0;
                 const float sc_new = fmaxf(5.f, fminf(2000.f, sc / ratio));
                 const float* anchor = m1;                                            // the midpoint in reference metres
@@ -908,6 +954,19 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
         }
+        if (g_fp_mode == 3 && primary && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
+            // Third person: the heading slews round behind the direction of
+            // travel. Proportional with a rate cap, and weighted by how far
+            // round it has to go, so running toward the camera does not swing
+            // it (w = 0 at 180 degrees, 1/2 side-on, 1 running away).
+            const float want = atan2f(-g_fp_move_dir[0], -g_fp_move_dir[2]);
+            float d = want - g_fp_yaw;
+            while (d >  3.14159265f) d -= 6.2831853f;
+            while (d < -3.14159265f) d += 6.2831853f;
+            const float w = (1.f + cosf(d)) * 0.5f;
+            const float step = g_tp_follow_rate * 0.0174533f * g_dt * w;
+            g_fp_yaw += fmaxf(-step, fminf(step, d * fminf(1.f, 1.5f * g_dt)));   // exponential approach (2/3 s), capped
+        }
         const float fy[3] = { -sinf(g_fp_yaw), 0.f, -cosf(g_fp_yaw) };
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
@@ -928,13 +987,15 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             P[0] += d[0] * g_fp_head_fwd; P[2] += d[2] * g_fp_head_fwd;
         }
         else { P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2]; }
-        if (g_fp_mode == 2) {
-            // Diorama: anchored to the player (smoothed), the offset lives in the
-            // heading frame as g_gest_move (right, up, forward; behind = negative
-            // forward) and is what the grab gestures and the reset set.
-            const float* target = g_anchor_ovr_valid ? g_anchor_ovr : g_fp_pos;
-            const float k = g_anchor_ovr_valid ? g_anchor_ovr_k : g_fp_anchor_k;
-            if (g_anchor_ovr_valid != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = g_anchor_ovr_valid; }   // battle start / end: snap
+        if (g_fp_mode >= 2) {
+            // Diorama / third person: anchored to the player (smoothed), the offset
+            // lives in the heading frame as g_gest_move (right, up, forward; behind =
+            // negative forward) and is what the grab gestures and the reset set. The
+            // battle centroid stands in for the player in the diorama only.
+            const bool ovr_on = g_anchor_ovr_valid && g_fp_mode == 2;
+            const float* target = ovr_on ? g_anchor_ovr : g_fp_pos;
+            const float k = ovr_on ? g_anchor_ovr_k : g_fp_anchor_k;
+            if (ovr_on != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = ovr_on; }   // battle start / end: snap
             if (!g_fp_anchor_valid) { memcpy(g_fp_anchor, target, sizeof(g_fp_anchor)); g_fp_anchor_valid = true; }
             else for (int i = 0; i < 3; ++i) g_fp_anchor[i] += (target[i] - g_fp_anchor[i]) * k;
             P[0] = g_fp_anchor[0]; P[1] = g_fp_anchor[1]; P[2] = g_fp_anchor[2];
@@ -970,7 +1031,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float live_yaw = atan2f(-f[0], -f[2]);
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
             const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
-            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode == 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's
+            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode >= 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's
             else if (g_follow_pans) {
                 // slew the latched yaw toward the live one, rate-limited
                 float d = live_yaw - g_seat_yaw;
@@ -1013,17 +1074,17 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     if (xr) {
         if (g_xr_translate) { hx = g_xr_p[0]; hy = g_xr_p[1]; hz = g_xr_p[2]; }
         if (eye2) { hx += g_xr_eye_off[0]; hy += g_xr_eye_off[1]; hz += g_xr_eye_off[2]; }
-        const float sc = g_xr_scale * (g_fp_mode == 1 ? 1.f : g_gest_scale); hx *= sc; hy *= sc; hz *= sc;   // first person is always true scale
+        const float sc = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f); hx *= sc; hy *= sc; hz *= sc;   // only the diorama zooms the world
     }
     const float* Rm = xr ? Rb : Rn;                      // manual offsets: heading frame with the headset (up stays up), head frame without
     float mv[3] = { 0.f, 0.f, 0.f };
     if (g_fp_mode == 0)      { for (int i = 0; i < 3; ++i) mv[i] = g_ovr_move[i] + g_gest_move[i]; }   // authored seat: numpad + grab
-    else if (g_fp_mode == 2) { for (int i = 0; i < 3; ++i) mv[i] = g_gest_move[i]; }                  // diorama: the grab offset from the player
+    else if (g_fp_mode >= 2) { for (int i = 0; i < 3; ++i) mv[i] = g_gest_move[i]; }                  // diorama / third person: the grab offset from the player
     for (int i = 0; i < 3; ++i)
         Pn[i] = P[i] + Rm[0*3+i]*mv[0] + Rn[0*3+i]*lateral + Rm[1*3+i]*mv[1] - Rm[2*3+i]*mv[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
 
-    if (g_fp_mode == 2 && g_diorama_floor > 0.f && !g_gest_active && Pn[1] < P[1] + g_diorama_floor) Pn[1] = P[1] + g_diorama_floor;   // diorama floor
+    if (g_fp_mode >= 2 && g_diorama_floor > 0.f && !g_gest_active && Pn[1] < P[1] + g_diorama_floor) Pn[1] = P[1] + g_diorama_floor;   // diorama / third person floor
 
     float tn[3];
     for (int r = 0; r < 3; ++r) tn[r] = -(Rn[r*3+0]*Pn[0] + Rn[r*3+1]*Pn[1] + Rn[r*3+2]*Pn[2]);
@@ -3731,12 +3792,8 @@ extern "C" __declspec(dllexport) void ffxvr_msaa_status(uint32_t* seen, uint32_t
 extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }
 extern "C" __declspec(dllexport) void ffxvr_vrpad_set(int enabled) { g_vrpad_enabled = enabled != 0; }
 extern "C" __declspec(dllexport) void ffxvr_gesture_set(int enabled, float tilt_gain) { g_gest_enabled = enabled != 0; g_gest_tilt_gain = tilt_gain; }
-/// Reset the grab: the authored seat goes back to its camera; the diorama goes back behind and above the player.
-extern "C" __declspec(dllexport) void ffxvr_gesture_reset() {
-    g_gest_scale = 1.f; g_gest_pitch = (g_fp_mode == 2) ? -0.35f : 0.f;
-    if (g_fp_mode == 2) { g_gest_move[0] = 0.f; g_gest_move[1] = g_fp_follow_h; g_gest_move[2] = -g_fp_follow_dist; }
-    else g_gest_move[0] = g_gest_move[1] = g_gest_move[2] = 0.f;
-}
+extern "C" __declspec(dllexport) void ffxvr_gesture_reset() { view_reset(); }
+extern "C" __declspec(dllexport) void ffxvr_tp_set(float dist, float h, float pitch, float follow_rate) { g_tp_dist = dist; g_tp_h = h; g_tp_pitch = pitch; g_tp_follow_rate = follow_rate; }
 extern "C" __declspec(dllexport) void ffxvr_anchor_set(float k) { g_fp_anchor_k = k; }
 extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_floor = units; }
 /// Diorama anchor override (render space): the centre of the battle while one is on; valid = 0 hands it back to the player.
@@ -3770,11 +3827,7 @@ extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float 
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
     const int mode_before = g_fp_mode;
     g_fp_mode = mode; g_fp_eye_h = eye_h; g_fp_follow_dist = follow_dist; g_fp_follow_h = follow_h; g_fp_hide_body = hide_body != 0; g_fp_hide_radius = hide_radius;
-    if (mode != mode_before) {   // the grab offset means something different per mode: start each mode from its default
-        g_gest_scale = 1.f; g_gest_pitch = (mode == 2) ? -0.35f : 0.f; g_fp_anchor_valid = false;   // the diorama starts looking down at the player a little
-        if (mode == 2) { g_gest_move[0] = 0.f; g_gest_move[1] = g_fp_follow_h; g_gest_move[2] = -g_fp_follow_dist; }
-        else g_gest_move[0] = g_gest_move[1] = g_gest_move[2] = 0.f;
-    }
+    if (mode != mode_before) { view_defaults(mode); g_fp_anchor_valid = false; }   // the grab offset means something different per mode: start each mode from its default
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_body_set(int mode, uint32_t head_mask, int solo) { g_fp_body_mode = mode; g_fp_head_mask = head_mask; g_fp_solo = solo; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_fp_parts() { return g_fp_parts_last; }

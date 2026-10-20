@@ -5,14 +5,16 @@
 # Nexus mod 244) as a FILE-ONLY FAHRENHEIT MOD. Do NOT install ffgriever's
 # External File Loader DLL next to Fahrenheit: Fahrenheit's own file loader
 # hooks the same game functions (BigFileStream::openFile, PStreamFile) and
-# serves loose files from <game>\fahrenheit\mods\<id>\efl\x\FFX_Data\...,
-# which is the same tree EFL reads from data\mods\ffx_data\... .
+# serves loose files from <game>\fahrenheit\mods\<id>\efl\x\..., where efl\x
+# is the VBF root: ffx_ps2\... and ffx_data\gamedata\... side by side, exactly
+# the tree EFL reads from data\mods\. (The game asks for "/FFX_Data/GameData/..."
+# and "/ffx_ps2/...": FFX_Data is the VBF's ffx_data folder, case-insensitive.)
 #
 # What it does:
 #   1. creates <game>\fahrenheit\mods\<Id>\ with a manifest (no DLL = file-only mod)
-#   2. extracts the archive(s) with 7-Zip into that mod's efl\x\FFX_Data\ (handles
-#      archives rooted at data\mods\ffx_data, at ffx_data, or at the VBF root
-#      itself - ffx_ps2\ and ffx_data\ side by side)
+#   2. extracts the archive(s) with 7-Zip into that mod's efl\x\ (finds the VBF
+#      root in the archive: the folder holding ffx_ps2\ and/or ffx_data\; anything
+#      else at that level, such as a bundled EFL loader, is left out)
 #   3. adds <Id> to fahrenheit\mods\loadorder BEFORE ffxvr (ffxvr's own efl files, if
 #      any, win conflicts)
 #   4. optionally turns on NTFS compression for the mod folder (the pack author's
@@ -36,7 +38,7 @@ $ErrorActionPreference = 'Stop'
 $game   = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
 $mods   = Join-Path $game 'fahrenheit\mods'
 $modDir = Join-Path $mods $Id
-$eflX   = Join-Path $modDir 'efl\x\FFX_Data'
+$eflX   = Join-Path $modDir 'efl\x'
 $order  = Join-Path $mods 'loadorder'
 $proj   = 'C:\projects\FFX-VR'
 $log    = Join-Path $proj ("logs\install-texture-pack-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -89,9 +91,9 @@ foreach ($c in $candidates) {
 if (!$root) { throw "could not find ffx_ps2\ or ffx_data\ in the extracted archive (looked under $tmp)" }
 Log "VBF root in the archive: $root"
 
-# Merge into efl\x\FFX_Data (existing files are replaced)
+# Merge into efl\x (existing files are replaced); only the VBF's own folders
 $moved = 0
-Get-ChildItem -Path $root -Directory | ForEach-Object {
+Get-ChildItem -Path $root -Directory | Where-Object { $_.Name -in @('ffx_ps2', 'ffx_data', 'ffx2_ps2', 'ffx2_data') } | ForEach-Object {
     $dst = Join-Path $eflX $_.Name
     if (Test-Path $dst) {
         # merge: robocopy moves files, keeps the tree
@@ -109,8 +111,9 @@ $lines = @()
 if (Test-Path $order) { $lines = @(Get-Content $order | Where-Object { $_.Trim() -ne '' }) }
 if ($lines -notcontains $Id) {
     $i = [array]::IndexOf($lines, 'ffxvr')
-    if ($i -ge 0) { $lines = @($lines[0..($i-1)]) + @($Id) + @($lines[$i..($lines.Count-1)]) | Where-Object { $_ -ne $null } }
-    else { $lines = @($Id) + $lines }
+    if ($i -gt 0)      { $lines = @($lines[0..($i-1)]) + @($Id) + @($lines[$i..($lines.Count-1)]) }
+    elseif ($i -eq 0)  { $lines = @($Id) + $lines }     # ($lines[0..-1] would wrap round: no slice here)
+    else               { $lines = @($Id) + $lines }
     Set-Content -Path $order -Value $lines
     Log "loadorder is now: $($lines -join ', ')"
 }

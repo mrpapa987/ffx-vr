@@ -81,6 +81,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
     private delegate* unmanaged[Cdecl]<int> _fn_fp_hidden;
     private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 0.75f;
+    private float _tp_dist = 24f, _tp_h = 22f, _tp_pitch = -8f, _tp_follow_rate = 0f;   // third person: units, units, degrees, deg/s (0 = heading never follows)
+    private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_tp_set;
     private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
     private int _fp_body_mode = 0; private string _fp_head_parts = "0,1,2,3,9"; private int _fp_solo = -1;   // 0 = whole body hidden (default). Tidus (c101): parts 0-3 hair, 9 face/head, kept for later   // 0 hide all, 1 hide head parts only, 2 show all
     private delegate* unmanaged[Cdecl]<int, uint, int, void> _fn_fp_body_set;
@@ -334,6 +336,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_haptic       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_haptic");
             _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_set");
             _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_reset");
+            _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_tp_set");
             _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_poll");
             _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_body_set");
             _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_parts");
@@ -641,6 +644,10 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
                     case "follow_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_dist); break;
                     case "follow_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_h); break;
+                    case "tp_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_dist); break;
+                    case "tp_height":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_h); break;
+                    case "tp_pitch":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_pitch); break;
+                    case "tp_follow_rate":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_follow_rate); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -700,7 +707,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
             $"follow_distance={_fp_follow_dist.ToString("F0", ci)}\n" +
-            $"follow_height={_fp_follow_h.ToString("F0", ci)}\n";
+            $"follow_height={_fp_follow_h.ToString("F0", ci)}\n" +
+            $"tp_distance={_tp_dist.ToString("F0", ci)}\n" +
+            $"tp_height={_tp_h.ToString("F0", ci)}\n" +
+            $"tp_pitch={_tp_pitch.ToString("F0", ci)}\n" +
+            $"tp_follow_rate={_tp_follow_rate.ToString("F0", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -778,10 +789,11 @@ public sealed unsafe class FFXVRModule : FhModule {
         int fp_before = _fp_mode;
         ImGui.RadioButton("authored (seat)", ref _fp_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("first person", ref _fp_mode, 1); ImGui.SameLine();
+        ImGui.RadioButton("third person", ref _fp_mode, 3); ImGui.SameLine();
         ImGui.RadioButton("diorama (follows the player)", ref _fp_mode, 2);
-        ImGui.SameLine(); ImGui.TextDisabled("End / right grip + stick click: first person <-> diorama");
-        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = _fp_mode == 1 ? 2 : 1;
-        if (_chord_toggle_pending) { _chord_toggle_pending = false; _fp_mode = _fp_mode == 1 ? 2 : 1; }
+        ImGui.SameLine(); ImGui.TextDisabled("End / right grip + right stick click: first person -> third person -> diorama.   left grip + left stick click: reset the view");
+        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = next_view_mode(_fp_mode);
+        if (_chord_toggle_pending) { _chord_toggle_pending = false; _fp_mode = next_view_mode(_fp_mode); }
 
         // Turning (first person and seat alike)
         ImGui.Text("turning:"); ImGui.SameLine();
@@ -795,11 +807,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_move_status(&yv, &yc, &dd, &calls, &hooked);
             ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
         }
-        if (_fp_mode != fp_before) {
-            if (_fp_mode == 1) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }   // first person: true scale
-            else if (fp_before == 1) _xr_scale = _scale_before_fp;                           // back to a seat or the diorama: the scale from before
-        }
+        if (_fp_mode != fp_before) apply_mode_scale(fp_before, _fp_mode);
         push_player();
+        if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
 
         // View
@@ -980,6 +990,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             else ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
             ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
             ImGui.SliderFloat("follow height", ref _fp_follow_h, 0f, 150f);
+            ImGui.Text("third person:"); ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("distance", ref _tp_dist, 4f, 120f, "%.0f"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("height", ref _tp_h, 0f, 60f, "%.0f"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("pitch", ref _tp_pitch, -60f, 30f, "%.0f deg"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(140); ImGui.SliderFloat("heading follows the run", ref _tp_follow_rate, 0f, 180f, "%.0f deg/s");
+            ImGui.SameLine(); ImGui.TextDisabled("0 = fixed heading like first person (recommended); grips zoom the distance, not the world");
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
             ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.1f, 12f); ImGui.SameLine(); ImGui.TextDisabled("the player's parts sit exactly on the actor position; an NPC you talk to is 1+ units away, so keep this small");
             ImGui.Text("in first person:"); ImGui.SameLine();
@@ -1025,11 +1040,17 @@ public sealed unsafe class FFXVRModule : FhModule {
     }
 
     /// <summary>Numpad nudges and the per-frame push of override + eye-2 state to the native side.</summary>
-    /// First person <-> diorama (the chord and the End key). Entering first person
-    /// goes to true scale; leaving it restores the diorama scale.
+    /// First person -> third person -> diorama (the chord and the End key).
+    private static int next_view_mode(int m) => m == 1 ? 3 : m == 3 ? 2 : 1;
+    private static bool life_size(int m) => m == 1 || m == 3;
+    /// First and third person are true scale; leaving them for a seat or the diorama restores the scale from before.
+    private void apply_mode_scale(int before, int after) {
+        if (!life_size(before) && life_size(after)) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; }
+        else if (life_size(before) && !life_size(after)) _xr_scale = _scale_before_fp;
+    }
     private void toggle_first_person() {
-        int before = _fp_mode; _fp_mode = _fp_mode == 1 ? 2 : 1;
-        if (before != 1) { _scale_before_fp = _xr_scale; _xr_scale = k_true_scale; } else _xr_scale = _scale_before_fp;
+        int before = _fp_mode; _fp_mode = next_view_mode(_fp_mode);
+        apply_mode_scale(before, _fp_mode);
     }
     private void push_override_and_stereo() {
         float dt   = ImGui.GetIO().DeltaTime;
@@ -1363,6 +1384,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             push_override_and_stereo();   // state still flows to the native side with the window hidden
             push_player();
             if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
+            if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
             if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
             if (_fn_xr_set != null) {
                 bool want = _xr_want;

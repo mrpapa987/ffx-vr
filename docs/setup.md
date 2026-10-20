@@ -145,8 +145,15 @@ Loader, which serves files from `data\mods\ffx_data\...` mirroring the VBF.
 **Do not install that loader next to Fahrenheit**: Fahrenheit's own
 `FhFileLoaderModule` hooks the same game functions and would fight it.
 Fahrenheit supports file-only mods: a folder under `fahrenheit\mods\<id>\`
-with `<id>.manifest.json` and the files under `efl\x\FFX_Data\...` (same tree
-as EFL's `ffx_data`), listed in `fahrenheit\mods\loadorder`.
+with `<id>.manifest.json` and the files under `efl\x\...`, listed in
+`fahrenheit\mods\loadorder`. `efl\x` is the VBF root: `ffx_ps2\...` and
+`ffx_data\gamedata\...` side by side, the same tree EFL serves from
+`data\mods\`. The file loader indexes each file by its path relative to
+`efl\x` and matches the paths the game asks for (`/ffx_ps2/...`,
+`/FFX_Data/GameData/...`; `FFX_Data` is `ffx_data`, the lookup ignores case).
+The example in Fahrenheit's `fileloader.cs` (`efl\x\FFX_Data\ffx_ps2\...`)
+is misleading: that extra level never matches, and a pack installed that way
+is silently ignored. The first install here did exactly that.
 
 `tools\install-texture-pack.ps1 -Archive <downloaded .7z> [-Compress]` does
 exactly that: extracts with 7-Zip, finds the VBF root in the archive, moves

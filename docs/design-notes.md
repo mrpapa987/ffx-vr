@@ -465,13 +465,33 @@ a deliberate drag below ground works and the clamp returns on release. 0
 turns it off. Hills rising behind the player can still put the seat inside
 terrain; that needs the walkmesh.
 
-## Pending: the follow view as an adjustable third person (noted 19 Oct 2026)
+## Third person (fp_mode 3, 19 Oct 2026)
 
-The diorama (follow) view wants to grow into a proper adjustable third-person
-mode: a blend between first person and the tabletop - close behind the
-player at true-ish scale, orbit / distance / height adjustable, with the
-floor and (eventually) walkmesh collision. Revisit after the save screen and
-the texture pack.
+A third view between first person and the diorama: life-size (k_true_scale,
+like first person), the camera 24 units behind and 22 above the player's
+feet, pitched down 8 degrees, the body drawn. The chord cycles first person
+-> third person -> diorama; End does the same.
+
+- Anchor and offset are the diorama's (`g_fp_anchor`, `g_gest_move` in the
+  heading frame, the floor clamp), so the grips work the same way: one hand
+  pans, two hands pan / rotate / tilt. The two-hand zoom differs: in third
+  person it scales the offset vector (closer / further, 4..400 units) and
+  leaves the world scale alone, so the player stays life-size.
+- The heading is fixed, as in first person: you turn by turning (head,
+  body, or the right stick), and the left stick is relative to where you
+  look. That is what makes it feel like first person; the first cut had the
+  camera swing round behind the run and the control was awful - the remap
+  against the live view chased the swinging camera. The swing survives as
+  an option (`tp_follow_rate` > 0, default 0): `g_fp_yaw` eases toward the
+  direction of travel, capped, weighted by (1 + cos d) / 2, and the stick
+  remap is latched while the stick is pushed so it cannot chase itself.
+- Reset chord: left grip + left stick click puts any mode back to its
+  default (`view_reset`); in third person it also snaps the heading behind
+  the way he last went. The seat and diorama get the same chord.
+- The battle centroid override applies to the diorama only; third person
+  stays on the player actor.
+- Settings: `tp_distance`, `tp_height`, `tp_pitch` (degrees), `tp_follow_rate`
+  (`ffxvr_tp_set`). Still pending: walkmesh collision for the camera.
 
 ## The save screen, and ImGui in the headset (19 Oct 2026)
 
