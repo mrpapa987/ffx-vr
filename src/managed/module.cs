@@ -79,7 +79,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
     // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
     private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
-    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0;
+    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false;
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -622,13 +622,22 @@ public sealed unsafe class FFXVRModule : FhModule {
     private string _ini_last = "";
     private bool _headset_autostart = false; private int _start_view = 1; private bool _overlay_at_start = true, _overlay_at_start_loaded = true;   // start_view: 0 seat, 1 first person, 3 third person, 2 diorama
 
+    private bool _settings_ok = false;   // a load succeeded (or there was no file): saving is allowed
     private void settings_load() {
         try {
             string dir = Path.GetDirectoryName(typeof(FFXVRModule).Assembly.Location) ?? ".";
             _ini_path = Path.Combine(dir, "ffxvr.ini");
             bone_labels_load();
-            if (!File.Exists(_ini_path)) return;
-            foreach (string raw in File.ReadAllLines(_ini_path)) {
+            if (!File.Exists(_ini_path)) { _settings_ok = true; _logger.Info($"settings: no {_ini_path} yet; defaults"); return; }
+            // The file can be briefly locked (an editor, a sync tool, the previous game process on its way out):
+            // retry rather than fall through to defaults, and never overwrite it with defaults on a failed read.
+            string[] lines_in = Array.Empty<string>(); Exception? last = null;
+            for (int attempt = 0; attempt < 10; attempt++) {
+                try { lines_in = File.ReadAllLines(_ini_path); last = null; break; }
+                catch (IOException e) { last = e; System.Threading.Thread.Sleep(100); }
+            }
+            if (last != null) { _settings_ok = false; _logger.Info($"settings: could not read {_ini_path} ({last.Message}); keeping defaults in memory and NOT saving this session"); return; }
+            foreach (string raw in lines_in) {
                 string line = raw.Trim();
                 int eq = line.IndexOf('=');
                 if (line.Length == 0 || line[0] == '#' || eq < 0) continue;
@@ -715,9 +724,9 @@ public sealed unsafe class FFXVRModule : FhModule {
                 _window_open = _overlay_at_start;   // straight into the headset: no overlay until F8
             }
             _logger.Info($"settings: loaded {_ini_path}: headset_autostart={_headset_autostart} start_view={_start_view} overlay_at_start={_overlay_at_start} overlay_open={_window_open} eye2_preview={_eye2_preview}");
-            _overlay_at_start_loaded = _overlay_at_start;
+            _overlay_at_start_loaded = _overlay_at_start; _settings_ok = true;
         }
-        catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
+        catch (Exception e) { _settings_ok = false; _logger.Info($"settings: load failed ({e.GetType().Name}: {e.Message}); not saving this session"); }
     }
 
     /// <summary>An edit of the ini while the game runs (by hand, or by a tool) is picked up instead of being
@@ -733,8 +742,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _ini_mtime_seen = mt;
             string on_disk = File.ReadAllText(_ini_path);
             if (on_disk == _ini_last) return;
-            bool autostart = _headset_autostart; bool xr_want = _xr_want; bool win = _window_open; int mode = _fp_mode;
-            settings_load();
+            bool autostart = _headset_autostart; bool xr_want = _xr_want; bool win = _window_open; int mode = _fp_mode; bool ok_before = _settings_ok;
+            settings_load(); _settings_ok = _settings_ok || ok_before;
             _headset_autostart = autostart || _headset_autostart; _xr_want = xr_want; _window_open = win; _fp_mode = mode;   // launch-only effects are not re-applied mid-session
             _ini_last = on_disk;
             _logger.Info("settings: ffxvr.ini was edited on disk; reloaded");
@@ -742,7 +751,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         catch { }
     }
     private void settings_save_if_changed() {
-        if (_ini_path.Length == 0) return;
+        if (_ini_path.Length == 0 || !_settings_ok) return;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         string text =
             "# FFX VR settings. Edited by the overlay; hand edits are fine.\n" +
@@ -820,7 +829,10 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n";
         if (text == _ini_last) return;
         if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
-        try { File.WriteAllText(_ini_path, text); _ini_last = text; _ini_mtime_seen = File.GetLastWriteTimeUtc(_ini_path); }
+        try {
+            if (_ini_last.Length == 0 && File.Exists(_ini_path)) File.Copy(_ini_path, _ini_path + ".bak", true);   // the first write of a session keeps the previous file
+            File.WriteAllText(_ini_path, text); _ini_last = text; _ini_mtime_seen = File.GetLastWriteTimeUtc(_ini_path);
+        }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
     }
 
@@ -1447,7 +1459,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         // member nearest the slot (the one running in to replace him).
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         if (in_battle != _btl_was) {
-            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0;
+            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0; _btl_diag_done = false;
             if (in_battle) { if (_battle_view >= 0 && _battle_view != _fp_mode) { _btl_mode_before = _fp_mode; apply_mode_scale(_fp_mode, _battle_view); _fp_mode = _battle_view; } }
             else if (_btl_mode_before >= 0) { if (_btl_mode_before != _fp_mode) { apply_mode_scale(_fp_mode, _btl_mode_before); _fp_mode = _btl_mode_before; } _btl_mode_before = -1; }
         }
@@ -1467,14 +1479,51 @@ public sealed unsafe class FFXVRModule : FhModule {
                     }
                 }
             }
+            // Fallback when the area's party positions are not where the party stands: the slot is where Tidus is when
+            // his first command window opens (he is standing on it then); the bench test then uses distance alone.
+            if (!_btl_slot_known && plys != null) {
+                BtlWindow* bw = Globals.Battle.cur_window;
+                if (read(bw, out BtlWindow w) && w.state == 4 && w.type == BtlWindowType.Main) {
+                    for (int i = 0; i < 16 && !_btl_slot_known; i++) {
+                        if (!read(plys + i, out Chr pc) || pc.id != w.cur_chr_id || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
+                        _btl_slot_pos = pa.chr_pos_vec; _btl_slot_known = true; _btl_area = -1; _btl_chr = i; _btl_who = _fp_actor;
+                        _logger.Info($"battle follow: {_fp_actor} slot taken from his first command window at ({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Z:F1}) (area positions did not match)");
+                    }
+                }
+            }
+            if (!_btl_diag_done && plys != null && btl_v.ptr_pos_def != null && read(btl_v.ptr_pos_def, out BtlArea d0)) {
+                _btl_diag_done = true;
+                var sb = new System.Text.StringBuilder($"battle follow: area_count {d0.area_count} party_pos {d0.count_party_pos}:");
+                for (int ar = 0; ar < Math.Min((int)d0.area_count, 4); ar++) {
+                    if (!read(btl_v.ptr_pos_def + ar, out BtlArea area)) continue;
+                    sb.Append($" [area {ar}:");
+                    for (int s = 0; s < Math.Min((int)area.count_party_pos, 6); s++) { Vector4 sp, rp; if (read((byte*)btl_v.ptr_pos_def + area.offset_party_pos + s * 16, out sp) && read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) sb.Append($" slot{s}=({sp.X:F1},{sp.Y:F1},{sp.Z:F1}) run=({rp.X:F1},{rp.Y:F1},{rp.Z:F1})"); }
+                    sb.Append(']');
+                }
+                _logger.Info(sb.ToString());
+            }
             if (_btl_slot_known && plys != null) {
                 // is the followed character on the bench (at a run position)?
                 bool benched = false;
-                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr cc) && cc.actor != null && read(cc.actor, out Actor ca) && live(ca) && read(btl_v.ptr_pos_def + _btl_area, out BtlArea area)) {
-                    for (int s = 0; s < Math.Min((int)area.count_party_pos, 8) && !benched; s++) {
-                        Vector4 rp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) continue;
-                        float dx = ca.chr_pos_vec.X - rp.X, dz = ca.chr_pos_vec.Z - rp.Z;
-                        if (dx * dx + dz * dz < 20f * 20f) benched = true;
+                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr cc) && cc.actor != null && read(cc.actor, out Actor ca) && live(ca)) {
+                    if (_btl_area >= 0 && read(btl_v.ptr_pos_def + _btl_area, out BtlArea area)) {
+                        for (int s = 0; s < Math.Min((int)area.count_party_pos, 8) && !benched; s++) {
+                            Vector4 rp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) continue;
+                            float dx = ca.chr_pos_vec.X - rp.X, dz = ca.chr_pos_vec.Z - rp.Z;
+                            if (dx * dx + dz * dz < 20f * 20f) benched = true;
+                        }
+                    }
+                    else {
+                        // distance rule: far from the slot and not near any monster (an attack run goes to a monster)
+                        float sx = ca.chr_pos_vec.X - _btl_slot_pos.X, sz = ca.chr_pos_vec.Z - _btl_slot_pos.Z;
+                        if (sx * sx + sz * sz > 60f * 60f) {
+                            bool near_mon = false; Chr* mons = Globals.Battle.monster_characters;
+                            for (int i = 0; i < 16 && !near_mon && mons != null; i++) {
+                                if (!read(mons + i, out Chr mc) || mc.stat_visible == 0 || mc.actor == null || !read(mc.actor, out Actor ma) || !live(ma)) continue;
+                                float mx = ca.chr_pos_vec.X - ma.chr_pos_vec.X, mz = ca.chr_pos_vec.Z - ma.chr_pos_vec.Z; if (mx * mx + mz * mz < 45f * 45f) near_mon = true;
+                            }
+                            if (!near_mon) benched = true;
+                        }
                     }
                     if (cc.stat_visible == 0) benched = true;
                 }
