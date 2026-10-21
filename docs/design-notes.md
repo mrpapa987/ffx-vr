@@ -759,3 +759,27 @@ Rebuild first (`tools\build-mod.ps1`). Then, in order:
 3. The module log's `actors:` lines for 30 s of riding (which actor the
    player is, hide bytes while NPCs pass).
 
+## Battle cleanup plan (21 Oct 2026)
+
+Done: follow by field slot (Tidus, else the lowest party index), Tidus takes
+the eyes when he joins, left grip + right stick click / Insert cycles the
+field, "battles start in" view switch, diorama on the fight centroid, floor.
+
+To do, by layer:
+- Eyes: face the enemies at battle start and on every eye switch (slot ->
+  monster centroid); a blink on eye jumps (`cut_blink` path); follow the Aeon
+  when summoned (capture: `window:` log during a summon for its ply index);
+  check big-boss diorama (centroid / floor); note how knockback feels.
+- 2D layer: hide the game's target / turn cursors (capture: census with and
+  without a cursor); damage numbers, Miss, status text and enemy readouts are
+  placed by the game's projection and will float off their targets too -
+  decide hide vs redraw at actor positions through the marker pipeline
+  (capture: census with a damage number up); confirm the command window, CTB
+  bar and HP boxes are readable at the panel distance; try every overdrive
+  input with the controllers (Lulu's stick spin is the risk).
+- Transitions: encounter shatter, results screen, game over / retry - how
+  each looks in the headset (capture: a census at the shatter if possible,
+  else a description).
+- Interactions: marker labels naming the targeted enemy (later); escape and
+  menu mapping on the controllers.
+
