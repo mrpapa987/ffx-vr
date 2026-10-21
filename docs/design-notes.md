@@ -709,3 +709,53 @@ Rebuild first (`tools\build-mod.ps1`). Then, in order:
    while moving. If a hand or finger vanishes entirely, the NaN hit a padding
    index: untick "NaN cut at the seam" and report which part vanished.
 
+## Blitzball and chocobo rides: what to expect, what to capture (21 Oct 2026, documentation only)
+
+### Detection
+- Blitzball: the map name at gva 0x23CBC60 starts with `bltz` (exe-analysis
+  section 14); `Globals.event_id` is also set per event. A mode flag from
+  that lets the mod pick a view policy automatically.
+- Chocobo: no static signal found; the first ride should be logged (actor
+  table, `actors:` lines, a frame census) to see whether the player actor
+  stays `c101`.
+
+### Blitzball, expected VR problems
+- It is a turn-based sphere-pool game with a heavily cut authored camera,
+  an underwater look (the swimming eye-height rule already exists for
+  `Swim` animation sets) and a thick 2D UI (command windows, timers, the
+  mini-map). First person on "the player" makes little sense: the
+  controlled athlete changes every possession.
+- Plan: on `bltz` maps default to the diorama anchored to the fight centroid
+  machinery (`g_anchor_ovr`) fed with the centroid of the live athlete
+  actors (or the ball, if it is an actor), ignore camera cuts as the diorama
+  already does, and keep the UI panel. Third person on the possessing
+  athlete is a later option (needs the "who has the ball" state, unknown).
+- Risk: the stadium is the one place where the scene-culling patches might
+  show something odd (the pool is a closed volume); check with cull_scene on
+  and off.
+
+### Chocobo rides, expected VR problems
+- First person: if Tidus stays `c101`, the head-bone eye height works
+  unchanged (he sits higher; `fp_head_anchor=1` takes the bone's height), and
+  the controls are the existing stick remap. If the pair becomes one actor
+  with another name, `fp_actor` has to follow it (a "controlled actor"
+  rule - fall back to actor 0 - is already the code's last resort).
+- The body hide uses a radius around the player actor's position; a chocobo
+  actor glued to the rider would share that position and be hidden too
+  (first person without a chocobo under you), or, with the body shown,
+  the rider's head collapse would not touch the bird. Expect to need a
+  per-actor hide (by model handle / actor index) rather than by radius.
+- Speed: the hide radius widens with the actor's step (`1.5 * step`); the
+  chocobo runs ~2x, so nearby NPCs may vanish again at talking distance
+  while mounted - the radius term may need a cap. Camera cuts along the
+  Mi'ihen road are frequent; first person ignores them already.
+- The chocobo mini-games (Calm Lands) run on their own timers and scripted
+  cameras: treat like cutscenes (seat view) unless they turn out to be
+  ordinary field control.
+
+### First captures to take there
+1. `log this table` in the actor table while mounted / mid-match.
+2. A frame census (structure + UI draws) once each.
+3. The module log's `actors:` lines for 30 s of riding (which actor the
+   player is, hide bytes while NPCs pass).
+

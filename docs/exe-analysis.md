@@ -302,3 +302,32 @@ settles the skinning facts the VR-hands work needed:
   triangles are dropped by the rasterizer - a clean cut at a seam. Slot 0
   must never be cut (padding indices point there).
 
+## 14. Map / event identity, blitzball and chocobo leads (21 Oct 2026)
+
+Globals (gva; Fahrenheit's `FhUtil` offsets are gva - 0x400000):
+
+| gva | what | how known |
+|---|---|---|
+| 0x12FBC40 | current event / map id (int) - Fahrenheit `Globals.event_id` | strcmp'd against special cases 0x17, 0x5D, 0x79, 0x123 next to the "bltz" test at 0x873063 |
+| 0x23CBC60 | current map name, NUL-terminated (`bltz0000`, `luca08`, `mihn..`, ...) | filled by a strcpy loop at 0x872FEF/0x873016 from the map-name table (`0x67AAC0(index)`), then `strncmp(.., "bltz")` at 0x873063; 15 readers |
+| 0x67AAC0 | map index -> name string | called with the map index (esi) before the copy above |
+| 0x874C00.. | blitzball map resolver: table `bltz0000 / 0005 / 0006 / 0200 / 0201` at 0xB5BF78.., picked by `0x6410E0()` (<= 0xA), `sins05` / `cn/` special cases | strings at raw 0x75AF78 |
+
+So a mode detector can be: blitzball = map name starts with `bltz` (or
+event_id in {0x17, 0x5D, 0x79, 0x123}: the Luca stadium events); any
+per-area memory (diorama view per map) can key on `Globals.event_id`.
+
+Debug leftovers (not needed, but they exist): a "Game parameter config"
+menu with `Full Blitz`, `Blitz Cheat`, `Chocobo Game Debug Enable`,
+`CharacterSwitching`, `JumpMap %s`, `SetBattle %s` (strings at raw
+0x747C00-0x747F00, used around 0x6B7000-0x6BD100); the autosave chocobo
+movie is `flash/chocobo.swf` created by 0x66F480 (FFX-60fps QOL-SAVEICON).
+Animation sets are named `Field / FieldBattle / Swim / SwimBattle` (raw
+0x747634..). The sphere grid's cursor is a model, `omd/CURSOR.omd`; the
+battle cursor is not (it is a UI-pass sprite).
+
+Nothing in Fahrenheit, FFX-60fps or the exe's strings describes the chocobo
+mount's actor: whether Tidus stays `c101` with a riding motion and the
+chocobo is a second actor glued to him, or the pair becomes one model, is a
+runtime question (actor table log while riding).
+
