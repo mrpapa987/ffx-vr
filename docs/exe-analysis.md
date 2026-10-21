@@ -271,3 +271,34 @@ tied to the save-menu flow; the export tool is `tools/export-save-to-steam.ps1`
   names and signatures: `src/x/sigs.cpp` (symbols), `src/x/rows/SMOOTH-00*.cpp`
   (Ch_DrawMain, Ch_StepMotion, Ch_UpdateAllActors, Ch_ClothSimulate,
   Ch_SeqFrame), `MAG-021.cpp` (Ch_SetMotion), `TEXANIM-001.cpp`.
+
+## 13. VBF layout and the character shaders (21 Oct 2026)
+
+`data\FFX_Data.vbf` (20.7 GB): header `SRYK`, u32 header size (0x967AC8), u32
+file count (71979); then 16-byte MD5s per file; then 32-byte entries
+`{u32 index, u32 total_blocks, u64 size, u64 offset, u64 name_offset}`; then
+u32 name-table size and the NUL-separated names (`ffx_ps2/...`,
+`ffx_data/gamedata/...`). Files are stored raw at `offset` (no per-file
+compression at the archive level). Reading one is a seek + read.
+
+The character shaders live at
+`ffx_data/gamedata/ps3data/shaders/d3d11/phyrechrlitshader.fx#<md5>.phyre`
+(222 variants) plus `chreasyshadow`, `chry0shadow`, `characterbtmtotop`.
+Each `.phyre` is a sequence of zlib streams; inflated (7.9 MB for one) it is
+a Phyre asset (`RYHPT` header) holding ~770 DXBC blobs. Their RDEF reflection
+settles the skinning facts the VR-hands work needed:
+
+- `$Globals` carries `BoneTransforms`: **float4x4[80]** (class 3 = column
+  class, 4x4), 5120 bytes, at **+1344, +1360 or +1456** depending on the
+  variant (buffer sizes 6912..7312; the same size can use two offsets, e.g.
+  7104). The mod now locates the palette by content (`palette_start`).
+- Input semantics `SkinnableVertex`, `SkinnableNormal`, `SkinWeights`,
+  `SkinIndices`; macro `SKINNING_ENABLED`. Phyre's `EvaluateSkinPosition`
+  sums `weight * BoneTransforms[index]` into a float3x4 and applies it with
+  w = 1, which is why blending is linear in world space and a zero matrix
+  sends a vertex toward the world origin (seen in-game).
+- Consequence used by the hands: a **NaN matrix** in a slot makes every
+  vertex that references that slot NaN (even with weight 0), and NaN
+  triangles are dropped by the rasterizer - a clean cut at a seam. Slot 0
+  must never be cut (padding indices point there).
+

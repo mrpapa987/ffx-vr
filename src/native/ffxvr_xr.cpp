@@ -62,6 +62,7 @@ XrSystemId   g_system   = XR_NULL_SYSTEM_ID;
 XrSession    g_session  = XR_NULL_HANDLE;
 XrSpace      g_space    = XR_NULL_HANDLE;
 XrSessionState g_state  = XR_SESSION_STATE_UNKNOWN;
+bool g_space_changed = false;   // XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING seen since the last xr_take_space_change
 bool         g_running  = false;
 bool         g_frame_open = false;
 XrTime       g_render_time = 0;
@@ -449,6 +450,11 @@ void poll_events() {
             else if (g_state == XR_SESSION_STATE_FOCUSED) set_status("focused");
         }
         else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) { xr_stop(); return; }
+        else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
+            // the runtime recentred its LOCAL space (Quest: hold the Meta button): our reference must follow
+            auto* rc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
+            if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) { g_space_changed = true; g_h.diag("xr: LOCAL space recentred by the runtime"); }
+        }
         ev = { XR_TYPE_EVENT_DATA_BUFFER };
     }
 }
@@ -610,3 +616,5 @@ void xr_haptic(int hand, float amplitude, float seconds) {
 }
 
 void xr_timing(double* wait_ms, double* end_ms) { if (wait_ms) *wait_ms = g_t_wait_ms; if (end_ms) *end_ms = g_t_end_ms; }
+
+bool xr_take_space_change() { const bool v = g_space_changed; g_space_changed = false; return v; }

@@ -648,3 +648,38 @@ What does not work yet - the reason it is tabled:
   wrist) with our own shader at the grip poses; no seams by construction,
   but new render code and the textures to load.
 
+## Overnight dig (21 Oct 2026): battle follow, cursors, hands
+
+- **ini "resets" explained**: the mod rewrites `ffxvr.ini` whenever any
+  setting changes while the game runs, from its in-memory values, so an
+  edit made on disk while the game is up is overwritten (that was every
+  "overlay_at_start keeps going back to 1"). The mod now re-reads the file
+  when its mtime changes (`settings_reload_if_edited`, once a second);
+  launch-only keys update their stored values without re-applying.
+- **Battle party mechanics** (from the per-second `window:` log): the party
+  list has all 7 characters; reserves not in the party sit at (67, 0, -1282).
+  Front members stand on the area's `party_pos` slots; a swap sends the
+  outgoing character to a `party_run_pos` ("bench", ~85 units from the slot
+  in the Besaid test) and the incoming one runs from the bench to the slot.
+  `BtlWindow.cur_chr_id` is whose turn it is; `type == Change` while the
+  swap menu is open. The follow logic keys on: slot = the party_pos Tidus is
+  found standing on (within 6 units), benched = within 20 units of any
+  party_run_pos or stat_visible == 0 for 10+ frames, successor = the visible
+  party member nearest the slot. The first version used a 120-unit
+  "walked off" threshold, larger than the bench distance - it never
+  switched.
+- **Cursors**: no named routine in the 60 fps mod's signatures; the sphere
+  grid has `omd/CURSOR.omd` (a model) but the battle cursor is a UI-pass
+  sprite. The frame census now lists each UI draw with its textures and the
+  head of its constant buffer; a with/without-cursor pair of censuses is the
+  next step to pick the draw(s) to drop.
+- **Hands**: see exe-analysis section 13. Two fixes from it: the palette
+  offset is found per record (three variants), and the seam is handled by
+  the NaN cut (`g_hands_nan_cut`, default on) instead of the split draw
+  (`g_hands_split`, off): the adjoining segment's bones get NaN matrices,
+  the seam triangles vanish, both hands draw in one pass per eye. The hand
+  pivot is also taken from each record's own wrist bone (ref slots 45/46/49
+  and 33/35) rather than last frame's transported reference, which removes
+  the string that appeared while moving. Untested in the headset at the time
+  of writing; still hidden behind `hands_dev=1`.
+

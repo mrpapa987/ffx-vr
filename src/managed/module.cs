@@ -76,6 +76,10 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_head_set;
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_anchor_override;
     private bool _battle_anchor = true; private int _battle_anchor_n = 0;
+    // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
+    // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
+    private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
+    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0;
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -88,7 +92,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_bones_seq; private delegate* unmanaged[Cdecl]<int> _fn_bones_seq_left; private int _seq_frames = 240;
     private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, float, int, int, int, void> _fn_hands_set; private bool _hands_swap = false, _hands_mirror = false; private int _hands_only = 0; private delegate* unmanaged[Cdecl]<uint*, nint> _fn_hands_status;
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_hands_side; private int _hands_px_left = -1; private float _hands_stretch = 1.6f; private bool _hands_side_pushed = false;
-    private delegate* unmanaged[Cdecl]<void> _fn_hands_calibrate, _fn_hands_dump; private delegate* unmanaged[Cdecl]<float*, int, uint> _fn_hands_cal_data;
+    private delegate* unmanaged[Cdecl]<void> _fn_hands_calibrate, _fn_hands_dump; private delegate* unmanaged[Cdecl]<int, int, void> _fn_hands_method; private bool _hands_nan = true, _hands_split = false; private delegate* unmanaged[Cdecl]<float*, int, uint> _fn_hands_cal_data;
     private double _hands_cal_at = -1; private uint _hands_cal_seen = 0; private string _hands_cal_ini = ""; private bool _hands_cal_loaded = false;
     private bool _hands_dev = false; private bool _hands_on = false, _hands_head = true; private int _hands_show = 3; private float _hands_yaw = 0f, _hands_pitch = 0f, _hands_roll = 0f, _hands_off_r = 0f, _hands_off_u = 0f, _hands_off_b = 0f;
     private bool _wig_on = false; private int _wig_rec = 10, _wig_slot = 0; private float _wig_amt = 3f;
@@ -161,7 +165,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int*, int*, int, int> _fn_eye2_size;
     private bool  _stereo_on = false;
     private float _ipd = 6f;
-    private bool  _eye2_preview = true;
+    private bool  _eye2_preview = false;   // the flat-screen debug window for eye 2; never while the headset runs (it would land in the ImGui layer)
     private delegate* unmanaged[Cdecl]<nint, nint, nint, nint> _fn_on_updatesub;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets;
     private delegate* unmanaged[Cdecl]<uint, nint*, nint, void> _fn_on_rendertargets_uav;
@@ -368,6 +372,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_hands_status = (delegate* unmanaged[Cdecl]<uint*, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_status");
             _fn_hands_calibrate = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_calibrate");
             _fn_hands_dump   = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_dump");
+            _fn_hands_method = (delegate* unmanaged[Cdecl]<int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_method");
             _fn_hands_side   = (delegate* unmanaged[Cdecl]<int, float, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_side");
             _fn_hands_cal_data  = (delegate* unmanaged[Cdecl]<float*, int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_cal_data");
             _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_poll");
@@ -615,7 +620,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private string _ini_path = "";
     private string _ini_last = "";
-    private bool _headset_autostart = false;
+    private bool _headset_autostart = false; private int _start_view = 1; private bool _overlay_at_start = true, _overlay_at_start_loaded = true;   // start_view: 0 seat, 1 first person, 3 third person, 2 diorama
 
     private void settings_load() {
         try {
@@ -631,6 +636,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 var ci = System.Globalization.CultureInfo.InvariantCulture;
                 switch (k) {
                     case "headset_autostart": _headset_autostart = v == "1"; break;
+                    case "start_view":        int.TryParse(v, out _start_view); break;
+                    case "overlay_at_start":  _overlay_at_start = v != "0"; break;
                     case "world_scale":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_scale); break;
                     case "head_position":     _xr_translate = v == "1"; break;
                     case "seat":              _xr_seat = v == "1"; break;
@@ -646,6 +653,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "gest_tilt":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _gest_tilt); break;
                     case "fp_body_mode":      int.TryParse(v, out _fp_body_mode); break;
                     case "battle_anchor":     _battle_anchor = v != "0"; break;
+                    case "battle_follow":     _battle_follow = v != "0"; break;
+                    case "battle_view":       int.TryParse(v, out _battle_view); break;
                     case "diorama_floor":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _diorama_floor); break;
                     case "fp_head_anchor":    if (!int.TryParse(v, out _fp_head_anchor)) _fp_head_anchor = v != "0" ? 2 : 0; break;
                     case "fp_head_up":        float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_up); break;
@@ -655,6 +664,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
                     case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
                     case "overlay_open":      _window_open = v != "0"; break;
+                    case "eye2_preview":      _eye2_preview = v == "1"; break;
                     case "ui_panel":          _ui_on = v != "0"; break;
                     case "ui_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_dist); break;
                     case "ui_width":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_width); break;
@@ -699,18 +709,47 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
                 }
             }
-            if (_headset_autostart) _xr_want = true;
+            if (_headset_autostart) {
+                _xr_want = true;
+                if (_start_view >= 0 && _start_view <= 3 && _start_view != _fp_mode) { apply_mode_scale(_fp_mode, _start_view); _fp_mode = _start_view; }
+                _window_open = _overlay_at_start;   // straight into the headset: no overlay until F8
+            }
+            _logger.Info($"settings: loaded {_ini_path}: headset_autostart={_headset_autostart} start_view={_start_view} overlay_at_start={_overlay_at_start} overlay_open={_window_open} eye2_preview={_eye2_preview}");
+            _overlay_at_start_loaded = _overlay_at_start;
         }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
     }
 
+    /// <summary>An edit of the ini while the game runs (by hand, or by a tool) is picked up instead of being
+    /// overwritten: every second the file is compared with what was last written, and reloaded if it differs.
+    /// Keys that only apply at launch (start_view, overlay_at_start) just update their stored values.</summary>
+    private DateTime _ini_mtime_seen = DateTime.MinValue; private int _ini_check = 0;
+    private void settings_reload_if_edited() {
+        if (_ini_path.Length == 0 || ++_ini_check < 60) return;
+        _ini_check = 0;
+        try {
+            DateTime mt = File.GetLastWriteTimeUtc(_ini_path);
+            if (mt == _ini_mtime_seen) return;
+            _ini_mtime_seen = mt;
+            string on_disk = File.ReadAllText(_ini_path);
+            if (on_disk == _ini_last) return;
+            bool autostart = _headset_autostart; bool xr_want = _xr_want; bool win = _window_open; int mode = _fp_mode;
+            settings_load();
+            _headset_autostart = autostart || _headset_autostart; _xr_want = xr_want; _window_open = win; _fp_mode = mode;   // launch-only effects are not re-applied mid-session
+            _ini_last = on_disk;
+            _logger.Info("settings: ffxvr.ini was edited on disk; reloaded");
+        }
+        catch { }
+    }
     private void settings_save_if_changed() {
         if (_ini_path.Length == 0) return;
         var ci = System.Globalization.CultureInfo.InvariantCulture;
         string text =
             "# FFX VR settings. Edited by the overlay; hand edits are fine.\n" +
             $"headset_autostart={(_headset_autostart ? 1 : 0)}\n" +
-            $"world_scale={_xr_scale.ToString("F1", ci)}\n" +
+            $"start_view={_start_view}\n" +
+            $"overlay_at_start={(_overlay_at_start ? 1 : 0)}\n" +
+            $"world_scale={(life_size(_fp_mode) ? _scale_before_fp : _xr_scale).ToString("F1", ci)}\n" +   // the seat / diorama scale; first and third person are always true scale
             $"head_position={(_xr_translate ? 1 : 0)}\n" +
             $"seat={(_xr_seat ? 1 : 0)}\n" +
             $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
@@ -726,6 +765,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"fp_body_mode={_fp_body_mode}\n" +
             $"fp_head_anchor={_fp_head_anchor}\n" +
             $"battle_anchor={(_battle_anchor ? 1 : 0)}\n" +
+            $"battle_follow={(_battle_follow ? 1 : 0)}\n" +
+            $"battle_view={_battle_view}\n" +
             $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
             $"fp_head_up={_fp_head_up.ToString("F2", ci)}\n" +
             $"fp_head_smooth={_fp_head_smooth.ToString("F2", ci)}\n" +
@@ -734,6 +775,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
             $"overlay_open={(_window_open ? 1 : 0)}\n" +
+            $"eye2_preview={(_eye2_preview ? 1 : 0)}\n" +
             $"ui_panel={(_ui_on ? 1 : 0)}\n" +
             $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
             $"ui_width={_ui_width.ToString("F2", ci)}\n" +
@@ -777,7 +819,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"hands_px_left={_hands_px_left}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n";
         if (text == _ini_last) return;
-        try { File.WriteAllText(_ini_path, text); _ini_last = text; }
+        if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
+        try { File.WriteAllText(_ini_path, text); _ini_last = text; _ini_mtime_seen = File.GetLastWriteTimeUtc(_ini_path); }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
     }
 
@@ -799,6 +842,11 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("Headset", ref want);
         ImGui.SameLine(); if (ImGui.Button("Recentre (Home)")) _fn_xr_recenter();
         ImGui.SameLine(); ImGui.Checkbox("start automatically", ref _headset_autostart);
+        if (_headset_autostart) {
+            ImGui.SameLine(); ImGui.Checkbox("overlay open at start", ref _overlay_at_start); ImGui.SameLine(); ImGui.Text("start in:"); ImGui.SameLine();
+            ImGui.RadioButton("seat##sv", ref _start_view, 0); ImGui.SameLine(); ImGui.RadioButton("first person##sv", ref _start_view, 1); ImGui.SameLine();
+            ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
+        }
         if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
         _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
         _xr_want = want;   // asked each frame until the native side accepts (it waits for the first 3D frame)
@@ -1042,6 +1090,10 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
+            ImGui.Checkbox("in battle, first person follows whoever is in Tidus's slot (a swap moves the eyes)", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
+            ImGui.Text("battles start in:"); ImGui.SameLine();
+            ImGui.RadioButton("the current view##bv", ref _battle_view, -1); ImGui.SameLine(); ImGui.RadioButton("first person##bv", ref _battle_view, 1); ImGui.SameLine();
+            ImGui.RadioButton("third person##bv", ref _battle_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##bv", ref _battle_view, 2); ImGui.SameLine(); ImGui.TextDisabled("(the view from before returns when the battle ends)");
             ImGui.SliderFloat("diorama floor: never below this many units above the player's feet (0 = off; suspended while a grip is held)", ref _diorama_floor, 0f, 40f, "%.0f");
             ImGui.Text("eye height:"); ImGui.SameLine();
             ImGui.RadioButton("fixed", ref _fp_head_anchor, 0); ImGui.SameLine();
@@ -1108,6 +1160,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 }
                 ImGui.SetNextItemWidth(120); ImGui.SliderFloat("arm stretch (to reach a real arm's length)", ref _hands_stretch, 1f, 2f, "%.2fx");
                 if (_fn_hands_dump != null) { if (ImGui.SmallButton("dump one frame of bone groups to ffxvr_diag.log")) _fn_hands_dump(); }
+                ImGui.SameLine(); ImGui.Checkbox("NaN cut at the seam", ref _hands_nan); ImGui.SameLine(); ImGui.Checkbox("split draw per hand", ref _hands_split);
+                if (_fn_hands_method != null) _fn_hands_method(_hands_nan ? 1 : 0, _hands_split ? 1 : 0);
                 ImGui.Text("sorting out the sides:"); ImGui.SameLine();
                 if (ImGui.SmallButton("the arm models are on the wrong sides: flip")) { if (_fn_hands_side != null) { int r2 = _fn_hands_side(-3, _hands_stretch); _hands_px_left = r2 & 1; } } ImGui.SameLine();
                 ImGui.Checkbox("swap arms", ref _hands_swap); ImGui.SameLine(); ImGui.Checkbox("mirror targets", ref _hands_mirror); ImGui.SameLine();
@@ -1247,7 +1301,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
     private void draw_eye2_preview() {
-        if (!_eye2_preview || !_stereo_on || _fn_eye2_srv == null || _fn_eye2_size == null) return;
+        if (!_eye2_preview || _xr_on || !_stereo_on || _fn_eye2_srv == null || _fn_eye2_size == null) return;
         int w, h;
         if (_fn_eye2_size(&w, &h, _eye2_source) == 0 || w == 0) return;
         nint srv = _fn_eye2_srv(_eye2_source);
@@ -1387,7 +1441,60 @@ public sealed unsafe class FFXVRModule : FhModule {
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
         int pick = -1;
-        if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
+        // Battle: whoever stands in the player's slot. The slot is one of the area's party positions
+        // (ptr_pos_def -> party_pos); a swapped-out character walks to a run position (party_run_pos, the
+        // "bench"), so: keep the current character until he reaches the bench, then follow the visible party
+        // member nearest the slot (the one running in to replace him).
+        Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
+        if (in_battle != _btl_was) {
+            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0;
+            if (in_battle) { if (_battle_view >= 0 && _battle_view != _fp_mode) { _btl_mode_before = _fp_mode; apply_mode_scale(_fp_mode, _battle_view); _fp_mode = _battle_view; } }
+            else if (_btl_mode_before >= 0) { if (_btl_mode_before != _fp_mode) { apply_mode_scale(_fp_mode, _btl_mode_before); _fp_mode = _btl_mode_before; } _btl_mode_before = -1; }
+        }
+        if (in_battle && _battle_follow) {
+            Chr* plys = Globals.Battle.player_characters;
+            // the slot: the party position Tidus (the configured player) stands on; looked for until found
+            if (!_btl_slot_known && plys != null && btl_v.ptr_pos_def != null && read(btl_v.ptr_pos_def, out BtlArea a0)) {
+                for (int i = 0; i < 16 && !_btl_slot_known; i++) {
+                    if (!read(plys + i, out Chr pc) || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
+                    for (int ar = 0; ar < Math.Min((int)a0.area_count, 8) && !_btl_slot_known; ar++) {
+                        if (!read(btl_v.ptr_pos_def + ar, out BtlArea area)) continue;
+                        for (int s = 0; s < Math.Min((int)area.count_party_pos, 8); s++) {
+                            Vector4 sp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_pos + s * 16, out sp)) continue;
+                            float dx = pa.chr_pos_vec.X - sp.X, dz = pa.chr_pos_vec.Z - sp.Z;
+                            if (dx * dx + dz * dz < 6f * 6f) { _btl_slot_pos = sp; _btl_slot_known = true; _btl_area = ar; _btl_chr = i; _btl_who = _fp_actor; _logger.Info($"battle follow: {_fp_actor} on slot {s} of area {ar} at ({sp.X:F1},{sp.Z:F1})"); break; }
+                        }
+                    }
+                }
+            }
+            if (_btl_slot_known && plys != null) {
+                // is the followed character on the bench (at a run position)?
+                bool benched = false;
+                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr cc) && cc.actor != null && read(cc.actor, out Actor ca) && live(ca) && read(btl_v.ptr_pos_def + _btl_area, out BtlArea area)) {
+                    for (int s = 0; s < Math.Min((int)area.count_party_pos, 8) && !benched; s++) {
+                        Vector4 rp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) continue;
+                        float dx = ca.chr_pos_vec.X - rp.X, dz = ca.chr_pos_vec.Z - rp.Z;
+                        if (dx * dx + dz * dz < 20f * 20f) benched = true;
+                    }
+                    if (cc.stat_visible == 0) benched = true;
+                }
+                else benched = true;
+                _btl_bench_frames = benched ? _btl_bench_frames + 1 : 0;
+                if (_btl_bench_frames > 10) {
+                    // the visible party member nearest the slot takes over (the replacement running in)
+                    int best = -1; float best_d = float.MaxValue;
+                    for (int i = 0; i < 16; i++) {
+                        if (i == _btl_chr || !read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
+                        float dx = pa.chr_pos_vec.X - _btl_slot_pos.X, dz = pa.chr_pos_vec.Z - _btl_slot_pos.Z; float d = dx * dx + dz * dz;
+                        if (d < 40f * 40f && d < best_d) { best_d = d; best = i; }
+                    }
+                    if (best >= 0 && read(plys + best, out Chr bc) && bc.actor != null && read(bc.actor, out Actor ba)) { _btl_chr = best; _btl_who = actor_name(ba.chr_name); _btl_bench_frames = 0; _logger.Info($"battle follow: now {_btl_who} (ply {best})"); }
+                }
+                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null) { pick = (int)(((byte*)fc.actor - (byte*)actors) / sizeof(Actor)); if (pick < 0 || pick >= 48) pick = -1; }
+            }
+        }
+        if (pick >= 0) { }
+        else if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
         else {
             for (int i = 0; i < 48 && pick < 0; i++) {
                 if (!read(actors + i, out Actor a)) break;
@@ -1448,7 +1555,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                 if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
                     sb.Append($" mon{i}[id={mc.id} chr_id={mc.chr_id} vis={mc.stat_visible}]=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
                 if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa))
-                    sb.Append($" ply{i}[id={pc.id} chr_id={pc.chr_id}]=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
+                    sb.Append($" ply{i}[id={pc.id} chr_id={pc.chr_id} vis={pc.stat_visible} hide={pc.stat_hide}]=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
             }
             float* wp = stackalloc float[128 * 3];
             int n = _fn_world_positions(wp, 128);
@@ -1548,6 +1655,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                 _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
             }
         }
+        settings_reload_if_edited();
         settings_save_if_changed();
     }
 }

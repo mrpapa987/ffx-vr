@@ -36,6 +36,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -565,8 +566,13 @@ int g_bones_left = 0; uint32_t g_bones_frame = 0; float g_bones_optpos[26][3] = 
 // player's uploads are numbered (record 0, 1, ...) and their palettes kept, so
 // a bone picked as (record, slot) can be found in the other parts by value
 // (the map is built at frame end and used on the next frame).
-constexpr UINT k_pal_off = 1344; constexpr int k_pal_max_slots = 64, k_pal_max_recs = 32;
-struct RecPal { int n; uint8_t m[k_pal_max_slots][64]; };
+constexpr int k_pal_max_slots = 64, k_pal_max_recs = 32;
+// Where the palette starts: phyrechrlitshader's variants declare BoneTransforms (float4x4[80]) at
+// +1344, +1360 or +1456 of $Globals depending on the variant (from the DXBC reflection in the VBF's
+// shader files), and the buffer size alone does not say which. The first of those offsets that is
+// followed by three affine matrices wins.
+UINT g_pal_off_cur = 1344;
+struct RecPal { int n; UINT off; uint8_t m[k_pal_max_slots][64]; };
 RecPal g_pal[k_pal_max_recs]; int g_pal_n = 0;           // this frame's records
 int g_bone_rec = 0;                                      // next record index this frame
 int g_pal_n_last = 0; int g_pal_slots_last[k_pal_max_recs] = {};
@@ -611,7 +617,9 @@ enum { G_NONE = -1, G_L_UP, G_L_FO, G_L_HD, G_R_UP, G_R_FO, G_R_HD, G_HEAD, G_CO
 // order and byte equality are not relied on.
 int8_t  g_refg[k_ref_slots]; bool g_refg_built = false;
 float   g_ref_T[k_ref_slots][16]; bool g_ref_T_valid = false;
-float   g_hand_W0[2][3], g_hand_P[2][3], g_hand_E[2][3]; bool g_hand_live[2] = {}; bool g_hands_dump = false;   // per bind side (0 = +x): this frame's wrist as animated, and where the hand goes
+float   g_hand_W0[2][3], g_hand_P[2][3], g_hand_E[2][3], g_hand_Hn[2][9]; bool g_hand_live[2] = {}; bool g_hands_dump = false;
+bool    g_hands_split = false;   // the per-hand split draw (superseded by the NaN cut; kept for experiments)
+bool    g_hands_nan_cut = true;  // cut the adjoining segment with NaN matrices (see hands_apply)   // per bind side (0 = +x): this frame's wrist as animated, and where the hand goes
 int     g_ap_arm = 0, g_ap_col = 0, g_ap_none = 0, g_ap_arm_l = 0, g_ap_col_l = 0, g_ap_none_l = 0;   // slots this / last frame: driven as arm, collapsed, untouched
 int     g_ref_rec = -1, g_ref_claim = -1;                        // the 53-slot record (last frame; claimed this frame)
 float   g_ref_W[16]; bool g_ref_valid = false;                   // that record's actor world matrix and the arm joints, last frame
@@ -1490,7 +1498,7 @@ extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) 
 // used. This is the map a second (per-eye) rendering of the scene needs.
 // ---------------------------------------------------------------------------
 
-struct FrameEv { char text[160]; };
+struct FrameEv { char text[400]; };
 std::vector<FrameEv> g_frame_ev;
 bool  g_frame_arm = false, g_frame_live = false;
 int   g_frame_draw_run = 0;        // draws since the last non-draw event
@@ -1744,9 +1752,23 @@ static void bones_capture(const uint8_t* p, UINT size, UINT base, const float* w
     g_bones_left--;
     diag("bones: take %d captured %u B (view base %u, world %.1f %.1f %.1f), %d left", g_bones_take, size, base, world[0], world[1], world[2], g_bones_left);
 }
-static int palette_slots(const uint8_t* p, UINT size) {
+static bool affine_at(const uint8_t* p, UINT off) {
+    const float* f = reinterpret_cast<const float*>(p + off);
+    bool ok = f[12] == 0.f && f[13] == 0.f && f[14] == 0.f && f[15] == 1.f;
+    for (int i = 0; ok && i < 12; ++i) ok = std::isfinite(f[i]);
+    for (int i : { 0, 1, 2, 4, 5, 6, 8, 9, 10 }) if (ok && fabsf(f[i]) > 3.f) ok = false;
+    return ok;
+}
+static UINT palette_start(const uint8_t* p, UINT size) {
+    for (UINT off : { 1344u, 1360u, 1456u, 1280u, 1392u, 1408u }) {
+        if (off + 192 > size) continue;
+        if (affine_at(p, off) && affine_at(p, off + 64) && affine_at(p, off + 128)) return off;
+    }
+    return 1344;
+}
+static int palette_slots(const uint8_t* p, UINT size, UINT start) {
     int n = 0;
-    for (UINT off = k_pal_off; off + 64 <= size && n < k_pal_max_slots; off += 64, ++n) {
+    for (UINT off = start; off + 64 <= size && n < k_pal_max_slots; off += 64, ++n) {
         const float* f = reinterpret_cast<const float*>(p + off);
         bool ok = f[12] == 0.f && f[13] == 0.f && f[14] == 0.f && f[15] == 1.f;
         for (int i = 0; ok && i < 12; ++i) ok = std::isfinite(f[i]);
@@ -1893,7 +1915,7 @@ static void hands_compute(const float* W) {
         }
         const int gu = px ? G_L_UP : G_R_UP, gf = px ? G_L_FO : G_R_FO, gh = px ? G_L_HD : G_R_HD;
         delta_about(Ru, S0, S, g_delta[gu]); delta_about(Rf, E0, E, g_delta[gf]); delta_about(Dh, W0, P, g_delta[gh]);
-        { const int side = px ? 0 : 1; memcpy(g_hand_W0[side], W0, 12); memcpy(g_hand_P[side], P, 12); memcpy(g_hand_E[side], E, 12); g_hand_live[side] = true; }
+        { const int side = px ? 0 : 1; memcpy(g_hand_W0[side], W0, 12); memcpy(g_hand_P[side], P, 12); memcpy(g_hand_E[side], E, 12); memcpy(g_hand_Hn[side], Hn, 36); g_hand_live[side] = true; }
         g_delta_on[gu] = g_delta_on[gf] = g_delta_on[gh] = true;
     }
     g_hands_cal_pending = false;
@@ -1906,7 +1928,8 @@ static void refg_build() {
     for (int sl : k_sl_head) g_refg[sl] = G_HEAD;
 }
 /// The group of a bone matrix from a non-reference record: the nearest transported reference bone, if near enough.
-static int group_of(const float* M) {
+static int group_of(const float* M, int* ref_slot = nullptr) {
+    if (ref_slot) *ref_slot = -1;
     if (!g_ref_T_valid) return -1;
     int best = -1; float best_s = 1e9f;
     for (int k = 0; k < k_ref_slots; ++k) {
@@ -1916,21 +1939,45 @@ static int group_of(const float* M) {
         float dr = 0.f; for (int i : { 0, 1, 2, 4, 5, 6, 8, 9, 10 }) dr += fabsf(M[i] - T[i]);
         const float sc = dt + dr; if (dr < 1.0f && sc < best_s) { best_s = sc; best = k; }
     }
+    if (ref_slot) *ref_slot = best;
     return best >= 0 ? g_refg[best] : -1;
 }
 /// Applies this frame's deltas to one record's palette copies.
 static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8_t* eye2, int variant) {
     if (rec >= k_pal_max_recs) return 0;
     refg_build(); int hand_slots = 0;
+    const UINT po = g_pal_off_cur;
+    // Pass 1: groups per slot, and the hand delta of THIS record from its own wrist-pivot bone (slots 45/46/49
+    // left, 33/35 right in the reference layout), so the pivot is this frame's, not last frame's transported one.
+    int8_t grp[k_pal_max_slots]; int refs[k_pal_max_slots];
+    float Dhand[2][16]; bool have_hand[2] = { false, false };
     for (int sl = 0; sl < n; ++sl) {
-        int g = (rec == g_ref_claim && n == k_ref_slots) ? g_refg[sl] : group_of(reinterpret_cast<const float*>(orig + k_pal_off + sl * 64));
+        int rs = -1;
+        if (rec == g_ref_claim && n == k_ref_slots) { grp[sl] = g_refg[sl]; rs = sl; }
+        else grp[sl] = (int8_t)group_of(reinterpret_cast<const float*>(orig + po + sl * 64), &rs);
+        refs[sl] = rs;
+        const int side = (rs == 45 || rs == 46 || rs == 49) ? 0 : (rs == 33 || rs == 35) ? 1 : -1;
+        if (side < 0 || have_hand[side] || !g_hand_live[side] || !g_delta_on[side == 0 ? G_L_HD : G_R_HD]) continue;
+        const float* M = reinterpret_cast<const float*>(orig + po + sl * 64);
+        const float sgn = side == 0 ? 1.f : -1.f;
+        const float b_wr[3] = { sgn*k_bL_wr[0], k_bL_wr[1], k_bL_wr[2] }, b_kn[3] = { sgn*k_bL_kn[0], k_bL_kn[1], k_bL_kn[2] }, b_th[3] = { sgn*k_bL_th[0], k_bL_th[1], k_bL_th[2] };
+        float W0[3]; aff_point(M, b_wr, W0);
+        float fm[3] = { b_kn[0]-b_wr[0], b_kn[1]-b_wr[1], b_kn[2]-b_wr[2] }, tm[3] = { b_th[0]-b_wr[0], b_th[1]-b_wr[1], b_th[2]-b_wr[2] };
+        v3norm(fm); { const float d = v3dot(tm, fm); for (int i = 0; i < 3; ++i) tm[i] -= d * fm[i]; } v3norm(tm);
+        float fc[3], tc[3]; aff_vec(M, fm, fc); aff_vec(M, tm, tc); v3norm(fc); { const float d = v3dot(tc, fc); for (int i = 0; i < 3; ++i) tc[i] -= d * fc[i]; } v3norm(tc);
+        float nc[3]; v3cross(fc, tc, nc); float Hc[9]; mat3_from_cols(fc, tc, nc, Hc);
+        float Dh[9]; mat3_mulT(g_hand_Hn[side], Hc, Dh);
+        delta_about(Dh, W0, g_hand_P[side], Dhand[side]); have_hand[side] = true;
+    }
+    for (int sl = 0; sl < n; ++sl) {
+        int g = grp[sl];
         if (g == G_L_HD || g == G_R_HD) hand_slots++;
         // The game blends bone matrices linearly, so a vertex on a seam between a drawn bone and a collapsed one
         // lands between the two: the only seam-free arrangement is ONE collapse point per draw, at the drawn
         // hand's own wrist. Hence the split: with both hands in a part, the part is drawn once per hand (variant
         // 0 / 1), each time with that hand's bones driven and every other bone - the other hand included -
         // collapsed onto that hand's wrist target. Seam vertices stay inside the hand; the rest is a dot there.
-        bool drawn; const float* Dp = nullptr; float D[16];
+        bool drawn; const float* Dp = nullptr; float D[16]; bool nan_it = false;
         if (variant >= 0) {
             const int gh = variant == 0 ? G_L_HD : G_R_HD;
             drawn = (g == gh);
@@ -1939,23 +1986,38 @@ static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8
         }
         else {
             drawn = (g == G_L_HD || g == G_R_HD) || (g_hands_show <= 2 && (g == G_L_FO || g == G_R_FO)) || (g_hands_show <= 1 && (g == G_L_UP || g == G_R_UP)) || (g_hands_show == 0 && g >= 0 && g != G_HEAD);
-            if (drawn) { if (g >= 0 && g_delta_on[g]) Dp = g_delta[g]; }
+            if (drawn) {
+                const int hs = (g == G_L_HD) ? 0 : (g == G_R_HD) ? 1 : -1;
+                if (hs >= 0 && have_hand[hs]) Dp = Dhand[hs];           // this record's own pivot
+                else if (g >= 0 && g_delta_on[g]) Dp = g_delta[g];
+            }
             else if (g_hands_show > 0 || g == G_HEAD) {
-                const float Z[9] = { 1e-5f, 0, 0,  0, 1e-5f, 0,  0, 0, 1e-5f }; const float zero[3] = { 0.f, 0.f, 0.f };
-                const int side = (g == G_L_FO || g == G_L_UP) ? 0 : (g == G_R_FO || g == G_R_UP) ? 1 : -1;
-                if (side >= 0 && g_hand_live[side]) { delta_about(Z, zero, (g == G_L_FO || g == G_R_FO) ? g_hand_P[side] : g_hand_E[side], D); Dp = D; }
-                else if (g_delta_on[G_HEAD]) Dp = g_delta[G_HEAD];
+                // The segment adjoining a drawn one is CUT: a NaN matrix. The shader sums weight * matrix over a
+                // vertex's bones (Phyre's EvaluateSkinPosition, float3x4, w ignored - confirmed by the ray to the
+                // origin with a zero matrix), so any vertex touching this bone becomes NaN and its triangles are
+                // dropped: the seam vanishes instead of being dragged, and the drawn segment ends at its own
+                // last hand-only ring. Bone slot 0 is never cut (a padding index with weight 0 would still NaN).
+                const bool adjoining = ((g == G_L_FO || g == G_R_FO) && g_hands_show >= 3) || ((g == G_L_UP || g == G_R_UP) && g_hands_show == 2);
+                if (adjoining && sl != 0 && g_hands_nan_cut) { nan_it = true; }
+                else {
+                    const float Z[9] = { 1e-5f, 0, 0,  0, 1e-5f, 0,  0, 0, 1e-5f }; const float zero[3] = { 0.f, 0.f, 0.f };
+                    const int side = (g == G_L_FO || g == G_L_UP) ? 0 : (g == G_R_FO || g == G_R_UP) ? 1 : -1;
+                    if (side >= 0 && g_hand_live[side]) { delta_about(Z, zero, (g == G_L_FO || g == G_R_FO) ? g_hand_P[side] : g_hand_E[side], D); Dp = D; }
+                    else if (g_delta_on[G_HEAD]) Dp = g_delta[G_HEAD];
+                }
             }
         }
         if (g_hands_dump && variant <= 0) {
-            const float* M0 = reinterpret_cast<const float*>(orig + k_pal_off + sl * 64);
-            diag("hands dump: rec %2d slot %2d group %2d %s  t=(%.1f %.1f %.1f)", rec, sl, g, drawn ? "DRAWN" : Dp ? "collapsed" : "untouched", M0[3], M0[7], M0[11]);
+            const float* M0 = reinterpret_cast<const float*>(orig + po + sl * 64);
+            diag("hands dump: rec %2d slot %2d ref %2d group %2d %s  t=(%.1f %.1f %.1f)", rec, sl, refs[sl], g, drawn ? "DRAWN" : nan_it ? "CUT" : Dp ? "collapsed" : "untouched", M0[3], M0[7], M0[11]);
         }
-        if (!Dp) { g_ap_none++; continue; }
+        if (!Dp && !nan_it) { g_ap_none++; continue; }
         if (drawn) g_ap_arm++; else g_ap_col++;
         for (uint8_t* dst : { eye1, eye2 }) {
             if (!dst) continue;
-            float* M = reinterpret_cast<float*>(dst + k_pal_off + sl * 64); float o[16]; mul4(Dp, M, o); memcpy(M, o, 64);
+            float* M = reinterpret_cast<float*>(dst + po + sl * 64);
+            if (nan_it) { const float qnan = std::numeric_limits<float>::quiet_NaN(); for (int i = 0; i < 16; ++i) M[i] = qnan; }
+            else { float o[16]; mul4(Dp, M, o); memcpy(M, o, 64); }
         }
     }
     return hand_slots;
@@ -1969,14 +2031,15 @@ static int bones_record(const uint8_t* p, UINT size, const float* world, uint8_t
     if (dx*dx + dy*dy + dz*dz >= r * r) return 0;
     const int rec = g_bone_rec++;
     if (rec >= k_pal_max_recs) return 0;
-    const int n = palette_slots(p, size);
-    g_pal[rec].n = n; for (int sl = 0; sl < n; ++sl) memcpy(g_pal[rec].m[sl], p + k_pal_off + sl * 64, 64);
+    const UINT po = palette_start(p, size); g_pal_off_cur = po;
+    const int n = palette_slots(p, size, po);
+    g_pal[rec].n = n; g_pal[rec].off = po; for (int sl = 0; sl < n; ++sl) memcpy(g_pal[rec].m[sl], p + po + sl * 64, 64);
     g_pal_n = rec + 1;
     const float* W = reinterpret_cast<const float*>(p + 640);
     if (g_delta_frame != g_frames) { g_delta_frame = g_frames; hands_compute(W); }
     const bool claim = (n == k_ref_slots && g_ref_claim < 0); if (claim) g_ref_claim = rec;
     int hand_slots;
-    if (g_hands_show == 3 && g_hands_on && e != nullptr && g_hand_live[0] && g_hand_live[1]) {
+    if (g_hands_split && g_hands_show == 3 && g_hands_on && e != nullptr && g_hand_live[0] && g_hand_live[1]) {
         // hands only, both controllers: split - the copies as they stand (camera written) become the right-hand variant
         e->eye1b.assign(eye1, eye1 + size); e->eye2b.assign(eye2, eye2 + size);
         hand_slots = hands_apply(rec, n, p, eye1, eye2, 0);
@@ -1984,18 +2047,18 @@ static int bones_record(const uint8_t* p, UINT size, const float* world, uint8_t
         e->split = hand_slots > 0;
     }
     else { hand_slots = hands_apply(rec, n, p, eye1, eye2, -1); if (e) e->split = false; }
-    if (claim) { g_ref_rec = rec; memcpy(g_ref_W, W, 64); memcpy(g_ref_pal, p + k_pal_off, sizeof(g_ref_pal)); g_ref_valid = true; }
+    if (claim) { g_ref_rec = rec; memcpy(g_ref_W, W, 64); memcpy(g_ref_pal, p + po, sizeof(g_ref_pal)); g_ref_valid = true; }
     if (g_bseq_left > 0 && rec == g_bseq_rec && n > 0) {
         wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_bones_seq.bin", g_dir);
         FILE* f = nullptr;
-        if (_wfopen_s(&f, path, L"ab") == 0 && f) { const uint32_t hdr[2] = { g_frames, (uint32_t)n }; fwrite("SEQ1", 1, 4, f); fwrite(hdr, 4, 2, f); fwrite(p + k_pal_off, 64, n, f); fclose(f); }
+        if (_wfopen_s(&f, path, L"ab") == 0 && f) { const uint32_t hdr[2] = { g_frames, (uint32_t)n }; fwrite("SEQ1", 1, 4, f); fwrite(hdr, 4, 2, f); fwrite(p + po, 64, n, f); fclose(f); }
         if (--g_bseq_left == 0) diag("bones: sequence capture done (record %d)", g_bseq_rec);
     }
     if (g_wig_amt == 0.f) return hand_slots;
     for (int sl = 0; sl < n; ++sl) {
         const bool hit = (rec == g_wig_rec && sl == g_wig_slot) || ((g_wig_map[rec][sl >> 3] >> (sl & 7)) & 1);
         if (!hit) continue;
-        for (uint8_t* dst : { eye1, eye2 }) { if (!dst) continue; float* f = reinterpret_cast<float*>(dst + k_pal_off + sl * 64); f[7] += g_wig_amt; }
+        for (uint8_t* dst : { eye1, eye2 }) { if (!dst) continue; float* f = reinterpret_cast<float*>(dst + po + sl * 64); f[7] += g_wig_amt; }
     }
     return hand_slots;
 }
@@ -2036,6 +2099,7 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands_status(uint32_t* frames
 /// Captures the grip -> hand rotation for both hands at the next frame (pose: arms straight out, palms down).
 extern "C" __declspec(dllexport) void ffxvr_hands_calibrate() { g_hands_cal_pending = true; }
 extern "C" __declspec(dllexport) void ffxvr_hands_dump() { g_hands_dump = true; }
+extern "C" __declspec(dllexport) void ffxvr_hands_method(int nan_cut, int split) { g_hands_nan_cut = nan_cut != 0; g_hands_split = split != 0; }
 /// The measured side (1 = +x is Tidus's left) and the stretch limit; set < 0 reads, otherwise writes the side (and marks it known).
 extern "C" __declspec(dllexport) int ffxvr_hands_side(int set_px_left, float stretch) {
     if (stretch > 0.f) g_hands_stretch = stretch;
@@ -2991,7 +3055,29 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
-    if (g_ui_draw_now) { g_ui_draws_frame++; return 1; }   // into the UI texture (eye2_begin handles it)
+    if (g_ui_draw_now) {
+        if (g_frame_live) {   // census: every 2D UI draw with its texture and the head of its VS constant buffer (sprite transforms live there)
+            char line[400]; size_t l = 0;
+            l += snprintf(line + l, sizeof(line) - l, "      ui draw %u (frame draw %d):", g_ui_draws_frame, idx);
+            for (int i = 0; i < 4; ++i) {
+                ID3D11Texture2D* t = texture_of(g_cur_ps_srv[i]); if (!t) continue;
+                D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
+                l += snprintf(line + l, sizeof(line) - l, " s%d:%p %ux%u f%u", i, static_cast<void*>(t), d.Width, d.Height, static_cast<unsigned>(d.Format));
+            }
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                for (int sl = 0; sl < 2; ++sl) {
+                    auto it = g_vs_cb[sl] ? g_buffers.find(g_vs_cb[sl]) : g_buffers.end();
+                    if (it == g_buffers.end()) continue;
+                    const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
+                    l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.data.size());
+                    for (UINT k = 0; k < nf && k < 12 && l < sizeof(line) - 16; ++k) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
+                }
+                FrameEv e; strncpy_s(e.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+            }
+        }
+        g_ui_draws_frame++; return 1;   // into the UI texture (eye2_begin handles it)
+    }
     g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer);
     if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
@@ -4466,6 +4552,7 @@ static void xr_tick() {
     xr_apply_poses(out);
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
     xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
+    if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; diag("xr: recentre (headset gesture)"); }   // same as Home
     gesture_tick();
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
