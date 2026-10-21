@@ -748,7 +748,7 @@ float    g_gest_last_p[2][3] = {};           // hand positions (reference space,
 float    g_gest_last_tilt = 0.f;             // mean grip pitch last frame (two-hand tilt)
 float    g_gest_tilt_gain = 1.f;             // seat pitch change per radian of wrist roll (negative inverts)
 uint32_t g_gest_toggle_fp = 0;               // chord events, read and cleared by the managed side
-bool     g_gest_chord_down = false, g_gest_reset_down = false;
+bool     g_gest_chord_down = false, g_gest_reset_down = false, g_gest_nchord_down = false; uint32_t g_gest_next_chr = 0;
 bool     g_gest_active = false;              // a grab is in progress this frame (overlay)
 /// Each mode's default view offset / pitch / scale.
 static void view_defaults(int mode) {
@@ -840,6 +840,11 @@ static void gesture_tick() {
     if (chord && !g_gest_chord_down) { g_gest_toggle_fp++; xr_haptic(0, 0.6f, 0.08f); xr_haptic(1, 0.6f, 0.08f); }
     g_gest_chord_down = chord;
     if (chord) g_vrpad_suppress = true;
+    // Next-character chord: left grip + right stick click (in battle, the managed side moves the eyes to the next party member).
+    const bool nchord = L.squeeze > 0.5f && R.stick_click;
+    if (nchord && !g_gest_nchord_down) { g_gest_next_chr++; xr_haptic(1, 0.4f, 0.06f); }
+    g_gest_nchord_down = nchord;
+    if (nchord) g_vrpad_suppress = true;
     // Reset chord: left grip + left stick click -> the view back to its default
     // (the authored seat to its camera, the diorama / third person behind the player).
     const bool rchord = L.squeeze > 0.5f && L.stick_click;
@@ -4318,7 +4323,7 @@ extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_f
 extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; }
 /// Chord events since the last call (cleared), plus the gesture state for the overlay.
 extern "C" __declspec(dllexport) uint32_t ffxvr_gesture_poll(float* move3, float* scale_mul, int* active) {
-    const uint32_t n = g_gest_toggle_fp; g_gest_toggle_fp = 0;
+    const uint32_t n = (g_gest_toggle_fp & 0xFF) | ((g_gest_next_chr & 0xFF) << 8); g_gest_toggle_fp = 0; g_gest_next_chr = 0;   // low byte: view toggles, next byte: next-character presses
     if (move3) { move3[0] = g_gest_move[0]; move3[1] = g_gest_move[1]; move3[2] = g_gest_move[2]; }
     if (scale_mul) *scale_mul = g_gest_scale; if (active) *active = g_gest_active ? 1 : 0;
     return n;

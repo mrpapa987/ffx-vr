@@ -79,7 +79,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
     // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
     private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
-    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false;
+    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false; private int _btl_cycle_req = 0; private bool _btl_tidus_on = false; private readonly List<Vector4> _btl_field = new();
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -1103,6 +1103,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
             ImGui.Checkbox("in battle, first person follows whoever is in Tidus's slot (a swap moves the eyes)", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
+            ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
             ImGui.Text("battles start in:"); ImGui.SameLine();
             ImGui.RadioButton("the current view##bv", ref _battle_view, -1); ImGui.SameLine(); ImGui.RadioButton("first person##bv", ref _battle_view, 1); ImGui.SameLine();
             ImGui.RadioButton("third person##bv", ref _battle_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##bv", ref _battle_view, 2); ImGui.SameLine(); ImGui.TextDisabled("(the view from before returns when the battle ends)");
@@ -1296,7 +1297,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             uint toggles = _fn_gesture_poll(mv, &mul, &act);
             mv0 = mv[0]; mv1 = mv[1]; mv2 = mv[2];
             _gest_move_x = mv0; _gest_move_y = mv1; _gest_move_z = mv2; _gest_scale_mul = mul; _gest_active = act;
-            if ((toggles & 1) != 0) { if (_window_open) _chord_toggle_pending = true; else toggle_first_person(); }
+            if ((toggles & 0xFF) != 0) { if (_window_open) _chord_toggle_pending = true; else toggle_first_person(); }
+            if (((toggles >> 8) & 0xFF) != 0) _btl_cycle_req++;
         }
         if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, parse_mask(_fp_head_parts), _fp_solo);
         if (_fn_cull_scene_set != null && _fn_cull_scene_get != null && (_fn_cull_scene_get() != 0) != _cull_scene) {
@@ -1488,6 +1490,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                         if (pick_i < 0) foreach (var f in field) if (pick_i < 0 || f.i < pick_i) pick_i = f.i;
                         if (pick_i >= 0) {
                             var f = field.Find(x => x.i == pick_i);
+                            _btl_field.Clear(); foreach (var x in field) _btl_field.Add(x.pos);
+                            _btl_tidus_on = field.Exists(x => x.name == _fp_actor);
                             _btl_slot_pos = f.pos; _btl_slot_known = true; _btl_area = -1; _btl_chr = pick_i; _btl_who = f.name; _btl_bench_frames = 0;
                             var sb = new System.Text.StringBuilder($"battle follow: field ="); foreach (var x in field) sb.Append($" ply{x.i} {x.name} ({x.pos.X:F1},{x.pos.Z:F1}) d{x.d:F0}");
                             sb.Append($" -> following {f.name} (ply {pick_i}) on ({f.pos.X:F1},{f.pos.Z:F1})"); _logger.Info(sb.ToString());
@@ -1496,6 +1500,31 @@ public sealed unsafe class FFXVRModule : FhModule {
                 }
             }
             if (_btl_slot_known && plys != null) {
+                // Tidus joining the field takes the eyes, whoever they were on; the slot becomes the one he arrives at.
+                for (int i = 0; i < 16; i++) {
+                    if (!read(plys + i, out Chr pc) || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
+                    bool on = false; Vector4 at = default;
+                    if (pc.stat_visible != 0) foreach (var fp in _btl_field) { float dx = pa.chr_pos_vec.X - fp.X, dz = pa.chr_pos_vec.Z - fp.Z; if (dx * dx + dz * dz < 12f * 12f) { on = true; at = fp; } }
+                    if (on && !_btl_tidus_on && _btl_chr != i) { _btl_chr = i; _btl_who = _fp_actor; _btl_slot_pos = at; _btl_bench_frames = 0; _logger.Info($"battle follow: {_fp_actor} joined the field at ({at.X:F1},{at.Z:F1}); following him"); }
+                    _btl_tidus_on = on;
+                    break;
+                }
+                // Manual: next party member on the field (left grip + right stick click, or Insert), in party order.
+                if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;
+                if (_btl_cycle_req > 0) {
+                    _btl_cycle_req = 0;
+                    var onfield = new List<(int i, string name, Vector4 pos)>();
+                    for (int i = 0; i < 16; i++) {
+                        if (!read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
+                        bool on = false; foreach (var fp in _btl_field) { float dx = pa.chr_pos_vec.X - fp.X, dz = pa.chr_pos_vec.Z - fp.Z; if (dx * dx + dz * dz < 40f * 40f) on = true; }
+                        if (on) onfield.Add((i, actor_name(pa.chr_name), pa.chr_pos_vec));
+                    }
+                    if (onfield.Count > 0) {
+                        int k = onfield.FindIndex(x => x.i == _btl_chr); var nx = onfield[(k + 1) % onfield.Count];
+                        _btl_chr = nx.i; _btl_who = nx.name; _btl_slot_pos = nx.pos; _btl_bench_frames = 0;
+                        _logger.Info($"battle follow: manual -> {nx.name} (ply {nx.i})");
+                    }
+                }
                 // is the followed character on the bench (at a run position)?
                 bool benched = false;
                 if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr cc) && cc.actor != null && read(cc.actor, out Actor ca) && live(ca)) {
@@ -1530,7 +1559,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                         float dx = pa.chr_pos_vec.X - _btl_slot_pos.X, dz = pa.chr_pos_vec.Z - _btl_slot_pos.Z; float d = dx * dx + dz * dz;
                         if (d < 40f * 40f && d < best_d) { best_d = d; best = i; }
                     }
-                    if (best >= 0 && read(plys + best, out Chr bc) && bc.actor != null && read(bc.actor, out Actor ba)) { _btl_chr = best; _btl_who = actor_name(ba.chr_name); _btl_bench_frames = 0; _logger.Info($"battle follow: now {_btl_who} (ply {best})"); }
+                    if (best >= 0 && read(plys + best, out Chr bc) && bc.actor != null && read(bc.actor, out Actor ba)) { _btl_chr = best; _btl_who = actor_name(ba.chr_name); _btl_bench_frames = 0; if (actor_name(ba.chr_name) == _fp_actor) _btl_tidus_on = true; _logger.Info($"battle follow: now {_btl_who} (ply {best})"); }
                 }
                 if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null) { pick = (int)(((byte*)fc.actor - (byte*)actors) / sizeof(Actor)); if (pick < 0 || pick >= 48) pick = -1; }
             }
