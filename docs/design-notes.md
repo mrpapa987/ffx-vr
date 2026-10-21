@@ -554,3 +554,97 @@ folder; 4,877 verts, T-pose, parts by material; cut forearm+hand by vertex x
 beyond the elbow, ~500 tris per arm, PS2 textures) drawn by our own shader at
 the grip poses, scaled to the 18-unit Tidus. Square Enix assets: never in the
 repo; loaded from a user folder.
+
+## Tidus's skeleton: bone palettes decoded (20 Oct 2026)
+
+Capture: `ffxvr_bones_capture` (one frame, every skinned buffer on the
+player, raw) and `ffxvr_bones_seq` (one record's palette every frame for N
+frames). Findings:
+
+- Every part's 7 KB buffer carries a **bone palette at +1344**: 64-byte
+  row-major affine matrices, **world (render) space**, M = W_joint *
+  Bind^-1, one per slot. The player uploads 26 records a frame (13 parts x 2
+  passes) with 26 / 53 / 9 / 5 / 3 slots; ~78 distinct bones. The same bone
+  is byte-identical in every part that uses it, so a slot picked in one part
+  is found in the others by value (`g_grp`, rebuilt each frame end).
+- Hierarchy and pivots from motion: for a child c with parent p the joint
+  is a fixed point in both bind spaces, so (R_c - R_p) B = t_p - t_c over
+  the 240 frames of a run gives B (the joint in bind space) with ~0 residual
+  for the true parent. Bind space is model space: x = Tidus's left, y DOWN,
+  18 units tall. Results for the 53-slot reference part (record 10):
+
+  | joint | bind position | slots |
+  |---|---|---|
+  | L shoulder | (1.90, -14.70, -0.01) | 20, 21 (+23, 24 at the same pivot: pauldron?) |
+  | L elbow | (3.82, -12.79, -0.04) | 25, 26, 44 |
+  | L wrist | (5.57, -11.03, -0.07) | 49 hand, 45/46 wrist twist, fingers 47 48 50 51, thumb 52 (5.76, -10.53, -0.46) |
+  | knuckles (middle) | (6.31, -10.65, 0.09) | |
+  | R side | mirrored in x | upper 41 42 43 (+28), elbow 38 39 40, hand 33 35, fingers 31 32 34 37, thumb 36 |
+  | head / neck | (0, -15.81, 0.05) | 0, 1, 27, 30 (hair bones live in the 26-slot head parts) |
+  | hip | (0, -11.25) | 4, 15 | legs: (+-0.85, -9.73) knee-ish 2 3 16 17, ankles (+-0.85, -5.40), feet (+-0.85, -0.90) |
+
+  Upper arm 2.71 units, forearm 2.48.
+- The user's `bone_labels.txt` (lift-one-bone finder) agrees with the fit.
+
+### VR hands: state of play (tabled 21 Oct 2026)
+
+Everything below is in the code, off by default and hidden from the overlay
+(`hands_dev=1` in ffxvr.ini shows the section again). What works:
+
+- Hands (with animated fingers) placed at the controller grips in first
+  person: rigid world-space delta per hand group about the wrist, no bind
+  rotations needed. Calibration: a 10 s countdown with both arms straight
+  out, palms down, captures grip -> hand rotation per controller
+  (`g_hands_Rc`, ini `hands_cal`); yaw/pitch/roll sliders trim; out/up/back
+  offsets move the wrist off the grip. Saved, reloaded.
+- Which bind side is which arm is MEASURED (left = up x direction of travel
+  vs the shoulder-to-shoulder vector) and locked at calibration: +x is
+  Tidus's RIGHT (ini `hands_px_left=0`). The flat-screen labels had it the
+  other way round. A "flip" button exists.
+- Arms hang off virtual shoulders beside/below the eyes that turn with the
+  head (`g_hb_eye`, `g_hb_right`, `g_hb_fwd`), not off Tidus's animated
+  shoulders: he turns his body to run, so arms rooted on him crossed the
+  chest when backing up. Two-bone IK with the reach clamped, arms stretch
+  along their bones up to `hands_stretch` (1.6) to match real arm length.
+- Draw levels (`hands_show`): whole body / arms / forearms + hands / hands
+  only. Parts without hand bones are not drawn at all in the last two.
+
+What does not work yet - the reason it is tabled:
+
+- Seams. The game blends bone matrices LINEARLY in world space (zeroing a
+  bone sends its vertices to the world origin, proven by the white ray), so a
+  vertex on a seam between a drawn bone and a collapsed one lands between
+  the two destinations. Any arrangement with two destinations in one draw
+  leaves a "string" at the seam between them. Tried, in order: collapse to
+  the neck (strings wrist -> neck); forearm to a dot at the wrist (strings
+  from a shoulder bone that the proximity matcher mislabelled as forearm);
+  nearest-wrist rule (chest bones map the bind wrist close to the real
+  wrist with the arms at rest -> a chest sheet between the hands); all-zero
+  matrices (would be exact with homogeneous blending; the shader ignores w);
+  and finally the SPLIT: each hand-bearing part drawn once per hand per eye
+  with one collapse point at that hand's wrist (eye-2 replay machinery,
+  `EyeImage::eye1b/eye2b`, `split`, 3 extra passes from `ffxvr_on_draw`,
+  `ffxvr_eye2_begin` pass 0 = right hand into eye 1). Standing still that is
+  clean.
+- Still wrong with the split: (1) strings while MOVING - the deltas are
+  built from LAST frame's reference palette transported by the actor matrix
+  (`g_ref_pal`, X = W * Wref^-1), so the pivot W0 lags the arm animation by
+  a frame; the hand lands at P + (that error) while the collapse point is P
+  exactly, and the seam shows the difference. Fix: take W0 (and the hand
+  frame) from the CURRENT record's own hand-bone matrix - every
+  hand-bearing record has it - instead of the transported reference; keep
+  the reference only for identifying slots. (2) One hand renders in one eye
+  only with the split: pass 2 (right variant into eye 2) is not landing;
+  check `g_eye2_slots[sl] == g_eye2_cur` in `ffxvr_eye2_begin` (the ring
+  lookup may pick a different EyeImage for the same cb) and that
+  `ffxvr_eye2_end` between passes restores eye1 before pass 2.
+- Bone identity in non-reference records is by proximity to the transported
+  reference bones (`group_of`), which mislabels shoulder bones sharing a
+  pivot with the upper arm. Byte-equality within the frame is exact but the
+  reference (53-slot) part uploads 10th; records before it would need last
+  frame's equality map keyed by record order (which looked stable in every
+  dump: 26 records, same order).
+- Plan B remains: draw our own hand mesh (the PS2 OBJ's hands, cut at the
+  wrist) with our own shader at the grip poses; no seams by construction,
+  but new render code and the textures to load.
+

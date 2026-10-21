@@ -83,6 +83,28 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 0.75f;
     private float _tp_dist = 24f, _tp_h = 22f, _tp_pitch = -8f, _tp_follow_rate = 0f;   // third person: units, units, degrees, deg/s (0 = heading never follows)
     private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_tp_set;
+    private delegate* unmanaged[Cdecl]<float*, int, int> _fn_bones_capture; private int _bones_take = 0;
+    private delegate* unmanaged[Cdecl]<int, int, float, void> _fn_bone_wiggle; private delegate* unmanaged[Cdecl]<int*, int*, int> _fn_bone_status;
+    private delegate* unmanaged[Cdecl]<int, int, void> _fn_bones_seq; private delegate* unmanaged[Cdecl]<int> _fn_bones_seq_left; private int _seq_frames = 240;
+    private delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, float, int, int, int, void> _fn_hands_set; private bool _hands_swap = false, _hands_mirror = false; private int _hands_only = 0; private delegate* unmanaged[Cdecl]<uint*, nint> _fn_hands_status;
+    private delegate* unmanaged[Cdecl]<int, float, int> _fn_hands_side; private int _hands_px_left = -1; private float _hands_stretch = 1.6f; private bool _hands_side_pushed = false;
+    private delegate* unmanaged[Cdecl]<void> _fn_hands_calibrate, _fn_hands_dump; private delegate* unmanaged[Cdecl]<float*, int, uint> _fn_hands_cal_data;
+    private double _hands_cal_at = -1; private uint _hands_cal_seen = 0; private string _hands_cal_ini = ""; private bool _hands_cal_loaded = false;
+    private bool _hands_dev = false; private bool _hands_on = false, _hands_head = true; private int _hands_show = 3; private float _hands_yaw = 0f, _hands_pitch = 0f, _hands_roll = 0f, _hands_off_r = 0f, _hands_off_u = 0f, _hands_off_b = 0f;
+    private bool _wig_on = false; private int _wig_rec = 10, _wig_slot = 0; private float _wig_amt = 3f;
+    // Bone labels: (record, slot) -> name, kept in bone_labels.txt next to the mod.
+    private readonly Dictionary<(int, int), string> _bone_labels = new();
+    private static readonly string[] k_bone_names = { "L upper arm", "L forearm", "L hand", "L fingers", "R upper arm", "R forearm", "R hand", "R fingers", "head", "neck", "torso", "hip", "L leg", "R leg", "nothing visible", "other" };
+    private string _bone_labels_path => Path.Combine(Path.GetDirectoryName(_ini_path) ?? ".", "bone_labels.txt");
+    private void bone_labels_load() {
+        try { if (!File.Exists(_bone_labels_path)) return;
+            foreach (string l in File.ReadAllLines(_bone_labels_path)) { var t = l.Split('\t'); if (t.Length >= 3 && int.TryParse(t[0], out int r) && int.TryParse(t[1], out int s)) _bone_labels[(r, s)] = t[2]; } }
+        catch { }
+    }
+    private void bone_labels_save() {
+        try { var lines = new List<string>(); foreach (var kv in _bone_labels) lines.Add($"{kv.Key.Item1}\t{kv.Key.Item2}\t{kv.Value}"); lines.Sort(); File.WriteAllLines(_bone_labels_path, lines); }
+        catch { }
+    }
     private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
     private int _fp_body_mode = 0; private string _fp_head_parts = "0,1,2,3,9"; private int _fp_solo = -1;   // 0 = whole body hidden (default). Tidus (c101): parts 0-3 hair, 9 face/head, kept for later   // 0 hide all, 1 hide head parts only, 2 show all
     private delegate* unmanaged[Cdecl]<int, uint, int, void> _fn_fp_body_set;
@@ -337,6 +359,17 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_set");
             _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_reset");
             _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_tp_set");
+            _fn_bones_capture = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_capture");
+            _fn_bone_wiggle  = (delegate* unmanaged[Cdecl]<int, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bone_wiggle");
+            _fn_bone_status  = (delegate* unmanaged[Cdecl]<int*, int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bone_status");
+            _fn_bones_seq    = (delegate* unmanaged[Cdecl]<int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_seq");
+            _fn_bones_seq_left = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_seq_left");
+            _fn_hands_set    = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_set");
+            _fn_hands_status = (delegate* unmanaged[Cdecl]<uint*, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_status");
+            _fn_hands_calibrate = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_calibrate");
+            _fn_hands_dump   = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_dump");
+            _fn_hands_side   = (delegate* unmanaged[Cdecl]<int, float, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_side");
+            _fn_hands_cal_data  = (delegate* unmanaged[Cdecl]<float*, int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_cal_data");
             _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_poll");
             _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_body_set");
             _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_parts");
@@ -588,6 +621,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         try {
             string dir = Path.GetDirectoryName(typeof(FFXVRModule).Assembly.Location) ?? ".";
             _ini_path = Path.Combine(dir, "ffxvr.ini");
+            bone_labels_load();
             if (!File.Exists(_ini_path)) return;
             foreach (string raw in File.ReadAllLines(_ini_path)) {
                 string line = raw.Trim();
@@ -648,6 +682,21 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "tp_height":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_h); break;
                     case "tp_pitch":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_pitch); break;
                     case "tp_follow_rate":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_follow_rate); break;
+                    case "hands_dev":         _hands_dev = v == "1"; break;
+                    case "hands":             _hands_on = v == "1"; break;
+                    case "hands_head":        _hands_head = v != "0"; break;
+                    case "hands_show":        int.TryParse(v, out _hands_show); break;
+                    case "hands_yaw":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_yaw); break;
+                    case "hands_pitch":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_pitch); break;
+                    case "hands_roll":        float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_roll); break;
+                    case "hands_off_right":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_r); break;
+                    case "hands_off_up":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_u); break;
+                    case "hands_off_back":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_b); break;
+                    case "hands_swap":        _hands_swap = v == "1"; break;
+                    case "hands_mirror":      _hands_mirror = v == "1"; break;
+                    case "hands_cal":         _hands_cal_ini = v; break;
+                    case "hands_px_left":     int.TryParse(v, out _hands_px_left); break;
+                    case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
                 }
             }
             if (_headset_autostart) _xr_want = true;
@@ -711,7 +760,22 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"tp_distance={_tp_dist.ToString("F0", ci)}\n" +
             $"tp_height={_tp_h.ToString("F0", ci)}\n" +
             $"tp_pitch={_tp_pitch.ToString("F0", ci)}\n" +
-            $"tp_follow_rate={_tp_follow_rate.ToString("F0", ci)}\n";
+            $"tp_follow_rate={_tp_follow_rate.ToString("F0", ci)}\n" +
+            $"hands_dev={(_hands_dev ? 1 : 0)}\n" +
+            $"hands={(_hands_on ? 1 : 0)}\n" +
+            $"hands_head={(_hands_head ? 1 : 0)}\n" +
+            $"hands_show={_hands_show}\n" +
+            $"hands_yaw={_hands_yaw.ToString("F0", ci)}\n" +
+            $"hands_pitch={_hands_pitch.ToString("F0", ci)}\n" +
+            $"hands_roll={_hands_roll.ToString("F0", ci)}\n" +
+            $"hands_off_right={_hands_off_r.ToString("F3", ci)}\n" +
+            $"hands_off_up={_hands_off_u.ToString("F3", ci)}\n" +
+            $"hands_off_back={_hands_off_b.ToString("F3", ci)}\n" +
+            $"hands_swap={(_hands_swap ? 1 : 0)}\n" +
+            $"hands_mirror={(_hands_mirror ? 1 : 0)}\n" +
+            $"hands_cal={_hands_cal_ini}\n" +
+            $"hands_px_left={_hands_px_left}\n" +
+            $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n";
         if (text == _ini_last) return;
         try { File.WriteAllText(_ini_path, text); _ini_last = text; }
         catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
@@ -810,6 +874,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fp_mode != fp_before) apply_mode_scale(fp_before, _fp_mode);
         push_player();
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
+        push_hands();
         if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
 
         // View
@@ -1003,6 +1068,87 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("show everything", ref _fp_body_mode, 2);
             ImGui.SetNextItemWidth(160); ImGui.InputText("head parts (indices, e.g. 2,3)", ref _fp_head_parts, 64); ImGui.SameLine();
             ImGui.TextDisabled($"player parts drawn into the scene last frame: {(_fn_fp_parts != null ? _fn_fp_parts() : 0)}");
+            if (!_hands_dev) { _hands_on = false; }   // VR hands are tabled: hidden unless hands_dev=1 in the ini (docs/design-notes.md, "VR hands: state of play")
+            if (_hands_dev && _fn_bones_capture != null && ImGui.Button($"capture bone palettes (one frame -> ffxvr_bones_{_bones_take + 1}.bin)")) {
+                float* op = stackalloc float[78]; Actor* actors = Globals.actors;
+                if (actors != null && _fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor pa)) { for (int k = 0; k < 26; k++) { op[k*3] = pa.chr_optpos[k].X; op[k*3+1] = pa.chr_optpos[k].Y; op[k*3+2] = pa.chr_optpos[k].Z; } }
+                _bones_take = _fn_bones_capture(op, 64);
+                _logger.Info($"bone palette capture armed: take {_bones_take} -> ffxvr_bones_{_bones_take}.bin + 'bones:' lines in ffxvr_diag.log");
+            }
+            if (_hands_dev && _fn_hands_set != null) {
+                ImGui.Separator();
+                ImGui.Checkbox("VR hands (first person): Tidus's arms follow the controllers", ref _hands_on); ImGui.SameLine();
+                ImGui.Checkbox("collapse the head bones", ref _hands_head);
+                ImGui.Text("draw:"); ImGui.SameLine();
+                ImGui.RadioButton("whole body", ref _hands_show, 0); ImGui.SameLine(); ImGui.RadioButton("arms", ref _hands_show, 1); ImGui.SameLine();
+                ImGui.RadioButton("forearms + hands", ref _hands_show, 2); ImGui.SameLine(); ImGui.RadioButton("hands only", ref _hands_show, 3);
+                if (_fn_hands_status != null) { uint hf; nint why = _fn_hands_status(&hf); ImGui.SameLine(); ImGui.TextDisabled($"{System.Runtime.InteropServices.Marshal.PtrToStringAnsi(why)}  frames {hf}"); }
+                ImGui.SetNextItemWidth(90); ImGui.SliderFloat("hand yaw", ref _hands_yaw, -180f, 180f, "%.0f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(90); ImGui.SliderFloat("pitch", ref _hands_pitch, -180f, 180f, "%.0f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(90); ImGui.SliderFloat("roll", ref _hands_roll, -180f, 180f, "%.0f"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(70); ImGui.SliderFloat("out", ref _hands_off_r, -0.15f, 0.15f, "%.2f m"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(70); ImGui.SliderFloat("up", ref _hands_off_u, -0.15f, 0.15f, "%.2f m"); ImGui.SameLine();
+                ImGui.SetNextItemWidth(70); ImGui.SliderFloat("back", ref _hands_off_b, -0.15f, 0.15f, "%.2f m");
+                ImGui.TextDisabled("calibration: turn the hand about the grip until the fingers point along the controller; offsets move the wrist off the grip");
+                if (_fn_hands_calibrate != null && _fn_hands_cal_data != null) {
+                    double now = ImGui.GetTime();
+                    if (ImGui.Button("calibrate: 10 s countdown")) _hands_cal_at = now + 10.0;
+                    ImGui.SameLine();
+                    if (_hands_cal_at > 0) {
+                        if (now >= _hands_cal_at) { _fn_hands_calibrate(); _hands_cal_at = -1; }
+                        else ImGui.Text($"{(int)Math.Ceiling(_hands_cal_at - now)} ... hold both arms STRAIGHT OUT IN FRONT, shoulder width, PALMS DOWN, fingers forward");
+                    }
+                    else ImGui.TextDisabled("pose: arms straight out in front, palms down; the buzz = captured");
+                    ImGui.SameLine(); if (ImGui.SmallButton("reset calibration")) { float* id = stackalloc float[18]; for (int i = 0; i < 18; i++) id[i] = (i % 9) % 4 == 0 ? 1f : 0f; _fn_hands_cal_data(id, 1); _hands_cal_ini = ""; if (_fn_hands_side != null) _fn_hands_side(-2, _hands_stretch); _hands_px_left = -1; }
+                    float* rc = stackalloc float[18]; uint seen = _fn_hands_cal_data(rc, 0);
+                    if (seen != _hands_cal_seen) {   // a capture happened: persist it
+                        _hands_cal_seen = seen; var sb2 = new System.Text.StringBuilder(); for (int i = 0; i < 18; i++) { if (i > 0) sb2.Append(','); sb2.Append(rc[i].ToString("F4", System.Globalization.CultureInfo.InvariantCulture)); }
+                        _hands_cal_ini = sb2.ToString();
+                    }
+                }
+                ImGui.SetNextItemWidth(120); ImGui.SliderFloat("arm stretch (to reach a real arm's length)", ref _hands_stretch, 1f, 2f, "%.2fx");
+                if (_fn_hands_dump != null) { if (ImGui.SmallButton("dump one frame of bone groups to ffxvr_diag.log")) _fn_hands_dump(); }
+                ImGui.Text("sorting out the sides:"); ImGui.SameLine();
+                if (ImGui.SmallButton("the arm models are on the wrong sides: flip")) { if (_fn_hands_side != null) { int r2 = _fn_hands_side(-3, _hands_stretch); _hands_px_left = r2 & 1; } } ImGui.SameLine();
+                ImGui.Checkbox("swap arms", ref _hands_swap); ImGui.SameLine(); ImGui.Checkbox("mirror targets", ref _hands_mirror); ImGui.SameLine();
+                ImGui.RadioButton("both", ref _hands_only, 0); ImGui.SameLine(); ImGui.RadioButton("left controller only", ref _hands_only, 1); ImGui.SameLine(); ImGui.RadioButton("right only", ref _hands_only, 2);
+            }
+            if (_hands_dev && _fn_bone_wiggle != null && _fn_bone_status != null) {
+                int* slots = stackalloc int[32]; int matches; int nrec = _fn_bone_status(slots, &matches);
+                ImGui.Text("bone finder:"); ImGui.SameLine(); ImGui.Checkbox("lift one bone", ref _wig_on); ImGui.SameLine();
+                ImGui.SetNextItemWidth(100); ImGui.SliderInt("record", ref _wig_rec, 0, Math.Max(0, nrec - 1)); ImGui.SameLine();
+                int nsl = (_wig_rec >= 0 && _wig_rec < nrec) ? slots[_wig_rec] : 0;
+                ImGui.SetNextItemWidth(100); ImGui.SliderInt("slot", ref _wig_slot, 0, Math.Max(0, nsl - 1)); ImGui.SameLine();
+                ImGui.SetNextItemWidth(80); ImGui.SliderFloat("units up", ref _wig_amt, 0.5f, 10f, "%.1f");
+                if (ImGui.IsKeyPressed(ImGuiKey.PageUp)) _wig_slot = Math.Min(Math.Max(0, nsl - 1), _wig_slot + 1);
+                if (ImGui.IsKeyPressed(ImGuiKey.PageDown)) _wig_slot = Math.Max(0, _wig_slot - 1);
+                var sb = new System.Text.StringBuilder(); for (int r = 0; r < nrec; r++) { if (r > 0) sb.Append(' '); sb.Append(slots[r]); }
+                ImGui.TextDisabled($"PgUp/PgDn: next/previous slot.   player records last frame: {nrec} (slots: {sb})   this bone also in {matches} other slots");
+                _fn_bone_wiggle(_wig_rec, _wig_slot, _wig_on ? _wig_amt : 0f);
+                // Labelling: a button per body part names the current slot, saves, and steps to the next slot.
+                string cur = _bone_labels.TryGetValue((_wig_rec, _wig_slot), out string? cl) ? cl : "(unlabelled)";
+                ImGui.Text($"record {_wig_rec} slot {_wig_slot}: {cur}"); ImGui.SameLine();
+                if (ImGui.SmallButton("clear")) { _bone_labels.Remove((_wig_rec, _wig_slot)); bone_labels_save(); }
+                for (int i = 0; i < k_bone_names.Length; i++) {
+                    if (i % 8 != 0) ImGui.SameLine();
+                    if (ImGui.SmallButton(k_bone_names[i])) { _bone_labels[(_wig_rec, _wig_slot)] = k_bone_names[i]; bone_labels_save(); _wig_slot = Math.Min(Math.Max(0, nsl - 1), _wig_slot + 1); }
+                }
+                int labelled = 0; foreach (var kv in _bone_labels) if (kv.Key.Item1 == _wig_rec) labelled++;
+                ImGui.TextDisabled($"labelled {labelled} of {nsl} slots in record {_wig_rec}; saved to bone_labels.txt");
+                if (_fn_bones_seq != null && _fn_bones_seq_left != null) {
+                    int left = _fn_bones_seq_left();
+                    if (ImGui.Button($"record {_seq_frames} frames of record {_wig_rec}'s palette (then move around)")) _fn_bones_seq(_wig_rec, _seq_frames);
+                    ImGui.SameLine(); ImGui.SetNextItemWidth(100); ImGui.SliderInt("frames", ref _seq_frames, 60, 1200);
+                    ImGui.SameLine(); ImGui.TextDisabled(left > 0 ? $"recording: {left} frames left" : "-> ffxvr_bones_seq.bin");
+                }
+                if (ImGui.TreeNode("labels so far")) {
+                    foreach (string name in k_bone_names) {
+                        var sl = new List<string>(); foreach (var kv in _bone_labels) if (kv.Value == name) sl.Add(kv.Key.Item1 == _wig_rec ? kv.Key.Item2.ToString() : $"{kv.Key.Item1}:{kv.Key.Item2}");
+                        if (sl.Count > 0) ImGui.Text($"{name,-16} {string.Join(" ", sl)}");
+                    }
+                    ImGui.TreePop();
+                }
+            }
             ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.InputText("player model name", ref _fp_actor, 16); ImGui.SameLine();
@@ -1224,6 +1370,15 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (n == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
         _fn_anchor_override(-sx / n, -sy / n, sz / n, 1);   // render space negates X and Y
     }
+    private void push_hands() {
+        if (!_hands_cal_loaded && _fn_hands_cal_data != null && _hands_cal_ini.Length > 0) {
+            _hands_cal_loaded = true; var t = _hands_cal_ini.Split(','); if (t.Length == 18) { float* rc = stackalloc float[18]; bool ok = true; for (int i = 0; i < 18; i++) ok &= float.TryParse(t[i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out rc[i]); if (ok) { _fn_hands_cal_data(rc, 1); _hands_cal_seen = _fn_hands_cal_data(null, 0); } }
+        }
+        if (_fn_hands_side != null) {
+            if (!_hands_side_pushed) { _hands_side_pushed = true; if (_hands_px_left >= 0) _fn_hands_side(_hands_px_left, _hands_stretch); }
+            int r = _fn_hands_side(-1, _hands_stretch); if ((r & 2) != 0) _hands_px_left = r & 1;   // the measurement, once made, is what gets saved
+        }
+        if (_fn_hands_set != null) _fn_hands_set(_hands_on ? 1 : 0, (_hands_head ? 1 : 0) | (_hands_show << 1), _hands_yaw * 0.0174533f, _hands_pitch * 0.0174533f, _hands_roll * 0.0174533f, _hands_off_r, _hands_off_u, _hands_off_b, _hands_swap ? 1 : 0, _hands_mirror ? 1 : 0, _hands_only); }
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
@@ -1385,6 +1540,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             push_player();
             if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
             if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
+            push_hands();
             if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
             if (_fn_xr_set != null) {
                 bool want = _xr_want;
