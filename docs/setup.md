@@ -137,6 +137,16 @@ eyes. The margin is thin. `MSAA=` in `GameSetting.ini` is ignored on the
 Fahrenheit launch path (0 and 2 both left the target at 8 samples); AA has to
 be changed through `FFX&X-2_LAUNCHER.exe` or, later, by the mod itself.
 
+## Settings (ffxvr.ini)
+
+`fahrenheit\mods\ffxvr\ffxvr.ini` holds every overlay setting; the overlay
+writes it whenever something changes, and the mod re-reads it within a
+second if it is edited on disk (so hand edits while the game runs are kept,
+not overwritten). Launch-only keys: `headset_autostart` (start XR at the
+first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
+diorama), `overlay_at_start` (0 = no mod window until F8). `hands_dev=1`
+shows the experimental VR-hands section.
+
 ## Texture packs (External File Loader style) under Fahrenheit
 
 Loose-file texture packs for this game (e.g. HitokageWorshipper's

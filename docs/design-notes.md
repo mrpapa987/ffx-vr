@@ -683,3 +683,29 @@ What does not work yet - the reason it is tabled:
   the string that appeared while moving. Untested in the headset at the time
   of writing; still hidden behind `hands_dev=1`.
 
+### Next session: what to test (written 21 Oct 2026, nothing below is verified yet)
+
+Rebuild first (`tools\build-mod.ps1`). Then, in order:
+
+1. **Launch defaults**: the game should come up in the headset, first person,
+   no overlay. ini: `headset_autostart=1 start_view=1 overlay_at_start=0`.
+   If any of it is off, the module log's `settings: loaded ...` line says what
+   was read; edit the ini only with the game closed, or through the overlay
+   (the mod now also picks up on-disk edits within a second).
+2. **Battle follow**: first person, get into a battle, swap Tidus out. The eyes
+   should move to the replacement once Tidus reaches the bench. The module
+   log has `battle follow: <name> on slot N of area A` and `battle follow:
+   now <name>`; the overlay's "now: c1xx" shows the current one. If it never
+   switches, send the log: the per-second `window:` lines now include each
+   party member's `vis`/`hide` bytes and positions.
+3. **Battles start in** (overlay, first-person tree): pick diorama or third
+   person; the view should switch at battle start and return after.
+4. **Cursors**: in battle with the target cursor visible, press the frame
+   census; again with no cursor. `ffxvr_frame.log` then lists every UI draw
+   (`ui draw N ... s0:<tex> WxH | cb0 <size>B: <floats>`); the lines that
+   exist only with the cursor are the ones to drop.
+5. **Hands** (optional, `hands_dev=1`): hands only, NaN cut on (default),
+   split off. Expect clean hand ends with no strings, both eyes, no change
+   while moving. If a hand or finger vanishes entirely, the NaN hit a padding
+   index: untick "NaN cut at the seam" and report which part vanished.
+
