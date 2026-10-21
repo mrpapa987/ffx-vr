@@ -1950,14 +1950,15 @@ static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8
     // Pass 1: groups per slot, and the hand delta of THIS record from its own wrist-pivot bone (slots 45/46/49
     // left, 33/35 right in the reference layout), so the pivot is this frame's, not last frame's transported one.
     int8_t grp[k_pal_max_slots]; int refs[k_pal_max_slots];
-    float Dhand[2][16]; bool have_hand[2] = { false, false };
+    float Dhand[2][16]; bool have_hand[2] = { false, false }; int hand_pri[2] = { 0, 0 };   // 2 = the hand bone itself (49 / 33), 1 = a wrist-twist bone
     for (int sl = 0; sl < n; ++sl) {
         int rs = -1;
         if (rec == g_ref_claim && n == k_ref_slots) { grp[sl] = g_refg[sl]; rs = sl; }
         else grp[sl] = (int8_t)group_of(reinterpret_cast<const float*>(orig + po + sl * 64), &rs);
         refs[sl] = rs;
         const int side = (rs == 45 || rs == 46 || rs == 49) ? 0 : (rs == 33 || rs == 35) ? 1 : -1;
-        if (side < 0 || have_hand[side] || !g_hand_live[side] || !g_delta_on[side == 0 ? G_L_HD : G_R_HD]) continue;
+        const int pri = (rs == 49 || rs == 33) ? 2 : 1;
+        if (side < 0 || hand_pri[side] >= pri || !g_hand_live[side] || !g_delta_on[side == 0 ? G_L_HD : G_R_HD]) continue;
         const float* M = reinterpret_cast<const float*>(orig + po + sl * 64);
         const float sgn = side == 0 ? 1.f : -1.f;
         const float b_wr[3] = { sgn*k_bL_wr[0], k_bL_wr[1], k_bL_wr[2] }, b_kn[3] = { sgn*k_bL_kn[0], k_bL_kn[1], k_bL_kn[2] }, b_th[3] = { sgn*k_bL_th[0], k_bL_th[1], k_bL_th[2] };
@@ -1967,7 +1968,7 @@ static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8
         float fc[3], tc[3]; aff_vec(M, fm, fc); aff_vec(M, tm, tc); v3norm(fc); { const float d = v3dot(tc, fc); for (int i = 0; i < 3; ++i) tc[i] -= d * fc[i]; } v3norm(tc);
         float nc[3]; v3cross(fc, tc, nc); float Hc[9]; mat3_from_cols(fc, tc, nc, Hc);
         float Dh[9]; mat3_mulT(g_hand_Hn[side], Hc, Dh);
-        delta_about(Dh, W0, g_hand_P[side], Dhand[side]); have_hand[side] = true;
+        delta_about(Dh, W0, g_hand_P[side], Dhand[side]); have_hand[side] = true; hand_pri[side] = pri;
     }
     for (int sl = 0; sl < n; ++sl) {
         int g = grp[sl];
