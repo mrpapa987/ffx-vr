@@ -1465,42 +1465,35 @@ public sealed unsafe class FFXVRModule : FhModule {
         }
         if (in_battle && _battle_follow) {
             Chr* plys = Globals.Battle.player_characters;
-            // the slot: the party position Tidus (the configured player) stands on; looked for until found
-            if (!_btl_slot_known && plys != null && btl_v.ptr_pos_def != null && read(btl_v.ptr_pos_def, out BtlArea a0)) {
-                for (int i = 0; i < 16 && !_btl_slot_known; i++) {
-                    if (!read(plys + i, out Chr pc) || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
-                    for (int ar = 0; ar < Math.Min((int)a0.area_count, 8) && !_btl_slot_known; ar++) {
-                        if (!read(btl_v.ptr_pos_def + ar, out BtlArea area)) continue;
-                        for (int s = 0; s < Math.Min((int)area.count_party_pos, 8); s++) {
-                            Vector4 sp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_pos + s * 16, out sp)) continue;
-                            float dx = pa.chr_pos_vec.X - sp.X, dz = pa.chr_pos_vec.Z - sp.Z;
-                            if (dx * dx + dz * dz < 6f * 6f) { _btl_slot_pos = sp; _btl_slot_known = true; _btl_area = ar; _btl_chr = i; _btl_who = _fp_actor; _logger.Info($"battle follow: {_fp_actor} on slot {s} of area {ar} at ({sp.X:F1},{sp.Z:F1})"); break; }
+            // The slot: taken from the field itself, since ptr_pos_def did not read as a usable area table
+            // (area_count 0). When the first command window opens everyone is standing on their slots; the three
+            // visible party members nearest the monsters are the field. Tidus if he is one of them, else the
+            // lowest party index (Yuna before Auron...), and his position is the slot to follow.
+            if (!_btl_slot_known && plys != null) {
+                BtlWindow* bw = Globals.Battle.cur_window;
+                if (read(bw, out BtlWindow w) && w.state == 4) {
+                    Chr* mons = Globals.Battle.monster_characters; float cx = 0, cz = 0; int cn = 0;
+                    for (int i = 0; i < 16 && mons != null; i++) if (read(mons + i, out Chr mc) && mc.stat_visible != 0 && mc.actor != null && read(mc.actor, out Actor ma) && live(ma)) { cx += ma.chr_pos_vec.X; cz += ma.chr_pos_vec.Z; cn++; }
+                    if (cn > 0) {
+                        cx /= cn; cz /= cn;
+                        var field = new List<(float d, int i, string name, Vector4 pos)>();
+                        for (int i = 0; i < 16; i++) {
+                            if (!read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
+                            float dx = pa.chr_pos_vec.X - cx, dz = pa.chr_pos_vec.Z - cz; float d = MathF.Sqrt(dx * dx + dz * dz);
+                            if (d < 300f) field.Add((d, i, actor_name(pa.chr_name), pa.chr_pos_vec));
+                        }
+                        field.Sort((a, b) => a.d.CompareTo(b.d));
+                        if (field.Count > 3) field.RemoveRange(3, field.Count - 3);
+                        int pick_i = -1; foreach (var f in field) if (f.name == _fp_actor) pick_i = f.i;
+                        if (pick_i < 0) foreach (var f in field) if (pick_i < 0 || f.i < pick_i) pick_i = f.i;
+                        if (pick_i >= 0) {
+                            var f = field.Find(x => x.i == pick_i);
+                            _btl_slot_pos = f.pos; _btl_slot_known = true; _btl_area = -1; _btl_chr = pick_i; _btl_who = f.name; _btl_bench_frames = 0;
+                            var sb = new System.Text.StringBuilder($"battle follow: field ="); foreach (var x in field) sb.Append($" ply{x.i} {x.name} ({x.pos.X:F1},{x.pos.Z:F1}) d{x.d:F0}");
+                            sb.Append($" -> following {f.name} (ply {pick_i}) on ({f.pos.X:F1},{f.pos.Z:F1})"); _logger.Info(sb.ToString());
                         }
                     }
                 }
-            }
-            // Fallback when the area's party positions are not where the party stands: the slot is where Tidus is when
-            // his first command window opens (he is standing on it then); the bench test then uses distance alone.
-            if (!_btl_slot_known && plys != null) {
-                BtlWindow* bw = Globals.Battle.cur_window;
-                if (read(bw, out BtlWindow w) && w.state == 4 && w.type == BtlWindowType.Main) {
-                    for (int i = 0; i < 16 && !_btl_slot_known; i++) {
-                        if (!read(plys + i, out Chr pc) || pc.id != w.cur_chr_id || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
-                        _btl_slot_pos = pa.chr_pos_vec; _btl_slot_known = true; _btl_area = -1; _btl_chr = i; _btl_who = _fp_actor;
-                        _logger.Info($"battle follow: {_fp_actor} slot taken from his first command window at ({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Z:F1}) (area positions did not match)");
-                    }
-                }
-            }
-            if (!_btl_diag_done && plys != null && btl_v.ptr_pos_def != null && read(btl_v.ptr_pos_def, out BtlArea d0)) {
-                _btl_diag_done = true;
-                var sb = new System.Text.StringBuilder($"battle follow: area_count {d0.area_count} party_pos {d0.count_party_pos}:");
-                for (int ar = 0; ar < Math.Min((int)d0.area_count, 4); ar++) {
-                    if (!read(btl_v.ptr_pos_def + ar, out BtlArea area)) continue;
-                    sb.Append($" [area {ar}:");
-                    for (int s = 0; s < Math.Min((int)area.count_party_pos, 6); s++) { Vector4 sp, rp; if (read((byte*)btl_v.ptr_pos_def + area.offset_party_pos + s * 16, out sp) && read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) sb.Append($" slot{s}=({sp.X:F1},{sp.Y:F1},{sp.Z:F1}) run=({rp.X:F1},{rp.Y:F1},{rp.Z:F1})"); }
-                    sb.Append(']');
-                }
-                _logger.Info(sb.ToString());
             }
             if (_btl_slot_known && plys != null) {
                 // is the followed character on the bench (at a run position)?
