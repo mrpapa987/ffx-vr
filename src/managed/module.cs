@@ -79,7 +79,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
     // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
     private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
-    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false; private int _btl_cycle_req = 0; private bool _btl_tidus_on = false; private readonly List<Vector4> _btl_field = new();
+    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false, _btl_aeon_out = false; private int _btl_cycle_req = 0; private bool _btl_tidus_on = false; private readonly List<Vector4> _btl_field = new();
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -1461,7 +1461,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         // member nearest the slot (the one running in to replace him).
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         if (in_battle != _btl_was) {
-            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0; _btl_diag_done = false;
+            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0; _btl_diag_done = false; _btl_aeon_out = false;
             if (in_battle) { if (_battle_view >= 0 && _battle_view != _fp_mode) { _btl_mode_before = _fp_mode; apply_mode_scale(_fp_mode, _battle_view); _fp_mode = _battle_view; } }
             else if (_btl_mode_before >= 0) { if (_btl_mode_before != _fp_mode) { apply_mode_scale(_fp_mode, _btl_mode_before); _fp_mode = _btl_mode_before; } _btl_mode_before = -1; }
         }
@@ -1508,6 +1508,21 @@ public sealed unsafe class FFXVRModule : FhModule {
                     if (on && !_btl_tidus_on && _btl_chr != i) { _btl_chr = i; _btl_who = _fp_actor; _btl_slot_pos = at; _btl_bench_frames = 0; _logger.Info($"battle follow: {_fp_actor} joined the field at ({at.X:F1},{at.Z:F1}); following him"); }
                     _btl_tidus_on = on;
                     break;
+                }
+                // Summon: while an Aeon is out (a visible party entry beyond the seven characters - chr_id 8+ is the
+                // assumption, logged when first seen), the party walks off and Yuna stays to command it: her eyes.
+                {
+                    int aeon = -1; for (int i = 0; i < 16 && aeon < 0; i++) if (read(plys + i, out Chr pc) && pc.chr_id >= 8 && pc.chr_id < 64 && pc.stat_visible != 0 && pc.actor != null && read(pc.actor, out Actor pa) && live(pa) && MathF.Abs(pa.chr_pos_vec.Z) < 500f) aeon = i;
+                    if (aeon >= 0 && !_btl_aeon_out) { _btl_aeon_out = true; if (read(plys + aeon, out Chr ac) && ac.actor != null && read(ac.actor, out Actor aa)) _logger.Info($"battle follow: aeon out: ply {aeon} chr_id {ac.chr_id} {actor_name(aa.chr_name)} at ({aa.chr_pos_vec.X:F1},{aa.chr_pos_vec.Z:F1})"); }
+                    if (aeon < 0 && _btl_aeon_out) { _btl_aeon_out = false; _btl_bench_frames = 0; }
+                    if (_btl_aeon_out) {
+                        for (int i = 0; i < 16; i++) {
+                            if (!read(plys + i, out Chr pc) || pc.chr_id != 1 || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;   // Yuna
+                            if (_btl_chr != i) { _btl_chr = i; _btl_who = actor_name(pa.chr_name); _logger.Info("battle follow: summon -> Yuna's eyes"); }
+                            _btl_slot_pos = pa.chr_pos_vec; _btl_bench_frames = 0;   // wherever she stands to command it is the slot for now
+                            break;
+                        }
+                    }
                 }
                 // Manual: next party member on the field (left grip + right stick click, or Insert), in party order.
                 if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;

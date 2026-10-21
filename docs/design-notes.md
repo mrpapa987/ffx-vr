@@ -767,8 +767,11 @@ field, "battles start in" view switch, diorama on the fight centroid, floor.
 
 To do, by layer:
 - Eyes: face the enemies at battle start and on every eye switch (slot ->
-  monster centroid); a blink on eye jumps (`cut_blink` path); follow the Aeon
-  when summoned (capture: `window:` log during a summon for its ply index);
+  monster centroid); a blink on eye jumps (`cut_blink` path); on a summon
+  the eyes go to YUNA (she stays on the field to command the Aeon while the
+  others walk off) - implemented on the assumption that the Aeon is a
+  visible party entry with chr_id 8+ (logged as `aeon out:` when first seen;
+  capture one summon's `window:` lines to confirm the index);
   check big-boss diorama (centroid / floor); note how knockback feels.
 - 2D layer: hide the game's target / turn cursors (capture: census with and
   without a cursor); damage numbers, Miss, status text and enemy readouts are
