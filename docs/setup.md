@@ -79,6 +79,7 @@ re-maps the addresses again.
 | `tools/check-prereqs.ps1` | Reports toolchain, OpenXR runtime registration, Steam paths |
 | `tools/build-fahrenheit-full.ps1` | Clones if needed, checks out the tested commit (`-Latest` for main), full msbuild build, reports native artifacts |
 | `tools/install-fahrenheit.ps1` | Copies the build into `<game>\fahrenheit\bin` (cleared first; config/mods/saves untouched), adds dbghelp.dll if missing |
+| `tools/package-release.ps1` | Builds (`build-mod.ps1 -NoDeploy`) and packs the player zip into `dist\` with its README and installer; see `docs/release.md` §1 |
 | `tools/paths.ps1` | Shared by all scripts: repository root, game folder (env var / local file / Steam) |
 | `tools/run-ffx.ps1` | Launches via Fahrenheit, captures console and game-side logs |
 

@@ -13,6 +13,11 @@
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\build-mod.ps1     (from the repository folder)
+#
+#   -NoDeploy   build only; leave the game folder alone (tools\package-release.ps1 uses this,
+#               and it works on a PC without the game installed)
+
+param([switch]$NoDeploy)
 
 $ErrorActionPreference = 'Continue'
 
@@ -20,8 +25,8 @@ $ErrorActionPreference = 'Continue'
 $proj    = $FfxvrRepo
 $srcMgd  = Join-Path $proj 'src\managed'
 $srcNat  = Join-Path $proj 'src\native'
-$game    = Get-FfxvrGame
-$modsDir = Join-Path $game 'fahrenheit\mods'
+$game    = if ($NoDeploy) { $null } else { Get-FfxvrGame }
+$modsDir = if ($game) { Join-Path $game 'fahrenheit\mods' } else { $null }
 $modId   = 'ffxvr'
 $logDir  = Join-Path $proj 'logs'
 $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -155,7 +160,7 @@ if ($mgdCode -ne 0) {
 
 $dll = Get-ChildItem $srcMgd -Recurse -File -Filter "$modId.dll" -ErrorAction SilentlyContinue |
        Where-Object { $_.FullName -match '\\(bin|artifacts)\\' } |
-       Sort-Object LastWriteTime -Descending |
+       Sort-Object @{ e = { Test-Path (Join-Path $_.DirectoryName "$modId.manifest.json") } }, LastWriteTime -Descending |
        Select-Object -First 1
 
 if (-not $dll) {
@@ -166,6 +171,15 @@ if (-not $dll) {
 
 $outDir = $dll.Directory.FullName
 Log "[managed] $outDir"
+
+if ($NoDeploy) {
+    Log ''
+    Log 'Built (-NoDeploy: nothing copied to the game).'
+    Log "  native : $natDll"
+    Log "  managed: $outDir"
+    Log "Log: $log"
+    exit 0
+}
 
 # ---------------------------------------------------------------- deploy
 $dest = Join-Path $modsDir $modId

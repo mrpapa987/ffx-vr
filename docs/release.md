@@ -7,25 +7,44 @@ as they get done.
 
 ## 1. What a release is
 
-A GitHub release (tag `vX.Y.Z`) with one zip attached, laid out exactly as
-the mod folder is deployed:
+A GitHub release (tag `vX.Y.Z`) with one zip attached, made by
+`tools\package-release.ps1` (22 Oct 2026). The zip is for players, who install without
+building anything:
 
-    ffxvr/
-      ffxvr.dll                 our managed module (C#)
-      ffxvr.deps.json
-      ffxvr.runtimeconfig.json
-      ffxvr.manifest.json       Fahrenheit's mod manifest (version, authors, link)
-      ffxvr_native.dll          our native DLL (C++)
-      openxr_loader.dll         Khronos OpenXR loader, 32-bit (Apache-2.0)
-      efl/x/, efl/x2/           empty file-loader roots (Fahrenheit layout)
-      LICENSE                   ours
-      THIRD-PARTY-NOTICES       everything below that ends up in the zip
-      README (install steps)
+    ffx-vr-<label>/
+      README.md                 packaging/README-zip.md, version/commit/date filled in
+      LICENSE, THIRD-PARTY-NOTICES
+      mod/ffxvr/
+        ffxvr.dll, ffxvr.deps.json, ffxvr.runtimeconfig.json, ffxvr.manifest.json
+        ffxvr_native.dll
+        openxr_loader.dll       Khronos OpenXR loader, 32-bit (Apache-2.0)
+      tools/
+        install-mod.ps1         from packaging/: checks Fahrenheit, .NET x86, the 32-bit
+                                OpenXR runtime and FFX-60fps; copies mod/ffxvr into
+                                <game>\fahrenheit\mods\ffxvr (keeps the ini), unblocks the
+                                files, adds the loadorder line; -Uninstall
+        paths.ps1               the same game finder the repo uses (env var, paths.local.ps1, Steam)
+        run-ffx.ps1, game-settings.ps1, import-steam-saves.ps1,
+        export-save-to-steam.ps1, install-texture-pack.ps1   (they only need paths.ps1)
 
-Users unzip into `fahrenheit\mods\` and add `ffxvr` to `loadorder`. The
-`ffxvr.ini` is NOT in the zip: the mod writes it on first run (and
-build-mod.ps1 now preserves it across installs). No `.pdb`, no logs, no
-captures, no bone labels, no `.bak`.
+`<label>` is `-Version` if given, else the csproj `<Version>` plus the short commit
+(`-dirty` with uncommitted changes). A `.sha256` file is written next to the zip; `dist/` is
+git-ignored. The script builds with `build-mod.ps1 -NoDeploy` (works without the game
+installed), takes the managed files from the build folder that has the manifest, and
+assembles everything in a fresh staging folder, never from the live mod folder (that has the
+ini, logs and captures). `-SkipBuild` packs the existing build but refuses if any source
+file is newer than the DLLs. It warns if a packed DLL contains a `C:\Users\<name>\` path
+(debug-info paths; ours are `C:\projects\FFX-VR\...`, which is fine).
+
+Not in the zip: `ffxvr.ini` (the mod writes it on first run), `.pdb`, logs, captures, bone
+labels, `.bak`; Fahrenheit and FFX-60fps (separate projects, own licences and releases; the
+README sends players to them). The README puts the HD texture pack last, as an optional
+"later" step: most players won't start with it.
+
+The catch for zip players today: no Fahrenheit *release* works with the 1 Oct 2026 game
+patch, so they still need to build Fahrenheit (INSTALL-ALPHA.md steps 1-4) until the crew
+ships alpha12 or later. Bundling our Fahrenheit build would be allowed for the LGPL code but
+not for its assets folder (section 2); ask the crew before doing anything like that.
 
 The source release is the repo itself at the tag. The repo must stay free
 of: game files of any kind (VBF contents, `.phyre`, shaders, textures,
@@ -88,8 +107,8 @@ game version (Steam build id).
 ## 5. Before the first tag
 
 - [x] LICENSE (ours) + THIRD-PARTY-NOTICES (OpenXR Apache-2.0; credits for the rest) at the repo root
-- [ ] both copied into the release zip by the packaging script
-- [ ] `tools/package-release.ps1`: builds, assembles the zip from a clean folder (never from the live mod folder - it has the ini, logs and captures), writes a SHA-256 next to it
+- [x] both copied into the release zip by the packaging script
+- [x] `tools/package-release.ps1`: builds, assembles the zip from a clean folder (never from the live mod folder - it has the ini, logs and captures), writes a SHA-256 next to it
 - [ ] version: one place (`ffxvr.csproj` `<Version>`) flowing into the manifest and a `ffxvr_native` version string shown in the overlay; tag matches
 - [ ] CHANGELOG.md
 - [ ] README: install section for users (requirements, Fahrenheit version/commit, the loadorder line, first-run notes: F8 overlay, headset autostart, recentre), the "Standing on" credits, screenshots or a short clip

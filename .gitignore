@@ -47,3 +47,6 @@ src/native/obj/
 
 # Per-machine path override for the tools (see tools/paths.ps1)
 tools/paths.local.ps1
+
+# Release zips (tools/package-release.ps1)
+dist/
