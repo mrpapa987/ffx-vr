@@ -1078,7 +1078,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 ImGui.TextDisabled($"  now: {vis} characters in view, nearest {nd:F0}, subject {sd:F0}; screen plane {pl:F0}, eye separation {sp:F1} (background limited by the {_xr_screen_width:F1} m screen)");
             }
             if (!_s3_auto) ImGui.SliderFloat("screen plane (game units: nearer pops out, farther goes in)##s3", ref _s3_plane, 50f, 2000f, "%.0f");
-            ImGui.SliderFloat("screen width (m)##s3", ref _xr_screen_width, 1f, 8f, "%.1f"); ImGui.SameLine(); ImGui.TextDisabled("distance: Debug > Virtual screen panel; Home recentres the screen in front of you");
+            ImGui.SliderFloat("screen width (m)##s3", ref _xr_screen_width, 1f, 8f, "%.1f");
+            ImGui.SliderFloat("screen distance (m)##s3", ref _xr_screen_dist, 1f, 6f, "%.1f"); ImGui.SameLine(); ImGui.TextDisabled("Home re-places the screen in front of you");
         }
         ImGui.Text("painted-backdrop rooms (hut interiors):"); ImGui.SameLine();
         ImGui.RadioButton("whole room on the screen", ref _backdrop_mode, 1); ImGui.SameLine();
@@ -1192,7 +1193,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.TreeNode("Virtual screen panel")) {
             ImGui.SliderFloat("width (m)", ref _xr_screen_width, 1f, 6f);
             ImGui.SliderFloat("distance (m)", ref _xr_screen_dist, 1f, 6f);
-            ImGui.TextDisabled("applied at the next recentre");
+            ImGui.TextDisabled("both apply at once; Home re-places the screen in front of you");
             ImGui.TreePop();
         }
 

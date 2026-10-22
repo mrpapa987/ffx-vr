@@ -1441,3 +1441,19 @@ forward toward the nearest actor instead, keeping the depth (the subject
 sits slightly behind the screen). The pop-out slider goes down to 0 =
 nothing ever in front of the screen. The background cap scales with the
 screen width slider: a narrower screen allows more depth.
+
+Third pass (22 Oct): (a) athletes "wiggle between double vision and 3D" -
+the subject (actor nearest the image centre) flipped between athletes
+frame to frame, dragging the plane with it. The subject is now sticky
+(kept while in view; a challenger must be nearer the centre by 0.15 ndc^2
+for 0.5 s; cuts reset), the plane eases with a 0.8 s constant, the
+separation 0.25 s, and the eased pair is re-checked against the pop-out
+cap every frame so lag never lets a close actor split. (b) The screen
+distance slider only took effect at a recentre: the screen pose is now
+re-derived from the reference whenever the distance changes, and the
+slider sits next to the stereo options. (c) **VR-hands leftover**: with
+the hands off, `hands_apply` still ran its NaN cut on the adjoining
+forearm segments (the cut did not check `g_hands_on`), so the player's
+model lost forearm pieces in every view within the hide radius -
+including the blitz model. `hands_apply` now returns at once when the
+hands are off.

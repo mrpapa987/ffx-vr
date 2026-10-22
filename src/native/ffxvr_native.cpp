@@ -658,8 +658,9 @@ bool  g_screen3d = false, g_screen3d_now = false; float g_screen3d_sep = 6.f, g_
 // g_s3_max_pop (a fraction of the screen width). Targets are eased (time constant ~0.3 s) and snapped on cuts.
 bool g_s3_auto = true; float g_s3_depth = 1.f, g_s3_max_pop = 0.025f, g_s3_plane_set = 300.f;
 float g_s3_sep_cur = 10.f, g_s3_conv_cur = 300.f; uint32_t g_s3_frame = 0, g_s3_cut_seen = 0; int g_s3_vis = 0; float g_s3_near = 0.f, g_s3_subject = 0.f;
+float g_s3_subj_pos[3] = {}; bool g_s3_subj_valid = false; float g_s3_cand_t = 0.f;   // the subject is sticky: a challenger must be clearly nearer the centre for half a second
 bool  g_backdrop_room = false;          // last frame had painted-backdrop draws: first person makes no sense here
-float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
+float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f, g_xr_screen_dist_placed = -1.f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
 UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer layout dump (ffxvr_dump_cb)
@@ -814,7 +815,12 @@ static void xr_apply_poses(const XrFrameOut& f) {
         g_xr_ref_q[0] = 0; g_xr_ref_q[1] = sinf(a * 0.5f); g_xr_ref_q[2] = 0; g_xr_ref_q[3] = cosf(a * 0.5f);
         memcpy(g_xr_ref_p, g_xr_raw_p, sizeof(g_xr_ref_p));
         g_xr_recenter_pending = false;
-        // The virtual screen sits g_xr_screen_dist in front, facing the user.
+        g_xr_screen_dist_placed = -1.f;   // re-place the screen below
+    }
+    if (g_xr_screen_dist_placed != g_xr_screen_dist) {
+        // The virtual screen sits g_xr_screen_dist in front of the reference, facing the user; re-placed from the
+        // reference whenever the distance setting changes, so the slider works live (it used to wait for a recentre).
+        g_xr_screen_dist_placed = g_xr_screen_dist;
         const float ahead[3] = { 0.f, 0.f, -g_xr_screen_dist }; float off[3]; quat_rotate(g_xr_ref_q, ahead, off);
         g_xr_screen_p[0] = g_xr_ref_p[0] + off[0]; g_xr_screen_p[1] = g_xr_ref_p[1] + off[1]; g_xr_screen_p[2] = g_xr_ref_p[2] + off[2];
         memcpy(g_xr_screen_q, g_xr_ref_q, sizeof(g_xr_screen_q));
@@ -1331,7 +1337,8 @@ static void screen3d_auto(const float v[12], const float* Pj) {
     const float t[3] = { v[3], v[7], v[11] };
     float P[3]; for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
     const float P0 = fabsf(Pj[0]), P5 = fabsf(Pj[5]);
-    float dnear = 1e9f, dsub = 0.f, best_c = 1e9f; int vis = 0;
+    float dnear = 1e9f, dsub = 0.f, best_c = 1e9f; int vis = 0; int best_i = -1;
+    float same_c = 1e9f, same_d = 0.f; int same_i = -1;   // the actor nearest where last frame's subject stood
     {   // (no lock: write_camera runs under g_mutex already - ffxvr_on_updatesub takes it; relocking crashed the game)
         for (int i = 0; i < g_world_report_n; ++i) {
             const float w[3] = { g_world_report[i][0] - P[0], g_world_report[i][1] - P[1], g_world_report[i][2] - P[2] };
@@ -1341,9 +1348,22 @@ static void screen3d_auto(const float v[12], const float* Pj) {
             if (fabsf(nx) > 1.1f || fabsf(ny) > 1.1f) continue;   // outside the picture (a little margin: the stereo shift)
             vis++;
             if (d < dnear) dnear = d;
-            const float c = nx * nx + ny * ny; if (c < best_c) { best_c = c; dsub = d; }
+            const float c = nx * nx + ny * ny; if (c < best_c) { best_c = c; dsub = d; best_i = i; }
+            if (g_s3_subj_valid) {
+                const float sx = g_world_report[i][0] - g_s3_subj_pos[0], sy = g_world_report[i][1] - g_s3_subj_pos[1], sz = g_world_report[i][2] - g_s3_subj_pos[2];
+                if (sx*sx + sy*sy + sz*sz < 40.f * 40.f && c < same_c) { same_c = c; same_d = d; same_i = i; }
+            }
         }
     }
+    // Sticky subject: keep last frame's subject while it is in view, unless another actor has been clearly
+    // nearer the centre (by 0.15 in ndc^2) for half a second; a cut resets it at once.
+    const bool cut_now = g_cut_count != g_s3_cut_seen;
+    if (same_i >= 0 && !cut_now) {
+        if (best_i != same_i && best_c + 0.15f < same_c) g_s3_cand_t += g_dt; else g_s3_cand_t = 0.f;
+        if (g_s3_cand_t < 0.5f) { dsub = same_d; best_i = same_i; } else g_s3_cand_t = 0.f;
+    }
+    else g_s3_cand_t = 0.f;
+    if (best_i >= 0) { memcpy(g_s3_subj_pos, g_world_report[best_i], sizeof(g_s3_subj_pos)); g_s3_subj_valid = true; } else g_s3_subj_valid = false;
     g_s3_vis = vis; g_s3_near = vis ? dnear : 0.f; g_s3_subject = dsub;
     // Disparity of a point at depth d, as a fraction of the screen width: P0 * sep * (1/d - 1/conv) / 2
     // (positive = in front of the screen). Two limits:
@@ -1362,11 +1382,17 @@ static void screen3d_auto(const float v[12], const float* Pj) {
             if (inv > 1.f / conv) conv = fmaxf(dnear, 1.f / inv);
         }
     }
-    // ease, snap on a cut
-    const bool cut = g_cut_count != g_s3_cut_seen; g_s3_cut_seen = g_cut_count;
-    const float k = cut ? 1.f : fminf(1.f, g_dt / 0.3f);
-    g_s3_conv_cur += (conv - g_s3_conv_cur) * k;
-    g_s3_sep_cur  += (sep  - g_s3_sep_cur)  * k;
+    // ease (the plane slowly: a jump in the plane is what reads as a wobble; the separation a little faster,
+    // since it is what keeps a close actor fusible), snap on a cut
+    const bool cut = cut_now; g_s3_cut_seen = g_cut_count;
+    const float kc = cut ? 1.f : fminf(1.f, g_dt / 0.8f), ks = cut ? 1.f : fminf(1.f, g_dt / 0.25f);
+    g_s3_conv_cur += (conv - g_s3_conv_cur) * kc;
+    g_s3_sep_cur  += (sep  - g_s3_sep_cur)  * ks;
+    // the eased pair must still respect the pop-out limit this frame (the plane lags the target on purpose)
+    if (vis && dnear < g_s3_conv_cur && P0 > 0.f) {
+        const float cap = 2.f * g_s3_max_pop / (P0 * (1.f / dnear - 1.f / g_s3_conv_cur));
+        if (g_s3_sep_cur > cap) g_s3_sep_cur = fmaxf(0.f, cap);
+    }
     g_screen3d_conv = g_s3_conv_cur; g_screen3d_sep = g_s3_sep_cur;
 }
 
@@ -2451,6 +2477,7 @@ static int group_of(const float* M, int* ref_slot = nullptr) {
 /// Applies this frame's deltas to one record's palette copies.
 static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8_t* eye2, int variant) {
     if (rec >= k_pal_max_recs) return 0;
+    if (!g_hands_on) return 0;   // the NaN cut of the adjoining segments ran with the hands off: Tidus lost forearm pieces in every view
     refg_build(); int hand_slots = 0;
     const UINT po = g_pal_off_cur;
     // Pass 1: groups per slot, and the hand delta of THIS record from its own wrist-pivot bone (slots 45/46/49
