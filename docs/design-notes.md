@@ -1306,3 +1306,29 @@ atlas dump. Findings:
 Next captures there: the scene bisect on the radar run; a log of rendered
 vs actor positions for 10 s of play; picks (F9) on the stat bars and the
 radar background; who-has-the-ball (Farplane's blitz pointers).
+
+### Blitzball, second session (22 Oct 2026)
+
+- The automatic position log did not run: map names carry a folder prefix
+  (`bl/bltz0000`, `te/test20`, `me/memochek`), and the test was
+  `StartsWith("bltz")`. Fixed (match after the slash). A save-sphere match
+  is `bl/bltz0000` with event_id 62.
+- **Picks: the radar is ordinary UI.** Its grid (418x1 and 2x313 lines),
+  and the athlete dots (textureless 23x32 / 31x22 triangles, ui draws
+  12..21) are UI-pass draws, so they go to the panel with everything else.
+  The empty radar in the eye-2 flat dump is a dump artifact (UI draws are
+  not re-issued into eye 2's backbuffer copy); retracted as a problem.
+- Picks on the command window: a 472x223 window (1024 atlas, textureless
+  frame and fill), the menu hand cursor a 68x45 quad of a 4096x4096 sheet,
+  text glyphs from the 2048x4096 font sheets. **The glyph draws have a
+  vertex stream 3, stride 8: the atlas UVs.** That is the UV source the
+  cursor-art idea lacked (pointer quads printed only streams 1-2 then).
+- **The scoreboard (time, score, team badges) could not be picked**: not a
+  UI-pass draw. The first session's census has the candidates: 44
+  "NO IMAGE" scene draws right before the UI pass opens (scene draws
+  417..460 of 461; 40 quads of 6 indices, two of 18, VS cb 256 B, blended,
+  no z-write, depth bound). Drawn into the scene target with no camera we
+  recognise, they land identically in both eyes. To confirm: the scene
+  bisect hiding the last ~45 scene draws. If it is the scoreboard, the fix
+  is to treat that run like the UI pass (into the UI layer), keyed on its
+  VS cb size and position right before the UI-pass depth clear.

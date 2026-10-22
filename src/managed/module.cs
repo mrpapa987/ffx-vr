@@ -1512,7 +1512,9 @@ public sealed unsafe class FFXVRModule : FhModule {
         try { var sb = new System.Text.StringBuilder(); for (int i = 0; i < 15; i++) { byte b = FhUtil.get_at<byte>(0x1FCBC60 + i); if (b == 0 || b < 32 || b > 126) break; sb.Append((char)b); } return sb.ToString(); }
         catch { return ""; }
     }
-    private static bool in_blitz() => map_name().StartsWith("bltz");
+    // The name carries a folder prefix ("bl/bltz0000", "te/test20"): match on the part after the slash.
+    private static string map_base(string m) { int k = m.LastIndexOf('/'); return k >= 0 ? m[(k + 1)..] : m; }
+    private static bool in_blitz() => map_base(map_name()).StartsWith("bltz");
 
     // Blitzball: twice a second while on a bltz map, every live actor's logical position (actor table) next to
     // where it is actually drawn (the nearest skinned-root translation in the ground plane), to learn how the
@@ -1522,7 +1524,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         double now = ImGui.GetTime(); if (now - _blitz_last_log < 0.5) return; _blitz_last_log = now;
         string map = map_name();
         if (map != _map_last) { _logger.Info($"map: {(_map_last.Length > 0 ? _map_last : "?")} -> {map} (event_id {(Globals.event_id != null ? *Globals.event_id : -1)})"); _map_last = map; }
-        if (!map.StartsWith("bltz") || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;
+        if (!map_base(map).StartsWith("bltz") || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;
         Actor* actors = Globals.actors; if (actors == null) return;
         float* wp = stackalloc float[128 * 3]; int nwp = _fn_world_positions(wp, 128);
         var sb = new System.Text.StringBuilder($"blitz {map}:");
