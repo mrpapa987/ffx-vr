@@ -1345,13 +1345,22 @@ static void screen3d_auto(const float v[12], const float* Pj) {
         }
     }
     g_s3_vis = vis; g_s3_near = vis ? dnear : 0.f; g_s3_subject = dsub;
-    // targets: the screen plane on the subject (bounded), the separation from the depth setting, capped by the pop-out limit
+    // Disparity of a point at depth d, as a fraction of the screen width: P0 * sep * (1/d - 1/conv) / 2
+    // (positive = in front of the screen). Two limits:
+    //  - background: the far distance (d -> inf) must not push the eyes apart beyond their own spacing on the
+    //    physical screen - 0.8 x 64 mm over the screen's width in metres - or they diverge;
+    //  - foreground: the nearest actor's pop-out stays under g_s3_max_pop, by moving the screen plane forward
+    //    toward it (the depth is kept; the subject slips a little behind the screen) rather than flattening.
+    const float bg_max = 0.8f * 0.064f / fmaxf(1.f, g_xr_screen_width);
     float conv = vis ? fmaxf(60.f, fminf(2000.f, dsub)) : g_s3_plane_set;
-    float sep = g_s3_depth * conv / 30.f;
-    if (vis && dnear < conv && P0 > 0.f) {
-        // disparity of a point at depth d, as a fraction of the screen width: P0 * sep * (1/d - 1/conv) / 2
-        const float cap = 2.f * g_s3_max_pop / (P0 * (1.f / dnear - 1.f / conv));
-        if (sep > cap) sep = cap;
+    float sep = 0.f;
+    for (int pass = 0; pass < 2; ++pass) {
+        sep = g_s3_depth * conv / 30.f;
+        if (P0 > 0.f) sep = fminf(sep, 2.f * bg_max * conv / P0);
+        if (vis && dnear < conv && P0 > 0.f && sep > 0.f) {
+            const float inv = 1.f / dnear - 2.f * g_s3_max_pop / (P0 * sep);   // 1/conv must be >= this
+            if (inv > 1.f / conv) conv = fmaxf(dnear, 1.f / inv);
+        }
     }
     // ease, snap on a cut
     const bool cut = g_cut_count != g_s3_cut_seen; g_s3_cut_seen = g_cut_count;
@@ -5136,6 +5145,7 @@ extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen
 extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float depth, float conv, int autodepth, float max_pop) {
     g_screen3d = on != 0; g_s3_depth = depth < 0.f ? 0.f : depth > 4.f ? 4.f : depth; g_s3_plane_set = conv < 10.f ? 10.f : conv;
     g_s3_auto = autodepth != 0; g_s3_max_pop = max_pop < 0.f ? 0.f : max_pop > 0.2f ? 0.2f : max_pop;
+    if (!g_s3_auto) { /* fixed plane: still respect the background limit */ }
     if (!g_s3_auto) { g_screen3d_conv = g_s3_plane_set; g_screen3d_sep = g_s3_depth * g_s3_plane_set / 30.f; g_s3_conv_cur = g_screen3d_conv; g_s3_sep_cur = g_screen3d_sep; }
 }
 /// What the auto depth is doing: visible actors, nearest depth, subject depth, current plane and separation.

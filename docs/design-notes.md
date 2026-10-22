@@ -1427,3 +1427,17 @@ applies with auto off. The overlay shows what it is doing (characters in
 view, nearest, subject, plane, separation). Not covered: close scenery
 (walls, stands) - only actors are known; the depth buffer would be the
 next step if that shows.
+
+Second pass (user at depth 0.88, pop-out 0.5% - the slider's minimum - and
+wanted it more aggressive): two things were wrong with the first version.
+(1) The 1/30 rule ignores the physical screen: with a 5 m screen at 2.5 m,
+sep = plane/30 puts the far background 16 cm apart on the screen, beyond
+the eyes' 6.4 cm - divergence, which reads as "too much depth" however
+the pop-out is set. The separation is now also capped so the background
+disparity stays under 0.8 x 64 mm over the screen width (1% of a 5 m
+screen). (2) The pop-out cap reduced the separation, flattening the whole
+shot whenever anyone was near the lens; now it moves the screen plane
+forward toward the nearest actor instead, keeping the depth (the subject
+sits slightly behind the screen). The pop-out slider goes down to 0 =
+nothing ever in front of the screen. The background cap scales with the
+screen width slider: a narrower screen allows more depth.

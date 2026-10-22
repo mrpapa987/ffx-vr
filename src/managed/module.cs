@@ -1072,10 +1072,10 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_s3_blitz || _s3_all) {
             ImGui.SliderFloat("3D depth (1 = standard; 0 = flat)##s3", ref _s3_depth, 0f, 3f, "%.2f");
             ImGui.Checkbox("auto depth: the screen plane follows the subject, and nothing pops out further than##s3", ref _s3_auto); ImGui.SameLine();
-            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("% of the screen##s3pop", ref _s3_max_pop, 0.5f, 6f, "%.1f");
+            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("% of the screen (0 = nothing in front of it)##s3pop", ref _s3_max_pop, 0f, 6f, "%.1f");
             if (_s3_auto && _fn_screen3d_status != null) {
                 int vis; float nd, sd, pl, sp; _fn_screen3d_status(&vis, &nd, &sd, &pl, &sp);
-                ImGui.TextDisabled($"  now: {vis} characters in view, nearest {nd:F0}, subject {sd:F0}; screen plane {pl:F0}, eye separation {sp:F1}");
+                ImGui.TextDisabled($"  now: {vis} characters in view, nearest {nd:F0}, subject {sd:F0}; screen plane {pl:F0}, eye separation {sp:F1} (background limited by the {_xr_screen_width:F1} m screen)");
             }
             if (!_s3_auto) ImGui.SliderFloat("screen plane (game units: nearer pops out, farther goes in)##s3", ref _s3_plane, 50f, 2000f, "%.0f");
             ImGui.SliderFloat("screen width (m)##s3", ref _xr_screen_width, 1f, 8f, "%.1f"); ImGui.SameLine(); ImGui.TextDisabled("distance: Debug > Virtual screen panel; Home recentres the screen in front of you");
