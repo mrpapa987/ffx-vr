@@ -761,9 +761,10 @@ Rebuild first (`tools\build-mod.ps1`). Then, in order:
 
 ## Battle cleanup plan (21 Oct 2026)
 
-Done: follow by field slot (Tidus, else the lowest party index), Tidus takes
-the eyes when he joins, left grip + right stick click / Insert cycles the
-field, "battles start in" view switch, diorama on the fight centroid, floor.
+Done: follow from the game's field roster (Tidus, else the slot's occupant,
+else the lowest id), Tidus takes the eyes when he joins, summon -> summoner's
+eyes, left grip + right stick click / Insert cycles the field, "battles start
+in" view switch, diorama on the fight centroid, floor.
 
 To do, by layer:
 - Eyes: face the enemies at battle start and on every eye switch (slot ->
@@ -785,4 +786,353 @@ To do, by layer:
   else a description).
 - Interactions: marker labels naming the targeted enemy (later); escape and
   menu mapping on the controllers.
+
+### Cursor census (21 Oct 2026)
+
+Three frame censuses from one battle (`ffxvr_frame.log`, markers on). The
+UI pass draws from the same handful of atlases every frame (four 2048x4096
+glyph/widget sheets, a 4096x4096 and an 8192x4096) - 64 draws in a quiet
+command-window frame. The differences:
+
+- one frame had a single extra draw, first in the UI pass, from a
+  **1024x1024** texture (0x21855824);
+- one frame had a block of ten draws from that same 1024x1024 texture,
+  each paired with a textureless draw, plus one draw of a 1632x1088 texture,
+  and ten more glyph draws - the target-selection moment, by the look of it
+  (a cursor per selectable target, or the target list).
+
+So the working guess is that the cursor sprite lives on the 1024x1024
+atlas. The census does not carry sprite positions (the VS constant buffer
+head is zeros; the transform must be in the vertices), so the test is the
+experiment switch under Battle in the overlay, `ui_hide`: 0 off, 3 hide
+1024x1024 draws in battle only, 1 always, 2 also the textureless draws.
+"hidden last frame" counts what it removed.
+
+Result: the 1024x1024 atlas is the CTB bar and the menu backgrounds, not
+the cursor. The cursor is one of the **textureless** draws (hiding those
+removed it), and a quiet frame has three textureless draws of its own, so
+"textureless" alone is too coarse too. The census now writes a second line
+per UI draw: the draw call (indexed or not, index count), VS / PS / blend
+state pointers, topology, vertex stride, and the first six vertices as the
+vertex buffer holds them (x y z w: screen positions for the UI). Geometry
+buffers are copied at Unmap while a census is armed (`ffxvr_frame_arm`
+sets `g_vb_capture`; cleared after the dump). The cursor quad should stand
+out by its index count or its vertex positions (over the target, moving
+between censuses); then the hide rule is "textureless + that signature".
+`ui_hide=4` hides only the textureless draws in battle, to see what the
+other three are.
+
+Second census (21 Oct, 116 UI draws, target selection up; crashed the game
+afterwards - `frame_dump` runs under `g_mutex` and the new cleanup locked it
+again; fixed). Vertices were "(not captured)": the UI's position stream
+(stride 12) is not written through Map/Unmap of a buffer under 8 MB, so
+capture now also covers UpdateSubresource and buffers up to 64 MB, and the
+dump header counts what it caught. The shader pairs already say a lot:
+every textureless draw uses VS 02AC4278 / PS 215166F8 (the sprite draws use
+0CBB3A38 / 2158C7B8, the 1024x1024 and other icon draws 214D3838 /
+21533AF8). The three everyday textureless draws are **18-index** (three
+quads each: the window backgrounds). The target-selection block adds
+textureless draws of 6, 12, 66 and 54 indices, interleaved with 1024x1024
+sprites. So `ui_hide=5` = textureless draws that are not 18-index, in
+battle; if that removes only the cursor, that is the rule (pending the
+vertex positions to make it exact).
+
+### The settings kept resetting: it was the build script (21 Oct 2026)
+
+Every "my ini reset" so far (autostart off, overlay back, hand calibration
+gone) lined up with a rebuild: `tools/build-mod.ps1` deployed with
+`Remove-Item $dest -Recurse`, wiping the whole mod folder - `ffxvr.ini`,
+`bone_labels.txt`, captures and logs included - and the game then started
+with defaults ("settings: no ffxvr.ini yet") and wrote them back on the
+first change. The earlier theories (File.Exists on a sed-edited file, the
+game clobbering the ini) were this. The deploy now deletes only build
+output (`*.ini`, `*.bak`, `*.log`, `*.txt`, `*.bin` and the manifest stay).
+
+### Cursor vertices (21 Oct 2026)
+
+With geometry capture working (26 Map/Unmap copies, 6 buffers), the UI's
+coordinate space is a virtual screen with the origin at the centre, 1920 x
+1080 (x -960..960, y -540..540 down); the game's layout only uses about
+-815..815 of it. The textureless draws in a command-window
+frame with target selection up:
+
+| draw | n | where | what |
+|---|---|---|---|
+| 1, 23, 46 | 18 | x 290..814, three 12-high strips at y 328, 380, 432 | party status rows (bottom right) |
+| 65 | 6 | a ~20-unit triangle near (-284, 60), wobbling between censuses | a pointer: the command / target cursor |
+| 69..81 | 6-12 | x 677..726, bars 48 apart, y -58..-346 | CTB list bars (top right) |
+| 83, 84 | 66, 54 | first vertices all at (-376000, -260200) | projected through the game's camera: off-screen in our frame; more vertices now logged |
+
+The census prints up to 24 distinct vertices of every textureless draw now,
+and marks draws the hide rule removed (`HIDDEN by ui_hide`), so the next
+capture with `ui_hide=5` on shows exactly which draws go.
+
+Third census, `ui_hide=5` on: it hid draws 65, 69-84 (the triangle, the
+CTB bars, the two far-away draws) and the cursor stayed - so the cursor is
+not textureless at all. Diffing the two full captures (different targets)
+finds exactly one sprite that jumped: a single quad of **68x45 units from
+the 1024x1024 atlas** (texture 0x218294E4), at (-588..-520, -9..36) in one
+and (-157..-89, -146..-101) in the other. The same atlas and nearly the same
+quad size as the CTB portraits (70x46, at x 692..802), which is why
+"hide 1024x1024" takes the CTB with it. The 1632x1088 texture is a 34x31
+icon at the top right; the far-away textureless pair (66 / 48-54 indices)
+is still unexplained (vertices now logged in full).
+
+Rule in the build (`hide_cursor`, default on, battle only): a 1024x1024
+single-quad draw whose rectangle is 55-82 wide, 35-56 high and ends left of
+x 660 (the CTB column starts at 677). The sprite's rectangle comes from the
+slot-0 vertex stream. First attempt copied the UI streams at every Unmap:
+they turned out to be large dynamic ring buffers in write-combined memory,
+and reading them froze battles. Now only the last Map pointer per UI stream
+is remembered and the four vertices are read through an SEH-guarded read,
+within the frame the game wrote them (the upload ring is not recycled until
+the GPU has consumed it); the census still copies whole buffers, but only
+in its one armed frame. The UI position stream is a 12 MB ring. First run
+of the rule hid nothing: the game maps the ring a frame ahead of the draws,
+so "mapped this frame" never matched; the lookup now accepts a Map from the
+last two frames, and the overlay shows "candidates / rect unknown" counts.
+
+Still open which of two things is the cursor the user sees: the 68x45 quad,
+or the pair of 42/66-index draws (a textureless pass then a textured one
+over the same geometry) whose first vertices sit at (-376000, -260200).
+The buggy build that hid "every textured draw that is not one quad" did
+hide the cursor, which points at the pair; the census now logs full vertex
+lists for hidden draws and for every 1024x1024 draw, and the whole cb0
+(60 floats) of sprite draws, since the UV stream is zeros and the atlas
+rect must come from the constant buffer.
+
+If the cursor over an enemy at the far right survives, the next
+refinement is the UV rectangle (slot-1 stream, now in the census as
+`streams:`), which is position-independent.
+
+### UI pick tool (21 Oct 2026)
+
+Guessing signatures from census diffs took five rounds and produced a
+fragile rule, so identification is now a mouse pick: in flat mode, hover
+the element and press **F9**. The next frame's UI pass tests every 2D draw's
+quad(s) against the point (UI space is a centred 1920 x 1080 layout, x
+-960..960, y -540..540 down, scaled to the backbuffer; the pick is passed
+normalised; calibrated from two near-misses: the command-cursor triangle
+and the HP window both landed exactly once 1920 x 1080 replaced the
+1632 x 918 guess) and logs each hit
+to `ffxvr_diag.log` - texture pointer and size, index count, rectangle, and
+the whole cb0 - and lists the hits under Debug > "Pick a UI element". A
+miss logs the nearest draw instead, which is also how to check the
+coordinate mapping (pick the HP window, see if the rect agrees). **F10**
+toggles slow motion (a sleep per frame, slider in the same panel) so
+damage numbers and other flashes can be hovered. (The old native
+constant-buffer capture also sat on F9 - a multi-second dump that looked
+like a freeze; it is Ctrl+F9 now.) The sprite's atlas rect
+should be in cb0; once it is known for the cursor, the hide rule becomes
+"this texture + this atlas rect", position-independent.
+
+First try picked nothing ("nearest:" empty): with the headset off, the UI
+pass was never recognised - the scene-target / resolve / depth-clear state
+machine only ran in stereo, because it exists to build the UI layer. Flat
+mode now has its own small tracker (scene target = most draws with depth
+this frame; its resolve, then a depth clear on it, opens the pass), and UI
+draws found that way go through pick, census and the hide rules, then draw
+normally. F9 is also no longer shared with the native constant-buffer dump
+(Ctrl+F9 now).
+
+### Picks (21 Oct 2026, evening)
+
+- Target cursor over a stationary enemy: **1024x1024 atlas, one quad,
+  68x45** (at 170..238, -183..-138 that time). The CTB portraits are 70x46,
+  so the hide rule is now the exact size, no position test. The pick on a
+  moving enemy missed (the quad had moved on by the next frame).
+- "Turn cursor" pick landed on the 1600x55 strip across the top of the
+  screen (8192x4096 texture at y -444..-389): the enemy-name bar, not a
+  cursor; the turn highlight is probably part of the CTB list.
+- Damage numbers under slow motion: two misses - one frame where 102 UI
+  draws were recognised but none had a readable vertex pointer (the "mapped
+  within two frames" test again; dropped, the pointer alone is used now),
+  one where nothing was near the point. They may not be UI-pass draws at
+  all (world-placed sprites in the scene pass); next: a pick that also
+  reports scene-pass draws near the point.
+- Turn cursor (the pointer floating over the acting character - Tidus at
+  the time, upper right of the flat view), three picks: a **textureless
+  6-index quad**, width pulsing 15..28, height 30. (First read as the CTB
+  list marker from its x; the user corrected that - the pick point says
+  where the thing was, not what it is.)
+- Hiding is now a **hide list** of sprite signatures (texture size or
+  textureless, index count, width and height ranges), kept in the ini as
+  `hide_list`, defaulting to the target pointer and the turn pointer. Each
+  pick hit has a "hide this" button that adds its signature (width range
+  widened for pulsing); entries show how many draws they removed last frame
+  and can be removed. `hide_cursor` switches the whole list, battle only,
+  headset only.
+- The target cursor then escaped the list in the next session: the pick
+  returned a 1024-atlas draw of **12 indices spanning 1200 x 130** - the
+  game had batched the cursor quad with another sprite into one draw, so
+  neither "one quad" nor the draw's bounding box matched. Signatures are
+  now per quad (texture + quad size, no index count) and every quad of a
+  draw is tested; a matching quad inside a batch is cut out by drawing the
+  rest in two pieces around it (`ffxvr_draw_skip`, bit 17 of the draw
+  result). The pick reports the quad under the point, not the draw's
+  bounds, and "hide this" no longer adds duplicates; the list has a reset
+  button. (The user's list had collected 20 junk entries from repeated
+  clicks on the batched draw; the ini was reset.)
+- Damage numbers, four more misses with 193 UI draws recognised and
+  nothing within reach of the point: they are not UI-pass draws. Next
+  census line for scene draws carries the slot-0 texture and index count,
+  and a pick miss reports how many scene-pass draws sampled a 2048x4096
+  sheet (the font sheets) that frame - the numbers are expected there.
+- cb0 is the orthographic projection and identity matrices, identical for
+  every UI draw; no PS constant buffers are bound; vertex stream 1 reads
+  (0,0,1)/(0.5,0.5,1) for every sprite and stream 2 is a colour. The atlas
+  rectangle is not in any of them, which means it is in a stream we are
+  not reading (slot 3+), or packed in the 12-byte position stream. Not
+  needed for the cursor any more; worth knowing for the damage numbers.
+
+### The pointer rule (22 Oct 2026)
+
+The turn pointer defeated the size list: it is a spinning billboard, so
+its width runs 18..40 within a battle, and its height changed from 27 to
+40 between battles (the game camera's distance sets the size). Eight
+hand-added entries still left an edge-on sliver. Sizes are the wrong
+handle; position is the right one. The game places both pointers by
+projecting the actor through its own camera, and we have that camera
+(`g_cam`, the one the VR override is built from) and this frame's actor
+root positions (`g_world_live`, the translations of the skinned world
+matrices). So `hide_pointers` (default on, battle, headset): project the
+actors into UI units at the first UI draw; any quad that is textureless or
+from the 1024 atlas, at most 90 units on a side, whose centre is within 55
+units of an actor's column and whose bottom sits from 30 below to 420 above
+the actor's root, is a pointer - cut out of its draw like a list hit. The
+signature list stays as the manual fallback. The highlight shows the rule's
+work: red boxes are quads it would hide, green crosses are the projected
+actor roots.
+
+First test took the CTB portraits with it (picked: 70x46 at x 692..768,
+rows 48 apart). Two causes, both fixed: the list entry for the target
+cursor said 66-70 wide and 70x46 is exactly the portrait (now 66-69), and
+the pointer rule had no notion of "on a window" - a character standing at
+the right of the screen projects into the CTB column. The rule now records
+the frame's window backgrounds (quads at least 100 x 100 drawn from the
+1024 or 8192 sheets, or textureless; the CTB panel is a 128 x 288 quad of
+the 1024 sheet) and a small quad lying inside one is an icon, never a
+pointer.
+
+### The game's own cursors, re-projected (22 Oct 2026)
+
+With the pointer quads identified at draw time, hiding them is only half
+the job: the same moment is the chance to keep them. When a pointer quad
+is cut out of the UI pass, its complete draw state is captured - texture
+and sampler, VS / PS, input layout, blend state, the ortho cb0, and the
+UV and colour streams at that quad's own vertex offset (slot offsets
+re-based to `base + 4q`), plus the quad's size and the actor it floated
+over (from the pointer rule's match). At the end of the frame, where the
+3D markers are drawn, each captured sprite is drawn again into each eye
+image with the game's own pipeline: our position stream (four vertices in
+UI units, the game's index pattern 0 1 2 2 1 3), bottom-centred on OUR
+projection of the marker nearest that actor, so the real cursor - with its
+spin and its art - sits over the target in stereo. Markers that got a
+sprite skip the stand-in triangle. `markers_game_art`; the overlay counts
+sprites drawn per frame.
+
+Outcome: nothing drawn. The re-issued draw depends on the game's vertex
+streams carrying the sprite's atlas coordinates, and the picks showed that
+streams 1 and 2 hold the same values for every sprite (a constant and a
+colour) - where the UVs come from is still unknown (a stream beyond slot
+2, or generated in the shader). Rather than dig further, the decision (22
+Oct) was to make our own markers good: the option stays, off by default,
+as "experimental".
+
+### Markers, second pass (22 Oct 2026)
+
+A first redesign (arrow head + shaft, outline, yellow / white, bob and
+spin) was rejected: the target pointer must stay red, and a generic arrow
+is not what is wanted. Reverted to the triangle in the original colours
+(target red, turn cyan). Kept from the pass: the tip sits just above the
+actor's **head** (the highest sub-position in the actor table, which
+follows each monster's own height) instead of a fixed height above the
+feet, with "pointer clearance" and "pointer size" sliders (`marker_scale`
+saved); the turn marker is tagged by alpha 0xFE in its colour word so the
+native side can treat the two kinds differently later.
+
+Options for the look, discussed 22 Oct:
+1. keep the triangle (now);
+2. the game's own art, by hand: dump the 1024x1024 sprite sheets the UI
+   samples ("Dump UI atlases" under Captures writes them as .dds - they
+   are BC3), cut the cursor out, ship it as a texture in the mod and draw
+   it as a textured billboard at the marker. Authentic look, no runtime
+   dependency on the game's UV source; the only work is finding the
+   sprite in the sheet once;
+3. hand-made geometry imitating the game's pointer shape (needs a
+   reference: the cut-out from 2 would be that too);
+4. the sphere grid's cursor model (`omd/CURSOR.omd`) - a real 3D object,
+   but a loader is a project of its own.
+
+Decision (22 Oct): leave the triangle as it is for now. When this is
+picked up again, option 2 is the plan: press "Dump UI atlases" (Debug >
+Captures) in a battle with a target selected, find the two pointers in
+the `ui_atlas_1024x1024_*.dds` files (the target pointer is 68x45 UI units
+and red; the turn pointer is a plain coloured quad, so it may be geometry
+rather than art), cut them out, ship them as a texture in the mod, and
+draw them at the markers as textured billboards through the marker pass
+(it already draws per eye; it needs a textured variant of its shader and
+a sampler). The capture-and-reissue path (`markers_game_art`) stays in the
+code, off, in case the UV source turns up: the next thing to try there is
+reading vertex streams 3+ in a pick (the pick prints up to slot 5 now).
+
+### Battle cleanup: where things stand (22 Oct 2026)
+
+Done this session: battle follow from the game's field roster; the game's
+two battle pointers identified (by mouse pick, with hover highlight) and
+hidden in the headset by a position rule plus a signature list; the
+pointers re-drawn as 3D markers above each actor's head; the mouse pick,
+slow motion, highlight and atlas-dump tools. Still open from the plan:
+face the enemies on battle start / eye switch, blink on eye jumps, boss
+diorama check, transitions, overdrive inputs, marker labels.
+
+### Hover highlight (21 Oct 2026)
+
+**F11** cycles a highlight drawn on the monitor from the same data the pick
+uses: the quads under the mouse (yellow, filled, with a size + atlas label)
+or every UI quad the mod recognises (white outlines). It shows what F9
+would pick before pressing it, and, in the "every quad" mode, which sprites
+the mod can see at all - a cursor that is visible on screen but has no
+outline is being drawn outside the UI pass. Native: `ffxvr_ui_hover`
+(mouse, mode) each frame, `ffxvr_ui_hover_rects` read at Present.
+
+### Farplane check (21 Oct 2026)
+
+[Farplane](https://github.com/topher-au/Farplane) has no camera or cursor
+knowledge (its only camera item is the FreeCamera debug byte we already use
+through Fahrenheit), but chasing its `PartyInBattleFlags` through the exe
+turned up the game's own **field roster**: three chr ids at `FhUtil`
+0xD2C895, kept current by battle setup, swaps, summons and dismissals
+(exe-analysis.md section 15). That replaces every distance heuristic in
+`btl_follow`:
+
+- field detection at the first command window -> read the three bytes;
+- benched = "60 units from the slot" -> chr id gone from the roster;
+- successor = "visible member within 40" -> the id that took the slot;
+- Tidus joins -> chr id 0 appears in the roster;
+- Aeon out = "visible ply with chr_id 8-63" -> `field[0]` in 8..0x11, and
+  the summoner is the aeon entity's +0x6D1 (no Yuna assumption needed);
+  the pre-summon party sits at 0xD2C89C until the dismissal.
+
+Confirmed in the log (21 Oct, two battles): `[2,5,1]` from the first
+battle frame, a Change window flips a slot in place (`[0,5,1]`, Auron to the
+reserve list), a summon leaves `[8,255,255]` with the party saved at
+0xD2C89C and `cur_chr_id=8` on the Aeon's turns. One caveat: before setup
+runs the bytes are stale (`[0,0,0]` seen on the first frame), so a roster
+with a repeated id is ignored.
+
+`btl_follow` now runs on the roster: the eyes follow a chr id; Tidus when he
+is on the field (and the moment he joins), else the id that took the
+followed slot, else the lowest id; a summon hands the eyes to the summoner
+read from the aeon entity (+0x6D1), dismissal hands them back; manual cycle
+walks the three slots. Entities are only used to turn an id into an actor
+position. A swap-in waits until the newcomer has stood still for a quarter
+second (or 5 s) so the eyes do not ride the run-in.
+
+First test (21 Oct, log 142113): battle start `[2,5,1]` -> Yuna's eyes,
+correct. Tidus swapped in (`[0,5,1]`) but the eyes never moved: the join is
+a one-frame event and the arrival wait dropped it on the next frame. Fixed:
+a pending switch stays wanted while its character is on the field. Summon
+of Ixion showed `[255,255,11]` - the Aeon takes the summoner's slot, not
+slot 0, so the aeon check scans all three.
 

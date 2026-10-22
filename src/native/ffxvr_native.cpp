@@ -19,7 +19,7 @@
 // log beside the DLL every few seconds. If Draw fires but Map does not, the game
 // uploads constant buffers by another path, which UpdateSubresource covers.
 //
-// F9 writes a full dump of every constant buffer seen.
+// Ctrl+F9 writes a full dump of every constant buffer seen.
 
 #include <windows.h>
 #include <d3d11.h>
@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <set>
 #include <mutex>
 #include <vector>
 
@@ -236,6 +237,19 @@ bool as_constant_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_s
 
     *out_buf  = buf;
     *out_size = desc.ByteWidth;
+    return true;
+}
+
+// Vertex or index buffer (identity key only, like as_constant_buffer).
+bool as_geometry_buffer(ID3D11Resource* res, ID3D11Buffer** out_buf, UINT* out_size, UINT* out_bind) {
+    if (res == nullptr) return false;
+    D3D11_RESOURCE_DIMENSION dim = D3D11_RESOURCE_DIMENSION_UNKNOWN; res->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER) return false;
+    ID3D11Buffer* buf = nullptr;
+    if (FAILED(res->QueryInterface(__uuidof(ID3D11Buffer), reinterpret_cast<void**>(&buf))) || buf == nullptr) return false;
+    D3D11_BUFFER_DESC desc = {}; buf->GetDesc(&desc); buf->Release();
+    if ((desc.BindFlags & (D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER)) == 0) return false;
+    *out_buf = buf; *out_size = desc.ByteWidth; *out_bind = desc.BindFlags;
     return true;
 }
 
@@ -525,6 +539,83 @@ uint32_t g_fp_part_idx = 0, g_fp_parts_last = 0;
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
 // eyes, 1 eye 1 only, 2 hide in both.
+unsigned g_ui_hide_w = 0, g_ui_hide_h = 0; int g_ui_hide_notex = 0; uint32_t g_ui_hidden_draws = 0;   // UI draw hiding experiment (ffxvr_ui_hide)
+bool g_ui_hide_cursor = false; uint32_t g_rect_unknown = 0, g_rect_checked = 0;
+// The hide list: 2D UI draws to skip while the cursor hiding is on. An entry is a sprite signature -
+// slot-0 texture size (0x0 = textureless), index count, and a range of quad width / height in UI
+// units (pulsing cursors change width). Filled from the managed side (ffxvr_ui_hide_list), which
+// keeps it in the ini; entries come from picks.
+struct HideSig { unsigned tw, th; float w0, w1, h0, h1; };   // per quad: the game batches sprites, so the index count is not part of it
+HideSig g_hide_sigs[16]; int g_hide_sig_n = 0; uint32_t g_hide_sig_hits[16] = {};
+unsigned g_skip_first = 0, g_skip_count = 0;   // partial hide of the draw being reported: index range to leave out (ffxvr_draw_skip)
+// The pointer rule: the game places its battle pointers (over the target, over the acting character) by
+// projecting the actor through ITS camera, and draws them as a small quad - textureless (the turn pointer,
+// a spinning billboard whose width and height vary with the camera distance) or from the 1024 atlas (the
+// target pointer). So: a small quad of those kinds that sits in the column above where an actor projects
+// through the game camera is a pointer. Size-independent, batching-independent, no list to maintain.
+bool g_hide_pointers = false; float g_actor_ui[k_world_max][2]; int g_actor_ui_n = 0; uint32_t g_pointer_hits = 0; int g_actor_ui_frame = -1;
+// Window backgrounds seen so far this frame (large quads: the CTB list panel, the command and status windows).
+// A small quad lying inside one is an icon on a window, never a pointer - the CTB portraits sit right where
+// a character at the right of the screen can project.
+struct BgRect { float x0, y0, x1, y1; }; BgRect g_bg_rects[48]; int g_bg_n = 0; int g_bg_frame = -1;
+// Draw arguments of the call being reported (set by ffxvr_draw_args just before ffxvr_on_draw).
+int g_draw_kind = 0; unsigned g_draw_n = 0, g_draw_start = 0; int g_draw_base = 0;
+// The game's own pointer art, re-used: when a pointer quad is cut out of the UI pass, its whole draw state
+// is kept (texture, sampler, shaders, layout, blend, cb0, the UV / colour streams at that quad's offset, and
+// the quad's size) together with the actor it floated over. At the end of the frame it is drawn again into
+// each eye image at OUR projection of the marker for that actor, with the game's pipeline, so the headset
+// shows the real cursor (animation included) in 3D instead of a stand-in triangle.
+struct PtrSprite {
+    ID3D11ShaderResourceView* srv; ID3D11SamplerState* smp; ID3D11VertexShader* vs; ID3D11PixelShader* ps; ID3D11InputLayout* il;
+    ID3D11BlendState* bs; float bf[4]; UINT bm; ID3D11Buffer* cb0; ID3D11Buffer* vb[8]; UINT stride[8], off[8];   // every bound stream (UVs turned out not to be in slots 1-2)
+    float w, h; float world[3]; bool has_world; unsigned q;
+};
+PtrSprite g_ptr_sprites[6]; int g_ptr_sprite_n = 0; bool g_ptr_reuse = true; uint32_t g_ptr_drawn = 0, g_ptr_unpaired = 0, g_ptr_captured = 0; double g_ptr_log_t = 0;
+ID3D11Buffer* g_ptr_vb = nullptr; ID3D11Buffer* g_ptr_ib = nullptr;
+static void ptr_sprites_release() {
+    for (int i = 0; i < g_ptr_sprite_n; ++i) {
+        PtrSprite& p = g_ptr_sprites[i];
+        if (p.srv) p.srv->Release(); if (p.smp) p.smp->Release(); if (p.vs) p.vs->Release(); if (p.ps) p.ps->Release(); if (p.il) p.il->Release();
+        if (p.bs) p.bs->Release(); if (p.cb0) p.cb0->Release(); for (int k = 0; k < 8; ++k) if (p.vb[k]) p.vb[k]->Release();
+    }
+    g_ptr_sprite_n = 0;
+}
+// Called from the UI draw path for a quad about to be hidden: quad q of the draw, its UI rect, the actor it
+// sits over (index into g_actor_ui / g_world_live, or -1).
+static void ptr_sprite_capture(unsigned q, float x0, float y0, float x1, float y1, int actor) {
+    if (!g_ptr_reuse || g_ptr_sprite_n >= 6 || !g_ctx) return;
+    PtrSprite p = {};
+    g_ctx->PSGetShaderResources(0, 1, &p.srv); g_ctx->PSGetSamplers(0, 1, &p.smp);
+    g_ctx->VSGetShader(&p.vs, nullptr, nullptr); g_ctx->PSGetShader(&p.ps, nullptr, nullptr); g_ctx->IAGetInputLayout(&p.il);
+    g_ctx->OMGetBlendState(&p.bs, p.bf, &p.bm); g_ctx->VSGetConstantBuffers(0, 1, &p.cb0);
+    g_ctx->IAGetVertexBuffers(0, 8, p.vb, p.stride, p.off);
+    for (int k = 1; k < 8; ++k) if (p.vb[k]) p.off[k] += ((unsigned)g_draw_base + q * 4) * p.stride[k];   // this quad's four vertices in every other stream
+    p.w = x1 - x0; p.h = y1 - y0; p.q = q;
+    p.has_world = actor >= 0 && actor < g_world_live_n;
+    if (p.has_world) memcpy(p.world, g_world_live[actor], sizeof(p.world));
+    g_ptr_sprites[g_ptr_sprite_n++] = p;
+}
+// Mouse pick of 2D UI draws: the next frame's UI draws whose quads cover the picked point are logged
+// (ffxvr_diag.log) with texture, index count, rectangle and the whole cb0, and summarised for the overlay.
+// The UI's coordinate space is a centred 1920 x 1080 layout (y down, x -960..960), scaled to the backbuffer
+// (calibrated with two picks: the command cursor triangle and the HP window).
+bool g_pick_armed = false; float g_pick_nx = 0, g_pick_ny = 0;
+unsigned g_pick_scene_text = 0;   // scene-pass draws sampling a 2048x4096 sheet during the pick frame
+char g_pick_summary[1024] = ""; int g_pick_hits = 0; float g_pick_best_d = 1e9f; char g_pick_best[200] = "";
+// Hover highlight: every frame, the quads under the mouse (mode 1) or every UI quad (mode 2) are collected
+// as rectangles in UI units for the overlay to outline. Written during the UI pass, read at Present.
+int g_hover_mode = 0; float g_hover_nx = 0, g_hover_ny = 0;
+// UI atlas dump: the 1024x1024 (and 1632x1088) textures the UI pass samples, written as .dds next to the
+// mod (they are BC3-compressed, so no BMP), to cut the cursor art out of by hand.
+bool g_atlas_dump_armed = false; ID3D11Texture2D* g_atlas_dumped[16]; int g_atlas_dumped_n = 0;
+struct HoverRect { float x0, y0, x1, y1; unsigned tw, th, hit; };
+HoverRect g_hover_rects[512]; int g_hover_n = 0;
+int g_slowmo_ms = 0;   // sleep per frame (slow motion for picking things that flash by)
+// Flat mode (no headset): the UI pass is not captured into a layer, but its draws are still recognised
+// (same depth clear on the scene target that opens the pass in VR) so picks, the census and the hide
+// experiments work on the monitor. Set at that depth clear, cleared at the next resolve / frame start.
+bool g_ui_flat_pass = false; bool g_ui_flat_draw_now = false; bool g_ui_flat_resolved = false;
+ID3D11Texture2D* g_flat_scene_tex = nullptr; uint32_t g_flat_scene_draws = 0; std::map<ID3D11Texture2D*, uint32_t> g_flat_draws_per_target;   // sprite-rect lookups that had no usable Map pointer / total   // the battle target cursor: a single 1024x1024-atlas quad of ~68x45 units drawn outside the CTB column (design-notes "cursor vertices")
 int g_noimg_mode = 0; uint32_t g_noimg_draws = 0; int g_noimg_census_lines = 0;
 // Bisect tool: scene-pass draws by index in the frame. mode 1 hides [a,b],
 // mode 2 shows only [a,b]. The census lists every scene-pass draw.
@@ -1506,6 +1597,19 @@ extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) 
 struct FrameEv { char text[400]; };
 std::vector<FrameEv> g_frame_ev;
 bool  g_frame_arm = false, g_frame_live = false;
+// Draw arguments of the call being reported (set by ffxvr_draw_args just before ffxvr_on_draw), and
+// vertex / index buffer contents captured through Map/Unmap while a frame census is armed, so the
+// census can print the 2D UI quads' screen positions (the cursor is a textureless quad among others).
+bool g_vb_capture = false; unsigned g_vb_maps = 0, g_vb_updates = 0;   // geometry copies taken (Map/Unmap, UpdateSubresource) while armed
+std::map<ID3D11Buffer*, std::vector<uint8_t>> g_vbufs;
+// The 2D UI's own vertex streams (learned from UI draws). Copying them at every Unmap was far too slow
+// (the streams are big dynamic ring buffers in write-combined memory: reading them froze battles), so
+// only the mapped pointer is remembered; a hide rule reads the few vertices it needs through a guarded
+// read, within the frame the game wrote them (the upload ring is not reused until the GPU is done).
+struct VbMap { void* p = nullptr; UINT size = 0; uint32_t frame = 0; };
+std::set<ID3D11Buffer*> g_ui_vbs;
+std::map<ID3D11Buffer*, VbMap> g_vb_last_map;
+std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_vb_in_flight;
 int   g_frame_draw_run = 0;        // draws since the last non-draw event
 int   g_frame_run_small = 0, g_frame_run_mid = 0, g_frame_run_big = 0, g_frame_run_none = 0;
 
@@ -1603,11 +1707,312 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
 }
 
 extern "C" __declspec(dllexport) void ffxvr_dump_cb(unsigned size, int count) { g_dump_cb_size = size; g_dump_cb_left = count; }
+/// Hides 2D UI draws whose texture is w x h (w = 0: off); notex also hides the textureless draws.
+extern "C" __declspec(dllexport) void ffxvr_ui_hide(unsigned w, unsigned h, int notex) { g_ui_hide_w = w; g_ui_hide_h = h; g_ui_hide_notex = notex; }
+extern "C" __declspec(dllexport) void ffxvr_ui_hide_cursor(int on) { g_ui_hide_cursor = on != 0; }
+/// Replaces the hide list: `count` entries of 6 floats each (tex_w, tex_h, w0, w1, h0, h1).
+extern "C" __declspec(dllexport) void ffxvr_ui_hide_list(const float* v, int count) {
+    g_hide_sig_n = 0;
+    for (int i = 0; i < count && i < 16; ++i) { const float* e = v + i * 6; g_hide_sigs[g_hide_sig_n++] = { (unsigned)e[0], (unsigned)e[1], e[2], e[3], e[4], e[5] }; }
+}
+extern "C" __declspec(dllexport) void ffxvr_ui_hide_pointers(int on) { g_hide_pointers = on != 0; }
+/// (pointer-rule hits since the last call) | (actors projected this frame) << 16
+extern "C" __declspec(dllexport) unsigned ffxvr_ui_pointer_stats() { unsigned n = (g_pointer_hits & 0xFFFF) | ((unsigned)g_actor_ui_n << 16); g_pointer_hits = 0; return n; }
+/// After ffxvr_on_draw returned with bit 17 set: the index range (first, count) of the draw to leave out.
+extern "C" __declspec(dllexport) void ffxvr_draw_skip(unsigned* first, unsigned* count) { *first = g_skip_first; *count = g_skip_count; }
+/// Hits per hide-list entry since the last call (up to 16), for the overlay.
+extern "C" __declspec(dllexport) void ffxvr_ui_hide_hits(unsigned* out, int count) { for (int i = 0; i < count && i < 16; ++i) { out[i] = g_hide_sig_hits[i]; g_hide_sig_hits[i] = 0; } }
+static bool guarded_read_xy(const uint8_t* base, UINT stride, float* xy8);   // below
+/// Arms a pick at a normalised backbuffer position (0..1, y down) for the next frame's UI pass.
+extern "C" __declspec(dllexport) void ffxvr_ui_pick(float nx, float ny) { g_pick_nx = nx; g_pick_ny = ny; g_pick_hits = 0; g_pick_scene_text = 0; g_pick_best_d = 1e9f; g_pick_best[0] = 0; g_pick_summary[0] = 0; g_pick_armed = true; }
+extern "C" __declspec(dllexport) void ffxvr_ui_atlas_dump() { g_atlas_dump_armed = true; g_atlas_dumped_n = 0; }
+static void dump_dds(ID3D11Texture2D* tex, const wchar_t* name) {
+    D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
+    if (d.Format != DXGI_FORMAT_BC3_UNORM && d.Format != DXGI_FORMAT_BC3_UNORM_SRGB && d.Format != DXGI_FORMAT_BC1_UNORM && d.Format != DXGI_FORMAT_BC1_UNORM_SRGB && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_R8G8B8A8_UNORM) { diag("atlas dump %ls: format %u, skipped", name, (unsigned)d.Format); return; }
+    D3D11_TEXTURE2D_DESC sd = d; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0; sd.MipLevels = 1; sd.ArraySize = 1;
+    ID3D11Texture2D* st = nullptr; if (FAILED(g_device->CreateTexture2D(&sd, nullptr, &st)) || !st) return;
+    { InEye2 guard; g_ctx->CopySubresourceRegion(st, 0, 0, 0, 0, tex, 0, nullptr); }
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (SUCCEEDED(g_orig_map(g_ctx, st, 0, D3D11_MAP_READ, 0, &ms))) {
+        const bool bc = d.Format == DXGI_FORMAT_BC3_UNORM || d.Format == DXGI_FORMAT_BC3_UNORM_SRGB || d.Format == DXGI_FORMAT_BC1_UNORM || d.Format == DXGI_FORMAT_BC1_UNORM_SRGB;
+        const bool bc3 = d.Format == DXGI_FORMAT_BC3_UNORM || d.Format == DXGI_FORMAT_BC3_UNORM_SRGB;
+        const UINT bw = bc ? (d.Width + 3) / 4 : d.Width, bh = bc ? (d.Height + 3) / 4 : d.Height, bpb = bc ? (bc3 ? 16 : 8) : 4;
+        wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g_dir, name);
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path, L"wb") == 0 && f) {
+            uint32_t h[32] = {}; h[0] = 124; h[1] = 0x1 | 0x2 | 0x4 | 0x1000 | (bc ? 0x80000 : 0x8); h[2] = d.Height; h[3] = d.Width; h[4] = bc ? bw * bpb * bh : d.Width * 4; h[6] = 1;
+            h[19] = 32; h[20] = bc ? 0x4 : 0x41; h[21] = bc ? (bc3 ? 0x35545844u : 0x31545844u) : 0; h[22] = bc ? 0 : 32;
+            if (!bc) { h[23] = 0x00FF0000; h[24] = 0x0000FF00; h[25] = 0x000000FF; h[26] = 0xFF000000; }
+            h[27] = 0x1000;
+            fwrite("DDS ", 1, 4, f); fwrite(h, 4, 31, f);
+            for (UINT y = 0; y < bh; ++y) fwrite(static_cast<const uint8_t*>(ms.pData) + y * ms.RowPitch, 1, bw * bpb, f);
+            fclose(f);
+            diag("atlas dump: %ls (%ux%u fmt %u)", name, d.Width, d.Height, (unsigned)d.Format);
+        }
+        g_orig_unmap(g_ctx, st, 0);
+    }
+    st->Release();
+}
+/// Hover highlight for this frame: mode 0 off, 1 the quads under (nx, ny), 2 every UI quad (the hit ones flagged).
+extern "C" __declspec(dllexport) void ffxvr_ui_hover(float nx, float ny, int mode) { g_hover_nx = nx; g_hover_ny = ny; g_hover_mode = mode; }
+/// The rectangles collected this frame: 7 floats each (x0 y0 x1 y1 tex_w tex_h hit), in UI units; returns the count and clears.
+extern "C" __declspec(dllexport) int ffxvr_ui_hover_rects(float* out, int max) {
+    const int n = g_hover_n < max ? g_hover_n : max;
+    for (int i = 0; i < n; ++i) { const HoverRect& r = g_hover_rects[i]; out[i*7] = r.x0; out[i*7+1] = r.y0; out[i*7+2] = r.x1; out[i*7+3] = r.y1; out[i*7+4] = (float)r.tw; out[i*7+5] = (float)r.th; out[i*7+6] = (float)r.hit; }
+    g_hover_n = 0;
+    return n;
+}
+
+// Collects this draw's quads for the hover highlight.
+static unsigned ui_sprite_xy(float* xy, unsigned max_v);   // below
+
+// Projects this frame's actor positions (the translations of the skinned world matrices seen in the scene
+// pass) through the game's own camera into UI units. Once per frame, at the first UI draw.
+static void actors_project_ui() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_actor_ui_n = 0;
+    if (!g_cam_valid) return;
+    float V[16]; memcpy(V, g_cam, 48); V[12] = V[13] = V[14] = 0.f; V[15] = 1.f;
+    const float* P = &g_cam[16];
+    for (int i = 0; i < g_world_live_n && g_actor_ui_n < k_world_max; ++i) {
+        const float w[4] = { g_world_live[i][0], g_world_live[i][1], g_world_live[i][2], 1.f };
+        float e[4], c[4];
+        for (int r = 0; r < 4; ++r) e[r] = V[r*4+0]*w[0] + V[r*4+1]*w[1] + V[r*4+2]*w[2] + V[r*4+3]*w[3];
+        for (int r = 0; r < 4; ++r) c[r] = P[r*4+0]*e[0] + P[r*4+1]*e[1] + P[r*4+2]*e[2] + P[r*4+3]*e[3];
+        if (c[3] <= 1e-4f) continue;
+        const float ux = c[0] / c[3] * 960.f, uy = -c[1] / c[3] * 540.f;
+        if (!std::isfinite(ux) || !std::isfinite(uy) || fabsf(ux) > 1500.f || fabsf(uy) > 900.f) continue;
+        g_actor_ui[g_actor_ui_n][0] = ux; g_actor_ui[g_actor_ui_n][1] = uy; g_actor_ui_n++;
+    }
+}
+
+// Records this draw's large quads as window backgrounds (called for every UI draw while a rule is on).
+static void ui_backgrounds_note(const float* xy, unsigned nv) {
+    if (g_bg_frame != (int)g_frames) { g_bg_frame = (int)g_frames; g_bg_n = 0; }
+    for (unsigned q = 0; q < nv / 4 && g_bg_n < 48; ++q) {
+        float x0 = xy[q*8], x1 = x0, y0 = xy[q*8+1], y1 = y0;
+        for (unsigned k = 1; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        if (!std::isfinite(x0) || !std::isfinite(x1) || !std::isfinite(y0) || !std::isfinite(y1)) continue;
+        if (x1 - x0 >= 100.f && y1 - y0 >= 100.f && x1 - x0 < 1900.f) g_bg_rects[g_bg_n++] = { x0, y0, x1, y1 };
+    }
+}
+static bool quad_on_window(float x0, float y0, float x1, float y1) {
+    if (g_bg_frame != (int)g_frames) return false;
+    for (int i = 0; i < g_bg_n; ++i) { const BgRect& b = g_bg_rects[i]; if (x0 >= b.x0 - 4.f && x1 <= b.x1 + 4.f && y0 >= b.y0 - 4.f && y1 <= b.y1 + 4.f) return true; }
+    return false;
+}
+
+// Quad q's rectangle within a draw's vertex list.
+static void quad_rect(const float* xy, unsigned q, float* x0, float* y0, float* x1, float* y1) {
+    *x0 = *x1 = xy[q*8]; *y0 = *y1 = xy[q*8+1];
+    for (unsigned k = 1; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (x < *x0) *x0 = x; if (x > *x1) *x1 = x; if (y < *y0) *y0 = y; if (y > *y1) *y1 = y; }
+}
+// Pointers are solitary; damage numbers are runs of digit quads side by side (same height, touching) in one
+// draw, and they float above the target exactly where a pointer would. A quad with such a neighbour is a glyph.
+static bool quad_in_run(const float* xy, unsigned nq, unsigned q) {
+    float x0, y0, x1, y1; quad_rect(xy, q, &x0, &y0, &x1, &y1); const float h = y1 - y0;
+    for (unsigned o = 0; o < nq; ++o) {
+        if (o == q) continue;
+        float ox0, oy0, ox1, oy1; quad_rect(xy, o, &ox0, &oy0, &ox1, &oy1);
+        const float oh = oy1 - oy0; if (fabsf(oh - h) > 0.35f * h) continue;                       // similar height
+        const float gap = ox0 > x1 ? ox0 - x1 : x0 > ox1 ? x0 - ox1 : 0.f; if (gap > 12.f) continue;   // touching or nearly
+        const float vo = (y1 < oy1 ? y1 : oy1) - (y0 > oy0 ? y0 : oy0); if (vo > 0.5f * h) return true;   // on the same line
+    }
+    return false;
+}
+
+// Is this quad (UI units) a battle pointer by the pointer rule? `actor` gets the index of the actor it is over.
+static bool quad_is_pointer(float x0, float y0, float x1, float y1, int* actor = nullptr) {
+    const float w = x1 - x0, h = y1 - y0;
+    if (w > 90.f || h > 90.f || w < 1.f || h < 8.f) return false;
+    if (quad_on_window(x0, y0, x1, y1)) return false;
+    const float cx = 0.5f * (x0 + x1);
+    int best = -1; float best_d = 1e9f;
+    for (int i = 0; i < g_actor_ui_n; ++i) {
+        const float dx = cx - g_actor_ui[i][0], above = g_actor_ui[i][1] - y1;   // the actor's root projects below the pointer
+        if (fabsf(dx) < 55.f && above > -30.f && above < 420.f && fabsf(dx) + above * 0.1f < best_d) { best_d = fabsf(dx) + above * 0.1f; best = i; }
+    }
+    if (actor) *actor = best;
+    return best >= 0;
+}
+
+static void ui_hover_collect() {
+    if (g_hover_mode == 0 || g_hover_n >= 512) return;
+    if (g_actor_ui_frame != (int)g_frames) { g_actor_ui_frame = (int)g_frames; actors_project_ui(); }
+    if (g_ui_draws_frame == 0) {   // once per frame: where the actors project through the game camera (flag 4: a cross)
+        for (int i = 0; i < g_actor_ui_n && g_hover_n < 512; ++i) g_hover_rects[g_hover_n++] = { g_actor_ui[i][0] - 6.f, g_actor_ui[i][1] - 6.f, g_actor_ui[i][0] + 6.f, g_actor_ui[i][1] + 6.f, 0, 0, 4u };
+    }
+    float xy[2 * 48]; const unsigned nv = ui_sprite_xy(xy, 48); if (nv == 0) return;
+    const float px = g_hover_nx * 1920.f - 960.f, py = g_hover_ny * 1080.f - 540.f;
+    ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
+    if (!t || td.Width == 1024 || td.Width == 8192) ui_backgrounds_note(xy, nv);
+    const bool pointer_kind = !t || (td.Width == 1024 && td.Height == 1024);
+    for (unsigned q = 0; q < nv / 4 && g_hover_n < 512; ++q) {
+        float x0 = xy[q*8], x1 = x0, y0 = xy[q*8+1], y1 = y0; bool ok = true;
+        for (unsigned k = 0; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (!std::isfinite(x) || !std::isfinite(y) || fabsf(x) > 5000.f || fabsf(y) > 5000.f) { ok = false; break; } if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+        if (!ok) continue;
+        const bool hit = px >= x0 - 4.f && px <= x1 + 4.f && py >= y0 - 4.f && py <= y1 + 4.f;
+        const bool ptr = pointer_kind && quad_is_pointer(x0, y0, x1, y1) && !quad_in_run(xy, nv / 4, q);   // flag 2: the pointer rule would hide it
+        if (g_hover_mode == 1 && !hit && !ptr) continue;
+        g_hover_rects[g_hover_n++] = { x0, y0, x1, y1, td.Width, td.Height, (hit ? 1u : 0u) | (ptr ? 2u : 0u) };
+    }
+}
+
+/// The last pick's summary (one line per hit), for the overlay.
+extern "C" __declspec(dllexport) const char* ffxvr_ui_pick_result() { return g_pick_summary; }
+extern "C" __declspec(dllexport) void ffxvr_slowmo(int ms) { g_slowmo_ms = ms < 0 ? 0 : ms > 2000 ? 2000 : ms; }
+
+// Up to `max_v` vertex x,y pairs of the sprite about to be drawn (quads are laid out 4 vertices each in
+// the slot-0 stream at the bound offset). Returns the count read, 0 if the stream is unknown.
+static unsigned ui_sprite_xy(float* xy, unsigned max_v) {
+    ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
+    if (!vb) return 0;
+    const uint8_t* src = nullptr; unsigned nv = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_ui_vbs.insert(vb);
+        auto it = g_vb_last_map.find(vb);
+        if (it != g_vb_last_map.end() && it->second.p && stride >= 8) {
+            nv = (g_draw_n / 6) * 4; if (nv > max_v) nv = max_v; if (nv < 4) nv = 4;
+            if ((size_t)voff + nv * stride <= it->second.size) src = static_cast<const uint8_t*>(it->second.p) + voff; else nv = 0;
+        }
+    }
+    vb->Release();
+    if (!src) return 0;
+    for (unsigned k = 0; k < nv; k += 4) { if (!guarded_read_xy(src + k * stride, stride, xy + k * 2)) return k; }
+    return nv;
+}
+
+// The pick: called for every UI draw of the armed frame.
+static void ui_pick_check(unsigned draw_idx) {
+    float xy[2 * 48]; const unsigned nv = ui_sprite_xy(xy, 48);
+    const float px = g_pick_nx * 1920.f - 960.f, py = g_pick_ny * 1080.f - 540.f;
+    if (nv == 0) return;
+    ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
+    // each quad of the draw on its own (sprites are batched): the hit is the quad under the point
+    const unsigned nq = nv / 4; float x0 = 0, x1 = 0, y0 = 0, y1 = 0; int hit_q = -1; float best_d = 1e9f;
+    for (unsigned q = 0; q < nq; ++q) {
+        float qx0 = xy[q*8], qx1 = qx0, qy0 = xy[q*8+1], qy1 = qy0; bool okq = true;
+        for (unsigned k = 0; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (!std::isfinite(x) || !std::isfinite(y) || fabsf(x) > 5000.f || fabsf(y) > 5000.f) { okq = false; break; } if (x < qx0) qx0 = x; if (x > qx1) qx1 = x; if (y < qy0) qy0 = y; if (y > qy1) qy1 = y; }
+        if (!okq) continue;
+        const float dx = px < qx0 ? qx0 - px : px > qx1 ? px - qx1 : 0.f, dy = py < qy0 ? qy0 - py : py > qy1 ? py - qy1 : 0.f; const float d = sqrtf(dx * dx + dy * dy);
+        if (d < best_d) { best_d = d; hit_q = (int)q; x0 = qx0; x1 = qx1; y0 = qy0; y1 = qy1; }
+    }
+    if (hit_q < 0) return;
+    char head[200];
+    snprintf(head, sizeof(head), "ui draw %u quad %d/%u: %s%ux%u rect x %.0f..%.0f y %.0f..%.0f (%.0fx%.0f)", draw_idx, hit_q + 1, g_draw_n / 6, t ? "tex " : "no texture ", td.Width, td.Height, x0, x1, y0, y1, x1 - x0, y1 - y0);
+    if (best_d < g_pick_best_d) { g_pick_best_d = best_d; strncpy_s(g_pick_best, head, _TRUNCATE); }
+    if (best_d > 6.f) return;
+    g_pick_hits++;
+    // the whole cb0 (the sprite's atlas rect / transform lives in here somewhere)
+    char cb[900]; size_t l = 0; cb[0] = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_vs_cb[0] ? g_buffers.find(g_vs_cb[0]) : g_buffers.end();
+        if (it != g_buffers.end()) {
+            const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
+            l += snprintf(cb + l, sizeof(cb) - l, " cb0 %uB:", (unsigned)it->second.data.size());
+            for (UINT k = 0; k < nf && k < 64 && l < sizeof(cb) - 16; ++k) l += snprintf(cb + l, sizeof(cb) - l, " %.4g", f[k]);
+        }
+    }
+    // the PS constant buffers (not tracked per slot: asked from the context, looked up in the write records)
+    char pcb[700]; size_t pl = 0; pcb[0] = 0;
+    {
+        ID3D11Buffer* pbs[2] = {}; g_ctx->PSGetConstantBuffers(0, 2, pbs);
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (int sl = 0; sl < 2; ++sl) {
+            if (!pbs[sl]) continue;
+            auto it = g_buffers.find(pbs[sl]);
+            if (it == g_buffers.end()) pl += snprintf(pcb + pl, sizeof(pcb) - pl, " ps_cb%d: (no record)", sl);
+            else {
+                const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
+                pl += snprintf(pcb + pl, sizeof(pcb) - pl, " ps_cb%d %uB:", sl, (unsigned)it->second.data.size());
+                for (UINT k = 0; k < nf && k < 40 && pl < sizeof(pcb) - 16; ++k) pl += snprintf(pcb + pl, sizeof(pcb) - pl, " %.4g", f[k]);
+            }
+            pbs[sl]->Release();
+        }
+    }
+    // the other vertex streams, all four corners of the first quad (UVs / colours must be in one of them)
+    char st[600]; size_t tl = 0; st[0] = 0;
+    for (UINT slot = 1; slot <= 5; ++slot) {
+        ID3D11Buffer* sb = nullptr; UINT sstride = 0, soff = 0; g_ctx->IAGetVertexBuffers(slot, 1, &sb, &sstride, &soff);
+        if (!sb) continue;
+        const uint8_t* ssrc = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_ui_vbs.insert(sb);
+            auto it = g_vb_last_map.find(sb);
+            if (it != g_vb_last_map.end() && it->second.p && sstride >= 4 && (size_t)soff + 4 * sstride <= it->second.size) ssrc = static_cast<const uint8_t*>(it->second.p) + soff;
+        }
+        sb->Release();
+        tl += snprintf(st + tl, sizeof(st) - tl, " v%u(stride %u):", slot, sstride);
+        if (!ssrc) { tl += snprintf(st + tl, sizeof(st) - tl, " ?"); continue; }
+        const unsigned nf = sstride / 4 < 4 ? sstride / 4 : 4;
+        for (unsigned k = 0; k < 4 && tl < sizeof(st) - 80; ++k) {
+            float v[4] = {}; if (!guarded_read_xy(ssrc + k * sstride, 8, v)) break;   // reads v[0], v[1]
+            float v2[4] = {}; if (nf > 2 && !guarded_read_xy(ssrc + k * sstride + 8, 8, v2)) break;
+            const float vals[4] = { v[0], v[1], v2[0], v2[1] }; const uint32_t* u = reinterpret_cast<const uint32_t*>(vals);
+            tl += snprintf(st + tl, sizeof(st) - tl, " [");
+            for (unsigned j = 0; j < nf; ++j) {
+                if (std::isfinite(vals[j]) && fabsf(vals[j]) < 1e6f && (vals[j] == 0.f || fabsf(vals[j]) > 1e-6f)) tl += snprintf(st + tl, sizeof(st) - tl, "%s%.4g", j ? " " : "", vals[j]);
+                else tl += snprintf(st + tl, sizeof(st) - tl, "%s%08X", j ? " " : "", u[j]);
+            }
+            tl += snprintf(st + tl, sizeof(st) - tl, "]");
+        }
+    }
+    diag("pick (%.0f,%.0f): %s tex=%p%s%s%s", px, py, head, static_cast<void*>(t), cb, pcb, st);
+    size_t sl = strlen(g_pick_summary);
+    if (sl < sizeof(g_pick_summary) - 260) snprintf(g_pick_summary + sl, sizeof(g_pick_summary) - sl, "%s%s|sig=%u,%u,%.0f,%.0f", sl ? "\n" : "", head, td.Width, td.Height, x1 - x0, y1 - y0);
+}
+
+// Reads the x,y of four vertices from a (possibly no longer mapped) pointer under an SEH guard. No C++
+// objects in here: __try cannot unwind them.
+static bool guarded_read_xy(const uint8_t* base, UINT stride, float* xy8) {
+    __try {
+        for (unsigned k = 0; k < 4; ++k) { const float* f = reinterpret_cast<const float*>(base + k * stride); xy8[k * 2] = f[0]; xy8[k * 2 + 1] = f[1]; }
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// The screen rectangle of the sprite about to be drawn: vertices 0..3 of the slot-0 stream at the bound
+// offset (every UI sprite is DrawIndexed(6, 0, 0) over a fixed 0,1,2,2,1,3 index pattern, so the quad
+// is the first four vertices), read from the stream's last Map pointer if it was mapped this frame.
+// False if unknown (the first frame after the stream is learned, or a map from another frame).
+static bool ui_sprite_rect(float* x0, float* y0, float* x1, float* y1) {
+    ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
+    if (!vb) return false;
+    bool ok = false; const uint8_t* src = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_ui_vbs.insert(vb);   // learn the UI's streams as they are used; pointers are kept from the next Map on
+        auto it = g_vb_last_map.find(vb);
+        if (it != g_vb_last_map.end() && it->second.p && stride >= 8 && (size_t)voff + 4 * stride <= it->second.size)
+            src = static_cast<const uint8_t*>(it->second.p) + voff;
+        else g_rect_unknown++;
+    }
+    vb->Release();
+    if (!src) return false;
+    float xy[8];
+    if (!guarded_read_xy(src, stride, xy)) return false;
+    *x0 = *x1 = xy[0]; *y0 = *y1 = xy[1];
+    for (unsigned k = 1; k < 4; ++k) { if (xy[k*2] < *x0) *x0 = xy[k*2]; if (xy[k*2] > *x1) *x1 = xy[k*2]; if (xy[k*2+1] < *y0) *y0 = xy[k*2+1]; if (xy[k*2+1] > *y1) *y1 = xy[k*2+1]; }
+    ok = std::isfinite(*x0) && std::isfinite(*x1) && std::isfinite(*y0) && std::isfinite(*y1);
+    return ok;
+}
+extern "C" __declspec(dllexport) unsigned ffxvr_ui_hidden_draws() { unsigned n = g_ui_hidden_draws; g_ui_hidden_draws = 0; return n; }
+/// Cursor-rule bookkeeping: (rect lookups that failed) | (lookups made) << 16, both since the last call.
+extern "C" __declspec(dllexport) unsigned ffxvr_ui_rect_stats() { unsigned n = (g_rect_unknown & 0xFFFF) | ((g_rect_checked & 0xFFFF) << 16); g_rect_unknown = 0; g_rect_checked = 0; return n; }
+
 extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_frame_ev.clear();
     g_frame_arm = true;
+    g_vb_capture = true;   // geometry buffers are copied at Unmap until the census frame is written
 }
+
+/// The arguments of the draw call about to be reported through ffxvr_on_draw (kind 1 DrawIndexed, 2 Draw).
+extern "C" __declspec(dllexport) void ffxvr_draw_args(int kind, unsigned n, unsigned start, int base_vertex) { g_draw_kind = kind; g_draw_n = n; g_draw_start = start; g_draw_base = base_vertex; }
 
 static void frame_dump() {
     frame_flush_draws();
@@ -1615,10 +2020,11 @@ static void frame_dump() {
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_frame.log", g_dir);
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
-    fprintf(f, "frame structure, %zu events\n", g_frame_ev.size());
+    fprintf(f, "frame structure, %zu events; geometry buffers captured: %zu (%u via Map/Unmap, %u via UpdateSubresource)\n", g_frame_ev.size(), g_vbufs.size(), g_vb_maps, g_vb_updates);
     for (const FrameEv& e : g_frame_ev) fprintf(f, "  %s\n", e.text);
     fprintf(f, "\n");
     fclose(f);
+    g_vb_capture = false; g_vbufs.clear(); g_vb_in_flight.clear(); g_vb_maps = 0; g_vb_updates = 0;   // (the caller holds g_mutex)
 }
 
 
@@ -2527,7 +2933,8 @@ void dump_capture() {
 }
 
 void tick() {
-    const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    // Ctrl+F9: the constant-buffer capture (a large dump; plain F9 is the UI pick in the managed side).
+    const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 
     if (down && !g_f9_was_down) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -2649,6 +3056,14 @@ HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT
         std::lock_guard<std::mutex> lock(g_mutex);
         g_in_flight[m->pData] = { buf, size };
     }
+    else if (g_vb_capture || !g_ui_vbs.empty()) {
+        UINT bind = 0;
+        if (as_geometry_buffer(r, &buf, &size, &bind) && size <= 64u * 1024 * 1024) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (g_vb_capture) g_vb_in_flight[m->pData] = { buf, size };
+            if (g_ui_vbs.count(buf)) { VbMap& vm = g_vb_last_map[buf]; vm.p = m->pData; vm.size = size; vm.frame = g_frames; }
+        }
+    }
     return hr;
 }
 
@@ -2666,6 +3081,19 @@ void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT 
             break;
         }
     }
+    else if (g_vb_capture) {
+        UINT bind = 0;
+        if (as_geometry_buffer(r, &buf, &size, &bind)) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            for (auto it = g_vb_in_flight.begin(); it != g_vb_in_flight.end(); ++it) {
+                if (it->second.first != buf) continue;
+                std::vector<uint8_t>& d = g_vbufs[buf]; d.resize(size); memcpy(d.data(), it->first, size);
+                g_vb_maps++;
+                g_vb_in_flight.erase(it);
+                break;
+            }
+        }
+    }
 
     g_orig_unmap(c, r, sub);
     tick();
@@ -2679,6 +3107,16 @@ void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resour
     if (box == nullptr && as_constant_buffer(r, &buf, &size)) {
         std::lock_guard<std::mutex> lock(g_mutex);
         record_buffer(buf, size, src, "UpdateSubresource");
+    }
+    else if (g_vb_capture && c == g_ctx && src != nullptr) {
+        UINT bind = 0;
+        if (as_geometry_buffer(r, &buf, &size, &bind) && size <= 64u * 1024 * 1024) {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_vb_updates++;
+            std::vector<uint8_t>& d = g_vbufs[buf]; if (d.size() != size) d.assign(size, 0);
+            if (box == nullptr) memcpy(d.data(), src, size);
+            else if (box->left < box->right && box->right <= size) memcpy(d.data() + box->left, src, box->right - box->left);
+        }
     }
 
     g_orig_updatesub(c, r, sub, box, src, rp, dp);
@@ -2752,6 +3190,8 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 }
 
 } // namespace
+
+static void ui_census_geometry();   // census helper, defined below ffxvr_on_draw's neighbours
 
 
 // ---------------------------------------------------------------------------
@@ -2929,6 +3369,15 @@ static void perf_tick() {
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    if (g_pick_armed) {
+        g_pick_armed = false;
+        if (g_pick_hits == 0) { snprintf(g_pick_summary, sizeof(g_pick_summary), "no UI draw under the point (%.0f,%.0f); UI draws recognised last frame: %u (stereo %d, headset %d); scene-pass draws using a 2048x4096 sheet (text drawn in the world?): %u; nearest: %s", g_pick_nx * 1920.f - 960.f, g_pick_ny * 1080.f - 540.f, g_ui_draws_report, g_stereo ? 1 : 0, g_xr_want ? 1 : 0, g_pick_scene_text, g_pick_best); diag("pick: %s", g_pick_summary); }
+        g_pick_scene_text = 0;
+    }
+    if (g_slowmo_ms > 0) Sleep((DWORD)g_slowmo_ms);
+    if (g_atlas_dump_armed && g_atlas_dumped_n > 0) g_atlas_dump_armed = false;   // one frame with UI draws is enough
+    ptr_sprites_release();
+    g_ui_flat_pass = false; g_ui_flat_resolved = false; g_flat_scene_tex = nullptr; g_flat_scene_draws = 0; g_flat_draws_per_target.clear();
     bool dump_now = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -3028,6 +3477,96 @@ extern "C" __declspec(dllexport) void ffxvr_draw_ctx(void* ctx) {
     if (ctx == static_cast<void*>(g_ctx)) g_draw_ctx_same++; else { g_draw_ctx_other++; g_draw_ctx_last_other = ctx; }
 }
 
+// Census, second line per 2D UI draw: the draw call, shaders, blend state, topology and the first
+// vertices (x y z w of each, as the vertex buffer holds them; for the UI these are screen positions).
+static void ui_census_geometry() {
+    if (!g_ctx) return;
+    char line[400]; size_t l = 0;
+    ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    ID3D11BlendState* bs = nullptr; FLOAT bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+    D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED; g_ctx->IAGetPrimitiveTopology(&topo);
+    ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
+    ID3D11Buffer* ib = nullptr; DXGI_FORMAT ifmt = DXGI_FORMAT_UNKNOWN; UINT ioff = 0; g_ctx->IAGetIndexBuffer(&ib, &ifmt, &ioff);
+    { D3D11_BUFFER_DESC vbd = {}; if (vb) vb->GetDesc(&vbd);
+      l += snprintf(line + l, sizeof(line) - l, "         %s n=%u start=%u base=%d topo=%d vs=%p ps=%p blend=%p stride=%u vb=%p/%uB", g_draw_kind == 1 ? "DrawIndexed" : "Draw", g_draw_n, g_draw_start, g_draw_base, (int)topo, (void*)vs, (void*)ps, (void*)bs, stride, (void*)vb, (unsigned)vbd.ByteWidth); }
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto vit = vb ? g_vbufs.find(vb) : g_vbufs.end();
+        if (vit == g_vbufs.end() || stride < 8) l += snprintf(line + l, sizeof(line) - l, " verts: (not captured)");
+        else {
+            const std::vector<uint8_t>& vd = vit->second;
+            auto iit = (g_draw_kind == 1 && ib) ? g_vbufs.find(ib) : g_vbufs.end();
+            // textured sprites: the first six vertices (one quad); textureless draws: up to 24 distinct
+            // vertices, continued on extra lines - the cursor is textureless and may be many triangles
+            bool notex = texture_of(g_cur_ps_srv[0]) == nullptr;
+            if (!notex) { D3D11_TEXTURE2D_DESC td = {}; texture_of(g_cur_ps_srv[0])->GetDesc(&td); if (td.Width == 1024 && td.Height == 1024) notex = true; }   // the cursor atlas: full vertex list too
+            const unsigned nv = g_draw_n < (notex ? 72u : 6u) ? g_draw_n : (notex ? 72u : 6u);
+            unsigned printed = 0; float lastv[4] = { 1e30f, 1e30f, 1e30f, 1e30f };
+            l += snprintf(line + l, sizeof(line) - l, " verts:");
+            for (unsigned k = 0; k < nv; ++k) {
+                unsigned vi;
+                if (g_draw_kind == 1) {
+                    if (iit == g_vbufs.end()) { l += snprintf(line + l, sizeof(line) - l, " (indices not captured)"); break; }
+                    const std::vector<uint8_t>& id = iit->second; const unsigned isz = ifmt == DXGI_FORMAT_R16_UINT ? 2 : 4;
+                    const size_t ip = ioff + (size_t)(g_draw_start + k) * isz; if (ip + isz > id.size()) break;
+                    vi = isz == 2 ? *reinterpret_cast<const uint16_t*>(id.data() + ip) : *reinterpret_cast<const uint32_t*>(id.data() + ip);
+                    vi += (unsigned)g_draw_base;
+                }
+                else vi = g_draw_start + k;
+                const unsigned nf = stride / 4 < 4 ? stride / 4 : 4;
+                const size_t vp = voff + (size_t)vi * stride; if (vp + nf * 4 > vd.size()) break;
+                const float* f = reinterpret_cast<const float*>(vd.data() + vp);
+                if (notex) {   // skip repeats of the previous vertex (shared quad corners)
+                    bool same = true; for (unsigned j = 0; j < nf; ++j) if (f[j] != lastv[j]) same = false;
+                    if (same) continue; for (unsigned j = 0; j < nf; ++j) lastv[j] = f[j];
+                    if (++printed > 24) { l += snprintf(line + l, sizeof(line) - l, " ..."); break; }
+                }
+                if (l > sizeof(line) - 60) {   // continue on a new line
+                    FrameEv c; strncpy_s(c.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(c);
+                    l = (size_t)snprintf(line, sizeof(line), "            ...");
+                }
+                l += snprintf(line + l, sizeof(line) - l, " [");
+                for (unsigned j = 0; j < nf && l < sizeof(line) - 16; ++j) l += snprintf(line + l, sizeof(line) - l, "%s%.4g", j ? " " : "", f[j]);
+                if (l < sizeof(line) - 4) l += snprintf(line + l, sizeof(line) - l, "]");
+            }
+        }
+        FrameEv e; strncpy_s(e.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+        // the other vertex streams (UVs, colours): first and third vertex of each, so a sprite's atlas rect shows
+        l = (size_t)snprintf(line, sizeof(line), "            streams:");
+        for (UINT slot = 1; slot <= 2; ++slot) {
+            ID3D11Buffer* sb = nullptr; UINT sstride = 0, soff = 0; g_ctx->IAGetVertexBuffers(slot, 1, &sb, &sstride, &soff);
+            if (!sb) continue;
+            auto sit = g_vbufs.find(sb);
+            l += snprintf(line + l, sizeof(line) - l, " v%u(stride %u)", slot, sstride);
+            if (sit == g_vbufs.end() || sstride < 4) l += snprintf(line + l, sizeof(line) - l, " ?");
+            else {
+                const std::vector<uint8_t>& sd = sit->second; const unsigned nf = sstride / 4 < 4 ? sstride / 4 : 4;
+                auto iit = (g_draw_kind == 1 && ib) ? g_vbufs.find(ib) : g_vbufs.end();
+                for (unsigned k = 0; k < 3 && k < g_draw_n; k += 2) {
+                    unsigned vi = g_draw_start + k;
+                    if (g_draw_kind == 1) {
+                        if (iit == g_vbufs.end()) break;
+                        const std::vector<uint8_t>& id = iit->second; const unsigned isz = ifmt == DXGI_FORMAT_R16_UINT ? 2 : 4;
+                        const size_t ip = ioff + (size_t)(g_draw_start + k) * isz; if (ip + isz > id.size()) break;
+                        vi = (isz == 2 ? *reinterpret_cast<const uint16_t*>(id.data() + ip) : *reinterpret_cast<const uint32_t*>(id.data() + ip)) + (unsigned)g_draw_base;
+                    }
+                    const size_t vp = soff + (size_t)vi * sstride; if (vp + nf * 4 > sd.size() || l > sizeof(line) - 80) break;
+                    const float* f = reinterpret_cast<const float*>(sd.data() + vp); const uint32_t* u = reinterpret_cast<const uint32_t*>(f);
+                    l += snprintf(line + l, sizeof(line) - l, " [");
+                    for (unsigned j = 0; j < nf; ++j) {
+                        if (std::isfinite(f[j]) && fabsf(f[j]) < 1e6f && fabsf(f[j]) > 1e-6f) l += snprintf(line + l, sizeof(line) - l, "%s%.4g", j ? " " : "", f[j]);
+                        else l += snprintf(line + l, sizeof(line) - l, "%s%08X", j ? " " : "", u[j]);   // not a float: a packed colour or similar
+                    }
+                    l += snprintf(line + l, sizeof(line) - l, "]");
+                }
+            }
+            sb->Release();
+        }
+        if (l > 21) { FrameEv e2; strncpy_s(e2.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e2); }
+    }
+    if (vs) vs->Release(); if (ps) ps->Release(); if (bs) bs->Release(); if (vb) vb->Release(); if (ib) ib->Release();
+}
+
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
@@ -3061,7 +3600,90 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
-    if (g_ui_draw_now) {
+    if (!g_stereo && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
+        ID3D11Texture2D* gt = texture_of(g_cur_rtv[0]);
+        if (gt) { const uint32_t c = ++g_flat_draws_per_target[gt]; if (c > g_flat_scene_draws) { g_flat_scene_draws = c; g_flat_scene_tex = gt; } }
+    }
+    g_ui_flat_draw_now = (!g_ui_draw_now && g_ui_flat_pass && !g_xr_want && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == (g_stereo ? g_scene_live_tex : g_flat_scene_tex));
+    if (g_ui_draw_now || g_ui_flat_draw_now) {
+        // Experiment: skip UI draws whose slot-0 texture has a given size (the battle cursor sprite is
+        // suspected to come from the 1024x1024 atlas; see design-notes "cursor census").
+        if (g_pick_armed) ui_pick_check(g_ui_draws_frame);
+        ui_hover_collect();
+        if (g_atlas_dump_armed) {
+            ID3D11Texture2D* at = texture_of(g_cur_ps_srv[0]);
+            if (at) {
+                D3D11_TEXTURE2D_DESC ad = {}; at->GetDesc(&ad);
+                bool seen = false; for (int i = 0; i < g_atlas_dumped_n; ++i) if (g_atlas_dumped[i] == at) seen = true;
+                if (!seen && g_atlas_dumped_n < 16 && (ad.Width == 1024 || ad.Width == 1632)) {
+                    g_atlas_dumped[g_atlas_dumped_n++] = at;
+                    wchar_t name[64]; _snwprintf_s(name, _TRUNCATE, L"ui_atlas_%ux%u_%02d.dds", ad.Width, ad.Height, g_atlas_dumped_n);
+                    dump_dds(at, name);
+                }
+            }
+        }
+        if (g_ui_hide_w != 0 || g_ui_hide_notex || g_ui_hide_cursor || g_hide_pointers) {
+            ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]);
+            bool hide = false;
+            if (t) { D3D11_TEXTURE2D_DESC d = {}; if (g_ui_hide_w != 0) { t->GetDesc(&d); if (d.Width == g_ui_hide_w && d.Height == g_ui_hide_h) hide = true; } }
+            int partial_first = -1, partial_last = -1;
+            if (!hide && g_ui_hide_cursor && g_hide_sig_n > 0 && g_draw_kind == 1 && g_draw_n % 6 == 0) {
+                unsigned tw = 0, th = 0; if (t) { D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d); tw = d.Width; th = d.Height; }
+                bool any = false; for (int i = 0; i < g_hide_sig_n; ++i) if (g_hide_sigs[i].tw == tw && g_hide_sigs[i].th == th) any = true;
+                if (any) {
+                    // every quad of the draw (the game batches several sprites into one draw): a quad that matches
+                    // a signature is left out; all matching -> the draw is skipped, some -> an index range is skipped
+                    float xy[2 * 48]; const unsigned nv = ui_sprite_xy(xy, 48); const unsigned nq = nv / 4, nq_draw = g_draw_n / 6;
+                    g_rect_checked++;
+                    int matched = 0;
+                    for (unsigned q = 0; q < nq; ++q) {
+                        float x0 = xy[q*8], x1 = x0, y0 = xy[q*8+1], y1 = y0;
+                        for (unsigned k = 1; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+                        const float w = x1 - x0, h = y1 - y0;
+                        for (int i = 0; i < g_hide_sig_n; ++i) {
+                            const HideSig& g = g_hide_sigs[i];
+                            if (g.tw == tw && g.th == th && w >= g.w0 && w <= g.w1 && h >= g.h0 && h <= g.h1) {
+                                g_hide_sig_hits[i]++; if (partial_first < 0) partial_first = (int)q; partial_last = (int)q; matched++;
+                                if (g_actor_ui_frame != (int)g_frames) { g_actor_ui_frame = (int)g_frames; actors_project_ui(); }
+                                int actor = -1; quad_is_pointer(x0, y0, x1, y1, &actor); ptr_sprite_capture(q, x0, y0, x1, y1, actor);
+                                break;
+                            }
+                        }
+                    }
+                    if (matched > 0 && nq >= nq_draw && matched == (int)nq_draw) { hide = true; partial_first = -1; }
+                    if (nv == 0) g_rect_unknown++;
+                }
+            }
+            if (!hide && partial_first < 0 && g_hide_pointers && g_draw_kind == 1 && g_draw_n % 6 == 0) {
+                unsigned tw = 0, th = 0; if (t) { D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d); tw = d.Width; th = d.Height; }
+                float xy[2 * 48]; unsigned nv = 0;
+                if (!t || tw == 1024 || tw == 8192) { nv = ui_sprite_xy(xy, 48); ui_backgrounds_note(xy, nv); }   // the window art lives on these
+                if (!t || (tw == 1024 && th == 1024)) {
+                    if (g_actor_ui_frame != (int)g_frames) { g_actor_ui_frame = (int)g_frames; actors_project_ui(); }
+                    const unsigned nq = nv / 4, nq_draw = g_draw_n / 6; int matched = 0;
+                    for (unsigned q = 0; q < nq; ++q) {
+                        float x0, y0, x1, y1; quad_rect(xy, q, &x0, &y0, &x1, &y1);
+                        int actor = -1;
+                        if (quad_is_pointer(x0, y0, x1, y1, &actor) && !quad_in_run(xy, nq, q)) { g_pointer_hits++; if (partial_first < 0) partial_first = (int)q; partial_last = (int)q; matched++; ptr_sprite_capture(q, x0, y0, x1, y1, actor); }
+                    }
+                    if (matched > 0 && nq >= nq_draw && matched == (int)nq_draw) { hide = true; partial_first = -1; }
+                }
+            }
+            if (!hide && partial_first >= 0) {
+                g_skip_first = (unsigned)partial_first * 6; g_skip_count = (unsigned)(partial_last - partial_first + 1) * 6;
+                g_ui_draws_frame++;
+                return (g_ui_flat_draw_now ? 0 : 1) | 0x20000;   // drawn in two pieces around the hidden quads
+            }
+            if (!t && (g_ui_hide_notex == 1 || (g_ui_hide_notex == 2 && g_draw_n != 18))) hide = true;   // textureless experiment; 2 keeps the three 18-index window backgrounds
+            if (hide) {
+                if (g_frame_live) {
+                    char t2[96]; snprintf(t2, sizeof(t2), "      ui draw %u (frame draw %d): HIDDEN by ui_hide (tex %s, n=%u)", g_ui_draws_frame, idx, t ? "yes" : "no", g_draw_n);
+                    { std::lock_guard<std::mutex> lock(g_mutex); FrameEv e; strncpy_s(e.text, t2, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e); }
+                    ui_census_geometry();   // its vertices as well, so a hidden draw can still be identified
+                }
+                g_ui_hidden_draws++; g_ui_draws_frame++; return -1;
+            }
+        }
         if (g_frame_live) {   // census: every 2D UI draw with its texture and the head of its VS constant buffer (sprite transforms live there)
             char line[400]; size_t l = 0;
             l += snprintf(line + l, sizeof(line) - l, "      ui draw %u (frame draw %d):", g_ui_draws_frame, idx);
@@ -3078,11 +3700,23 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                     const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
                     l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.data.size());
                     for (UINT k = 0; k < nf && k < 12 && l < sizeof(line) - 16; ++k) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
+                    if (sl == 0 && nf > 12) {   // the rest of cb0, on extra lines (sprite transforms / atlas rects live somewhere in here)
+                        FrameEv e0; strncpy_s(e0.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e0);
+                        l = (size_t)snprintf(line, sizeof(line), "            cb0+48:");
+                        for (UINT k = 12; k < nf && k < 64; ++k) {
+                            if (l > sizeof(line) - 24) { FrameEv e1; strncpy_s(e1.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e1); l = (size_t)snprintf(line, sizeof(line), "            cb0+%u:", k * 4); }
+                            l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
+                        }
+                    }
                 }
                 FrameEv e; strncpy_s(e.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
             }
+            ui_census_geometry();
         }
-        g_ui_draws_frame++; return 1;   // into the UI texture (eye2_begin handles it)
+        if (g_ui_hide_cursor && (g_ui_draws_frame & 15) == 0) { float a, b, c, d; ui_sprite_rect(&a, &b, &c, &d); }   // keeps the stream set learned (cheap)
+        g_ui_draws_frame++;
+        if (g_ui_flat_draw_now) return 0;   // flat mode: drawn where the game puts it
+        return 1;   // into the UI texture (eye2_begin handles it)
     }
     g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer);
     if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
@@ -3148,14 +3782,16 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
                 ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
                 int zwrite = -1; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = (dd.DepthEnable && dd.DepthWriteMask) ? 1 : 0; ds->Release(); }
+                char s0[48] = ""; { ID3D11Texture2D* t0 = texture_of(g_cur_ps_srv[0]); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); snprintf(s0, sizeof(s0), " s0 %p %ux%u", static_cast<void*>(t0), td.Width, td.Height); } }
                 FrameEv e;
-                snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p",
+                snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p%s n=%u",
                          sidx, idx, g_eye2_cur == nullptr ? "NO IMAGE" : (g_eye2_cur->kind == 1 ? "camera" : "product"),
-                         vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps);
+                         vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps, s0, g_draw_n);
                 if (vs) vs->Release(); if (ps) ps->Release();
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_scene_census_lines++; }
             }
+            if (g_pick_armed) { ID3D11Texture2D* t0 = texture_of(g_cur_ps_srv[0]); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); if (td.Width == 2048 && td.Height == 4096) g_pick_scene_text++; } }
             if (g_bisect_mode == 1 && sidx >= g_bisect_a && sidx <= g_bisect_b) return -1;
             if (g_bisect_mode == 2 && (sidx < g_bisect_a || sidx > g_bisect_b)) return -1;
             if (g_eye2_cur == nullptr) {
@@ -3578,6 +4214,13 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
     g_resolves++;
     ID3D11Texture2D* dst = nullptr; static_cast<ID3D11Resource*>(dst_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&dst));
     ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
+    if (dst && src && !g_stereo) {
+        // flat mode: the scene target (most draws so far this frame, with depth) resolved -> the UI follows
+        if (src == g_flat_scene_tex && g_flat_scene_draws >= 20) {
+            if (g_ui_flat_pass && g_ui_draws_frame > 0) { g_ui_flat_pass = false; g_ui_draws_report = g_ui_draws_frame; }
+            else g_ui_flat_resolved = true;
+        }
+    }
     if (dst && src) {
         if (g_frame_live) {
             char a[96], b[96]; char t[200];
@@ -3603,6 +4246,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                     // clear that opens the pass and the first UI draw: that
                     // resolve is just a newer base, the pass reopens at the next
                     // depth clear. Once done, done: later resolves do not reopen.
+                    if (g_ui_flat_pass && g_ui_draws_frame > 0) { g_ui_flat_pass = false; g_ui_draws_report = g_ui_draws_frame; }
                     if (g_ui_state == UI_PASS) {
                         if (g_ui_draws_frame > 0) { g_ui_state = UI_DONE; g_ui_pass_frame = g_frames; g_ui_draws_report = g_ui_draws_frame; }
                         else { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
@@ -3627,7 +4271,11 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, voi
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
 static void ui_pass_begin();
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
-    if (g_in_eye2 || !g_stereo || g_ctx == nullptr) return;
+    if (g_in_eye2 || g_ctx == nullptr) return;
+    if (!g_stereo) {   // flat mode: the depth clear on the resolved scene target opens the UI pass
+        if (depth && g_ui_flat_resolved && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_flat_scene_tex) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }
+        return;
+    }
     if (!depth) {
         ID3D11Texture2D* ct = texture_of(static_cast<ID3D11View*>(view));
         if (ct && g_cleared_frame_n < 64) g_cleared_frame[g_cleared_frame_n++] = ct;
@@ -3636,7 +4284,11 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
     if (g_scene_live_tex && g_scene_live_draws >= 20) {
         ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
-        else if (depth && bound == g_scene_live_tex) { g_ui_depth_clears_frame++; if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin(); }   // screen frames keep their UI (subtitles) in the frame
+        else if (depth && bound == g_scene_live_tex) {
+            g_ui_depth_clears_frame++;
+            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin();   // screen frames keep their UI (subtitles) in the frame
+            else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
+        }
     }
     g_in_eye2 = true;
     if (depth) { ID3D11DepthStencilView* t = twin_dsv(static_cast<ID3D11DepthStencilView*>(view)); if (t) g_ctx->ClearDepthStencilView(t, flags, d, st); }
@@ -4026,7 +4678,8 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
 // combatant at the right depth (the game's cursors are placed through its
 // own camera and land in the wrong place on the UI panel).
 
-struct Marker { float x, y, z; uint32_t color; };
+struct Marker { float x, y, z; uint32_t color; int kind; };   // kind 0 target, 1 turn
+float g_marker_scale = 1.f;
 Marker g_markers[32]; int g_marker_n = 0;
 static const char k_marker_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 VP; };\n"
@@ -4038,7 +4691,7 @@ ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3
 ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr;
 bool g_mk_tried = false;
 struct MkVertex { float p[3]; float c[4]; };
-static const int k_mk_max_verts = 32 * 6;
+static const int k_mk_max_verts = 32 * 48;
 
 static bool marker_pass_init() {
     if (g_mk_tried) return g_mk_vs != nullptr;
@@ -4079,6 +4732,95 @@ static bool marker_pass_init() {
 
 /// Draws the markers into `dst` (w x h) for one eye: `V` the eye's view
 /// (row-major 4x4, column-vector convention), `f` its field of view.
+// Draws the captured pointer sprites into one eye image with the game's own UI pipeline. Each sprite goes
+// to the marker nearest its actor (markers are in render space at the actor plus the marker height); the
+// quad keeps its UI size, bottom-centred on the marker's projection. Returns a mask of markers that got one.
+static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float VP[16]) {
+    uint32_t used = 0;
+    if (g_ptr_sprite_n == 0 || !g_ptr_reuse || g_marker_n == 0 || !g_device) return 0;
+    if (!g_ptr_vb) {
+        D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = 4 * 12; bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        g_device->CreateBuffer(&bd, nullptr, &g_ptr_vb);
+        const uint16_t idx[6] = { 0, 1, 2, 2, 1, 3 };   // the game's quad pattern (v0 top-left, v1 top-right, v2 bottom-left, v3 bottom-right)
+        D3D11_BUFFER_DESC ib = {}; ib.ByteWidth = sizeof(idx); ib.Usage = D3D11_USAGE_IMMUTABLE; ib.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA init = { idx, 0, 0 }; g_device->CreateBuffer(&ib, &init, &g_ptr_ib);
+        if (!g_ptr_vb || !g_ptr_ib) return 0;
+    }
+    // save what we touch
+    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
+    ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
+    g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
+    ID3D11Buffer* o_cb = nullptr; g_ctx->VSGetConstantBuffers(0, 1, &o_cb);
+    ID3D11Buffer* o_vb[8] = {}; UINT o_stride[8] = {}, o_off[8] = {}; g_ctx->IAGetVertexBuffers(0, 8, o_vb, o_stride, o_off);
+    ID3D11Buffer* o_ib = nullptr; DXGI_FORMAT o_ifmt = DXGI_FORMAT_UNKNOWN; UINT o_ioff = 0; g_ctx->IAGetIndexBuffer(&o_ib, &o_ifmt, &o_ioff);
+    ID3D11InputLayout* o_il = nullptr; g_ctx->IAGetInputLayout(&o_il);
+    D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
+    ID3D11BlendState* o_bs = nullptr; float o_bf[4]; UINT o_mask; g_ctx->OMGetBlendState(&o_bs, o_bf, &o_mask);
+    ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
+    ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
+    ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
+
+    InEye2 guard;
+    ID3D11RenderTargetView* rt[1] = { dst }; g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
+    g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST); g_ctx->IASetIndexBuffer(g_ptr_ib, DXGI_FORMAT_R16_UINT, 0);
+    for (int i = 0; i < g_ptr_sprite_n; ++i) {
+        const PtrSprite& p = g_ptr_sprites[i];
+        if (!p.has_world || !p.vs || !p.ps || !p.il || !p.vb[0]) continue;
+        // the marker for this actor: nearest in the ground plane (markers sit marker_height above the root)
+        int m = -1; float md = 1e9f;
+        for (int k = 0; k < g_marker_n; ++k) { const float dx = g_markers[k].x - p.world[0], dz = g_markers[k].z - p.world[2]; const float d = dx*dx + dz*dz; if (d < md) { md = d; m = k; } }
+        if (m < 0 || md > 40.f * 40.f || (used & (1u << m))) { g_ptr_unpaired++; continue; }
+        const float wp[4] = { g_markers[m].x, g_markers[m].y, g_markers[m].z, 1.f };
+        float c[4]; for (int r = 0; r < 4; ++r) c[r] = VP[r*4+0]*wp[0] + VP[r*4+1]*wp[1] + VP[r*4+2]*wp[2] + VP[r*4+3]*wp[3];
+        if (c[3] <= 1e-4f) continue;
+        const float ux = c[0] / c[3] * 960.f, uy = -c[1] / c[3] * 540.f;   // UI units: the game's ortho cb0 maps these to the eye image
+        if (!std::isfinite(ux) || !std::isfinite(uy)) continue;
+        const float x0 = ux - 0.5f * p.w, x1 = ux + 0.5f * p.w, y1 = uy, y0 = uy - p.h;   // bottom-centred on the marker (tip at the point)
+        const float verts[12] = { x0, y0, 1.f, x1, y0, 1.f, x0, y1, 1.f, x1, y1, 1.f };
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        if (FAILED(g_orig_map(g_ctx, g_ptr_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) continue;
+        memcpy(ms.pData, verts, sizeof(verts)); g_orig_unmap(g_ctx, g_ptr_vb, 0);
+        ID3D11Buffer* vbs[8]; UINT strides[8], offs[8];
+        for (int k = 0; k < 8; ++k) { vbs[k] = k == 0 ? g_ptr_vb : p.vb[k]; strides[k] = k == 0 ? 12u : p.stride[k]; offs[k] = k == 0 ? 0u : p.off[k]; }
+        g_ctx->IASetVertexBuffers(0, 8, vbs, strides, offs); g_ctx->IASetInputLayout(p.il);
+        g_ctx->VSSetShader(p.vs, nullptr, 0); g_ctx->PSSetShader(p.ps, nullptr, 0);
+        g_orig_vssetcb(g_ctx, 0, 1, &p.cb0);
+        g_ctx->PSSetShaderResources(0, 1, &p.srv); g_ctx->PSSetSamplers(0, 1, &p.smp);
+        g_ctx->OMSetBlendState(p.bs, p.bf, p.bm);
+        g_ctx->DrawIndexed(6, 0, 0);
+        used |= 1u << m; g_ptr_drawn++;
+    }
+    {   // once a second: what was captured and what was drawn (ffxvr_diag.log)
+        const double t = (double)GetTickCount64() * 0.001;
+        if (t - g_ptr_log_t > 1.0) {
+            g_ptr_log_t = t;
+            char line[600]; size_t l = (size_t)snprintf(line, sizeof(line), "cursor art: %d captured, markers %d:", g_ptr_sprite_n, g_marker_n);
+            for (int i = 0; i < g_ptr_sprite_n && l < sizeof(line) - 120; ++i) {
+                const PtrSprite& p = g_ptr_sprites[i]; int slots = 0; for (int k = 0; k < 8; ++k) if (p.vb[k]) slots++;
+                l += (size_t)snprintf(line + l, sizeof(line) - l, " [%d: %.0fx%.0f quad %u, %d streams, tex %s, actor %s (%.0f,%.0f,%.0f)]", i, p.w, p.h, p.q, slots, p.srv ? "yes" : "no", p.has_world ? "yes" : "NO", p.world[0], p.world[1], p.world[2]);
+            }
+            for (int k = 0; k < g_marker_n && l < sizeof(line) - 60; ++k) l += (size_t)snprintf(line + l, sizeof(line) - l, " m%d(%.0f,%.0f,%.0f)", k, g_markers[k].x, g_markers[k].y, g_markers[k].z);
+            diag("%s | drawn so far %u, unpaired %u", line, g_ptr_drawn, g_ptr_unpaired);
+        }
+    }
+    // restore
+    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv); if (nvp) g_ctx->RSSetViewports(1, &o_vp);
+    g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
+    g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
+    g_ctx->IASetVertexBuffers(0, 8, o_vb, o_stride, o_off); g_ctx->IASetIndexBuffer(o_ib, o_ifmt, o_ioff);
+    g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
+    g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
+    g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
+    for (auto* v : o_rtv) if (v) v->Release();
+    if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release(); if (o_cb) o_cb->Release();
+    for (auto* v : o_vb) if (v) v->Release(); if (o_ib) o_ib->Release(); if (o_il) o_il->Release();
+    if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release(); if (o_rs) o_rs->Release(); if (o_srv) o_srv->Release(); if (o_smp) o_smp->Release();
+    return used;
+}
+
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f) {
     if (g_marker_n == 0 || dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
@@ -4087,15 +4829,18 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     P[5] = 2.f / (f.u - f.d); P[6] = (f.u + f.d) / (f.u - f.d);
     P[10] = -1.f; P[14] = -1.f;
     float VP[16]; mul4(P, V, VP);
+    const uint32_t with_sprite = draw_ptr_sprites_eye(dst, w, h, VP);   // the game's own pointer art, where it has been captured
     // Camera axes in world space (rows of the view's rotation) for billboarding.
     const float right[3] = { V[0], V[1], V[2] }, up[3] = { V[4], V[5], V[6] };
-    // Size: a marker ~1/8 of a character (20 units) wide.
-    const float sz = 2.5f;
+    const float t = (float)((double)GetTickCount64() * 0.001);
     MkVertex verts[k_mk_max_verts]; int nv = 0;
+    // The marker as it has been: a downward-pointing triangle, tip at the point, base above it.
+    const float sz = 2.5f * g_marker_scale;
+    (void)t;
     for (int i = 0; i < g_marker_n && nv + 6 <= k_mk_max_verts; ++i) {
+        if (with_sprite & (1u << i)) continue;
         const Marker& m = g_markers[i];
         const float c[4] = { ((m.color >> 0) & 255) / 255.f, ((m.color >> 8) & 255) / 255.f, ((m.color >> 16) & 255) / 255.f, ((m.color >> 24) & 255) / 255.f };
-        // Downward-pointing triangle above the point: tip at the point, base sz above.
         float tip[3] = { m.x, m.y, m.z };
         float a[3], b[3];
         for (int k = 0; k < 3; ++k) { a[k] = tip[k] + up[k] * sz * 2.f - right[k] * sz; b[k] = tip[k] + up[k] * sz * 2.f + right[k] * sz; }
@@ -4150,9 +4895,10 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
 /// Markers for this frame, in render space. Called from the managed side each frame.
 extern "C" __declspec(dllexport) void ffxvr_markers_set(const float* xyz, const uint32_t* colors, int n) {
     if (n < 0) n = 0; if (n > 32) n = 32;
-    for (int i = 0; i < n; ++i) { g_markers[i].x = xyz[i*3]; g_markers[i].y = xyz[i*3+1]; g_markers[i].z = xyz[i*3+2]; g_markers[i].color = colors[i]; }
-    g_marker_n = n;
+    for (int i = 0; i < n; ++i) { g_markers[i].x = xyz[i*3]; g_markers[i].y = xyz[i*3+1]; g_markers[i].z = xyz[i*3+2]; g_markers[i].color = colors[i] & 0x00FFFFFFu | 0xFF000000u; g_markers[i].kind = (colors[i] >> 24) == 0xFE ? 1 : 0; }
+    g_marker_n = n;   // alpha 0xFE in the colour tags the turn pointer
 }
+extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_scale = s < 0.2f ? 0.2f : s > 5.f ? 5.f : s; }
 
 /// Draws the markers into both eye images, each with its own view and FOV.
 static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
@@ -4403,6 +5149,8 @@ extern "C" __declspec(dllexport) uint32_t ffxvr_scene_draws() { return g_scene_d
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }
+/// Re-use the game's pointer sprites at the markers (needs the pointer hiding to capture them); returns sprites drawn since the last call.
+extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {

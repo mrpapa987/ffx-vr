@@ -39,6 +39,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, int>  _fn_counter;
     private delegate* unmanaged[Cdecl]<int, int> _fn_on_draw;
     private delegate* unmanaged[Cdecl]<nint, void> _fn_draw_ctx;
+    private delegate* unmanaged[Cdecl]<int, uint, uint, int, void> _fn_draw_args;
     private delegate* unmanaged[Cdecl]<int, int> _fn_eye2_begin;
     private delegate* unmanaged[Cdecl]<void> _fn_eye2_end;
     private delegate* unmanaged[Cdecl]<int, float, int, int, int, void> _fn_stereo_set;
@@ -76,10 +77,29 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_player_head_set;
     private delegate* unmanaged[Cdecl]<float, float, float, int, void> _fn_anchor_override;
     private bool _battle_anchor = true; private int _battle_anchor_n = 0;
+    // UI draw hiding experiment (cursor): 0 = off, 1 = hide draws from the 1024x1024 atlas, 2 = also the textureless draws, 3 = only in battle (1024x1024), 4 = textureless draws only, in battle, 5 = textureless except the 18-index window backgrounds, in battle
+    private int _ui_hide = 0; private uint _ui_hidden_n = 0;
+    private bool _hide_cursor = true;   // battle cursors (the hide list below), in battle, headset only
+    // Hide list: per-quad sprite signatures "tex_w,tex_h,w0,w1,h0,h1" (texture size 0,0 = textureless; quad width /
+    // height ranges in UI units; the game batches sprites, so a draw's index count is not part of it - a matching quad
+    // inside a batch is cut out of the draw). Defaults are the two cursors picked on 21 Oct: the target pointer
+    // (1024 atlas, 68x45) and the pointer over the acting character (textureless quad, width pulses 15..28, height 30).
+    private static float[][] hide_list_defaults() => new[] { new float[] { 1024, 1024, 66, 69, 43, 46 }, new float[] { 0, 0, 8, 36, 24, 34 } };   // the CTB portraits are 70x46: keep them out
+    private readonly List<float[]> _hide_list = new(hide_list_defaults());
+    private bool _hide_list_dirty = true; private readonly uint[] _hide_hits = new uint[16];
+    private bool _hide_pointers = true; private uint _pointer_stats = 0;   // the pointer rule (small quads above where an actor projects through the game camera)
+    private delegate* unmanaged[Cdecl]<int, void> _fn_ui_hide_pointers; private delegate* unmanaged[Cdecl]<uint> _fn_ui_pointer_stats;
+    private delegate* unmanaged[Cdecl]<float*, int, void> _fn_ui_hide_list; private delegate* unmanaged[Cdecl]<uint*, int, void> _fn_ui_hide_hits; private delegate* unmanaged[Cdecl]<uint*, uint*, void> _fn_draw_skip;
     // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
     // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
     private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
-    private int _btl_chr = -1; private Vector4 _btl_slot_pos; private bool _btl_slot_known = false; private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private int _btl_area = -1, _btl_bench_frames = 0; private bool _btl_diag_done = false, _btl_aeon_out = false; private int _btl_cycle_req = 0; private bool _btl_tidus_on = false; private readonly List<Vector4> _btl_field = new();
+    // Battle follow state. The game's own field roster (exe-analysis.md section 15) says who is on the
+    // field; the eyes follow a chr id (0 Tidus, 1 Yuna, 2 Auron, 3 Kimahri, 4 Wakka, 5 Lulu, 6 Rikku,
+    // 8..0x11 Aeons), and only the actor position is read from the entities.
+    private int _btl_chr = -1; private int _btl_follow_id = -1, _btl_follow_slot = -1, _btl_pre_summon_id = -1, _btl_pending_id = -1, _btl_pending_frames = 0, _btl_pending_still = 0; private Vector4 _btl_pending_pos; private string _btl_pending_why = "";
+    private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private bool _btl_aeon_out = false; private int _btl_cycle_req = 0;
+    private readonly byte[] _btl_roster = new byte[3], _btl_roster_prev = new byte[3];
+    private const int k_roster_off = 0xD2C895, k_roster_saved_off = 0xD2C89C, k_aeon_summoner_off = 0x6D1;
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -124,6 +144,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
     private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
     private bool _markers_3d = true;
+    private float _marker_scale = 1f; private delegate* unmanaged[Cdecl]<float, void> _fn_markers_scale; private delegate* unmanaged[Cdecl]<void> _fn_ui_atlas_dump;
+    private bool _markers_game_art = false; private uint _markers_game_art_n = 0; private delegate* unmanaged[Cdecl]<int, uint> _fn_markers_game_art;   // the game's own cursor sprites at the markers
     private bool _ui_on = true; private float _ui_dist = 1.5f, _ui_width = 1.6f;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
     private int _xr_screen_mode = 0; private float _xr_screen_width = 2.5f, _xr_screen_dist = 2.5f;
@@ -173,6 +195,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_on_viewport;
     private delegate* unmanaged[Cdecl]<nint, int, void> _fn_on_clear;
     private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
+    private delegate* unmanaged[Cdecl]<uint, uint, int, void> _fn_ui_hide; private delegate* unmanaged[Cdecl]<uint> _fn_ui_hidden_draws; private delegate* unmanaged[Cdecl]<int, void> _fn_ui_hide_cursor; private delegate* unmanaged[Cdecl]<uint> _fn_ui_rect_stats; private uint _rect_stats = 0;
+    private delegate* unmanaged[Cdecl]<float, float, void> _fn_ui_pick; private delegate* unmanaged[Cdecl]<nint> _fn_ui_pick_result; private delegate* unmanaged[Cdecl]<int, void> _fn_slowmo;
+    private string _pick_text = ""; private int _pick_n = 0; private int _slowmo_ms = 150; private bool _slowmo_on = false;
+    private delegate* unmanaged[Cdecl]<float, float, int, void> _fn_ui_hover; private delegate* unmanaged[Cdecl]<float*, int, int> _fn_ui_hover_rects;
+    private int _hover_mode = 0;   // 0 off, 1 outline the quads under the mouse, 2 outline every UI quad (F11 cycles)
     private delegate* unmanaged[Cdecl]<uint, int, void> _fn_dump_cb; private int _dump_cb_size = 1456;
     private delegate* unmanaged[Cdecl]<uint, uint, void> _fn_census_arm;
     private delegate* unmanaged[Cdecl]<uint, uint, nint*, void> _fn_on_ps_srvs;
@@ -188,7 +215,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<void*, void*, uint, int> _fn_safe_read;
     private delegate* unmanaged[Cdecl]<float, float, float, float*, int> _fn_project;
     private bool  _markers_on    = true;
-    private float _marker_height = 25f;
+    private float _marker_height = 6f;   // clearance of the pointer's tip above the actor's head (render units)
     private int   _markers_drawn;
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_world_positions;
     private double _last_pos_log;
@@ -299,6 +326,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
             _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
             _fn_draw_ctx     = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_ctx");
+            try { _fn_draw_args = (delegate* unmanaged[Cdecl]<int, uint, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_args"); } catch { }
             _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
             _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
             _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
@@ -333,6 +361,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_hidden");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
+            try { _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_atlas_dump"); } catch { }
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
@@ -347,6 +376,12 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_viewport");
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
+            try { _fn_ui_hide = (delegate* unmanaged[Cdecl]<uint, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide"); _fn_ui_hidden_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hidden_draws"); _fn_ui_hide_cursor = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_cursor"); _fn_ui_rect_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_rect_stats");
+                  _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_hits"); _fn_draw_skip = (delegate* unmanaged[Cdecl]<uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_skip");
+                  _fn_ui_hide_pointers = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_pointers"); _fn_ui_pointer_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pointer_stats");
+                  _fn_ui_pick = (delegate* unmanaged[Cdecl]<float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick"); _fn_ui_pick_result = (delegate* unmanaged[Cdecl]<nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick_result");
+                  _fn_slowmo = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_slowmo");
+                  _fn_ui_hover = (delegate* unmanaged[Cdecl]<float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover"); _fn_ui_hover_rects = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover_rects"); } catch { }
             _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
             _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
             _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
@@ -503,18 +538,55 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     private void h_drawindexed(nint ctx, uint n, uint start, int base_vertex) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
+        if (_fn_draw_args != null) _fn_draw_args(1, n, start, base_vertex);
         int r = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(1) : 0;
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
         if (r < 0) return;                          // hidden (the player's own body in first person)
         int eye2 = r & 15; bool noblend = (r & 16) != 0 && _fn_blend_off != null;
+        // partial hide: a range of indices (a batched 2D sprite on the hide list) is left out, the rest drawn in two pieces
+        uint skip_first = 0, skip_count = 0; bool partial = (r & 0x20000) != 0 && _fn_draw_skip != null;
+        if (partial) { _fn_draw_skip(&skip_first, &skip_count); if (skip_first + skip_count > n) partial = false; }
         if (noblend) _fn_blend_off();
-        _o_drawindexed!(ctx, n, start, base_vertex);
-        for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_drawindexed!(ctx, n, start, base_vertex); _fn_eye2_end(); }
+        draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count);
+        for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count); _fn_eye2_end(); }
         if (noblend) _fn_blend_restore();
+    }
+    // Outlines, on the monitor, the UI quads the native side collected this frame (hover highlight), and
+    // hands it the mouse position for the next frame. UI units -> pixels: centred 1920x1080 layout.
+    private void draw_hover_highlight() {
+        if (_fn_ui_hover == null || _fn_ui_hover_rects == null) return;
+        Vector2 ds = ImGui.GetIO().DisplaySize; Vector2 m = ImGui.GetMousePos();
+        _fn_ui_hover(ds.X > 0 ? m.X / ds.X : 0f, ds.Y > 0 ? m.Y / ds.Y : 0f, _hover_mode);
+        if (_hover_mode == 0 || ds.X <= 0 || ds.Y <= 0) return;
+        float* r = stackalloc float[512 * 7]; int n = _fn_ui_hover_rects(r, 512);
+        ImDrawListPtr dl = ImGui.GetForegroundDrawList();
+        float sx = ds.X / 1920f, sy = ds.Y / 1080f;
+        for (int i = 0; i < n; i++) {
+            float x0 = (r[i*7] + 960f) * sx, y0 = (r[i*7+1] + 540f) * sy, x1 = (r[i*7+2] + 960f) * sx, y1 = (r[i*7+3] + 540f) * sy;
+            int flags = (int)r[i*7+6]; bool hit = (flags & 1) != 0, ptr = (flags & 2) != 0, actor = (flags & 4) != 0;
+            if (actor) {   // where a character's root projects through the game camera
+                float cx = 0.5f * (x0 + x1), cy = 0.5f * (y0 + y1);
+                dl.AddLine(new Vector2(cx - 12, cy), new Vector2(cx + 12, cy), 0xFF00FF00u, 2f); dl.AddLine(new Vector2(cx, cy - 12), new Vector2(cx, cy + 12), 0xFF00FF00u, 2f);
+                continue;
+            }
+            uint col = hit ? 0xFF00E5FFu : ptr ? 0xFF0000FFu : 0x80FFFFFFu;   // ABGR: yellow under the mouse, red = pointer rule, white other
+            dl.AddRect(new Vector2(x0, y0), new Vector2(x1, y1), col, 0f, (hit || ptr) ? 3f : 1f, ImDrawFlags.None);
+            if (hit || ptr) {
+                dl.AddRectFilled(new Vector2(x0, y0), new Vector2(x1, y1), hit ? 0x3000E5FFu : 0x300000FFu);
+                string tex = r[i*7+4] == 0 ? "textureless" : $"{r[i*7+4]:F0}x{r[i*7+5]:F0}";
+                dl.AddText(new Vector2(x0, y1 + 2), col, $"{r[i*7+2] - r[i*7]:F0}x{r[i*7+3] - r[i*7+1]:F0} {tex}{(ptr ? " [pointer]" : "")}");
+            }
+        }
+    }
+    private void draw_pieces(nint ctx, uint n, uint start, int base_vertex, bool partial, uint skip_first, uint skip_count) {
+        if (!partial) { _o_drawindexed!(ctx, n, start, base_vertex); return; }
+        if (skip_first > 0) _o_drawindexed!(ctx, skip_first, start, base_vertex);
+        uint after = skip_first + skip_count; if (after < n) _o_drawindexed!(ctx, n - after, start + after, base_vertex);
     }
 
     private void h_draw(nint ctx, uint n, uint start) {
         if (_fn_draw_ctx != null) _fn_draw_ctx(ctx);
+        if (_fn_draw_args != null) _fn_draw_args(2, n, start, 0);
         int r = (ours(ctx) && _fn_on_draw != null) ? _fn_on_draw(2) : 0;
         _o_draw ??= new FhCallHandle<d_Draw>(new FhCallLocation((void*)_a_draw)).chain_from(_h_draw!).fnptr;
         if (r < 0) return;
@@ -622,6 +694,21 @@ public sealed unsafe class FFXVRModule : FhModule {
     private string _ini_last = "";
     private bool _headset_autostart = false; private int _start_view = 1; private bool _overlay_at_start = true, _overlay_at_start_loaded = true;   // start_view: 0 seat, 1 first person, 3 third person, 2 diorama
 
+    private string hide_list_str() {
+        var ci = System.Globalization.CultureInfo.InvariantCulture; var parts = new List<string>();
+        foreach (float[] e in _hide_list) parts.Add(string.Join(",", Array.ConvertAll(e, x => x.ToString("0.#", ci))));
+        return string.Join(";", parts);
+    }
+    private void hide_list_parse(string v) {
+        var ci = System.Globalization.CultureInfo.InvariantCulture; var list = new List<float[]>();
+        foreach (string part in v.Split(';', StringSplitOptions.RemoveEmptyEntries)) {
+            string[] f = part.Split(','); if (f.Length != 6) continue;   // (7-field entries from the first build are dropped)
+            float[] e = new float[6]; bool ok = true; for (int k = 0; k < 6; k++) if (!float.TryParse(f[k], System.Globalization.NumberStyles.Float, ci, out e[k])) ok = false;
+            if (ok && !list.Exists(x => x[0] == e[0] && x[1] == e[1] && x[2] == e[2] && x[3] == e[3] && x[4] == e[4] && x[5] == e[5])) list.Add(e);
+        }
+        _hide_list.Clear(); _hide_list.AddRange(list.Count > 0 ? list : hide_list_defaults()); _hide_list_dirty = true;
+    }
+
     private bool _settings_ok = false;   // a load succeeded (or there was no file): saving is allowed
     private void settings_load() {
         try {
@@ -662,6 +749,12 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "gest_tilt":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _gest_tilt); break;
                     case "fp_body_mode":      int.TryParse(v, out _fp_body_mode); break;
                     case "battle_anchor":     _battle_anchor = v != "0"; break;
+                    case "ui_hide":           int.TryParse(v, out _ui_hide); break;
+                    case "hide_cursor":       _hide_cursor = v != "0"; break;
+                    case "hide_pointers":     _hide_pointers = v != "0"; break;
+                    case "markers_game_art":  _markers_game_art = v != "0"; break;
+                    case "marker_scale":      float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _marker_scale); break;
+                    case "hide_list":         hide_list_parse(v); break;
                     case "battle_follow":     _battle_follow = v != "0"; break;
                     case "battle_view":       int.TryParse(v, out _battle_view); break;
                     case "diorama_floor":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _diorama_floor); break;
@@ -774,6 +867,12 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"fp_body_mode={_fp_body_mode}\n" +
             $"fp_head_anchor={_fp_head_anchor}\n" +
             $"battle_anchor={(_battle_anchor ? 1 : 0)}\n" +
+            $"ui_hide={_ui_hide}\n" +
+            $"hide_cursor={(_hide_cursor ? 1 : 0)}\n" +
+            $"hide_pointers={(_hide_pointers ? 1 : 0)}\n" +
+            $"markers_game_art={(_markers_game_art ? 1 : 0)}\n" +
+            $"marker_scale={_marker_scale.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}\n" +
+            $"hide_list={hide_list_str()}\n" +
             $"battle_follow={(_battle_follow ? 1 : 0)}\n" +
             $"battle_view={_battle_view}\n" +
             $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
@@ -1102,8 +1201,23 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
-            ImGui.Checkbox("in battle, first person follows whoever is in Tidus's slot (a swap moves the eyes)", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
+            ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
             ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
+            ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
+            ImGui.TextDisabled($"hidden last frame: {_pointer_stats & 0xFFFF}, characters projected: {_pointer_stats >> 16}");
+            ImGui.Checkbox("hide the game's battle cursors by sprite signature, headset only (the list is filled by picking, below)", ref _hide_cursor); ImGui.SameLine();
+            ImGui.TextDisabled($"candidates {_rect_stats >> 16}, rect unknown {_rect_stats & 0xFFFF}");
+            for (int i = 0; i < _hide_list.Count; i++) {
+                float[] e = _hide_list[i];
+                ImGui.Text($"  {(e[0] == 0 ? "textureless" : $"{e[0]:F0}x{e[1]:F0} atlas")} quad {e[2]:F0}-{e[3]:F0} x {e[4]:F0}-{e[5]:F0} units   hidden last frame: {(i < 16 ? _hide_hits[i] : 0)}"); ImGui.SameLine();
+                if (ImGui.SmallButton($"remove##hl{i}")) { _hide_list.RemoveAt(i); _hide_list_dirty = true; break; }
+            }
+            if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
+            ImGui.Text("cursor experiment - hide 2D draws:"); ImGui.SameLine();
+            ImGui.RadioButton("off##uh", ref _ui_hide, 0); ImGui.SameLine(); ImGui.RadioButton("1024x1024 atlas, in battle##uh", ref _ui_hide, 3); ImGui.SameLine();
+            ImGui.RadioButton("1024x1024 atlas, always##uh", ref _ui_hide, 1); ImGui.SameLine(); ImGui.RadioButton("+ textureless draws##uh", ref _ui_hide, 2); ImGui.SameLine();
+            ImGui.RadioButton("textureless only, in battle##uh", ref _ui_hide, 4); ImGui.SameLine();
+            ImGui.RadioButton("textureless except window backgrounds, in battle##uh", ref _ui_hide, 5); ImGui.SameLine(); ImGui.TextDisabled($"hidden last frame: {_ui_hidden_n}");
             ImGui.Text("battles start in:"); ImGui.SameLine();
             ImGui.RadioButton("the current view##bv", ref _battle_view, -1); ImGui.SameLine(); ImGui.RadioButton("first person##bv", ref _battle_view, 1); ImGui.SameLine();
             ImGui.RadioButton("third person##bv", ref _battle_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##bv", ref _battle_view, 2); ImGui.SameLine(); ImGui.TextDisabled("(the view from before returns when the battle ends)");
@@ -1228,16 +1342,48 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.TreePop();
         }
 
+        if (ImGui.TreeNode("Pick a UI element (flat mode: hover it with the mouse, press F9)")) {
+            ImGui.TextWrapped("F9 logs every 2D UI draw under the mouse to ffxvr_diag.log (texture, index count, rectangle, constant buffer) and lists them here. F10 toggles slow motion so things that flash by (damage numbers) can be hovered.");
+            ImGui.SliderInt("slow motion: ms of sleep per frame", ref _slowmo_ms, 20, 1000); ImGui.SameLine(); ImGui.Checkbox("on (F10)", ref _slowmo_on);
+            ImGui.Text("highlight (F11 cycles):"); ImGui.SameLine();
+            ImGui.RadioButton("off##hv", ref _hover_mode, 0); ImGui.SameLine(); ImGui.RadioButton("the quads under the mouse##hv", ref _hover_mode, 1); ImGui.SameLine(); ImGui.RadioButton("every UI quad the mod sees##hv", ref _hover_mode, 2);
+            ImGui.TextDisabled("yellow = under the mouse (what F9 would pick), red = the pointer rule would hide it, green cross = a character's position through the game camera, white = other sprites");
+            ImGui.Text($"picks so far: {_pick_n}");
+            if (_pick_text.Length == 0) ImGui.TextDisabled("(nothing picked yet)");
+            else {
+                string[] hits = _pick_text.Split('\n'); int hi = 0;
+                foreach (string h in hits) {
+                    int bar = h.IndexOf("|sig="); string text = bar >= 0 ? h[..bar] : h;
+                    ImGui.TextWrapped(text);
+                    if (bar >= 0) {
+                        string[] f = h[(bar + 5)..].Split(','); ImGui.SameLine();
+                        if (f.Length == 4 && ImGui.SmallButton($"hide this##pk{hi}")) {
+                            var ci = System.Globalization.CultureInfo.InvariantCulture;
+                            float tw = float.Parse(f[0], ci), th = float.Parse(f[1], ci), w = float.Parse(f[2], ci), hh = float.Parse(f[3], ci);
+                            // width gets room for pulsing (about half to 1.3x), height a few units; no duplicates
+                            float[] e = { tw, th, MathF.Floor(w * 0.5f), MathF.Ceiling(w * 1.3f), MathF.Floor(hh - 3), MathF.Ceiling(hh + 3) };
+                            bool dup = _hide_list.Exists(x => x[0] == e[0] && x[1] == e[1] && x[2] == e[2] && x[3] == e[3] && x[4] == e[4] && x[5] == e[5]);
+                            if (!dup && _hide_list.Count < 16) { _hide_list.Add(e); _hide_list_dirty = true; _logger.Info($"hide list: added {tw}x{th} quad {w}x{hh} from a pick"); }
+                        }
+                    }
+                    hi++;
+                }
+            }
+            ImGui.TreePop();
+        }
+
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
-            ImGui.SliderFloat("marker height", ref _marker_height, 0f, 100f);
+            ImGui.Checkbox("experimental: the game's own cursor art at the markers (did not work: the atlas coordinates' source is unknown)", ref _markers_game_art); ImGui.SameLine(); ImGui.TextDisabled($"sprites drawn last frame: {_markers_game_art_n}");
+            ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f); ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
             ImGui.TreePop();
         }
 
         if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
             if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves"); }
+            if (_fn_ui_atlas_dump != null) { if (ImGui.Button("Dump UI atlases")) _fn_ui_atlas_dump(); ImGui.SameLine(); ImGui.Text("the 1024x1024 sprite sheets the UI samples this frame -> ui_atlas_*.dds next to the mod (do it in a battle with a target selected)"); }
             if (_fn_census_arm != null) { if (ImGui.Button("Stack census (character draws)")) _fn_census_arm(1872, 16384); ImGui.SameLine(); ImGui.Text("ffxvr_stacks.log: the game's call chains behind one frame's skinned-character uploads (where the draw/cull loop lives)"); }
             if (_fn_dump_cb != null) {
                 ImGui.SetNextItemWidth(90); ImGui.InputInt("##cbsize", ref _dump_cb_size, 0); ImGui.SameLine();
@@ -1455,128 +1601,99 @@ public sealed unsafe class FFXVRModule : FhModule {
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
         int pick = -1;
-        // Battle: whoever stands in the player's slot. The slot is one of the area's party positions
-        // (ptr_pos_def -> party_pos); a swapped-out character walks to a run position (party_run_pos, the
-        // "bench"), so: keep the current character until he reaches the bench, then follow the visible party
-        // member nearest the slot (the one running in to replace him).
+        // Battle: the eyes follow a chr id chosen from the game's field roster (see the state above).
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         if (in_battle != _btl_was) {
-            _btl_was = in_battle; _btl_chr = -1; _btl_slot_known = false; _btl_who = ""; _btl_area = -1; _btl_bench_frames = 0; _btl_diag_done = false; _btl_aeon_out = false;
+            _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
+            for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
             if (in_battle) { if (_battle_view >= 0 && _battle_view != _fp_mode) { _btl_mode_before = _fp_mode; apply_mode_scale(_fp_mode, _battle_view); _fp_mode = _battle_view; } }
             else if (_btl_mode_before >= 0) { if (_btl_mode_before != _fp_mode) { apply_mode_scale(_fp_mode, _btl_mode_before); _fp_mode = _btl_mode_before; } _btl_mode_before = -1; }
         }
         if (in_battle && _battle_follow) {
             Chr* plys = Globals.Battle.player_characters;
-            // The slot: taken from the field itself, since ptr_pos_def did not read as a usable area table
-            // (area_count 0). When the first command window opens everyone is standing on their slots; the three
-            // visible party members nearest the monsters are the field. Tidus if he is one of them, else the
-            // lowest party index (Yuna before Auron...), and his position is the slot to follow.
-            if (!_btl_slot_known && plys != null) {
-                BtlWindow* bw = Globals.Battle.cur_window;
-                if (read(bw, out BtlWindow w) && w.state == 4) {
-                    Chr* mons = Globals.Battle.monster_characters; float cx = 0, cz = 0; int cn = 0;
-                    for (int i = 0; i < 16 && mons != null; i++) if (read(mons + i, out Chr mc) && mc.stat_visible != 0 && mc.actor != null && read(mc.actor, out Actor ma) && live(ma)) { cx += ma.chr_pos_vec.X; cz += ma.chr_pos_vec.Z; cn++; }
-                    if (cn > 0) {
-                        cx /= cn; cz /= cn;
-                        var field = new List<(float d, int i, string name, Vector4 pos)>();
-                        for (int i = 0; i < 16; i++) {
-                            if (!read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
-                            float dx = pa.chr_pos_vec.X - cx, dz = pa.chr_pos_vec.Z - cz; float d = MathF.Sqrt(dx * dx + dz * dz);
-                            if (d < 300f) field.Add((d, i, actor_name(pa.chr_name), pa.chr_pos_vec));
-                        }
-                        field.Sort((a, b) => a.d.CompareTo(b.d));
-                        if (field.Count > 3) field.RemoveRange(3, field.Count - 3);
-                        int pick_i = -1; foreach (var f in field) if (f.name == _fp_actor) pick_i = f.i;
-                        if (pick_i < 0) foreach (var f in field) if (pick_i < 0 || f.i < pick_i) pick_i = f.i;
-                        if (pick_i >= 0) {
-                            var f = field.Find(x => x.i == pick_i);
-                            _btl_field.Clear(); foreach (var x in field) _btl_field.Add(x.pos);
-                            _btl_tidus_on = field.Exists(x => x.name == _fp_actor);
-                            _btl_slot_pos = f.pos; _btl_slot_known = true; _btl_area = -1; _btl_chr = pick_i; _btl_who = f.name; _btl_bench_frames = 0;
-                            var sb = new System.Text.StringBuilder($"battle follow: field ="); foreach (var x in field) sb.Append($" ply{x.i} {x.name} ({x.pos.X:F1},{x.pos.Z:F1}) d{x.d:F0}");
-                            sb.Append($" -> following {f.name} (ply {pick_i}) on ({f.pos.X:F1},{f.pos.Z:F1})"); _logger.Info(sb.ToString());
-                        }
-                    }
+            // The roster: three chr ids, 0xFF = empty slot. Kept by the game at setup, on swaps, summons and dismissals.
+            bool roster_ok = true;
+            try { for (int i = 0; i < 3; i++) _btl_roster[i] = FhUtil.get_at<byte>(k_roster_off + i); } catch { roster_ok = false; }
+            // before setup has run the bytes are stale (seen: [0,0,0]); a real roster never repeats an id
+            if (_btl_roster[0] == _btl_roster[1] && _btl_roster[0] != 0xFF || _btl_roster[1] == _btl_roster[2] && _btl_roster[1] != 0xFF || _btl_roster[0] == _btl_roster[2] && _btl_roster[0] != 0xFF) roster_ok = false;
+            if (roster_ok && plys != null) {
+                static bool is_aeon(byte id) => id >= 8 && id <= 0x11;
+                static bool is_party(byte id) => id <= 6;
+                bool on_field(int id) { for (int i = 0; i < 3; i++) if (_btl_roster[i] == id) return true; return false; }
+                int slot_of(int id) { for (int i = 0; i < 3; i++) if (_btl_roster[i] == id) return i; return -1; }
+                bool was_on(int id) { for (int i = 0; i < 3; i++) if (_btl_roster_prev[i] == id) return true; return false; }
+                int lowest_on() { int b = -1; for (int i = 0; i < 3; i++) if (is_party(_btl_roster[i]) && (b < 0 || _btl_roster[i] < b)) b = _btl_roster[i]; return b; }
+                // entity index of a chr id (the roster is ids; the actor comes from the entity)
+                int ply_of(int id) { for (int i = 0; i < 18; i++) if (read(plys + i, out Chr pc) && pc.chr_id == id && pc.actor != null) return i; return -1; }
+
+                bool changed = false; for (int i = 0; i < 3; i++) if (_btl_roster[i] != _btl_roster_prev[i]) changed = true;
+                if (changed) _logger.Info($"battle follow: roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] (was [{_btl_roster_prev[0]},{_btl_roster_prev[1]},{_btl_roster_prev[2]}])");
+
+                int aeon_id = -1; for (int i = 0; i < 3; i++) if (is_aeon(_btl_roster[i])) aeon_id = _btl_roster[i];
+                int want = _btl_follow_id; string why = null;
+
+                if (aeon_id >= 0) {
+                    // Summon: the party walks off and the summoner stays to command the Aeon - the summoner's eyes.
+                    // The aeon entity records the summoner's chr id (+0x6D1); Yuna if that does not read sensibly.
+                    if (!_btl_aeon_out) { _btl_aeon_out = true; _btl_pre_summon_id = _btl_follow_id; }
+                    int summoner = 1; int ai = ply_of(aeon_id);
+                    if (ai >= 0 && read((byte*)(plys + ai) + k_aeon_summoner_off, out byte sb) && sb <= 6) summoner = sb;
+                    if (want != summoner) { want = summoner; why = $"summon (aeon {aeon_id}) -> summoner {summoner}'s eyes"; }
                 }
-            }
-            if (_btl_slot_known && plys != null) {
-                // Tidus joining the field takes the eyes, whoever they were on; the slot becomes the one he arrives at.
-                for (int i = 0; i < 16; i++) {
-                    if (!read(plys + i, out Chr pc) || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa) || actor_name(pa.chr_name) != _fp_actor) continue;
-                    bool on = false; Vector4 at = default;
-                    if (pc.stat_visible != 0) foreach (var fp in _btl_field) { float dx = pa.chr_pos_vec.X - fp.X, dz = pa.chr_pos_vec.Z - fp.Z; if (dx * dx + dz * dz < 12f * 12f) { on = true; at = fp; } }
-                    if (on && !_btl_tidus_on && _btl_chr != i) { _btl_chr = i; _btl_who = _fp_actor; _btl_slot_pos = at; _btl_bench_frames = 0; _logger.Info($"battle follow: {_fp_actor} joined the field at ({at.X:F1},{at.Z:F1}); following him"); }
-                    _btl_tidus_on = on;
-                    break;
-                }
-                // Summon: while an Aeon is out (a visible party entry beyond the seven characters - chr_id 8+ is the
-                // assumption, logged when first seen), the party walks off and Yuna stays to command it: her eyes.
-                {
-                    int aeon = -1; for (int i = 0; i < 16 && aeon < 0; i++) if (read(plys + i, out Chr pc) && pc.chr_id >= 8 && pc.chr_id < 64 && pc.stat_visible != 0 && pc.actor != null && read(pc.actor, out Actor pa) && live(pa) && MathF.Abs(pa.chr_pos_vec.Z) < 500f) aeon = i;
-                    if (aeon >= 0 && !_btl_aeon_out) { _btl_aeon_out = true; if (read(plys + aeon, out Chr ac) && ac.actor != null && read(ac.actor, out Actor aa)) _logger.Info($"battle follow: aeon out: ply {aeon} chr_id {ac.chr_id} {actor_name(aa.chr_name)} at ({aa.chr_pos_vec.X:F1},{aa.chr_pos_vec.Z:F1})"); }
-                    if (aeon < 0 && _btl_aeon_out) { _btl_aeon_out = false; _btl_bench_frames = 0; }
+                else {
                     if (_btl_aeon_out) {
-                        for (int i = 0; i < 16; i++) {
-                            if (!read(plys + i, out Chr pc) || pc.chr_id != 1 || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;   // Yuna
-                            if (_btl_chr != i) { _btl_chr = i; _btl_who = actor_name(pa.chr_name); _logger.Info("battle follow: summon -> Yuna's eyes"); }
-                            _btl_slot_pos = pa.chr_pos_vec; _btl_bench_frames = 0;   // wherever she stands to command it is the slot for now
-                            break;
-                        }
+                        // dismissed: back to whoever had the eyes before the summon, if still on the field
+                        _btl_aeon_out = false;
+                        if (_btl_pre_summon_id >= 0 && on_field(_btl_pre_summon_id)) { want = _btl_pre_summon_id; why = "aeon dismissed -> back to " + want; }
+                        _btl_pre_summon_id = -1;
+                    }
+                    // Tidus joining the field takes the eyes, whoever they were on.
+                    if (on_field(0) && !was_on(0) && want != 0) { want = 0; why = "Tidus joined the field"; }
+                    // Manual: next party member on the field (left grip + right stick click, or Insert), in slot order.
+                    if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;
+                    if (_btl_cycle_req > 0) {
+                        _btl_cycle_req = 0; int k = slot_of(want);
+                        for (int step = 1; step <= 3; step++) { byte id = _btl_roster[(k + step + 3) % 3]; if (is_party(id) && id != want) { want = id; why = "manual"; break; } }
+                    }
+                    // Nobody yet, or the followed character left the field: the one who took the slot, else Tidus, else the lowest id.
+                    if (want < 0 || !on_field(want)) {
+                        int succ = _btl_follow_slot >= 0 && is_party(_btl_roster[_btl_follow_slot]) ? _btl_roster[_btl_follow_slot] : -1;
+                        int next = on_field(0) ? 0 : (succ >= 0 ? succ : lowest_on());
+                        if (next >= 0) { want = next; why = _btl_follow_id < 0 ? "battle start" : $"{_btl_follow_id} left the field"; }
                     }
                 }
-                // Manual: next party member on the field (left grip + right stick click, or Insert), in party order.
-                if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;
-                if (_btl_cycle_req > 0) {
-                    _btl_cycle_req = 0;
-                    var onfield = new List<(int i, string name, Vector4 pos)>();
-                    for (int i = 0; i < 16; i++) {
-                        if (!read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
-                        bool on = false; foreach (var fp in _btl_field) { float dx = pa.chr_pos_vec.X - fp.X, dz = pa.chr_pos_vec.Z - fp.Z; if (dx * dx + dz * dz < 40f * 40f) on = true; }
-                        if (on) onfield.Add((i, actor_name(pa.chr_name), pa.chr_pos_vec));
+                for (int i = 0; i < 3; i++) _btl_roster_prev[i] = _btl_roster[i];
+                // a switch still waiting for the newcomer to arrive stays wanted (the join is a one-frame event)
+                if (want == _btl_follow_id && _btl_pending_id >= 0 && _btl_pending_id != want && on_field(_btl_pending_id)) { want = _btl_pending_id; why = _btl_pending_why; }
+                else if (_btl_pending_id >= 0 && !on_field(_btl_pending_id)) _btl_pending_id = -1;
+
+                if (want >= 0 && want != _btl_follow_id) {
+                    // A swap: the newcomer runs in from the bench. Wait until he has stopped moving (or a few seconds)
+                    // so the eyes do not ride the run-in; battle start, summons and manual picks are immediate.
+                    bool swap_in = _btl_follow_id >= 0 && why != null && (why == "Tidus joined the field" || why.EndsWith("left the field"));
+                    int wi = ply_of(want);
+                    if (_btl_pending_id != want) { _btl_pending_id = want; _btl_pending_why = why ?? ""; _btl_pending_frames = 0; _btl_pending_still = 0; _logger.Info($"battle follow: {why} -> chr {want}{(swap_in ? ", waiting for him to arrive" : "")}"); }
+                    bool ready = !swap_in || wi < 0;
+                    if (!ready && read(plys + wi, out Chr wc) && wc.actor != null && read(wc.actor, out Actor wa) && live(wa)) {
+                        float dx = wa.chr_pos_vec.X - _btl_pending_pos.X, dz = wa.chr_pos_vec.Z - _btl_pending_pos.Z;
+                        _btl_pending_still = dx * dx + dz * dz < 0.3f * 0.3f ? _btl_pending_still + 1 : 0;
+                        _btl_pending_pos = wa.chr_pos_vec;
+                        if (_btl_pending_frames > 30 && _btl_pending_still > 15) ready = true;   // ran in, then stood still a quarter second
                     }
-                    if (onfield.Count > 0) {
-                        int k = onfield.FindIndex(x => x.i == _btl_chr); var nx = onfield[(k + 1) % onfield.Count];
-                        _btl_chr = nx.i; _btl_who = nx.name; _btl_slot_pos = nx.pos; _btl_bench_frames = 0;
-                        _logger.Info($"battle follow: manual -> {nx.name} (ply {nx.i})");
+                    if (++_btl_pending_frames > 300) ready = true;
+                    if (ready) {
+                        _btl_follow_id = want; _btl_pending_id = -1; _btl_pending_frames = 0;
+                        _btl_chr = ply_of(want); _btl_who = _btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null && read(fc.actor, out Actor fa) ? actor_name(fa.chr_name) : $"chr {want}";
+                        _logger.Info($"battle follow: {why} -> following {_btl_who} (chr {want}, ply {_btl_chr})");
                     }
                 }
-                // is the followed character on the bench (at a run position)?
-                bool benched = false;
-                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr cc) && cc.actor != null && read(cc.actor, out Actor ca) && live(ca)) {
-                    if (_btl_area >= 0 && read(btl_v.ptr_pos_def + _btl_area, out BtlArea area)) {
-                        for (int s = 0; s < Math.Min((int)area.count_party_pos, 8) && !benched; s++) {
-                            Vector4 rp; if (!read((byte*)btl_v.ptr_pos_def + area.offset_party_run_pos + s * 16, out rp)) continue;
-                            float dx = ca.chr_pos_vec.X - rp.X, dz = ca.chr_pos_vec.Z - rp.Z;
-                            if (dx * dx + dz * dz < 20f * 20f) benched = true;
-                        }
+                if (_btl_follow_id >= 0) {
+                    if (_btl_chr < 0 || !read(plys + _btl_chr, out Chr cc) || cc.chr_id != _btl_follow_id) _btl_chr = ply_of(_btl_follow_id);
+                    int sl = slot_of(_btl_follow_id); if (sl >= 0) _btl_follow_slot = sl;
+                    if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null && read(fc.actor, out Actor fa) && live(fa)) {
+                        pick = (int)(((byte*)fc.actor - (byte*)actors) / sizeof(Actor)); if (pick < 0 || pick >= 48) pick = -1;
                     }
-                    else {
-                        // distance rule: far from the slot and not near any monster (an attack run goes to a monster)
-                        float sx = ca.chr_pos_vec.X - _btl_slot_pos.X, sz = ca.chr_pos_vec.Z - _btl_slot_pos.Z;
-                        if (sx * sx + sz * sz > 60f * 60f) {
-                            bool near_mon = false; Chr* mons = Globals.Battle.monster_characters;
-                            for (int i = 0; i < 16 && !near_mon && mons != null; i++) {
-                                if (!read(mons + i, out Chr mc) || mc.stat_visible == 0 || mc.actor == null || !read(mc.actor, out Actor ma) || !live(ma)) continue;
-                                float mx = ca.chr_pos_vec.X - ma.chr_pos_vec.X, mz = ca.chr_pos_vec.Z - ma.chr_pos_vec.Z; if (mx * mx + mz * mz < 45f * 45f) near_mon = true;
-                            }
-                            if (!near_mon) benched = true;
-                        }
-                    }
-                    if (cc.stat_visible == 0) benched = true;
                 }
-                else benched = true;
-                _btl_bench_frames = benched ? _btl_bench_frames + 1 : 0;
-                if (_btl_bench_frames > 10) {
-                    // the visible party member nearest the slot takes over (the replacement running in)
-                    int best = -1; float best_d = float.MaxValue;
-                    for (int i = 0; i < 16; i++) {
-                        if (i == _btl_chr || !read(plys + i, out Chr pc) || pc.stat_visible == 0 || pc.actor == null || !read(pc.actor, out Actor pa) || !live(pa)) continue;
-                        float dx = pa.chr_pos_vec.X - _btl_slot_pos.X, dz = pa.chr_pos_vec.Z - _btl_slot_pos.Z; float d = dx * dx + dz * dz;
-                        if (d < 40f * 40f && d < best_d) { best_d = d; best = i; }
-                    }
-                    if (best >= 0 && read(plys + best, out Chr bc) && bc.actor != null && read(bc.actor, out Actor ba)) { _btl_chr = best; _btl_who = actor_name(ba.chr_name); _btl_bench_frames = 0; if (actor_name(ba.chr_name) == _fp_actor) _btl_tidus_on = true; _logger.Info($"battle follow: now {_btl_who} (ply {best})"); }
-                }
-                if (_btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null) { pick = (int)(((byte*)fc.actor - (byte*)actors) / sizeof(Actor)); if (pick < 0 || pick >= 48) pick = -1; }
             }
         }
         if (pick >= 0) { }
@@ -1604,6 +1721,23 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_fp_head_set != null) _fn_fp_head_set(_fp_head_anchor, _fp_head_up, _fp_head_smooth, _fp_head_fwd);
         push_battle_anchor();
         if (_fn_floor_set != null) _fn_floor_set(_diorama_floor);
+        if (_fn_ui_hide != null) {
+            bool hide = _ui_hide == 1 || _ui_hide == 2 || (_ui_hide == 3 && in_battle);
+            _fn_ui_hide(hide ? 1024u : 0u, 1024u, (_ui_hide == 2 || (_ui_hide == 4 && in_battle)) ? 1 : (_ui_hide == 5 && in_battle) ? 2 : 0);
+            if (_fn_ui_hidden_draws != null) _ui_hidden_n = _fn_ui_hidden_draws();
+            if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
+            if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on ? 1 : 0);
+            if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
+            if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
+            if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
+            if (_hide_list_dirty && _fn_ui_hide_list != null) {
+                _hide_list_dirty = false; float* buf = stackalloc float[16 * 6]; int cnt = Math.Min(_hide_list.Count, 16);
+                for (int i = 0; i < cnt; i++) for (int k = 0; k < 6; k++) buf[i * 6 + k] = _hide_list[i][k];
+                _fn_ui_hide_list(buf, cnt);
+            }
+            if (_fn_ui_hide_hits != null) { fixed (uint* hp = _hide_hits) _fn_ui_hide_hits(hp, 16); }
+            if (_fn_ui_rect_stats != null) _rect_stats = _fn_ui_rect_stats();
+        }
     }
 
     private void push_markers() {
@@ -1615,6 +1749,23 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void draw_markers() {
         _markers_drawn = 0; _mk_n = 0;
         try { draw_markers_inner(); } finally { push_markers(); }
+    }
+
+    // The game's own field roster (exe-analysis.md section 15): three chr ids at
+    // 0xD2C895 (0xFF = empty slot), the party saved while an Aeon is out at
+    // 0xD2C89C (7 bytes), reserves at 0xD2C8A3 (17 bytes). Logged for now;
+    // meant to replace the distance heuristics in btl_follow once confirmed.
+    private static string btl_field_str() {
+        try {
+            var sb = new System.Text.StringBuilder("[");
+            for (int i = 0; i < 3; i++) { if (i > 0) sb.Append(','); sb.Append(FhUtil.get_at<byte>(0xD2C895 + i)); }
+            sb.Append("] saved=[");
+            for (int i = 0; i < 7; i++) { if (i > 0) sb.Append(','); sb.Append(FhUtil.get_at<byte>(0xD2C89C + i)); }
+            sb.Append("] reserve=[");
+            for (int i = 0; i < 7; i++) { if (i > 0) sb.Append(','); sb.Append(FhUtil.get_at<byte>(0xD2C8A3 + i)); }
+            sb.Append(']');
+            return sb.ToString();
+        } catch { return "?"; }
     }
 
     private void draw_markers_inner() {
@@ -1636,7 +1787,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _last_pos_log = now;
             var sb = new System.Text.StringBuilder(
                 $"window: state={w.state} type={w.type} cur_chr_id={w.cur_chr_id} depth={w.submenu_depth} cmd={w.window_command_id} "
-              + $"sel_idx={w.sel_idx} sel_idx_render={w.sel_idx_render} sel_cmd={w.sel_command_id} sel_chrs=0x{w.sel_chrs:X4} sel_mons=0x{w.sel_mons:X4}  actors:");
+              + $"sel_idx={w.sel_idx} sel_idx_render={w.sel_idx_render} sel_cmd={w.sel_command_id} sel_chrs=0x{w.sel_chrs:X4} sel_mons=0x{w.sel_mons:X4}"
+              + $"  field={btl_field_str()}  actors:");
             for (int i = 0; i < 16; i++) {
                 if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
                     sb.Append($" mon{i}[id={mc.id} chr_id={mc.chr_id} vis={mc.stat_visible}]=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
@@ -1670,16 +1822,21 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (!read(c.actor, out Actor a)) return;
         if (c.stat_visible == 0 && label == "target") { /* still mark; the game does */ }
 
+        // Where the pointer's tip goes: just above the actor's head - the highest sub-position (actor space
+        // has Y down, so the lowest Y), which follows each monster's own height - plus the clearance slider.
+        float head_y = a.chr_pos_vec.Y; bool have_head = false;
+        for (int k = 0; k < 26; k++) { Vector4 sp = a.chr_optpos[k]; if (MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f && sp.Y < head_y && a.chr_pos_vec.Y - sp.Y < 400f) { head_y = sp.Y; have_head = true; } }
+        float tip_y = -(have_head ? head_y : a.chr_pos_vec.Y - 60f) + _marker_height;   // render space (Y negated)
         // For the headset: the same point as 3D geometry, drawn natively per eye.
         if (_mk_n < 32) {
-            _mk_pos[_mk_n * 3 + 0] = -a.chr_pos_vec.X; _mk_pos[_mk_n * 3 + 1] = -a.chr_pos_vec.Y + _marker_height; _mk_pos[_mk_n * 3 + 2] = a.chr_pos_vec.Z;
+            _mk_pos[_mk_n * 3 + 0] = -a.chr_pos_vec.X; _mk_pos[_mk_n * 3 + 1] = tip_y; _mk_pos[_mk_n * 3 + 2] = a.chr_pos_vec.Z;
             _mk_col[_mk_n] = color; _mk_n++;
         }
 
         float* ndc = stackalloc float[2];
         // Actor positions are in the game's PS2-era space; the renderer's world
         // space negates X and Y (verified against the skinned world matrices).
-        if (_fn_project(-a.chr_pos_vec.X, -a.chr_pos_vec.Y + _marker_height, a.chr_pos_vec.Z, ndc) == 0) return;
+        if (_fn_project(-a.chr_pos_vec.X, tip_y, a.chr_pos_vec.Z, ndc) == 0) return;
 
         Vector2 size = ImGui.GetIO().DisplaySize;
         float sx = (ndc[0] * 0.5f + 0.5f) * size.X;
@@ -1716,6 +1873,15 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_begin_frame != null) _fn_begin_frame();
 
         if (ImGui.IsKeyPressed(ImGuiKey.F8)) _window_open = !_window_open;
+        if (ImGui.IsKeyPressed(ImGuiKey.F10)) _slowmo_on = !_slowmo_on;
+        if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
+        draw_hover_highlight();
+        if (_fn_slowmo != null) _fn_slowmo(_slowmo_on ? _slowmo_ms : 0);
+        if (ImGui.IsKeyPressed(ImGuiKey.F9) && _fn_ui_pick != null) {
+            Vector2 m = ImGui.GetMousePos(), ds = ImGui.GetIO().DisplaySize;
+            if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
+        }
+        if (_fn_ui_pick_result != null) { try { string r = Marshal.PtrToStringAnsi(_fn_ui_pick_result()) ?? ""; if (r.Length > 0) _pick_text = r; } catch { } }
         if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
 
         if (_window_open && _native_init_done) {

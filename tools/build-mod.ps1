@@ -1,4 +1,4 @@
-# build-mod.ps1
+﻿# build-mod.ps1
 #
 # Builds both halves of the FFX VR mod, deploys them into the game's
 # fahrenheit\mods folder, and makes sure the mod id is listed in 'loadorder'.
@@ -170,7 +170,15 @@ Log "[managed] $outDir"
 $dest = Join-Path $modsDir $modId
 Log ''
 Log "[deploy] -> $dest"
-if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
+# Keep the user's files: settings, hand calibration, bone labels, captures and logs live next to the
+# DLLs. Only the build output is replaced (the whole folder used to be wiped, which reset the ini
+# on every build).
+$keep = @('*.ini', '*.ini.bak', '*.log', '*.txt', '*.bin', '*.json')
+if (Test-Path $dest) {
+    Get-ChildItem $dest -Recurse -File | Where-Object {
+        $n = $_.Name; -not ($keep | Where-Object { $n -like $_ }) -or $n -like '*.deps.json' -or $n -like '*.runtimeconfig.json'
+    } | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
 Copy-Item (Join-Path $outDir '*') -Destination $dest -Recurse -Force

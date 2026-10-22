@@ -331,3 +331,57 @@ mount's actor: whether Tidus stays `c101` with a riding motion and the
 chocobo is a second actor glued to him, or the pair becomes one model, is a
 runtime question (actor table log while riding).
 
+
+## 15. The battle roster the game keeps (from Farplane, 21 Oct 2026)
+
+[Farplane](https://github.com/topher-au/Farplane) is a memory editor for the
+PC remaster. Its FFX offset table is stale, but it resolves offsets by byte
+pattern (`Memory/OffsetScanner.cs`), and every pattern still matches our
+exe, so the addresses below are confirmed against the current build.
+`FhUtil.get_at<T>(off)` offsets are gva - 0x400000.
+
+| gva | FhUtil off | what |
+|---|---|---|
+| 0x2310EA0 | 0x1F10EA0 | `PartyInBattleFlags`: 8 bytes by chr id, written at the **results screen** (0x783338, from entity +0xDC8). Not live - useless for following. |
+| 0x2310EC4 | 0x1F10EC4 | `PartyGainedApFlags`, same story. |
+| 0x11334D4 / 0x1134468 | 0xD334D4 / 0xD34468 | party / enemy entity list pointers (= Fahrenheit's `player_characters` / `monster_characters`); entities are 0xF90 bytes, 18 party slots (7 characters + aeons, chr ids 0..0x11) |
+| 0x11307E8 | 0xD307E8 | `PartyList`: the menu party order, 8 bytes of chr id, 0xFF empty |
+| 0x112A8F8 | 0xD2A8F8 | battle debug flags, one byte each: EnemyInvincible, PartyInvincible, EnemyInput, ?, **FreeCamera** (+4, the one Fahrenheit's `BtlDebugFlags` exposes), ... +8 DisableAttackAnimation, +0x23 DisplayBattlefieldGrid, +0x25 PlayerAlways1HP |
+| 0x0CCC7C8 | 0x8CC7C8 | current room id (u16), used by Farplane's auto-free-camera mod to re-arm the flag on room change |
+| 0x18763E0 / 0x16AD8A0 | 0x14763E0 / 0x12AD8A0 | blitzball game pointer / blitzball mode (for later) |
+
+The useful find is not in Farplane's table at all - it fell out of reading
+the code around the flags above:
+
+**Field roster, live**, gva 0x112C895 (`FhUtil` 0xD2C895): **three bytes of
+chr id, the characters currently on the field, 0xFF for an empty slot.**
+Index = field slot (entity +0x4FE holds the same slot number). Maintained
+by the game itself:
+
+- battle setup 0x79C380: `PartyList[0..2]` go into the three slots, each
+  entity gets +0x10 = 1 (active) and +0xDC8 = 1 (participated); the rest of
+  `PartyList` is copied to the **reserve list** at 0x112C8A3 (17 bytes).
+- character swap 0x7ADC40: finds the outgoing id in the field list and
+  writes the incoming id in its place; the reverse in the reserve list; the
+  incoming entity gets +0xDC8 = 1 (0x7ADD31) and copies the slot bytes
+  +0x4FC..+0x4FE from the outgoing one.
+- summon 0x7ADF80..: the field list is copied to the **saved party** at
+  0x112C89C (7 bytes) and reserves to 0x112C8B4; every field member except
+  the summoner is swapped out (swap with 0xFF), then the summoner is swapped
+  for the aeon; the aeon entity's +0x6D1 = summoner's chr id. Magus Sisters
+  are chr ids 0xF/0x10/0x11 and all three go in. Aeon chr ids are 8..0x11.
+- dismiss 0x7AEED3: saved party copied back into the field list, reserves
+  restored.
+
+So "who is on the field" is three byte reads, with no distance heuristic,
+and "is an aeon out" is `field[0] in 8..0x11`. The mod logs
+`field=[..] saved=[..] reserve=[..]` in the `window:` line now (markers on)
+so the next battle test can confirm it before `btl_follow` is switched over.
+
+Entity layout from Farplane's `BattleEntityData` (0xF90): +0x4C name (64),
++0x8C help text (256), +0x18C scan text (512), +0x3E4 animation_start,
++0x3E6 freeze-animation byte, +0x3F0 animation_speed, +0x58E hp_max,
++0x5A6 strength.. (8 stat bytes), +0x5B6 overdrive current/max,
++0x5D0 hp_current / +0x5D4 mp_current, +0x5FE.. status bytes,
++0x6C0 action_defend, +0xF8F battle_row. Nothing about the camera or
+the cursor sprite.
