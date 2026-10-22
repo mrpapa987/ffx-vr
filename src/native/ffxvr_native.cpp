@@ -733,6 +733,13 @@ float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
 // the base). The resolve before it is the clean per-eye image; the UI draws
 // are re-issued into a transparent texture shown on a head-locked quad.
 enum UiState { UI_IDLE = 0, UI_RESOLVED = 1, UI_PASS = 2, UI_DONE = 3 };
+// Blitzball: the scoreboard and the radar disc are drawn into the scene target after the scene resolve and
+// before the UI pass opens, with no camera we recognise (identical in both eyes: double vision). With
+// g_blitz_overlay on, the first such draw opens the UI pass early (g_ui_early) so the run lands in the UI
+// layer; the resolve that follows the run pauses the pass instead of ending it (g_ui_early_keep), and the
+// next opener - another such draw, or the usual depth clear - resumes it without re-copying the eye images
+// (the game's own resolve now has the overlay baked in) and without clearing the UI layer.
+bool g_blitz_overlay = false, g_ui_early = false, g_ui_early_keep = false; uint32_t g_ui_early_draws = 0, g_ui_early_report = 0;
 int   g_ui_state = UI_IDLE;
 bool  g_ui_enabled = true;
 float g_ui_dist = 1.5f, g_ui_width = 1.6f;
@@ -1720,6 +1727,8 @@ extern "C" __declspec(dllexport) void ffxvr_ui_hide_list(const float* v, int cou
     for (int i = 0; i < count && i < 16; ++i) { const float* e = v + i * 6; g_hide_sigs[g_hide_sig_n++] = { (unsigned)e[0], (unsigned)e[1], e[2], e[3], e[4], e[5] }; }
 }
 extern "C" __declspec(dllexport) void ffxvr_ui_hide_pointers(int on) { g_hide_pointers = on != 0; }
+/// Blitzball overlay routing (see g_blitz_overlay); returns the draws routed last frame.
+extern "C" __declspec(dllexport) unsigned ffxvr_blitz_overlay(int on) { g_blitz_overlay = on != 0; return g_ui_early_report; }
 /// (pointer-rule hits since the last call) | (actors projected this frame) << 16
 extern "C" __declspec(dllexport) unsigned ffxvr_ui_pointer_stats() { unsigned n = (g_pointer_hits & 0xFFFF) | ((unsigned)g_actor_ui_n << 16); g_pointer_hits = 0; return n; }
 /// After ffxvr_on_draw returned with bit 17 set: the index range (first, count) of the draw to leave out.
@@ -3197,6 +3206,7 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 } // namespace
 
 static void ui_census_geometry();   // census helper, defined below ffxvr_on_draw's neighbours
+static void ui_pass_begin();        // the UI pass opener, defined with the clear hooks
 
 
 // ---------------------------------------------------------------------------
@@ -3604,7 +3614,20 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             }
         }
     }
+    if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && g_eye2_cur == nullptr
+        && g_cur_rtv_n > 0 && g_ctx && texture_of(g_cur_rtv[0]) == g_scene_live_tex) {
+        ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+        bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
+        ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
+        bool zwrite = false; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = dd.DepthEnable && dd.DepthWriteMask; ds->Release(); }
+        if (blend && !zwrite) {
+            if (g_ui_early_keep) { g_ui_early_keep = false; g_ui_state = UI_PASS; }
+            else ui_pass_begin();
+            if (g_ui_state == UI_PASS) g_ui_early = true;
+        }
+    }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
+    if (g_ui_draw_now && g_ui_early) g_ui_early_draws++;
     if (!g_stereo && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
         ID3D11Texture2D* gt = texture_of(g_cur_rtv[0]);
         if (gt) { const uint32_t c = ++g_flat_draws_per_target[gt]; if (c > g_flat_scene_draws) { g_flat_scene_draws = c; g_flat_scene_tex = gt; } }
@@ -4252,7 +4275,8 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                     // resolve is just a newer base, the pass reopens at the next
                     // depth clear. Once done, done: later resolves do not reopen.
                     if (g_ui_flat_pass && g_ui_draws_frame > 0) { g_ui_flat_pass = false; g_ui_draws_report = g_ui_draws_frame; }
-                    if (g_ui_state == UI_PASS) {
+                    if (g_ui_state == UI_PASS && g_ui_early) { g_ui_early = false; g_ui_early_keep = true; g_ui_state = UI_RESOLVED; }   // pause; the eye images stay as copied
+                    else if (g_ui_state == UI_PASS) {
                         if (g_ui_draws_frame > 0) { g_ui_state = UI_DONE; g_ui_pass_frame = g_frames; g_ui_draws_report = g_ui_draws_frame; }
                         else { g_ui_state = UI_RESOLVED; g_scene_resolved = dst; }
                     }
@@ -4275,6 +4299,10 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, voi
 
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
 static void ui_pass_begin();
+static void ui_pass_open() {
+    if (g_ui_early_keep) { g_ui_early_keep = false; g_ui_state = UI_PASS; return; }   // resume after an early overlay run
+    ui_pass_begin();
+}
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || g_ctx == nullptr) return;
     if (!g_stereo) {   // flat mode: the depth clear on the resolved scene target opens the UI pass
@@ -4291,7 +4319,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
         else if (depth && bound == g_scene_live_tex) {
             g_ui_depth_clears_frame++;
-            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_begin();   // screen frames keep their UI (subtitles) in the frame
+            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame
             else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
         }
     }
@@ -5250,6 +5278,7 @@ static void xr_tick() {
         if (g_imgui_tex && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;
     }
     g_ui_state = UI_IDLE; g_ui_last_frame_had_pass = ui_frame;
+    g_ui_early = false; g_ui_early_keep = false; g_ui_early_report = g_ui_early_draws; g_ui_early_draws = 0;
     if (ui_frame) {
         e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex;
         if (g_markers_3d) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);

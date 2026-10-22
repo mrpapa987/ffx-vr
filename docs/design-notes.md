@@ -1332,3 +1332,18 @@ radar background; who-has-the-ball (Farplane's blitz pointers).
   bisect hiding the last ~45 scene draws. If it is the scoreboard, the fix
   is to treat that run like the UI pass (into the UI layer), keyed on its
   VS cb size and position right before the UI-pass depth clear.
+- Headset report: the scoreboard is barely visible and doubled - as
+  predicted for a camera-less overlay painted into both eye images.
+  Census detail: the run is two parts - 42 quads after the scene resolve
+  (VS cb 256 B, two shader pairs), then a resolve, then two more draws
+  (one into an 832x624 viewport at the radar's place: the radar's disc,
+  drawn as geometry) - and only then the depth clear that opens the UI
+  pass. **Fix in the build (`blitz_overlay`, default on, bltz maps,
+  headset)**: on a blitz map, the first draw into the scene target after
+  the resolve with no camera image, blending on and no depth writes opens
+  the UI pass early; the resolve after the run pauses it rather than
+  ending it; the next such draw or the usual depth clear resumes it without
+  re-copying the eye images (the game's resolve then has the overlay baked
+  in) or clearing the UI layer. The run ends up on the head-locked panel.
+  The overlay counts routed draws. Field effects without a camera (fog,
+  water) are untouched: the rule only runs on blitz maps.

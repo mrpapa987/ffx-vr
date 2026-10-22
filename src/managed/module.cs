@@ -379,6 +379,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             try { _fn_ui_hide = (delegate* unmanaged[Cdecl]<uint, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide"); _fn_ui_hidden_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hidden_draws"); _fn_ui_hide_cursor = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_cursor"); _fn_ui_rect_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_rect_stats");
                   _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_hits"); _fn_draw_skip = (delegate* unmanaged[Cdecl]<uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_skip");
                   _fn_ui_hide_pointers = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_pointers"); _fn_ui_pointer_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pointer_stats");
+                  _fn_blitz_overlay = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_blitz_overlay");
                   _fn_ui_pick = (delegate* unmanaged[Cdecl]<float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick"); _fn_ui_pick_result = (delegate* unmanaged[Cdecl]<nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick_result");
                   _fn_slowmo = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_slowmo");
                   _fn_ui_hover = (delegate* unmanaged[Cdecl]<float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover"); _fn_ui_hover_rects = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover_rects"); } catch { }
@@ -752,6 +753,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "ui_hide":           int.TryParse(v, out _ui_hide); break;
                     case "hide_cursor":       _hide_cursor = v != "0"; break;
                     case "hide_pointers":     _hide_pointers = v != "0"; break;
+                    case "blitz_overlay":     _blitz_overlay = v != "0"; break;
                     case "markers_game_art":  _markers_game_art = v != "0"; break;
                     case "marker_scale":      float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _marker_scale); break;
                     case "hide_list":         hide_list_parse(v); break;
@@ -870,6 +872,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"ui_hide={_ui_hide}\n" +
             $"hide_cursor={(_hide_cursor ? 1 : 0)}\n" +
             $"hide_pointers={(_hide_pointers ? 1 : 0)}\n" +
+            $"blitz_overlay={(_blitz_overlay ? 1 : 0)}\n" +
             $"markers_game_art={(_markers_game_art ? 1 : 0)}\n" +
             $"marker_scale={_marker_scale.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}\n" +
             $"hide_list={hide_list_str()}\n" +
@@ -1213,6 +1216,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 if (ImGui.SmallButton($"remove##hl{i}")) { _hide_list.RemoveAt(i); _hide_list_dirty = true; break; }
             }
             if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
+            ImGui.Checkbox("blitzball: put the scoreboard and radar on the UI panel (they are drawn into the scene with no camera: double vision)", ref _blitz_overlay); ImGui.SameLine();
+            ImGui.TextDisabled(map_base(_map_last).StartsWith("bltz") ? $"routed last frame: {_blitz_overlay_n}" : "not in blitzball");
             ImGui.Text("cursor experiment - hide 2D draws:"); ImGui.SameLine();
             ImGui.RadioButton("off##uh", ref _ui_hide, 0); ImGui.SameLine(); ImGui.RadioButton("1024x1024 atlas, in battle##uh", ref _ui_hide, 3); ImGui.SameLine();
             ImGui.RadioButton("1024x1024 atlas, always##uh", ref _ui_hide, 1); ImGui.SameLine(); ImGui.RadioButton("+ textureless draws##uh", ref _ui_hide, 2); ImGui.SameLine();
@@ -1520,6 +1525,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     // where it is actually drawn (the nearest skinned-root translation in the ground plane), to learn how the
     // game turns its flat match positions into the 3D pool. Plus Farplane's blitz state words. Capped per session.
     private double _blitz_last_log = 0; private int _blitz_log_lines = 0; private string _map_last = "";
+    private bool _blitz_overlay = true; private uint _blitz_overlay_n = 0; private delegate* unmanaged[Cdecl]<int, uint> _fn_blitz_overlay;   // scoreboard / radar disc onto the UI panel
     private void blitz_auto_log() {
         double now = ImGui.GetTime(); if (now - _blitz_last_log < 0.5) return; _blitz_last_log = now;
         string map = map_name();
@@ -1767,6 +1773,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
             if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on ? 1 : 0);
             if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
+            if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
             if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
             if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
             if (_hide_list_dirty && _fn_ui_hide_list != null) {
