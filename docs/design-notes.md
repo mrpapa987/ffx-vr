@@ -1347,3 +1347,37 @@ radar background; who-has-the-ball (Farplane's blitz pointers).
   in) or clearing the UI layer. The run ends up on the head-locked panel.
   The overlay counts routed draws. Field effects without a camera (fog,
   water) are untouched: the rule only runs on blitz maps.
+- First test of the routing was worse: UI in one eye, a 2D pop-up at the
+  "Blitz Off" banner, UI hard to see after. The log shows "captured UI pass
+  0" on every frame: the resume re-armed the early flag, so the resolve
+  after the real UI pass paused it again instead of ending it; the frame
+  never counted as a UI frame and fell back to the backbuffer path, where
+  the UI draws had been diverted out of eye 2. Fixed (the resume does not
+  re-arm). Untested.
+- Position log (147 lines, 1716 athlete samples): the drawn root equals
+  the actor position (|dxz| 0, |dy| <= 14) - the actor table is the truth,
+  in 3D. Most of the match is at y = -520; athletes rise to -353 at times
+  (shots, keepers). Farplane's blitz pointers read zero here (game@0, mode
+  all 0): not useful at those offsets.
+
+### Alternative: a stereo cinema screen for blitzball (22 Oct 2026, idea)
+
+The user's proposal: a large flat screen in the room showing the game's
+own camera (cuts, chase camera and all), in stereo. It fits blitzball
+better than any free view: the authored camera is how the game is meant
+to be read, the screen is fixed in the room (no motion sickness), and
+everything 2D - menus, radar, the camera-less scoreboard - is identical in
+both eyes, which on a screen is exactly right (it sits on the screen
+plane). The overlay routing above becomes unnecessary in this mode.
+
+How: the override already renders both eyes from views we build. A
+"screen stereo" view = the game's own view and projection, the two eyes
+shifted by +-sep/2 along the camera's right vector (sep in game units,
+a slider), with a horizontal image shift in the projection so the
+convergence plane sits at a chosen depth (otherwise everything pops out
+of the screen). Submission: two quad layers, one per eye
+(XrCompositionLayerQuad.eyeVisibility LEFT / RIGHT), each sampling its
+eye's image, at the screen's pose - the virtual-screen layer we already
+have, doubled. Cost: what we render now. Open points: the screen's size
+and distance (a cinema-sized default), the depth amount, whether the
+pre-rendered FMVs and cutscenes want the same mode later.

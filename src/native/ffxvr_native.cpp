@@ -3621,9 +3621,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
         bool zwrite = false; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = dd.DepthEnable && dd.DepthWriteMask; ds->Release(); }
         if (blend && !zwrite) {
+            // Resuming after the pause is NOT early any more: the resolve that follows the real UI pass must
+            // end it (UI_DONE), or the frame is never treated as a UI frame (first test: UI in one eye only).
             if (g_ui_early_keep) { g_ui_early_keep = false; g_ui_state = UI_PASS; }
-            else ui_pass_begin();
-            if (g_ui_state == UI_PASS) g_ui_early = true;
+            else { ui_pass_begin(); if (g_ui_state == UI_PASS) g_ui_early = true; }
         }
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
