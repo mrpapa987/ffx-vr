@@ -153,7 +153,9 @@ public sealed unsafe class FFXVRModule : FhModule {
     // optional everywhere. The screen plane is the distance (game units) that sits exactly on the screen (nearer
     // pops out, farther recedes); depth 1 = the stereographers' 1/30 rule (eye separation = that distance / 30).
     private bool _s3_blitz = true, _s3_all = false; private float _s3_depth = 1f, _s3_plane = 300f;
-    private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_screen3d;
+    private bool _s3_auto = true; private float _s3_max_pop = 2.5f;   // auto depth: the screen plane follows the subject, pop-out capped (% of screen width)
+    private delegate* unmanaged[Cdecl]<int, float, float, int, float, void> _fn_screen3d;
+    private delegate* unmanaged[Cdecl]<int*, float*, float*, float*, float*, void> _fn_screen3d_status;
     private int _backdrop_mode = 1;
     private delegate* unmanaged[Cdecl]<int, int> _fn_cull_dist_set;
     private delegate* unmanaged[Cdecl]<int> _fn_cull_dist_get;
@@ -368,7 +370,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
             try { _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_atlas_dump"); _fn_motion_log = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_motion_log"); } catch { }
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
-            try { _fn_screen3d = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_screen3d"); } catch { }
+            try { _fn_screen3d = (delegate* unmanaged[Cdecl]<int, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_screen3d"); _fn_screen3d_status = (delegate* unmanaged[Cdecl]<int*, float*, float*, float*, float*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_screen3d_status"); } catch { }
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
             _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
@@ -750,6 +752,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "stereo_screen_all": _s3_all = v != "0"; break;
                     case "stereo_screen_depth": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_depth); break;
                     case "stereo_screen_plane": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_plane); break;
+                    case "stereo_screen_auto": _s3_auto = v != "0"; break;
+                    case "stereo_screen_max_pop": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_max_pop); break;
                     case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
                     case "cull_dist":         _cull_dist = v != "0"; break;
                     case "cull_scene":        _cull_scene = v != "0"; break;
@@ -872,6 +876,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"stereo_screen_all={(_s3_all ? 1 : 0)}\n" +
             $"stereo_screen_depth={_s3_depth.ToString("F2", ci)}\n" +
             $"stereo_screen_plane={_s3_plane.ToString("F0", ci)}\n" +
+            $"stereo_screen_auto={(_s3_auto ? 1 : 0)}\n" +
+            $"stereo_screen_max_pop={_s3_max_pop.ToString("F1", ci)}\n" +
             $"backdrop_mode={_backdrop_mode}\n" +
             $"cull_dist={(_cull_dist ? 1 : 0)}\n" +
             $"cull_scene={(_cull_scene ? 1 : 0)}\n" +
@@ -1065,7 +1071,13 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("in blitzball##s3", ref _s3_blitz); ImGui.SameLine(); ImGui.Checkbox("everywhere##s3", ref _s3_all);
         if (_s3_blitz || _s3_all) {
             ImGui.SliderFloat("3D depth (1 = standard; 0 = flat)##s3", ref _s3_depth, 0f, 3f, "%.2f");
-            ImGui.SliderFloat("screen plane (game units: nearer pops out, farther goes in)##s3", ref _s3_plane, 50f, 2000f, "%.0f");
+            ImGui.Checkbox("auto depth: the screen plane follows the subject, and nothing pops out further than##s3", ref _s3_auto); ImGui.SameLine();
+            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("% of the screen##s3pop", ref _s3_max_pop, 0.5f, 6f, "%.1f");
+            if (_s3_auto && _fn_screen3d_status != null) {
+                int vis; float nd, sd, pl, sp; _fn_screen3d_status(&vis, &nd, &sd, &pl, &sp);
+                ImGui.TextDisabled($"  now: {vis} characters in view, nearest {nd:F0}, subject {sd:F0}; screen plane {pl:F0}, eye separation {sp:F1}");
+            }
+            if (!_s3_auto) ImGui.SliderFloat("screen plane (game units: nearer pops out, farther goes in)##s3", ref _s3_plane, 50f, 2000f, "%.0f");
             ImGui.SliderFloat("screen width (m)##s3", ref _xr_screen_width, 1f, 8f, "%.1f"); ImGui.SameLine(); ImGui.TextDisabled("distance: Debug > Virtual screen panel; Home recentres the screen in front of you");
         }
         ImGui.Text("painted-backdrop rooms (hut interiors):"); ImGui.SameLine();
@@ -1796,7 +1808,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
             if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
             // stereo screen (pushed with the window hidden too; the screen's size and mode go with it)
-            if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth * _s3_plane / 30f, _s3_plane);   // the 1/30 rule of stereo photography: separation = screen-plane distance / 30 at depth 1
+            if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
             if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
             if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
             if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);

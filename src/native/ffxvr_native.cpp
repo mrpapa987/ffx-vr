@@ -653,6 +653,11 @@ bool  g_ovr_suspend = false;            // the frame goes to the virtual screen:
 // no first-person or diorama view. 2D frames (menus, FMV) still go to the mono screen. UI draws and other
 // camera-less overlays come out identical in both eyes, i.e. on the screen plane - which is right for a screen.
 bool  g_screen3d = false, g_screen3d_now = false; float g_screen3d_sep = 6.f, g_screen3d_conv = 300.f;   // eye separation and screen-plane distance, game units
+// Auto depth: per frame, the screen plane follows the subject (the skinned actor nearest the image centre)
+// and the separation is capped so that the nearest visible actor never pops out of the screen by more than
+// g_s3_max_pop (a fraction of the screen width). Targets are eased (time constant ~0.3 s) and snapped on cuts.
+bool g_s3_auto = true; float g_s3_depth = 1.f, g_s3_max_pop = 0.025f, g_s3_plane_set = 300.f;
+float g_s3_sep_cur = 10.f, g_s3_conv_cur = 300.f; uint32_t g_s3_frame = 0, g_s3_cut_seen = 0; int g_s3_vis = 0; float g_s3_near = 0.f, g_s3_subject = 0.f;
 bool  g_backdrop_room = false;          // last frame had painted-backdrop draws: first person makes no sense here
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
@@ -1320,7 +1325,45 @@ bool  g_have_PV      = false;
 /// the view matrix (64 in the common layout, 48 in the shifted one), `v` the
 /// 3x4 view to base the override on. Each derived block is replaced only if
 /// the original equals the product it is expected to be. Returns a bitmask.
+// Auto depth for the stereo screen (see g_s3_auto). `v` the game's 3x4 view, `Pj` its projection.
+static void screen3d_auto(const float v[12], const float* Pj) {
+    const float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
+    const float t[3] = { v[3], v[7], v[11] };
+    float P[3]; for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
+    const float P0 = fabsf(Pj[0]), P5 = fabsf(Pj[5]);
+    float dnear = 1e9f, dsub = 0.f, best_c = 1e9f; int vis = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (int i = 0; i < g_world_report_n; ++i) {
+            const float w[3] = { g_world_report[i][0] - P[0], g_world_report[i][1] - P[1], g_world_report[i][2] - P[2] };
+            const float x = R[0]*w[0] + R[1]*w[1] + R[2]*w[2], y = R[3]*w[0] + R[4]*w[1] + R[5]*w[2], d = -(R[6]*w[0] + R[7]*w[1] + R[8]*w[2]);
+            if (d < 5.f) continue;
+            const float nx = P0 * x / d, ny = P5 * y / d;
+            if (fabsf(nx) > 1.1f || fabsf(ny) > 1.1f) continue;   // outside the picture (a little margin: the stereo shift)
+            vis++;
+            if (d < dnear) dnear = d;
+            const float c = nx * nx + ny * ny; if (c < best_c) { best_c = c; dsub = d; }
+        }
+    }
+    g_s3_vis = vis; g_s3_near = vis ? dnear : 0.f; g_s3_subject = dsub;
+    // targets: the screen plane on the subject (bounded), the separation from the depth setting, capped by the pop-out limit
+    float conv = vis ? fmaxf(60.f, fminf(2000.f, dsub)) : g_s3_plane_set;
+    float sep = g_s3_depth * conv / 30.f;
+    if (vis && dnear < conv && P0 > 0.f) {
+        // disparity of a point at depth d, as a fraction of the screen width: P0 * sep * (1/d - 1/conv) / 2
+        const float cap = 2.f * g_s3_max_pop / (P0 * (1.f / dnear - 1.f / conv));
+        if (sep > cap) sep = cap;
+    }
+    // ease, snap on a cut
+    const bool cut = g_cut_count != g_s3_cut_seen; g_s3_cut_seen = g_cut_count;
+    const float k = cut ? 1.f : fminf(1.f, g_dt / 0.3f);
+    g_s3_conv_cur += (conv - g_s3_conv_cur) * k;
+    g_s3_sep_cur  += (sep  - g_s3_sep_cur)  * k;
+    g_screen3d_conv = g_s3_conv_cur; g_screen3d_sep = g_s3_sep_cur;
+}
+
 static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT base, const float v[12]) {
+    if (g_screen3d_now && g_s3_auto && g_eye_shift == 0.f && g_s3_frame != g_frames) { g_s3_frame = g_frames; screen3d_auto(v, reinterpret_cast<const float*>(orig + base + 64)); }
     float Vn[16], In[16], Pn[3];
     build_override_view(v, Vn, In, Pn);
 
@@ -5089,8 +5132,15 @@ extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g
 extern "C" __declspec(dllexport) const char* ffxvr_patch_name(int i) { return (i >= 0 && i < ffxvr_patch_count()) ? g_patches[i].name : ""; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
 extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : (g_screen3d_now ? 2 : 0); }
-/// The stereo screen (see g_screen3d): on, eye separation and screen-plane distance, both in game units.
-extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float sep, float conv) { g_screen3d = on != 0; g_screen3d_sep = sep < 0.f ? 0.f : sep > 60.f ? 60.f : sep; g_screen3d_conv = conv < 10.f ? 10.f : conv; }
+/// The stereo screen (see g_screen3d): on; depth (1 = the 1/30 rule); the screen-plane distance in game units (used
+/// when auto is off); auto depth on/off; the pop-out limit as a fraction of the screen width.
+extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float depth, float conv, int autodepth, float max_pop) {
+    g_screen3d = on != 0; g_s3_depth = depth < 0.f ? 0.f : depth > 4.f ? 4.f : depth; g_s3_plane_set = conv < 10.f ? 10.f : conv;
+    g_s3_auto = autodepth != 0; g_s3_max_pop = max_pop < 0.f ? 0.f : max_pop > 0.2f ? 0.2f : max_pop;
+    if (!g_s3_auto) { g_screen3d_conv = g_s3_plane_set; g_screen3d_sep = g_s3_depth * g_s3_plane_set / 30.f; g_s3_conv_cur = g_screen3d_conv; g_s3_sep_cur = g_screen3d_sep; }
+}
+/// What the auto depth is doing: visible actors, nearest depth, subject depth, current plane and separation.
+extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* near_d, float* subject, float* plane, float* sep) { *vis = g_s3_vis; *near_d = g_s3_near; *subject = g_s3_subject; *plane = g_screen3d_conv; *sep = g_screen3d_sep; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;

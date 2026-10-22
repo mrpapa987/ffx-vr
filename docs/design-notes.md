@@ -1406,3 +1406,24 @@ virtual screen's width (slider repeated next to the stereo options);
 distance and placement as before (Home recentres it in front of you).
 The overlay reports "showing: stereo screen". Mono 2D frames (menus, FMV)
 still use the plain screen.
+
+### Stereo screen: auto depth (22 Oct 2026)
+
+Report from the first run: works well until something is close to the
+camera - blitzball's chase camera and cut-ins put athletes next to the
+lens, and at a fixed plane of 300 a player at 30 units pops out ten times
+further than the plane, past what the eyes fuse (double images).
+
+`stereo_screen_auto` (default on): once per frame, from the game camera
+and the previous frame's skinned actor roots (`g_world_report`), every
+actor in the picture is projected; the **screen plane follows the
+subject** (the actor nearest the image centre, bounded 60..2000) and the
+**separation is capped** so the nearest visible actor's crossed disparity
+stays under `stereo_screen_max_pop` (2.5% of the screen width by default;
+disparity = P0 * sep * (1/d - 1/plane) / 2 of the width). Targets ease
+with a 0.3 s time constant and snap on camera cuts. The depth slider is
+the strength when nothing caps it (1/30 rule); the plane slider only
+applies with auto off. The overlay shows what it is doing (characters in
+view, nearest, subject, plane, separation). Not covered: close scenery
+(walls, stands) - only actors are known; the depth buffer would be the
+next step if that shows.
