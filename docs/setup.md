@@ -31,8 +31,7 @@ changed the native loaders, so both halves must come from the same commit.
 | .NET runtime, **x86** | 10.0.13 | separate install; the mod is a 32-bit managed plugin |
 | Git | 2.43 | |
 | PowerShell 7 | 7.6.7 | |
-| SteamVR | 2.17.10 | only needed as an OpenXR fallback |
-| Virtual Desktop Streamer | | provides the active 32-bit OpenXR runtime |
+| Virtual Desktop Streamer | | **the** runtime: its VDXR provides the active 32-bit OpenXR runtime (the only one in use since SteamVR problems; SteamVR untested) |
 
 VS Build Tools 2019 and 2022 may remain installed; the build script picks the
 highest version with the C++ workload.

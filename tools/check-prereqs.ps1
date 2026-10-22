@@ -1,4 +1,4 @@
-# check-prereqs.ps1
+﻿# check-prereqs.ps1
 #
 # READ-ONLY. This script does not install, change or delete anything.
 # It reports which build tools and VR settings are present, then writes the
@@ -90,6 +90,7 @@ $rt64 = (Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1' -Name ActiveRuntime 
 $rt32 = (Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Khronos\OpenXR\1' -Name ActiveRuntime -ErrorAction SilentlyContinue).ActiveRuntime
 if ($rt64) { Add-Line "  64-bit: $rt64" } else { Add-Line '  64-bit: (none registered)' }
 if ($rt32) { Add-Line "  32-bit: $rt32" } else { Add-Line '  32-bit: (none registered)  <-- must be set before the mod can work' }
+if ($rt32 -and $rt32 -notmatch 'virtualdesktop') { Add-Line '  note: the mod is developed and tested with Virtual Desktop''s VDXR only; other runtimes are untested' }
 
 # ---------------------------------------------------------------- Steam
 Add-Line ''

@@ -42,8 +42,7 @@ This mod only works because of other people's projects:
   pattern-scanned offsets confirmed ours and led to the game's own battle field roster, which
   the first-person battle view now follows.
 - **[OpenXR](https://www.khronos.org/openxr/)** (Khronos; loader and headers from the official
-  NuGet packages) - the headset interface, with Virtual Desktop's VDXR as the runtime it was
-  developed against and SteamVR as the fallback.
+  NuGet packages) - the headset interface, through Virtual Desktop's VDXR runtime.
 - **[Re-Remastered](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)**
   (HitokageWorshipper) - the texture pack installed alongside, written for ffgriever's External
   File Loader and served here through Fahrenheit's file loader instead.
@@ -63,8 +62,10 @@ This mod only works because of other people's projects:
 Run `tools\check-prereqs.ps1` to verify these. In short:
 
 - Windows, with the Steam copy of FFX/X-2 HD Remaster installed **outside** `C:\Program Files`
-- SteamVR 2.17 or newer, set as the default OpenXR runtime — **including its 32-bit entry**,
-  because `FFX.exe` is a 32-bit program
+- A headset streamed through **Virtual Desktop**, with its **VDXR** OpenXR runtime active —
+  **including the 32-bit entry**, because `FFX.exe` is a 32-bit program. VDXR is the only runtime
+  this mod is developed and tested with (Quest 3); SteamVR was dropped after problems and is
+  untested
 - .NET 10 SDK, plus the x86 .NET 10 runtime
 - Visual Studio with the C++ workload, and vcpkg
 - PowerShell 7 and Git
