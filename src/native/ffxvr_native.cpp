@@ -1745,9 +1745,10 @@ static void dump_dds(ID3D11Texture2D* tex, const wchar_t* name) {
         FILE* f = nullptr;
         if (_wfopen_s(&f, path, L"wb") == 0 && f) {
             uint32_t h[32] = {}; h[0] = 124; h[1] = 0x1 | 0x2 | 0x4 | 0x1000 | (bc ? 0x80000 : 0x8); h[2] = d.Height; h[3] = d.Width; h[4] = bc ? bw * bpb * bh : d.Width * 4; h[6] = 1;
-            h[19] = 32; h[20] = bc ? 0x4 : 0x41; h[21] = bc ? (bc3 ? 0x35545844u : 0x31545844u) : 0; h[22] = bc ? 0 : 32;
-            if (!bc) { h[23] = 0x00FF0000; h[24] = 0x0000FF00; h[25] = 0x000000FF; h[26] = 0xFF000000; }
-            h[27] = 0x1000;
+            // DDS_PIXELFORMAT starts at header dword 18 (size, flags, fourCC, bit count, R/G/B/A masks); caps at 26
+            h[18] = 32; h[19] = bc ? 0x4 : 0x41; h[20] = bc ? (bc3 ? 0x35545844u : 0x31545844u) : 0; h[21] = bc ? 0 : 32;
+            if (!bc) { h[22] = 0x00FF0000; h[23] = 0x0000FF00; h[24] = 0x000000FF; h[25] = 0xFF000000; }
+            h[26] = 0x1000;
             fwrite("DDS ", 1, 4, f); fwrite(h, 4, 31, f);
             for (UINT y = 0; y < bh; ++y) fwrite(static_cast<const uint8_t*>(ms.pData) + y * ms.RowPitch, 1, bw * bpb, f);
             fclose(f);

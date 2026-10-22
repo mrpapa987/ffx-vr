@@ -1258,3 +1258,51 @@ screen; haptics on damage / your turn (xr_haptic is unused); one-press
 seat height calibration; head-gaze targeting; auto MSAA 4->2 when frame
 time crosses ~13 ms; photo mode (freeze + free head); per-scene cutscene
 view memory.
+
+## Blitzball, first capture session (22 Oct 2026)
+
+A league / tournament match from a late save (save sphere > Play
+Blitzball), first person on, frame census, image sequence, actor table,
+atlas dump. Findings:
+
+- **Actors.** 13 live: 12 athletes and the ball. Our team at indices 0-5
+  (`c001` = Tidus in his blitz model, `n172`..`n176`), the opponents at
+  6-11 (`n197`, `n198`, `n278`, `n199`, `n200`, and `n198` again for the
+  keeper), the **ball is `w041`** (index 12; "not drawn" in most actor
+  logs - probably while held). Keepers sit on the long axis at z = +-580;
+  the field spans about x -330..330. `fp_actor=c101` does not exist here;
+  first person fell back to actor 0, which happened to be Tidus.
+- **Every athlete reports y = -520 in the actor table.** The game's blitz
+  logic looks planar (the radar is a flat disc), with the visual height
+  added elsewhere. Next capture: the rendered skinned positions next to
+  the actor positions, to see how the 3D placement is derived. Pool centre
+  for a globe anchor: about (0, -520, 0), radius ~600.
+- **The in-pool markers are 3D.** The ball-holder circle with its
+  triangle and the yellow floor emblem are scene geometry drawn with the
+  camera (present in the scene snapshot): they are already right in
+  stereo. Unlike battle, nothing floats; no pointer work needed.
+- **The UI**: Breakthrough / command menus, the stat bars top right, the
+  radar, time and score - panel material. **But the radar dots are not
+  UI-pass draws**: after the scene resolve the game draws ~40 small
+  textureless blended quads (VS cb 256 B, no z-write, n=6, two of n=18)
+  with no camera we recognise ("NO IMAGE" in the census, scene draws
+  417..460). The eye-1 image has the radar dots, the eye-2 image has an
+  empty radar. In the headset they presumably sit in one eye at screen
+  depth. To confirm with the scene bisect ("Find a draw", hide 417-460):
+  if the dots vanish, route that run into the UI layer like the UI pass.
+- **Performance**: GPU 19-20 ms per frame in a match vs 11-15 on the
+  field; the game settles at 30 fps (33.4 ms frames) on the 72 Hz
+  headset - the ghosting recipe. Extra 4096x4096 targets (reflection /
+  refraction) at 4K + 4x MSAA. A per-mode MSAA (2x in blitz) or the
+  auto-MSAA idea is the first lever.
+- Eye images: the large left/right offset between the two eye images is
+  the Quest 3's canted, asymmetric per-eye frustums (tan l -1.376 r 0.839
+  vs l -0.839 r 1.376), not an error.
+- The atlas dump caught a 1024x1024 stone texture (a scene texture the UI
+  pass also binds), not the UI sheet - and its DDS header had the pixel
+  format one dword off (fixed). The dump should filter on the UI's own
+  shaders.
+
+Next captures there: the scene bisect on the radar run; a log of rendered
+vs actor positions for 10 s of play; picks (F9) on the stat bars and the
+radar background; who-has-the-ball (Farplane's blitz pointers).
