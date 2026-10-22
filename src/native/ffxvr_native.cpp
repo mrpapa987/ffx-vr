@@ -501,6 +501,10 @@ PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = fa
 // head owns orientation; the player's own skinned draws are hidden.
 int   g_fp_mode = 0;                           // 0 off, 1 first person, 2 diorama (follow), 3 third person
 float g_fp_pos[3] = {};                        // player position, render space
+// Motion-smoothness log: for a couple of seconds, one line per drawn frame with the player's position as
+// read from the actor table, the nearest rendered skinned position (what the fps mod's interpolation puts
+// on screen), the view yaw and the head yaw - to see which of them step at the 30 Hz logic rate.
+int g_motion_log_left = 0;
 bool  g_fp_have_pos = false;
 float g_fp_eye_h = 18.f;                       // eye height above the actor origin (units), when not anchored to the head
 // Eye anchored to the head bone (the highest of the actor's sub-positions):
@@ -5100,6 +5104,20 @@ extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float 
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_body_set(int mode, uint32_t head_mask, int solo) { g_fp_body_mode = mode; g_fp_head_mask = head_mask; g_fp_solo = solo; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_fp_parts() { return g_fp_parts_last; }
+extern "C" __declspec(dllexport) void ffxvr_motion_log(int frames) { g_motion_log_left = frames; }
+static void motion_log_tick() {
+    if (g_motion_log_left <= 0) return;
+    g_motion_log_left--;
+    float best[3] = { 0, 0, 0 }; float bd = 1e30f;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (int i = 0; i < g_world_report_n; ++i) { const float dx = g_world_report[i][0] - g_fp_pos[0], dz = g_world_report[i][2] - g_fp_pos[2]; const float d = dx*dx + dz*dz; if (d < bd) { bd = d; memcpy(best, g_world_report[i], sizeof(best)); } }
+    }
+    float hy = 0.f;
+    { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d); hy = atan2f(-d[0], -d[2]); }
+    diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy);
+}
+
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {
     if (valid && g_fp_have_pos) {
         const float dx = x - g_fp_pos[0], dy = y - g_fp_pos[1], dz = z - g_fp_pos[2];
@@ -5304,6 +5322,7 @@ static void xr_tick() {
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
     }
     xr_apply_poses(out);
+    motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
     xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
     if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; diag("xr: recentre (headset gesture)"); }   // same as Home

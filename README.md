@@ -24,6 +24,30 @@ See [docs/design.md](docs/design.md) for the reasoning behind each choice,
 and [docs/exe-analysis.md](docs/exe-analysis.md) for everything known about
 FFX.exe itself (addresses, structures, cull sites, patches, leads).
 
+## Standing on
+
+This mod only works because of other people's projects:
+
+- **[Fahrenheit](https://github.com/fahrenheit-crew/fahrenheit)** (fahrenheit-crew) - the mod
+  framework the whole thing runs in: it loads the managed module into the game, provides the
+  structures for the battle state, party, windows and actors, the call hooks, the file loader
+  that serves the texture pack, and the Dear ImGui overlay (through Hexa.NET.ImGui) that our
+  settings panel is drawn with.
+- **[FFX-60fps](https://github.com/peternguyenst/FFX-60fps)** (peternguyenst) - runs the game at
+  a VR-friendly frame rate by interpolating camera and character motion between the game's
+  30 Hz logic ticks; its source was also the first map of the exe's camera code.
+- **[Farplane](https://github.com/topher-au/Farplane)** (topher-au) - a memory editor whose
+  pattern-scanned offsets confirmed ours and led to the game's own battle field roster, which
+  the first-person battle view now follows.
+- **[OpenXR](https://www.khronos.org/openxr/)** (Khronos; loader and headers from the official
+  NuGet packages) - the headset interface, with Virtual Desktop's VDXR as the runtime it was
+  developed against and SteamVR as the fallback.
+- **[Re-Remastered](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)**
+  (HitokageWorshipper) - the texture pack installed alongside, written for ffgriever's External
+  File Loader and served here through Fahrenheit's file loader instead.
+- The PS2-era modding community's documentation of the game's formats (the VBF archive,
+  Phyre assets), and the game's own debug leftovers, read with objdump.
+
 ## Layout
 
     src/managed/   C# Fahrenheit module: camera hook, mode detection, settings

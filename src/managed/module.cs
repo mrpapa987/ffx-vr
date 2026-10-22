@@ -144,7 +144,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, void> _fn_markers_3d;
     private float[] _mk_pos = new float[32 * 3]; private uint[] _mk_col = new uint[32]; private int _mk_n;
     private bool _markers_3d = true;
-    private float _marker_scale = 1f; private delegate* unmanaged[Cdecl]<float, void> _fn_markers_scale; private delegate* unmanaged[Cdecl]<void> _fn_ui_atlas_dump;
+    private float _marker_scale = 1f; private delegate* unmanaged[Cdecl]<float, void> _fn_markers_scale; private delegate* unmanaged[Cdecl]<void> _fn_ui_atlas_dump; private delegate* unmanaged[Cdecl]<int, void> _fn_motion_log;
     private bool _markers_game_art = false; private uint _markers_game_art_n = 0; private delegate* unmanaged[Cdecl]<int, uint> _fn_markers_game_art;   // the game's own cursor sprites at the markers
     private bool _ui_on = true; private float _ui_dist = 1.5f, _ui_width = 1.6f;
     private delegate* unmanaged[Cdecl]<int> _fn_xr_screen_now;
@@ -361,7 +361,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_hidden");
             _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
             _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
-            try { _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_atlas_dump"); } catch { }
+            try { _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_atlas_dump"); _fn_motion_log = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_motion_log"); } catch { }
             _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
             _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
             _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
@@ -1383,6 +1383,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
         if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
             if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves"); }
+            if (_fn_motion_log != null) { if (ImGui.Button("Motion log (3 s)")) _fn_motion_log(180); ImGui.SameLine(); ImGui.Text("per drawn frame: actor position vs rendered position, view yaw, head yaw -> ffxvr_diag.log (walk and turn with the stick while it runs; Numpad 5 also starts it)"); }
             if (_fn_ui_atlas_dump != null) { if (ImGui.Button("Dump UI atlases")) _fn_ui_atlas_dump(); ImGui.SameLine(); ImGui.Text("the 1024x1024 sprite sheets the UI samples this frame -> ui_atlas_*.dds next to the mod (do it in a battle with a target selected)"); }
             if (_fn_census_arm != null) { if (ImGui.Button("Stack census (character draws)")) _fn_census_arm(1872, 16384); ImGui.SameLine(); ImGui.Text("ffxvr_stacks.log: the game's call chains behind one frame's skinned-character uploads (where the draw/cull loop lives)"); }
             if (_fn_dump_cb != null) {
@@ -1875,6 +1876,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.IsKeyPressed(ImGuiKey.F8)) _window_open = !_window_open;
         if (ImGui.IsKeyPressed(ImGuiKey.F10)) _slowmo_on = !_slowmo_on;
         if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
+        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5) && _fn_motion_log != null) _fn_motion_log(180);
         draw_hover_highlight();
         if (_fn_slowmo != null) _fn_slowmo(_slowmo_on ? _slowmo_ms : 0);
         if (ImGui.IsKeyPressed(ImGuiKey.F9) && _fn_ui_pick != null) {

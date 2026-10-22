@@ -1136,3 +1136,35 @@ a pending switch stays wanted while its character is on the field. Summon
 of Ixion showed `[255,255,11]` - the Aeon takes the summoner's slot, not
 slot 0, so the aeon check scans all three.
 
+
+## Movement ghosting on controller turns and walking (22 Oct 2026)
+
+Reported: turning with the right stick, or moving, shows ghosting in the
+headset; turning the head alone does not. The asymmetry is the diagnosis:
+the runtime reprojects every displayed frame for head motion (the frame is
+submitted with the head pose it was rendered from; the compositor rotates
+it to the pose at display time), so head turns are smooth at the display
+rate whatever we render at. Anything the head did not do - a stick turn,
+the character walking - only changes when we render a new frame, and is
+shown stepwise at our frame rate; Virtual Desktop's spacewarp (if it is
+on) then synthesises in-between frames from image flow, which is where
+smearing / double edges ("ghosting") come from.
+
+Two rates matter. The game's logic runs at 30 Hz; the FFX-60fps mod draws
+60 by interpolating camera and character motion between ticks ("SMOOTH").
+Our view takes the player's position from the actor table, which may well
+be the 30 Hz value - then the eye moves in 30 Hz steps while the world
+around it is drawn at 60, the worst case. The stick turn is applied per
+drawn frame (60). Numpad 5 / "Motion log (3 s)" (Captures) writes one line
+per drawn frame with the actor-table position, the nearest rendered skinned
+position, the view yaw and the head yaw: if the actor position changes only
+every other line while the rendered one changes every line, the fix is to
+drive the eye from the rendered position (or interpolate ourselves).
+
+Beyond that: a headset refresh that is a multiple of the draw rate (120 Hz
+for 60 fps) gives an even cadence; Virtual Desktop's SSW set to off turns
+smearing into plain steps (a useful test); snap turning (`turn_mode`)
+avoids the issue for turns. Smoothing a virtual turn properly would mean
+re-submitting the last frame at display rate with a pose that carries the
+interpolated yaw - a submit thread, rotation only; walking cannot be
+smoothed without drawing faster.
