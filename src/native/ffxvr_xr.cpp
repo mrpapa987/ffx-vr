@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // ffxvr_xr.cpp -- see ffxvr_xr.h. The loader is loaded by full path and
 // every entry point fetched through xrGetInstanceProcAddr, so no import
 // library and no DLL search-path games.

@@ -54,6 +54,12 @@ bulk dumps).
 
 ## 3. Our licence
 
+**Decided (22 Oct 2026): MIT.** `LICENSE` at the root (copyright "mrpapa" -
+change to a real name if wanted), SPDX headers in all five source files,
+`THIRD-PARTY-NOTICES` at the root (the OpenXR loader with the full
+Apache-2.0 text, credits for the rest), README licence and disclaimer
+sections. The notes below were written before the decision.
+
 Still "to be decided" in the README. Constraints: nothing we ship is
 copyleft-contaminated (Fahrenheit is used, not copied; OpenXR is Apache).
 Candidates: **MIT** (simplest, what most mods use) or **Apache-2.0** (same
@@ -81,7 +87,8 @@ game version (Steam build id).
 
 ## 5. Before the first tag
 
-- [ ] LICENSE (ours) + THIRD-PARTY-NOTICES (OpenXR Apache-2.0 + NOTICE; credits for the rest) at the repo root; both copied into the zip by build-mod.ps1
+- [x] LICENSE (ours) + THIRD-PARTY-NOTICES (OpenXR Apache-2.0; credits for the rest) at the repo root
+- [ ] both copied into the release zip by the packaging script
 - [ ] `tools/package-release.ps1`: builds, assembles the zip from a clean folder (never from the live mod folder - it has the ini, logs and captures), writes a SHA-256 next to it
 - [ ] version: one place (`ffxvr.csproj` `<Version>`) flowing into the manifest and a `ffxvr_native` version string shown in the overlay; tag matches
 - [ ] CHANGELOG.md

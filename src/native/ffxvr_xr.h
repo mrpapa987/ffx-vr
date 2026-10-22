@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // ffxvr_xr.h -- OpenXR session for the FFX VR mod: submits the two eye
 // images the duplication pipeline produces and reports the head pose the
 // next frame should be rendered from. Everything it needs from the rest of

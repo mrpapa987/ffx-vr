@@ -3,7 +3,9 @@
 A VR mod for the PC release of **Final Fantasy X HD Remaster** (Steam), built on the
 [Fahrenheit](https://github.com/fahrenheit-crew/fahrenheit) mod framework.
 
-**Status:** pre-alpha. Nothing is implemented yet — this is the project skeleton.
+**Status:** pre-alpha, playable on the developer's setup (Quest 3 over Virtual Desktop). First
+person, third person and diorama views in the field and in battle, a head-locked UI panel, a
+virtual screen for 2D scenes and a stereo 3D screen for blitzball. No release build yet.
 
 ## What it does
 
@@ -74,5 +76,12 @@ Run `tools\check-prereqs.ps1` to verify these. In short:
 
 ## License
 
-Intended to be open source. Specific license still to be decided; note that Fahrenheit
-itself is LGPL-3.0, which constrains the choice for the managed half.
+MIT - see [LICENSE](LICENSE). Third-party software redistributed with release builds (the
+Khronos OpenXR loader, Apache-2.0) and the projects this mod depends on are listed in
+[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). Fahrenheit (LGPL-3.0-or-later) is used as a
+library and is not part of this repository.
+
+## Disclaimer
+
+An unofficial fan mod. Not affiliated with or endorsed by Square Enix. Requires a
+legitimate copy of FINAL FANTASY X/X-2 HD Remaster; no game files or assets are included.
