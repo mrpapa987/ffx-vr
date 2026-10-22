@@ -1168,3 +1168,93 @@ avoids the issue for turns. Smoothing a virtual turn properly would mean
 re-submitting the last frame at display rate with a pose that carries the
 interpolated yaw - a submit thread, rotation only; walking cannot be
 smoothed without drawing faster.
+
+## Black screen during scene transitions; presenter thread (22 Oct 2026, design only)
+
+Reported: some transitions show black for a few seconds - a random battle
+starting, talking to Cid to get the airship destination menu. The perf
+lines show why: frames of 1.6 s (`frame ... max 1612; gpu max 345`) while
+the game loads the next scene. On a monitor the last image just stays up.
+In the headset, the OpenXR frame loop runs on the game thread inside
+Present, so it stops with the game; after a couple of missed frames the
+runtime blanks the app. The black is our loop going silent, not the
+game's fade.
+
+Shortening the stalls: the likely big contributor is the Re-Remastered
+pack (18 GB of loose files read synchronously through the file loader);
+the user wants to keep it. Smaller: our twin targets being recreated when
+the game recreates its 4K / 4xMSAA targets (the 345 ms GPU peaks) - a
+twin pool by size/format would remove that part.
+
+The real fix, deferred (user, 22 Oct): a **presenter thread**.
+
+- It owns the OpenXR session and runs the loop at the display rate:
+  xrWaitFrame -> locate views -> acquire -> copy the latest completed eye
+  pair -> xrEndFrame. It never waits on the game. During a stall it keeps
+  submitting the last frame with the pose it was rendered with, so the
+  runtime reprojects it (steady, head-tracked); after ~0.5 s with no new
+  frame, dim it or add a "loading" quad.
+- The game thread stops making OpenXR calls. It finishes its eye images
+  as now, then publishes them (and the UI / ImGui layer textures) into a
+  small ring of shared textures stamped with the head pose it rendered
+  with. Poses flow back: the presenter leaves the latest prediction in a
+  shared slot that the game thread reads at frame start.
+- The obstacle: the game's immediate context is not thread-safe, so the
+  presenter cannot use the game's device. It gets its **own D3D11 device**;
+  the session is bound to it; eye images cross as **shared textures**
+  (shared NT handle + keyed mutex: game writes, releases; presenter
+  acquires, copies into the swapchain image, releases). One extra copy per
+  eye per frame. Our eye images are already resolved non-MSAA copies we
+  create, so making them shareable is a flag (MiscFlags SHARED_NTHANDLE |
+  SHARED_KEYEDMUTEX).
+- Also moving: xrSyncActions / controller input and the space-change
+  (recentre) events (published as a snapshot the gesture code reads), the
+  UI and overlay quad layers.
+- Pacing: the game no longer blocks in xrWaitFrame; it waits on a frame
+  event from the presenter to keep 1:1 cadence, falling through if the
+  presenter is behind.
+- Shutdown and device loss (headset off, VD disconnect, game exit with a
+  live session) need care.
+- Bonus: once the presenter picks the pose per display frame, stick turns
+  can be smoothed - present the last frame rotated by the yaw the turn has
+  reached now - so virtual turns become as smooth as head turns at any
+  frame rate. Walking still needs a re-render.
+
+Effort: the biggest change since the camera override - most of
+ffxvr_xr.cpp restructured, a second device, the shared ring, the thread.
+A few days with testing. Risks: shared-texture setup failing silently as
+black, cadence errors giving worse judder than today, shutdown crashes.
+Milestones: (1) the presenter shows the last frame during a stall,
+nothing else changes; (2) pose-based turn smoothing; (3) loading overlay.
+
+## Backlog (22 Oct 2026)
+
+Release: Fahrenheit dependency (pin a commit or get a release; questions
+for the crew drafted); our licence; LICENSE + THIRD-PARTY-NOTICES;
+packaging script; versioning; changelog; user-facing README (see
+docs/release.md).
+
+Presentation / comfort: presenter thread (above); blink on eye jumps;
+face the enemies at battle start and on eye switches; camera wall
+collision; intro credits double vision.
+
+Battle: aeon handling for every aeon (Magus Sisters are three ids); boss
+diorama; transitions (shatter, results, game over); overdrive inputs
+(Lulu's stick spin); target-name labels; cursor art from the atlas dump;
+damage numbers / status text (scene-pass draws).
+
+Field / modes: per-area diorama memory by event_id; swimming / underwater
+eye height and the distortion pass; blitzball and chocobo (doc only);
+gesture tuning.
+
+Tabled: VR hands (NaN-cut build untested, hands_dev=1).
+
+Not tried yet (ideas, 22 Oct): loading-stall dim quad as a stopgap;
+pre-warming the texture pack's files for the next area; a twin-target
+pool; snap turn + blink in battle, smooth in the field; enemy name drawn
+over the target in 3D; per-mode panel placement; dialogue boxes placed
+near the speaking NPC; save screen as a panel instead of the virtual
+screen; haptics on damage / your turn (xr_haptic is unused); one-press
+seat height calibration; head-gaze targeting; auto MSAA 4->2 when frame
+time crosses ~13 ms; photo mode (freeze + free head); per-scene cutscene
+view memory.
