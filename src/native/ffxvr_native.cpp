@@ -1332,8 +1332,7 @@ static void screen3d_auto(const float v[12], const float* Pj) {
     float P[3]; for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
     const float P0 = fabsf(Pj[0]), P5 = fabsf(Pj[5]);
     float dnear = 1e9f, dsub = 0.f, best_c = 1e9f; int vis = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
+    {   // (no lock: write_camera runs under g_mutex already - ffxvr_on_updatesub takes it; relocking crashed the game)
         for (int i = 0; i < g_world_report_n; ++i) {
             const float w[3] = { g_world_report[i][0] - P[0], g_world_report[i][1] - P[1], g_world_report[i][2] - P[2] };
             const float x = R[0]*w[0] + R[1]*w[1] + R[2]*w[2], y = R[3]*w[0] + R[4]*w[1] + R[5]*w[2], d = -(R[6]*w[0] + R[7]*w[1] + R[8]*w[2]);
