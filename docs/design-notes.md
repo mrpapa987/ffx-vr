@@ -1381,3 +1381,28 @@ eye's image, at the screen's pose - the virtual-screen layer we already
 have, doubled. Cost: what we render now. Open points: the screen's size
 and distance (a cinema-sized default), the depth amount, whether the
 pre-rendered FMVs and cutscenes want the same mode later.
+
+### Stereo screen, first build (22 Oct 2026)
+
+Built (untested): `stereo_screen_blitz` (default on) and
+`stereo_screen_all` (off; the general view option a viewer asked for).
+On 3D frames while it is active:
+- `build_override_view` returns the game's own camera moved -+sep/2
+  along its right axis (eye 1 left, eye 2 right) - no head pose, no first
+  person, no diorama, no seat;
+- `write_camera` skips the headset FOV and instead adds a horizontal
+  image shift to both projection variants, P[2] += P[0] * (+-sep/2)/plane,
+  so the centre point at the screen-plane distance has zero disparity;
+- the UI pass is not split off (no panel, no blitz overlay routing): UI and
+  camera-less overlays stay in the picture, identical in both eyes, on the
+  screen plane; body hiding, cut blinks and cut recentres are off (a
+  recentre would move the screen);
+- `xr_frame` submits the virtual screen as two quads, eye 1's image to
+  the left eye and eye 2's to the right (`eyeVisibility`), the right one
+  from a sixth swapchain (5) of the same size.
+Separation follows the 1/30 rule: sep = depth x plane / 30 (depth 1 =
+standard, 0 = flat); plane default 300 game units. Screen size from the
+virtual screen's width (slider repeated next to the stereo options);
+distance and placement as before (Home recentres it in front of you).
+The overlay reports "showing: stereo screen". Mono 2D frames (menus, FMV)
+still use the plain screen.

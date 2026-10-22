@@ -79,7 +79,7 @@ struct Eye {
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
-Eye g_eye[5];                                   // 0/1: the eyes; 2: the virtual screen; 3: the UI panel; 4: the ImGui layer
+Eye g_eye[6];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye
 XrSpace g_view_space = XR_NULL_HANDLE;           // head-locked space for the UI panel
 DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
 
@@ -388,7 +388,7 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 6; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
             // The headset's recommended width at the game's 16:9 aspect (the
@@ -397,7 +397,7 @@ bool xr_start(const XrHost& host) {
             e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
             if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
-        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2), the UI panel (3), the ImGui layer (4)
+        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2, 5), the UI panel (3), the ImGui layer (4)
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
@@ -415,7 +415,7 @@ bool xr_start(const XrHost& host) {
         if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
             set_status("intermediate texture failed"); xr_stop(); return false;
         }
-        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : "imgui", i, e.w, e.h, n);
+        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : "screen right", i, e.w, e.h, n);
     }
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
@@ -473,7 +473,7 @@ bool submit_eye(int i, ID3D11Texture2D* src) {
     if (r == XR_TIMEOUT_EXPIRED) { g_wait_timeouts++; if (g_wait_timeouts <= 5) g_h.diag("xr: swapchain image wait timed out (eye %d)", i); p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     if (XR_FAILED(r)) { p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
     stage(i == 0 ? "copy eye 0" : "copy eye 1");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i >= 3)) g_h.ctx->CopyResource(e.images[idx], e.mid);
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 || i == 4)) g_h.ctx->CopyResource(e.images[idx], e.mid);
     stage("release image");
     p_xrReleaseSwapchainImage(e.sc, &ri);
     return true;
@@ -492,17 +492,25 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     if (g_frame_open) {
         XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        XrCompositionLayerQuad quad_r = { XR_TYPE_COMPOSITION_LAYER_QUAD };   // the stereo screen's right eye
         const bool use_screen = screen != nullptr && screen->on;
+        const bool stereo_screen = use_screen && screen->stereo && screen->eye2 != nullptr;
         bool ok = g_should_render && g_render_views_valid;
         if (ok && use_screen) {
             ok = submit_eye(2, eye1);
-            quad.space = g_space; quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            if (ok && stereo_screen) ok = submit_eye(5, screen->eye2);
+            quad.space = g_space; quad.eyeVisibility = stereo_screen ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = g_eye[2].sc;
             quad.subImage.imageRect.offset = { 0, 0 };
             quad.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[2].w), static_cast<int32_t>(g_eye[2].h) };
             quad.pose.orientation = { screen->q[0], screen->q[1], screen->q[2], screen->q[3] };
             quad.pose.position = { screen->p[0], screen->p[1], screen->p[2] };
             quad.size = { screen->width, screen->width * 9.f / 16.f };
+            if (stereo_screen) {
+                quad_r = quad; quad_r.eyeVisibility = XR_EYE_VISIBILITY_RIGHT;
+                quad_r.subImage.swapchain = g_eye[5].sc;
+                quad_r.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[5].w), static_cast<int32_t>(g_eye[5].h) };
+            }
         }
         else if (ok) {
             for (int i = 0; i < 2; ++i) {
@@ -545,10 +553,11 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             imq.pose.position = { 0, 0, -(ui->dist * 0.95f) };
             imq.size = { ui->width * 0.95f, ui->width * 0.95f * 9.f / 16.f };
         }
-        const XrCompositionLayerBaseHeader* layers[3] = {
+        const XrCompositionLayerBaseHeader* layers[4] = {
             use_screen ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad) : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
-            nullptr, nullptr };
+            nullptr, nullptr, nullptr };
         uint32_t nl = 1;
+        if (stereo_screen) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_r);
         if (have_ui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq);
         if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };

@@ -647,6 +647,12 @@ int   g_xr_screen_mode = 0;             // 0 auto, 1 always, 2 never
 // while such draws are present (default), 0 = 3D props over the flat backdrop.
 int   g_backdrop_mode = 1; uint32_t g_bg_uploads_frame = 0, g_bg_uploads_total = 0;
 bool  g_ovr_suspend = false;            // the frame goes to the virtual screen: render it exactly as the game does
+// Stereo screen: 3D frames go to the virtual screen in stereo, seen through the game's own camera and lens.
+// The two eyes are the game's camera moved -+sep/2 along its right axis, with a horizontal image shift so the
+// plane at distance `conv` (game units) has no disparity and sits on the screen. No head pose, no headset FOV,
+// no first-person or diorama view. 2D frames (menus, FMV) still go to the mono screen. UI draws and other
+// camera-less overlays come out identical in both eyes, i.e. on the screen plane - which is right for a screen.
+bool  g_screen3d = false, g_screen3d_now = false; float g_screen3d_sep = 6.f, g_screen3d_conv = 300.f;   // eye separation and screen-plane distance, game units
 bool  g_backdrop_room = false;          // last frame had painted-backdrop draws: first person makes no sense here
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
@@ -1125,6 +1131,21 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     float P[3];
     for (int i = 0; i < 3; ++i) P[i] = -(R[0*3+i]*t[0] + R[1*3+i]*t[1] + R[2*3+i]*t[2]);
 
+    if (g_screen3d_now) {
+        // Stereo screen: the game's camera, each eye moved half the separation along the camera's right axis
+        // (row 0 of R). The separation comes from the managed side (eye distance at life size x the depth slider).
+        const float half = 0.5f * g_screen3d_sep * ((g_eye_shift != 0.f) ? 1.f : -1.f);
+        for (int i = 0; i < 3; ++i) Pn[i] = P[i] + R[0*3+i] * half;
+        float tn[3]; for (int r = 0; r < 3; ++r) tn[r] = -(R[r*3+0]*Pn[0] + R[r*3+1]*Pn[1] + R[r*3+2]*Pn[2]);
+        for (int r = 0; r < 3; ++r) {
+            Vn[r*4+0] = R[r*3+0]; Vn[r*4+1] = R[r*3+1]; Vn[r*4+2] = R[r*3+2]; Vn[r*4+3] = tn[r];
+            In[r*4+0] = R[0*3+r]; In[r*4+1] = R[1*3+r]; In[r*4+2] = R[2*3+r]; In[r*4+3] = Pn[r];
+        }
+        Vn[12] = Vn[13] = Vn[14] = 0.f; Vn[15] = 1.f; In[12] = In[13] = In[14] = 0.f; In[15] = 1.f;
+        if (g_eye_shift == 0.f) g_move_delta = 0.f;   // the game's camera: its own stick directions
+        return;
+    }
+
     // First person / follow: replace the base with a view at the player.
     const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled && !g_backdrop_room;
     const bool primary = (g_eye_shift == 0.f);
@@ -1321,7 +1342,16 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
     // Column-vector convention (w = -z): ndc_x = P[0]*t - P[2] for a
     // direction with tangent t, so P[0] = 2/(r-l), P[2] = (r+l)/(r-l).
     float Pjn[16]; memcpy(Pjn, Pj, sizeof(Pjn));
-    const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov;
+    const bool fov = g_xr_active && g_ovr_enabled && g_xr_use_fov && !g_screen3d_now;
+    if (g_screen3d_now && fabsf(Pj[0]) > 0.2f && g_screen3d_conv > 1.f) {
+        // Stereo screen: shift each eye's frustum so a point on the centre line at distance conv maps to the
+        // image centre (ndc_x = P[0]*t - P[2], t the tangent of that point seen from the eye: +-half/conv).
+        const float half = 0.5f * g_screen3d_sep;
+        const float tt = ((g_eye_shift != 0.f) ? -half : half) / g_screen3d_conv;
+        auto shift = [&](float* P) { P[2] += P[0] * tt; };
+        shift(Pjn); memcpy(p + o_projn, Pjn, 64);
+        if (size >= o_proj + 64) { float Pm[16]; memcpy(Pm, orig + o_proj, 64); shift(Pm); memcpy(p + o_proj, Pm, 64); }
+    }
     const XrFovTan& f = g_xr_fov_used[(g_eye_shift != 0.f) ? 1 : 0];
     const bool fov_ok = std::isfinite(f.l) && std::isfinite(f.r) && std::isfinite(f.u) && std::isfinite(f.d)
                      && f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f
@@ -3599,7 +3629,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     const bool fp_hiding = g_fp_mode == 1 && g_fp_hide_body;
-    if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+    if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
         const float r = g_fp_hide_radius + 1.5f * g_fp_step;
         if (dx*dx + dy*dy + dz*dz < r * r) {   // one of the player's own parts
@@ -3614,7 +3644,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             }
         }
     }
-    if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && g_eye2_cur == nullptr
+    if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && g_eye2_cur == nullptr
         && g_cur_rtv_n > 0 && g_ctx && texture_of(g_cur_rtv[0]) == g_scene_live_tex) {
         ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
         bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
@@ -4320,7 +4350,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
         else if (depth && bound == g_scene_live_tex) {
             g_ui_depth_clears_frame++;
-            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame
+            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame
             else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
         }
     }
@@ -5058,7 +5088,9 @@ extern "C" __declspec(dllexport) int ffxvr_cull_scene_get() { return (g_patches[
 extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g_patches) / sizeof(g_patches[0])); }
 extern "C" __declspec(dllexport) const char* ffxvr_patch_name(int i) { return (i >= 0 && i < ffxvr_patch_count()) ? g_patches[i].name : ""; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_backdrop_draws() { return g_bg_uploads_total; }
-extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : 0; }
+extern "C" __declspec(dllexport) int  ffxvr_xr_screen_now() { return g_xr_screen_now ? 1 : (g_screen3d_now ? 2 : 0); }
+/// The stereo screen (see g_screen3d): on, eye separation and screen-plane distance, both in game units.
+extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float sep, float conv) { g_screen3d = on != 0; g_screen3d_sep = sep < 0.f ? 0.f : sep > 60.f ? 60.f : sep; g_screen3d_conv = conv < 10.f ? 10.f : conv; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
@@ -5247,7 +5279,7 @@ static void detect_cut() {
         if ((dist > 40.f || ang > 25.f) && g_fp_mode == 0) {
             g_cut_count++;
             g_seat_latched = false;
-            if (g_cut_recentre) g_xr_recenter_pending = true;
+            if (g_cut_recentre && !g_screen3d_now && !g_xr_screen_now) g_xr_recenter_pending = true;   // a recentre also moves the screen: not on screen cuts
             if (g_cut_blink) g_blink_frames = 6;
             if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg", g_cut_count, dist, ang);
         }
@@ -5300,6 +5332,7 @@ static void xr_tick() {
     g_xr_fov_applied = false;
     auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
     if (e1 == nullptr) { clear_imgui(); return; }
+    if (g_screen3d_now) g_blink_frames = 0;         // the screen shows the game's cuts as cuts
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
@@ -5335,11 +5368,17 @@ static void xr_tick() {
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
+    {   // the stereo screen: 3D frames that would otherwise be shown in 3D (the frame just finished decides for the next)
+        const bool s3 = g_screen3d && !screen_next && !g_backdrop_room;
+        if (s3 != g_screen3d_now) diag("mode -> %s at frame %u (stereo screen: eye separation %.1f, screen plane at %.0f)", s3 ? "STEREO SCREEN" : "3D (headset view)", g_frames, g_screen3d_sep, g_screen3d_conv);
+        g_screen3d_now = s3;
+    }
     // The stick remap angle is refreshed by the override; whenever first person is not in effect it must be
     // zero, or a stale angle from outside keeps rotating the stick (a hut after a 150-degree doorway: "no control").
     if (g_ovr_suspend || g_backdrop_room || g_fp_mode == 0 || !g_xr_active) g_move_delta = 0.f;
     XrScreen screen = {};
-    screen.on = g_xr_screen_now; screen.width = g_xr_screen_width;
+    screen.on = g_xr_screen_now || g_screen3d_now; screen.width = g_xr_screen_width;
+    screen.stereo = g_screen3d_now && e2 != nullptr; screen.eye2 = screen.stereo ? e2 : nullptr;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
     {
         // The runtime composites on the game's own device context inside

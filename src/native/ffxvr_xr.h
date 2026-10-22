@@ -29,6 +29,8 @@ struct XrScreen {
     bool  on;                                               // submit the screen instead of the projection layers
     float q[4]; float p[3];                                 // pose of the panel centre in the reference space
     float width;                                            // metres; height follows the 16:9 image
+    bool  stereo;                                           // a stereo screen: eye 1's image to the left eye, `eye2` to the right
+    ID3D11Texture2D* eye2;                                  // the right eye's image when stereo
 };
 
 /// The UI panel: the game's UI pass on a head-locked, alpha-blended quad.
