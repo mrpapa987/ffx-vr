@@ -59,7 +59,8 @@ This mod only works because of other people's projects:
 
 ## Requirements
 
-Run `tools\check-prereqs.ps1` to verify these. In short:
+**Installing as a tester: follow [INSTALL-ALPHA.md](INSTALL-ALPHA.md)** - every dependency,
+every script, in order, plus the headset settings. In short:
 
 - Windows, with the Steam copy of FFX/X-2 HD Remaster installed **outside** `C:\Program Files`
 - A headset streamed through **Virtual Desktop**, with its **VDXR** OpenXR runtime active —

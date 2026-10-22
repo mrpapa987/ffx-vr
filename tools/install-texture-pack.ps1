@@ -20,8 +20,8 @@
 #   4. optionally turns on NTFS compression for the mod folder (the pack author's
 #      tip: roughly halves the size)
 #
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\install-texture-pack.ps1 `
-#       -Archive "C:\Users\mrpap\Downloads\FFX Extreme.7z" [-Id reremaster] [-Compress] [-Uninstall]
+#   powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 `
+#       -Archive "$env:USERPROFILE\Downloads\<the pack>.7z" [-Id reremaster] [-Compress] [-Uninstall]
 #
 # Multi-part archives: pass the .001 file. Several archives: -Archive a.7z,b.7z.
 
@@ -35,12 +35,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$game   = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$game   = Get-FfxvrGame
 $mods   = Join-Path $game 'fahrenheit\mods'
 $modDir = Join-Path $mods $Id
 $eflX   = Join-Path $modDir 'efl\x'
 $order  = Join-Path $mods 'loadorder'
-$proj   = 'C:\projects\FFX-VR'
+$proj   = $FfxvrRepo
 $log    = Join-Path $proj ("logs\install-texture-pack-{0}.txt" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
 function Log($m) { $m | Tee-Object -FilePath $log -Append }

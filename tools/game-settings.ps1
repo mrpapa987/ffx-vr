@@ -10,7 +10,7 @@
 #   -Width/-Height/-Msaa   override the vr numbers, e.g. -Width 3200 -Height 1800 -Msaa 4
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\game-settings.ps1 -Profile vr
+#   powershell -ExecutionPolicy Bypass -File .\tools\game-settings.ps1 -Profile vr
 
 param(
     [ValidateSet('vr', 'flat')] [string]$Profile = 'vr',

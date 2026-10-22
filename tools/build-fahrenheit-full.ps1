@@ -9,14 +9,22 @@
 # integration enabled once via:   vcpkg integrate install
 #
 # This script does NOT touch the game folder. It builds and reports only.
-# Log is written as UTF-8 to C:\projects\FFX-VR\logs.
+# Log is written as UTF-8 to logs\ in this repository.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fahrenheit-full.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\build-fahrenheit-full.ps1     (from the repository folder)
+#   ... -Latest            build the newest main instead of the tested commit
+#   ... -Commit <hash>     build a specific commit
+# Then tools\install-fahrenheit.ps1 copies the result into the game folder.
 
+param(
+    [string]$Commit = 'ecb6702abdc4573011163b22d943e9ef6761ca5c',   # tested with FFX VR (15 Oct 2026, "Save manager revision for alpha12")
+    [switch]$Latest
+)
 $ErrorActionPreference = 'Continue'
 
-$proj   = 'C:\projects\FFX-VR'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$proj   = $FfxvrRepo
 $repo   = Join-Path $proj '_ext\fahrenheit'
 $logDir = Join-Path $proj 'logs'
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -84,15 +92,22 @@ Log "[toolchain] msbuild: $msbuild"
 # ---------------------------------------------------------------- update source
 if (-not (Test-Path (Join-Path $repo 'Fahrenheit.slnx'))) {
     Log ''
-    Log "ERROR: Fahrenheit source not found at $repo"
-    Log '  Run build-fahrenheit.ps1 first to clone it.'
-    exit 1
+    Log "[git] cloning Fahrenheit into $repo"
+    New-Item -ItemType Directory -Force -Path (Split-Path $repo) | Out-Null
+    & git clone https://github.com/fahrenheit-crew/fahrenheit $repo 2>&1 | ForEach-Object { Log "  $_" }
+    if (-not (Test-Path (Join-Path $repo 'Fahrenheit.slnx'))) { Log 'ERROR: clone failed'; exit 1 }
 }
 
 Log ''
-Log '[git] updating to latest main'
 & git -C $repo fetch origin main 2>&1 | ForEach-Object { Log "  $_" }
-& git -C $repo reset --hard origin/main 2>&1 | ForEach-Object { Log "  $_" }
+if ($Latest) {
+    Log '[git] building the latest main (untested with FFX VR)'
+    & git -C $repo reset --hard origin/main 2>&1 | ForEach-Object { Log "  $_" }
+} else {
+    Log "[git] building commit $Commit"
+    & git -C $repo reset --hard $Commit 2>&1 | ForEach-Object { Log "  $_" }
+}
+& git -C $repo submodule update --init --recursive 2>&1 | ForEach-Object { Log "  $_" }
 & git -C $repo log -1 --pretty='  building commit %h  (%ad)  %s' --date=short 2>&1 | ForEach-Object { Log $_ }
 
 # ---------------------------------------------------------------- build

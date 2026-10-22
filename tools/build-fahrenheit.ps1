@@ -8,18 +8,19 @@
 # targets the old executable, which is why it crashes on the current game.
 #
 # This script does NOT touch the game folder. It only clones and builds, and
-# writes a log to C:\projects\FFX-VR\logs so the result can be reviewed.
+# writes a log to logs\ in this repository so the result can be reviewed.
 #
 # Native loaders (stage0/stage1) are NOT built here - that needs Visual Studio 2026.
 # Errors about those two projects are expected and can be ignored; we reuse the
 # prebuilt loaders from the alpha11 release.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fahrenheit.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\build-fahrenheit.ps1     (from the repository folder)
 
 $ErrorActionPreference = 'Continue'
 
-$proj   = 'C:\projects\FFX-VR'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$proj   = $FfxvrRepo
 $ext    = Join-Path $proj '_ext'
 $repo   = Join-Path $ext 'fahrenheit'
 $logDir = Join-Path $proj 'logs'

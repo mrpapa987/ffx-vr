@@ -9,8 +9,8 @@
 #   Steam:      Documents\SQUARE ENIX\FINAL FANTASY X&X-2 HD Remaster\[<steam id>\]FINAL FANTASY X\ffx_NNN  (OneDrive Documents too)
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\export-save-to-steam.ps1            # newest Fahrenheit save
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\export-save-to-steam.ps1 -Slot 2    # Fahrenheit slot ffx_002
+#   powershell -ExecutionPolicy Bypass -File .\tools\export-save-to-steam.ps1            # newest Fahrenheit save
+#   powershell -ExecutionPolicy Bypass -File .\tools\export-save-to-steam.ps1 -Slot 2    # Fahrenheit slot ffx_002
 #   ... -ToSlot 4     to choose the Steam slot (must be free unless -Force)
 #
 # Steam Cloud: a new file in the folder is uploaded on the next sync; if Steam
@@ -22,7 +22,8 @@ param(
     [switch]$Force        # allow overwriting an existing Steam slot
 )
 
-$game = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$game = Get-FfxvrGame
 $fh   = Join-Path $game 'fahrenheit\saves\0\default\FINAL FANTASY X'
 $docs = [Environment]::GetFolderPath('MyDocuments')
 $root = Join-Path $docs 'SQUARE ENIX\FINAL FANTASY X&X-2 HD Remaster'
@@ -55,7 +56,7 @@ if (-not $dest) { Write-Host "No FINAL FANTASY X save folder under $root"; exit 
 
 # Backup
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
-$backup = Join-Path 'C:\projects\FFX-VR\logs' "steam-saves-backup-$stamp"
+$backup = Join-Path (Join-Path $FfxvrRepo 'logs') "steam-saves-backup-$stamp"
 New-Item -ItemType Directory -Force -Path $backup | Out-Null
 Get-ChildItem $dest -File | Copy-Item -Destination $backup -Force
 Write-Host "Backed up $dest -> $backup"

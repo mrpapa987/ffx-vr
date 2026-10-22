@@ -5,7 +5,7 @@
 # results to ..\logs\prereqs.txt so they can be reviewed.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\check-prereqs.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\check-prereqs.ps1     (from the repository folder)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -143,6 +143,20 @@ if ($steam) {
     }
 } else {
     Add-Line '  Steam install path not found in the registry'
+}
+
+# ---------------------------------------------------------------- Paths the scripts will use
+. (Join-Path $PSScriptRoot 'paths.ps1')
+Add-Line ''
+Add-Line '[Paths the tools will use]'
+Add-Line "  repository: $FfxvrRepo"
+$gdir = Find-FfxvrGame
+if ($gdir) {
+    $how = if (Test-FfxvrGame $env:FFXVR_GAME_DIR) { 'FFXVR_GAME_DIR' } elseif (Test-FfxvrGame $FfxvrGameOverride) { 'tools\paths.local.ps1' } else { 'found through Steam' }
+    Add-Line "  game:       $gdir   ($how)"
+    if (Test-Path (Join-Path $gdir 'fahrenheit\bin\fhstage0.exe')) { Add-Line '  Fahrenheit: installed in the game folder' } else { Add-Line '  Fahrenheit: NOT installed in the game folder yet (tools\build-fahrenheit-full.ps1)' }
+} else {
+    Add-Line '  game:       NOT FOUND - set FFXVR_GAME_DIR or create tools\paths.local.ps1 (see tools\paths.ps1)'
 }
 
 Add-Line ''

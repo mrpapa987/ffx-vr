@@ -1,20 +1,21 @@
 # run-ffx.ps1
 #
 # Launches Final Fantasy X through the Fahrenheit loader and captures all output
-# into C:\projects\FFX-VR\logs, plus any log files the game or Fahrenheit write
+# into logs\ in this repository, plus any log files the game or Fahrenheit write
 # during the run.
 #
 # Steam must already be running. Do NOT run this elevated - Fahrenheit's docs
 # say running it as administrator breaks startup.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\run-ffx.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\run-ffx.ps1
 
 $ErrorActionPreference = 'Continue'
 
-$game   = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$game   = Get-FfxvrGame
 $bin    = Join-Path $game 'fahrenheit\bin'
-$logDir = 'C:\projects\FFX-VR\logs'
+$logDir = Join-Path $FfxvrRepo 'logs'
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $log    = Join-Path $logDir "run-$stamp.txt"
 

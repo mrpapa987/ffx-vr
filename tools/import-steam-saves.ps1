@@ -9,11 +9,12 @@
 #   Fahrenheit: <game>\fahrenheit\saves\0\default\FINAL FANTASY X\ffx_NNN
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\import-steam-saves.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\import-steam-saves.ps1
 
 $docs = [Environment]::GetFolderPath('MyDocuments')
 $root = Join-Path $docs 'SQUARE ENIX\FINAL FANTASY X&X-2 HD Remaster'
-$game = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$game = Get-FfxvrGame
 $dest = Join-Path $game 'fahrenheit\saves\0\default\FINAL FANTASY X'
 
 if (-not (Test-Path $root)) { Write-Host "No Steam save folder at $root"; exit 1 }

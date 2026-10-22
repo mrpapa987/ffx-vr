@@ -11,7 +11,7 @@
 #   ship\fps60.ini                         -> <game>\fps60.ini         (only if absent: your edits are kept)
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fps60.ps1 [-Fps 60] [-NoUpdate] [-Uninstall]
+#   powershell -ExecutionPolicy Bypass -File .\tools\build-fps60.ps1 [-Fps 60] [-NoUpdate] [-Uninstall]
 #
 # The project is written for the VS 2026 toolset (v145). When only an older
 # toolset is installed the build is retried with that one; the code is C++17.
@@ -24,9 +24,10 @@ param(
 
 $ErrorActionPreference = 'Continue'
 
-$proj   = 'C:\projects\FFX-VR'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$proj   = $FfxvrRepo
 $ext    = Join-Path $proj '_ext\FFX-60fps'
-$game   = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+$game   = Get-FfxvrGame
 $logDir = Join-Path $proj 'logs'
 $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
 $log    = Join-Path $logDir "build-fps60-$stamp.txt"

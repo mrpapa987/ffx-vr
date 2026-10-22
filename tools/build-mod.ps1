@@ -12,14 +12,15 @@
 # because the managed half builds against the Fahrenheit SDK it produces.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-mod.ps1
+#   powershell -ExecutionPolicy Bypass -File .\tools\build-mod.ps1     (from the repository folder)
 
 $ErrorActionPreference = 'Continue'
 
-$proj    = 'C:\projects\FFX-VR'
+. (Join-Path $PSScriptRoot 'paths.ps1')
+$proj    = $FfxvrRepo
 $srcMgd  = Join-Path $proj 'src\managed'
 $srcNat  = Join-Path $proj 'src\native'
-$game    = 'C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
+$game    = Get-FfxvrGame
 $modsDir = Join-Path $game 'fahrenheit\mods'
 $modId   = 'ffxvr'
 $logDir  = Join-Path $proj 'logs'

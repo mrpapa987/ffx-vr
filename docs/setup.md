@@ -59,7 +59,9 @@ artifacts exist and are dated today instead:
 
 ## Game install
 
-`C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster`
+Tested in the default Steam location, `C:\Program Files (x86)\Steam\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster`.
+The scripts find the game through Steam on any machine; `tools/paths.ps1` explains
+the overrides (`FFXVR_GAME_DIR`, `tools/paths.local.ps1`).
 
 Living under Program Files turned out **not** to be a problem: Fahrenheit writes
 its logs, config and state there without elevation. Do not run the game or
@@ -75,7 +77,9 @@ re-maps the addresses again.
 | Script | Purpose |
 | --- | --- |
 | `tools/check-prereqs.ps1` | Reports toolchain, OpenXR runtime registration, Steam paths |
-| `tools/build-fahrenheit-full.ps1` | Updates `main`, full msbuild build, reports native artifacts |
+| `tools/build-fahrenheit-full.ps1` | Clones if needed, checks out the tested commit (`-Latest` for main), full msbuild build, reports native artifacts |
+| `tools/install-fahrenheit.ps1` | Copies the build into `<game>\fahrenheit\bin` (cleared first; config/mods/saves untouched), adds dbghelp.dll if missing |
+| `tools/paths.ps1` | Shared by all scripts: repository root, game folder (env var / local file / Steam) |
 | `tools/run-ffx.ps1` | Launches via Fahrenheit, captures console and game-side logs |
 
 `tools/build-fahrenheit.ps1` is the managed-only build. Kept for reference, but it
@@ -101,8 +105,8 @@ characters, so our hooks see a camera upload - and a head pose - per drawn
 frame. There are no prebuilt releases; `tools\build-fps60.ps1` clones, builds
 (VS toolset v145, or the newest installed) and installs it:
 
-    powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fps60.ps1 -Fps 60
-    powershell -ExecutionPolicy Bypass -File C:\projects\FFX-VR\tools\build-fps60.ps1 -Uninstall
+    powershell -ExecutionPolicy Bypass -File .\tools\build-fps60.ps1 -Fps 60
+    powershell -ExecutionPolicy Bypass -File .\tools\build-fps60.ps1 -Uninstall
 
 Files it puts next to FFX.exe: `dbghelp.dll` (proxy loader; the game imports
 dbghelp.dll, so it loads at start), `fps60_ffx.dll`, `fps60.ini`. Fahrenheit
