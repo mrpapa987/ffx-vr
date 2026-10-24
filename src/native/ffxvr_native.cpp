@@ -154,6 +154,11 @@ bool               g_arm_next      = false;   // F9 pressed; start at the next f
 uint32_t           g_seq           = 0;
 uint32_t           g_frames        = 0;
 int                g_frames_left   = 0;       // frames remaining in this capture
+// Diagnostics that cost frame time (the slot-0 readback, the 1 s heartbeat) run only while armed: the first 1800
+// frames, and while the overlay's Debug header is expanded (managed calls ffxvr_diag_keepalive every such frame).
+// The captures (pick, frame census, cb dump, measure, sequence) do not need it: they read what is always kept.
+uint32_t           g_diag_until    = 1800;
+static inline bool diag_armed() { return g_frames < g_diag_until; }
 constexpr int      kCaptureFrames  = 10;
 uint32_t           g_frame_writes  = 0;       // writes seen in the frame just finished
 
@@ -191,8 +196,11 @@ void**  g_vt = nullptr;
 struct Patched { void** vt; int index; const char* name; void* ours; void* original; };
 Patched g_patched[12] = {};
 int     g_patched_n   = 0;
-ID3D11Buffer*        g_staging      = nullptr;
-UINT                 g_staging_size = 0;
+// The slot-0 readback (diagnostic: the heartbeat's "changed since previous frame"): a ring of staging copies tagged
+// with their frame, mapped without waiting, so the CPU never stalls on the GPU.
+struct CamRb { ID3D11Buffer* st = nullptr; UINT size = 0; uint32_t frame = 0; bool pending = false; };
+CamRb    g_cam_rb[5];   // deeper than DXGI's default 3-frame latency, so a GPU-bound frame never leaves no free entry
+uint32_t g_cam_last_collected = 0;
 
 float    g_cam[48] = {};     // view, projection, inverse view
 float    g_cam_last_view[12] = {};
@@ -202,7 +210,7 @@ uint32_t g_cam_changes = 0;  // frames in which the view matrix differed from th
 // previous frame, so we can see which bytes move while walking even if none of
 // them is a view matrix we recognise.
 std::vector<uint8_t> g_full, g_full_prev;
-int      g_diff_count   = 0;         // floats that changed since last frame
+int      g_diff_count   = 0;         // floats that changed since last frame; -1: n/a (the two copies are not consecutive frames)
 uint32_t g_diff_offs[8] = {};        // first few changed byte offsets
 int      g_draws_latched_at = -1;    // which draw of the frame latched (0 = first)
 int      g_draw_in_frame    = 0;
@@ -365,6 +373,9 @@ EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 
 bool      g_split_pass = false;       // the current extra pass is the right-hand variant into eye 1 (targets unchanged)
 EyeImage* g_eye2_slots[14] = {};      // entries uploaded for each VS slot in the current eye-2 draw
 uint32_t g_eye2_draws = 0, g_eye2_draws_report = 0;
+// R23 step 1 (a measurement only): eye-2 re-issues that swap no input texture and upload no eye-2 constant buffer.
+// An UPPER BOUND of the draws whose eye-2 output could equal eye 1's (their targets may still hold different content).
+uint32_t g_e2_same_inputs = 0, g_e2_same_inputs_report = 0;
 // why a draw did not get an eye-2 pass (cumulative)
 uint32_t g_e2_no_stereo = 0, g_e2_no_image = 0, g_e2_cb_mismatch = 0, g_e2_no_dsv = 0, g_e2_small = 0, g_e2_ok = 0, g_e2_begin_fail = 0;
 // Twins: for every texture the game renders into, an identical texture of
@@ -400,6 +411,12 @@ ID3D11ShaderResourceView* g_snap_game_srv = nullptr;   // eye 1's copy, for the 
 uint32_t g_resolves = 0, g_resolves_mirrored = 0, g_omrt_uav_calls = 0;
 uint32_t g_snap_by = 0;                               // what triggered the last snapshot: 1 SRV bind, 2 copy/resolve, 3 clear
 uint32_t g_snap_frame = 0;                            // frame the snapshot was taken in
+// Scene snapshots cost two full-resolution copies per stereo frame, so they are taken only on demand: the eye-2
+// preview (sources 1, 2) and Measure ask for them; snapshots unused for 600 frames are freed in sweep_caches.
+uint32_t g_snap_until = 0;                            // snapshots wanted while g_frames < this (only ever raised: snap_request)
+bool     g_measure_pending = false; uint32_t g_measure_deadline = 0;   // Measure waits for a fresh snapshot (end of begin_frame)
+static inline bool snap_wanted() { return g_frames < g_snap_until || g_measure_pending; }
+static inline void snap_request(uint32_t frames) { const uint32_t u = g_frames + frames; if (u > g_snap_until) g_snap_until = u; }
 bool g_debug_red = false;              // experiment: clear a depth-bound twin to red on its first eye-2 draw of the frame
 bool g_debug_leave = false;            // experiment: leave the eye-2 image in the buffer after the eye-2 draw (main view should shift)
 uint32_t g_red_clears = 0;
@@ -440,12 +457,16 @@ static void mul4(const float* a, const float* b, float* out) {
 }
 
 /// Relative comparison, loose enough for float products of large translations.
-static bool same4(const float* a, const float* b) {
+static float same4_tol_of(const float* b) {
     float scale = 1.f;
     for (int i = 0; i < 16; ++i) scale = (std::max)(scale, fabsf(b[i]));
-    for (int i = 0; i < 16; ++i) if (fabsf(a[i] - b[i]) > 0.01f * scale) return false;
+    return 0.01f * scale;
+}
+static bool same4_tol(const float* a, const float* b, float tol) {   // same4 with b's tolerance computed once by the caller
+    for (int i = 0; i < 16; ++i) if (fabsf(a[i] - b[i]) > tol) return false;
     return true;
 }
+static bool same4(const float* a, const float* b) { return same4_tol(a, b, same4_tol_of(b)); }
 
 /// Builds the override view V' (4x4) and its inverse from a base 3x4 view.
 // Head tracking (OpenXR). The located left-eye pose, relative to the
@@ -495,9 +516,14 @@ uint32_t g_turn_count = 0;
 bool  g_move_remap = true; float g_move_sign = 1.f; float g_move_delta = 0.f;   // radians
 float g_move_delta_hold = 0.f; bool g_move_held = false;   // third person: the remap latched while the stick is pushed (see the hook)
 float g_yaw_view = 0.f, g_yaw_cam = 0.f;
-uint32_t g_xi_hook_calls = 0; bool g_xi_hooked = false;
+uint32_t g_xi_hook_calls = 0; bool g_xi_hooked = false; uint32_t g_xi_hook_calls_all = 0;   // _all: every call of the game's, pad or not (heartbeat)
 typedef DWORD (WINAPI *PFN_XInputGetState)(DWORD, XINPUT_STATE*);
-PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = false; int g_xi_pad = -1; ULONGLONG g_xi_probe = 0;
+PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = false; int g_xi_pad = -1; ULONGLONG g_xi_probe = 0; DWORD g_xi_probe_slot = 0;
+// What the game's own XInputGetState calls returned, per pad slot (recorded by the import hook, before the VR pad is
+// merged in): while the game polls, stick turning uses this and makes no XInput calls of its own. Written on the
+// game's input thread, read on the render thread: aligned 32-bit fields, a torn read is harmless.
+struct XiSeen { DWORD res; LONG rx; DWORD tick; };
+XiSeen g_xi_seen[4] = {};
 // First person / follow: the view is built from the player's position, not
 // the authored camera. Heading latched at toggle (and at recentre); the
 // head owns orientation; the player's own skinned draws are hidden.
@@ -908,6 +934,8 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
 }
 static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
     DWORD r = g_xi_orig(idx, st);
+    g_xi_hook_calls_all++;
+    if (idx < 4 && st != nullptr) { g_xi_seen[idx].res = r; g_xi_seen[idx].rx = st->Gamepad.sThumbRX; g_xi_seen[idx].tick = GetTickCount(); }
     const bool vr = g_vrpad_enabled && g_xr_active && g_vrpad.ready && idx == 0 && st != nullptr;
     if (vr) { vrpad_apply(st, r == ERROR_SUCCESS); r = ERROR_SUCCESS; }
     if (r == ERROR_SUCCESS && st) {
@@ -1102,6 +1130,22 @@ static float right_stick_x() {
         if (fabsf(x) >= dz) return (x - (x > 0 ? dz : -dz)) / (1.f - dz);
         // fall through: a physical pad may still be turning
     }
+    auto norm_rx = [](LONG rx) {
+        float x = rx / 32767.f;
+        const float dz = 0.25f;
+        if (fabsf(x) < dz) return 0.f;
+        return (x - (x > 0 ? dz : -dz)) / (1.f - dz);
+    };
+    if (g_xi_hooked) {   // the game polls through its own import: use what it saw (no XInput calls of ours, no probing spikes)
+        const DWORD now = GetTickCount(); bool polling = false;
+        for (int i = 0; i < 4; ++i) {
+            const XiSeen seen = g_xi_seen[i];
+            if (seen.tick == 0 || (LONG)(now - seen.tick) > 500) continue;   // signed: a sample newer than `now` (other thread) is fresh
+            polling = true;
+            if (seen.res == ERROR_SUCCESS) { g_xi_pad = i; return norm_rx(seen.rx); }   // remembered: the direct read starts there if polling stops
+        }
+        if (polling) return 0.f;   // the game polls but no pad answered: a pad it does not poll could not drive it either
+    }
     if (!g_xi_tried) {
         g_xi_tried = true;
         HMODULE m = LoadLibraryA("xinput1_4.dll");
@@ -1112,22 +1156,17 @@ static float right_stick_x() {
         diag("xinput: %s", g_xi_get ? "loaded" : "not available");
     }
     if (!g_xi_get) return 0.f;
+    // No hook, or the game is not polling: read the pad directly.
     XINPUT_STATE st = {};
-    auto norm = [&]() {
-        float x = st.Gamepad.sThumbRX / 32767.f;
-        const float dz = 0.25f;
-        if (fabsf(x) < dz) return 0.f;
-        return (x - (x > 0 ? dz : -dz)) / (1.f - dz);
-    };
     if (g_xi_pad >= 0) {
-        if (g_xi_get((DWORD)g_xi_pad, &st) == ERROR_SUCCESS) return norm();
+        if (g_xi_get((DWORD)g_xi_pad, &st) == ERROR_SUCCESS) return norm_rx(st.Gamepad.sThumbRX);
         g_xi_pad = -1;
     }
-    const ULONGLONG now = GetTickCount64();                // probing absent pads is slow: every 2 s only
+    const ULONGLONG now = GetTickCount64();                // probing an absent pad is slow: one slot every 2 s, round robin
     if (now < g_xi_probe) return 0.f;
     g_xi_probe = now + 2000;
-    for (DWORD i = 0; i < 4; ++i)
-        if (g_xi_get(i, &st) == ERROR_SUCCESS) { g_xi_pad = (int)i; diag("xinput: pad %u", i); return norm(); }
+    const DWORD i = g_xi_probe_slot; g_xi_probe_slot = (g_xi_probe_slot + 1) % 4;
+    if (g_xi_get(i, &st) == ERROR_SUCCESS) { g_xi_pad = (int)i; diag("xinput: pad %u", i); return norm_rx(st.Gamepad.sThumbRX); }
     return 0.f;
 }
 
@@ -1502,15 +1541,23 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
 /// frame's known proj*view with the override's -- and any block equal to
 /// proj*view*X, where X is some other block in the same buffer (an object's
 /// world matrix), with the override's proj*view*X. Returns the number replaced.
-static int replace_known_products(uint8_t* p, UINT size, const float* PVn) {
+/// Replaces the frame's known proj*view (and proj*view*X for affine blocks X) in a buffer with no recognised camera.
+/// Reads `rd`, writes `wr`: the first hit copies rd into wr (unless they are the same buffer), so a buffer with
+/// nothing of ours in it (the common case) costs no copy. Returns the number of blocks replaced.
+static int replace_known_products(const uint8_t* rd, uint8_t* wr, UINT size, const float* PVn) {
     if (!g_have_PV) return 0;
     int n = 0;
     const UINT nblocks = size / 16;
+    bool copied = false;
+    auto take = [&]() { if (!copied) { if (wr != rd) memcpy(wr, rd, size); copied = true; } };   // never memcpy onto itself
+    auto cur  = [&]() -> const uint8_t* { return copied ? wr : rd; };                            // later passes see earlier replacements
+    const float tol_pv = same4_tol_of(g_last_PV);
 
     // Pass 1: bare proj*view.
     for (UINT off = 0; off + 64 <= size; off += 16) {
-        if (same4(reinterpret_cast<const float*>(p + off), g_last_PV)) {
-            memcpy(p + off, PVn, 64);
+        if (same4_tol(reinterpret_cast<const float*>(cur() + off), g_last_PV, tol_pv)) {
+            take();
+            memcpy(wr + off, PVn, 64);
             n++;
         }
     }
@@ -1519,17 +1566,19 @@ static int replace_known_products(uint8_t* p, UINT size, const float* PVn) {
     // Buffers of this kind are small, so the quadratic search is cheap.
     if (nblocks > 64) return n;
     for (UINT xo = 0; xo + 64 <= size; xo += 16) {
-        const float* X = reinterpret_cast<const float*>(p + xo);
+        const float* X = reinterpret_cast<const float*>(cur() + xo);
         if (X[12] != 0.f || X[13] != 0.f || X[14] != 0.f || fabsf(X[15] - 1.f) > 1e-4f) continue;   // not affine
-        if (same4(X, g_last_PV)) continue;
+        if (same4_tol(X, g_last_PV, tol_pv)) continue;
         float PVX[16], PVnX[16];
         mul4(g_last_PV, X, PVX);
+        const float tol_x = same4_tol_of(PVX);
         bool used = false;
         for (UINT off = 0; off + 64 <= size; off += 16) {
             if (off == xo) continue;
-            if (same4(reinterpret_cast<const float*>(p + off), PVX)) {
-                if (!used) { mul4(PVn, X, PVnX); used = true; }
-                memcpy(p + off, PVnX, 64);
+            if (same4_tol(reinterpret_cast<const float*>(cur() + off), PVX, tol_x)) {
+                if (!used) { mul4(PVn, X, PVnX); used = true; }   // X is unchanged in either buffer (only off != xo is written)
+                take();
+                memcpy(wr + off, PVnX, 64);
                 n++;
             }
         }
@@ -2034,7 +2083,7 @@ static void ui_pick_check(unsigned draw_idx) {
         auto it = g_vs_cb[0] ? g_buffers.find(g_vs_cb[0]) : g_buffers.end();
         if (it != g_buffers.end()) {
             const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
-            l += snprintf(cb + l, sizeof(cb) - l, " cb0 %uB:", (unsigned)it->second.data.size());
+            l += snprintf(cb + l, sizeof(cb) - l, " cb0 %uB:", (unsigned)it->second.size);
             for (UINT k = 0; k < nf && k < 64 && l < sizeof(cb) - 16; ++k) l += snprintf(cb + l, sizeof(cb) - l, " %.4g", f[k]);
         }
     }
@@ -2049,7 +2098,7 @@ static void ui_pick_check(unsigned draw_idx) {
             if (it == g_buffers.end()) pl += snprintf(pcb + pl, sizeof(pcb) - pl, " ps_cb%d: (no record)", sl);
             else {
                 const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
-                pl += snprintf(pcb + pl, sizeof(pcb) - pl, " ps_cb%d %uB:", sl, (unsigned)it->second.data.size());
+                pl += snprintf(pcb + pl, sizeof(pcb) - pl, " ps_cb%d %uB:", sl, (unsigned)it->second.size);
                 for (UINT k = 0; k < nf && k < 40 && pl < sizeof(pcb) - 16; ++k) pl += snprintf(pcb + pl, sizeof(pcb) - pl, " %.4g", f[k]);
             }
             pbs[sl]->Release();
@@ -2729,12 +2778,13 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) g_cam3d_uploads_frame++;
     }
     if (g_ovr_suspend) return src;              // the frame goes to the virtual screen: the game's own camera
+    if (base == 0 && !g_have_PV) return src;    // no camera, and no known product this frame to look for: nothing to do
 
     if (g_scratch.size() < size) g_scratch.resize(size);
-    memcpy(g_scratch.data(), p, size);
 
     unsigned mask = 0;
     if (base != 0) {
+        memcpy(g_scratch.data(), p, size);
         if (g_ovr_freeze) {
             if (!g_ovr_have_base) { memcpy(g_ovr_base, v, sizeof(v)); g_ovr_have_base = true; }
             memcpy(v, g_ovr_base, sizeof(v));
@@ -2777,7 +2827,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         }
     }
     else {
-        if (replace_known_products(g_scratch.data(), size, g_last_PVn) == 0) return src;   // nothing of ours in here
+        if (replace_known_products(p, g_scratch.data(), size, g_last_PVn) == 0) return src;   // nothing of ours in here (and nothing copied)
         mask = 256;
         if (g_stereo && buf != nullptr) {
             EyeImage& e = g_eye_ring[g_eye_ring_next];
@@ -2785,7 +2835,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 2; e.has_world = false;
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
-            replace_known_products(e.eye2.data(), size, g_last_PVn2);
+            replace_known_products(e.eye2.data(), e.eye2.data(), size, g_last_PVn2);   // in place
         }
     }
 
@@ -2843,8 +2893,13 @@ void record_buffer(ID3D11Buffer* buf, UINT size, const void* src, const char* vi
     rec.via     = via;
     rec.updates += 1;
     rec.frame = g_frames;
-    rec.data.resize(size);
-    memcpy(rec.data.data(), src, size);
+    // rec.data is diagnostic-only (the F9 pick, the frame census; nothing reads past 64 floats), so only the first
+    // 256 bytes are kept. camera_from_write and the world extraction above read `src` and must keep running on EVERY
+    // write: never gate record_buffer as a whole.
+    constexpr UINT kCbKeep = 256;
+    const UINT keep = size < kCbKeep ? size : kCbKeep;
+    if (rec.data.size() != keep) rec.data.resize(keep);
+    memcpy(rec.data.data(), src, keep);
     bump(C_CB_CAPTURED);
 
     if (g_capturing && g_capture.size() < kCaptureLimit) {
@@ -2897,7 +2952,8 @@ static void describe_address(void* p, char* out, size_t n) {
 
 void heartbeat(bool force) {
     const DWORD now = GetTickCount();
-    if (!force && (now - g_last_beat) < 1000) return;
+    const DWORD period = diag_armed() ? 1000 : 30000;   // every second while debugging, else every 30 s (still proves the hooks live)
+    if (!force && (now - g_last_beat) < period) return;
     g_last_beat = now;
 
     {   // one appended line per beat: the camera as a time series
@@ -2931,14 +2987,22 @@ void heartbeat(bool force) {
         fprintf(f, "  %-26s %ld\n", kCounterName[i], g_counters[i]);
     }
 
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        fprintf(f, "\n  distinct constant buffers:  %zu\n", g_buffers.size());
-        for (const auto& [buf, rec] : g_buffers) {
-            fprintf(f, "      %p  %5u bytes  %8llu updates  via %s\n",
-                    static_cast<void*>(buf), rec.size,
-                    static_cast<unsigned long long>(rec.updates), rec.via);
+    {   // copied under the lock, printed after it (file I/O must not hold up the render thread's writes)
+        struct BufLine { const void* buf; UINT size; unsigned long long updates; const char* via; };
+        constexpr size_t kMaxLines = 300;
+        std::vector<BufLine> lines; size_t total = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            total = g_buffers.size();
+            lines.reserve(total < kMaxLines ? total : kMaxLines);
+            for (const auto& [buf, rec] : g_buffers) {
+                if (lines.size() >= kMaxLines) break;
+                lines.push_back({ static_cast<const void*>(buf), rec.size, static_cast<unsigned long long>(rec.updates), rec.via });   // via: a string literal
+            }
         }
+        fprintf(f, "\n  distinct constant buffers:  %zu\n", total);
+        for (const BufLine& b : lines) fprintf(f, "      %p  %5u bytes  %8llu updates  via %s\n", b.buf, b.size, b.updates, b.via);
+        if (total > lines.size()) fprintf(f, "      ... %zu more\n", total - lines.size());
     }
 
     if (g_patched_n > 0) {
@@ -2954,11 +3018,14 @@ void heartbeat(bool force) {
         }
     }
 
-    fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n",
-            g_full.size(), g_draws_latched_at, g_cam_reads);
+    if (diag_armed()) fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n", g_full.size(), g_draws_latched_at, g_cam_reads);
+    else fprintf(f, "\n  latched slot-0 buffer: not latched (diagnostics disarmed), reads %u\n", g_cam_reads);
+    fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0);
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
-    fprintf(f, "  changed since previous frame: %d floats", g_diff_count);
-    if (g_diff_count > 0) {
+    if (!diag_armed()) fprintf(f, "  changed since previous frame: not measured (open the overlay's Debug header)");
+    else if (g_diff_count < 0) fprintf(f, "  changed since previous frame: n/a (frames not consecutive)");
+    else fprintf(f, "  changed since previous frame: %d floats", g_diff_count);
+    if (diag_armed() && g_diff_count > 0) {
         fprintf(f, " at bytes");
         for (int i = 0; i < g_diff_count && i < 8; ++i) fprintf(f, " %u", g_diff_offs[i]);
     }
@@ -2974,11 +3041,12 @@ void heartbeat(bool force) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_ovr_stats.empty()) {
+        std::vector<std::pair<UINT, OvrStat>> stats;
+        { std::lock_guard<std::mutex> lock(g_mutex); stats.assign(g_ovr_stats.begin(), g_ovr_stats.end()); }   // printed outside the lock
+        if (!stats.empty()) {
             fprintf(f, "\n  camera override, by buffer size (blocks patched in ALL writes / in ANY write):\n");
             static const char* const names[9] = { "view", "inv", "pos", "VP", "VW", "PVW", "IVW", "shifted", "product-only" };
-            for (const auto& [size, st] : g_ovr_stats) {
+            for (const auto& [size, st] : stats) {
                 fprintf(f, "    %6u B  %8u writes   all:", size, st.count);
                 for (int i = 0; i < 9; ++i) if (st.mask_all & (1u << i)) fprintf(f, " %s", names[i]);
                 fprintf(f, "   any:");
@@ -2989,8 +3057,8 @@ void heartbeat(bool force) {
     }
 
 
-    fprintf(f, "\n  eye 2: stereo=%d twins=%u backbuffer=%p draws last frame=%u\n", g_stereo ? 1 : 0,
-            g_twin_count, static_cast<void*>(g_backbuffer), g_eye2_draws_report);
+    fprintf(f, "\n  eye 2: stereo=%d twins=%u backbuffer=%p draws last frame=%u (same inputs as eye 1: %u, upper bound)\n", g_stereo ? 1 : 0,
+            g_twin_count, static_cast<void*>(g_backbuffer), g_eye2_draws_report, g_e2_same_inputs_report);
     fprintf(f, "         skipped: no stereo %u, no image %u, cb mismatch %u, no depth target %u, small cb %u; ok %u; begin failed %u\n",
             g_e2_no_stereo, g_e2_no_image, g_e2_cb_mismatch, g_e2_no_dsv, g_e2_small, g_e2_ok, g_e2_begin_fail);
     fprintf(f, "         backbuffer: draws seen %u (of which in overlay phase %u), eye2 begins %u (twin null %u), copies into it %u, overlay phase now %d\n",
@@ -3245,57 +3313,66 @@ void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resour
 
 // ---------------------------------------------------------------- install
 
-// Copy the bound slot-0 buffer somewhere the CPU can read, and pull out the
-// camera. Uses the original Map/Unmap so our own hooks neither recurse nor
-// record the staging buffer as game data.
+// Copy the latched slot-0 buffer somewhere the CPU can read, and diff it against the previous frame's copy
+// (diagnostic only: the camera itself comes from the CPU-side writes). Uses the original Map/Unmap so our own hooks
+// neither recurse nor record the staging buffers as game data. Only while diag_armed(); never blocks.
 void read_camera() {
-    if (g_slot0 == nullptr || g_device == nullptr || g_ctx == nullptr) return;
-    if (g_orig_map == nullptr || g_orig_unmap == nullptr) return;
+    if (!diag_armed()) {
+        if (g_slot0) { g_slot0->Release(); g_slot0 = nullptr; }   // not latched while disarmed either (ffxvr_on_draw)
+        return;
+    }
+    if (g_device == nullptr || g_ctx == nullptr || g_orig_map == nullptr || g_orig_unmap == nullptr) return;
 
+    // Collect: pending copies oldest first. The GPU completes in order, so stop at the first still in flight.
+    for (;;) {
+        CamRb* e = nullptr;
+        for (CamRb& c : g_cam_rb) if (c.pending && (e == nullptr || c.frame < e->frame)) e = &c;
+        if (e == nullptr) break;
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        const HRESULT hr = g_orig_map(g_ctx, e->st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) break;
+        e->pending = false;
+        if (FAILED(hr) || ms.pData == nullptr) { if (SUCCEEDED(hr)) g_orig_unmap(g_ctx, e->st, 0); continue; }
+        const uint8_t* p = static_cast<const uint8_t*>(ms.pData);
+        g_full_prev.swap(g_full);
+        g_full.assign(p, p + e->size);
+        g_orig_unmap(g_ctx, e->st, 0);
+        // Diff against the previous copy: consecutive frames, same size only.
+        g_diff_count = 0;
+        if (e->frame != g_cam_last_collected + 1) g_diff_count = -1;
+        else if (g_full_prev.size() == g_full.size()) {
+            const float* fa = reinterpret_cast<const float*>(g_full.data());
+            const float* fb = reinterpret_cast<const float*>(g_full_prev.data());
+            const size_t n = g_full.size() / 4;
+            for (size_t i = 0; i < n; ++i) {
+                if (fa[i] != fb[i]) {
+                    if (g_diff_count < 8) g_diff_offs[g_diff_count] = static_cast<uint32_t>(i * 4);
+                    g_diff_count++;
+                }
+            }
+        }
+        g_cam_last_collected = e->frame;
+    }
+
+    // Issue this frame's copy into a free entry (none free: skip this frame).
+    if (g_slot0 == nullptr) return;
     D3D11_BUFFER_DESC src = {};
     g_slot0->GetDesc(&src);
     if (src.ByteWidth < 48) return;
-
-    if (g_staging == nullptr || g_staging_size < src.ByteWidth) {
-        if (g_staging) { g_staging->Release(); g_staging = nullptr; }
+    CamRb* e = nullptr;
+    for (CamRb& c : g_cam_rb) if (!c.pending) { e = &c; break; }
+    if (e == nullptr) return;
+    if (e->st == nullptr || e->size != src.ByteWidth) {
+        if (e->st) { e->st->Release(); e->st = nullptr; }
         D3D11_BUFFER_DESC sd = {};
         sd.ByteWidth      = src.ByteWidth;
         sd.Usage          = D3D11_USAGE_STAGING;
         sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        if (FAILED(g_device->CreateBuffer(&sd, nullptr, &g_staging))) { g_staging = nullptr; return; }
-        g_staging_size = src.ByteWidth;
+        if (FAILED(g_device->CreateBuffer(&sd, nullptr, &e->st))) { e->st = nullptr; e->size = 0; return; }
+        e->size = src.ByteWidth;
     }
-
-    g_ctx->CopyResource(g_staging, g_slot0);
-
-    D3D11_MAPPED_SUBRESOURCE ms = {};
-    if (FAILED(g_orig_map(g_ctx, g_staging, 0, D3D11_MAP_READ, 0, &ms)) || ms.pData == nullptr) return;
-
-    const uint8_t* p = static_cast<const uint8_t*>(ms.pData);
-
-    g_full_prev.swap(g_full);
-    g_full.assign(p, p + src.ByteWidth);
-
-
-    g_orig_unmap(g_ctx, g_staging, 0);
-
-    // Diff against last frame: same buffer, same size only.
-    g_diff_count = 0;
-    if (g_full_prev.size() == g_full.size()) {
-        const float* a = reinterpret_cast<const float*>(g_full.data());
-        const float* b = reinterpret_cast<const float*>(g_full_prev.data());
-        const size_t n = g_full.size() / 4;
-        for (size_t i = 0; i < n; ++i) {
-            if (a[i] != b[i]) {
-                if (g_diff_count < 8) g_diff_offs[g_diff_count] = static_cast<uint32_t>(i * 4);
-                g_diff_count++;
-            }
-        }
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-    }
+    g_ctx->CopyResource(e->st, g_slot0);
+    e->frame = g_frames; e->pending = true;
 }
 
 bool patch(void** vtable, int index, void* replacement, void** out_original, const char* name = "?") {
@@ -3313,14 +3390,24 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 
 static void ui_census_geometry();   // census helper, defined below ffxvr_on_draw's neighbours
 static void ui_pass_begin();        // the UI pass opener, defined with the clear hooks
+static void measure_now();          // the Measure report, defined with ffxvr_measure (run deferred from begin_frame)
+static void snap_release();         // frees the four scene-snapshot objects, defined above snapshot_scene
+static void opaque_release(int slot);   // frees one preview copy (g_opaque), defined with opaque_copy
 
 
 // ---------------------------------------------------------------------------
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 1;
+constexpr int FFXVR_ABI = 2;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
+
+/// Keeps the costly diagnostics armed for `frames` more frames (see g_diag_until). Managed calls it with 2 every
+/// frame the overlay's Debug header is expanded, so closing the header (or the window) disarms them.
+extern "C" __declspec(dllexport) void ffxvr_diag_keepalive(int frames) {
+    const uint32_t u = g_frames + (uint32_t)(frames < 1 ? 1 : frames);
+    if (u > g_diag_until) g_diag_until = u;
+}
 
 extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_context) {
     if (g_installed) return 0;
@@ -3367,7 +3454,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
         _snwprintf_s(tpath, _TRUNCATE, L"%s\\ffxvr_trace.log", g_dir);
         FILE* t = nullptr;
         if (_wfopen_s(&t, tpath, L"w") == 0 && t != nullptr) {
-            fprintf(t, "camera trace: one line per second, from UpdateSubresource writes of per-object buffers\n");
+            fprintf(t, "camera trace: one line per heartbeat (1 s while debugging, 30 s otherwise), from UpdateSubresource writes of per-object buffers\n");
             fclose(t);
         }
     }
@@ -3394,6 +3481,10 @@ static void sweep_caches() {
         const uint32_t idle = big ? 36000u : 900u;
         if (it->first != g_backbuffer && g_frames - it->second.last_used > idle) { twin_release(it->second); it = g_twins.erase(it); g_twins_swept++; }
         else ++it;
+    }
+    if (!snap_wanted() && g_snap_tex && g_frames - g_snap_frame > 600) {   // R3: idle scene snapshots (2x scene-target VRAM) go after 10 s
+        snap_release();
+        opaque_release(1); opaque_release(2);   // and the preview's scene-size copies of them (requested together, so idle together)
     }
     std::lock_guard<std::mutex> lock(g_mutex);
     for (auto it = g_buffers.begin(); it != g_buffers.end();) {
@@ -3487,9 +3578,9 @@ static void perf_tick() {
     const bool slow = g_perf.frame_ms > 40.0;
     if (t - g_perf_log_tick > (slow ? 5000ULL : 30000ULL)) {
         g_perf_log_tick = t;
-        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u hidden %u hist %u",
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u",
              g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
-             (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_fp_hidden_draws, g_hist_draws);
+             (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws);
     }
 }
 
@@ -3562,6 +3653,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_targets_frame_n = 0; g_cleared_frame_n = 0;
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
+    g_e2_same_inputs_report = g_e2_same_inputs; g_e2_same_inputs = 0;
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
     bones_frame_end();
     {   // UI pass health: how many 3D frames had a captured UI pass, and the frame structure the detector saw
@@ -3593,6 +3685,8 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
 
     if (dump_now) dump_capture();
+    // A deferred Measure (R3): once the frame just finished took a snapshot, or after 5 frames whatever happened.
+    if (g_measure_pending && (g_snap_frame + 1 == g_frames || g_frames >= g_measure_deadline)) { g_measure_pending = false; measure_now(); }
 }
 
 // Fills 48 floats: view, projection, inverse view. Returns 1 if valid.
@@ -3853,7 +3947,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                     auto it = g_vs_cb[sl] ? g_buffers.find(g_vs_cb[sl]) : g_buffers.end();
                     if (it == g_buffers.end()) continue;
                     const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
-                    l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.data.size());
+                    l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.size);
                     for (UINT k = 0; k < nf && k < 12 && l < sizeof(line) - 16; ++k) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
                     if (sl == 0 && nf > 12) {   // the rest of cb0, on extra lines (sprite transforms / atlas rects live somewhere in here)
                         FrameEv e0; strncpy_s(e0.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e0);
@@ -3975,7 +4069,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     const int passes = (eye2 && g_eye2_cur && g_eye2_cur->split) ? 3 : (eye2 ? 1 : 0);
-    if (g_latched || g_ctx == nullptr) return passes | ret_flags;
+    if (g_latched || g_ctx == nullptr || !diag_armed()) return passes | ret_flags;   // the latch only feeds read_camera
 
     ID3D11Buffer* b = nullptr;
     g_ctx->VSGetConstantBuffers(0, 1, &b);          // AddRefs
@@ -3994,8 +4088,6 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     return passes | ret_flags;
 }
 
-/// out[0] = floats changed since last frame, out[1] = buffer size, out[2] = draw
-/// index that latched, out[3..10] = first changed byte offsets.
 /// Called from the managed inline detour on UpdateSubresource, which the
 /// runtime would not let us vtable-patch. Records (and scans) the write when
 /// the target is a constant buffer being replaced whole.
@@ -4152,6 +4244,15 @@ static ID3D11ShaderResourceView* twin_srv(ID3D11ShaderResourceView* v) {
 }
 
 
+/// The four snapshot objects, released together (a new source, or idle in sweep_caches).
+static void snap_release() {
+    if (g_snap_srv)      { g_snap_srv->Release();      g_snap_srv = nullptr; }
+    if (g_snap_tex)      { g_plain_srvs_forget(g_snap_tex);  g_snap_tex->Release();  g_snap_tex = nullptr; }
+    if (g_snap_game_srv) { g_snap_game_srv->Release(); g_snap_game_srv = nullptr; }
+    if (g_snap_game)     { g_plain_srvs_forget(g_snap_game); g_snap_game->Release(); g_snap_game = nullptr; }
+    g_snap_from = nullptr;
+}
+
 /// Copies the scene target (eye 1) and its twin (eye 2) at the same instant.
 /// Called the moment the game first binds the scene texture as a shader
 /// input -- i.e. when post-processing starts reading it -- so every pass
@@ -4161,10 +4262,7 @@ static void snapshot_scene(ID3D11Texture2D* game) {
     if (it == g_twins.end() || it->second.tex == nullptr) return;
     Twin& src = it->second;
     if (g_snap_tex == nullptr || g_snap_from != game) {
-        if (g_snap_srv)      { g_snap_srv->Release();      g_snap_srv = nullptr; }
-        if (g_snap_tex)      { g_plain_srvs_forget(g_snap_tex);  g_snap_tex->Release();  g_snap_tex = nullptr; }
-        if (g_snap_game_srv) { g_snap_game_srv->Release(); g_snap_game_srv = nullptr; }
-        if (g_snap_game)     { g_plain_srvs_forget(g_snap_game); g_snap_game->Release(); g_snap_game = nullptr; }
+        snap_release();
         D3D11_TEXTURE2D_DESC d; src.tex->GetDesc(&d);
         d.BindFlags = D3D11_BIND_SHADER_RESOURCE; d.MiscFlags = 0;
         if (SUCCEEDED(g_device->CreateTexture2D(&d, nullptr, &g_snap_tex)))  g_device->CreateShaderResourceView(g_snap_tex,  nullptr, &g_snap_srv);
@@ -4182,6 +4280,7 @@ static void snapshot_scene(ID3D11Texture2D* game) {
 /// Snapshot both eyes if `tex` is the texture that took the scene pass this
 /// frame and no snapshot was taken yet. `how` records the trigger.
 static bool snapshot_if_scene(ID3D11Texture2D* tex, uint32_t how) {
+    if (!snap_wanted()) return false;
     if (!g_stereo || tex == nullptr || g_snap_frame == g_frames) return false;
     if (tex != g_scene_live_tex || g_scene_live_draws < 60) return false;
     snapshot_scene(tex);
@@ -4307,6 +4406,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     // Upload the eye-2 image of every bound VS constant buffer that has one,
     // whichever slot it sits in: the shader may take the camera from a slot
     // other than 0.
+    bool e2_data_differs = false;
     for (int sl = 0; sl < 14; ++sl) {
         g_eye2_slots[sl] = nullptr;
         ID3D11Buffer* cb = g_vs_cb[sl];
@@ -4320,9 +4420,13 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
         for (int q = 0; q < sl; ++q) if (g_eye2_slots[q] == g_eye2_slots[sl]) dup = true;   // same buffer in two slots
         if (dup) { g_eye2_slots[sl] = nullptr; continue; }
         g_e2_uploads++;
-        if (g_eye2_slots[sl]->eye1 == g_eye2_slots[sl]->eye2) g_e2_identical++;
-        g_ctx->UpdateSubresource(cb, 0, nullptr, (right_variant && g_eye2_slots[sl] == g_eye2_cur) ? g_eye2_slots[sl]->eye2b.data() : g_eye2_slots[sl]->eye2.data(), 0, 0);
+        const bool same = g_eye2_slots[sl]->eye1 == g_eye2_slots[sl]->eye2;
+        if (same) g_e2_identical++;
+        const bool rv = right_variant && g_eye2_slots[sl] == g_eye2_cur;   // the split right-hand pass uploads eye2b (eye 1 drew eye1b)
+        if (rv ? g_eye2_slots[sl]->eye2b != g_eye2_slots[sl]->eye1b : !same) e2_data_differs = true;   // R23: only eye-2 data that differs from eye 1's counts
+        g_ctx->UpdateSubresource(cb, 0, nullptr, rv ? g_eye2_slots[sl]->eye2b.data() : g_eye2_slots[sl]->eye2.data(), 0, 0);
     }
+    if (!any && !e2_data_differs) g_e2_same_inputs++;   // R23: no swapped input, no eye-2 constant data that differs: a true upper bound
     return 1;
 }
 
@@ -4354,7 +4458,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned 
     for (unsigned i = 0; i < n && start + i < 16; ++i) g_cur_ps_srv[start + i] = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
     // The first time this frame the game reads the texture that took the
     // scene pass, the scene is complete: snapshot both eyes now.
-    if (views == nullptr) return;
+    if (views == nullptr || !g_stereo || !snap_wanted()) return;   // R3: no per-bind texture_of unless a snapshot is wanted
     for (unsigned i = 0; i < n; ++i) {
         if (views[i] == nullptr) continue;
         if (snapshot_if_scene(texture_of(static_cast<ID3D11View*>(views[i])), 1)) break;
@@ -4393,7 +4497,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
                 g_resolves_mirrored++;
                 // The first resolve of the scene pass is the finished scene, in a
                 // plain (non-multisampled) texture: that is the eye image.
-                if (src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
+                if (snap_wanted() && src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
                 if (src == g_scene_live_tex && g_scene_live_draws >= 20) {
                     g_ui_resolves_frame++;
                     // The UI pass ends at the resolve AFTER its draws. Some areas
@@ -4607,7 +4711,7 @@ static bool dump_bmp(ID3D11Texture2D* tex, const wchar_t* name, bool alpha_only 
 
 // A snapshot of the GAME's scene texture at the same moment as eye 2's, so
 // the two can be compared.
-extern "C" __declspec(dllexport) int ffxvr_measure() {
+static void measure_now() {
     diag("measure (eye separation %.2f): eye-2 uploads %u (identical to eye 1: %u), re-entered UpdateSubresource calls %u, red clears %u, twins %u",
          g_ipd, g_e2_uploads, g_e2_identical, g_e2_reentered_updates, g_red_clears, g_twin_count);
     diag("    draw contexts: on the hooked immediate context %u, on another context %u (last %p); hooked context %p", g_draw_ctx_same, g_draw_ctx_other, g_draw_ctx_last_other, static_cast<void*>(g_ctx));
@@ -4634,7 +4738,7 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         diag("    final: game vs eye-2 twin   mean |diff| %.2f/255, %.1f%% of pixels differ   (brightness %.1f vs %.1f)", m, fr * 100, ba, bb);
     else diag("    final: could not compare");
     {
-        D3D11_TEXTURE2D_DESC d = {}; if (g_snap_from) g_snap_from->GetDesc(&d);
+        D3D11_TEXTURE2D_DESC d = {}; if (g_snap_tex) g_snap_tex->GetDesc(&d);   // our own copy (same size and format), not the game's un-AddRef'd texture
         diag("    scene snapshot: %ux%u fmt %u, taken in frame %u (now %u) when the game first read the scene target", d.Width, d.Height, static_cast<unsigned>(d.Format), g_snap_frame, g_frames);
     }
     if (g_snap_tex && g_snap_game && readback_diff(g_snap_game, g_snap_tex, &m, &fr, &ba, &bb))
@@ -4650,6 +4754,12 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
         if (bt != g_twins.end()) dump_bmp(bt->second.tex, L"img_final_eye2_alpha.bmp", true);
         dump_bmp(g_snap_tex, L"img_scene_eye2_alpha.bmp", true);
     }
+}
+/// The Measure button. Snapshots are on demand (R3): with a fresh one (from the frame just finished) it measures at
+/// once, as before; otherwise it asks for snapshots and measures at the end of a later begin_frame (at most 5 frames).
+extern "C" __declspec(dllexport) int ffxvr_measure() {
+    if (g_snap_tex && g_snap_frame + 1 >= g_frames) { measure_now(); return 0; }
+    g_measure_pending = true; g_measure_deadline = g_frames + 5; snap_request(5);
     return 0;
 }
 
@@ -4704,6 +4814,12 @@ ID3D11VertexShader* g_copy_vs = nullptr; ID3D11PixelShader* g_copy_ps = nullptr;
 bool g_copy_tried = false;
 struct OpaqueCopy { ID3D11Texture2D* tex = nullptr; ID3D11RenderTargetView* rtv = nullptr; ID3D11ShaderResourceView* srv = nullptr; UINT w = 0, h = 0; };
 OpaqueCopy g_opaque[3];
+static void opaque_release(int slot) {
+    if (slot < 0 || slot > 2) return;
+    OpaqueCopy& oc = g_opaque[slot];
+    if (oc.srv) oc.srv->Release(); if (oc.rtv) oc.rtv->Release(); if (oc.tex) { g_plain_srvs_forget(oc.tex); oc.tex->Release(); }
+    oc = OpaqueCopy{};
+}
 
 static bool copy_pass_init() {
     if (g_copy_tried) return g_copy_vs != nullptr;
@@ -5076,6 +5192,7 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
+    if (source == 1 || source == 2) snap_request(3);   // side effect: requests snapshots (R3)
     ID3D11Texture2D* src = nullptr;
     if (source == 1) src = g_snap_tex;
     else if (source == 2) src = g_snap_game;
@@ -5087,8 +5204,10 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
     return ffxvr_eye2_final_srv();
 }
 extern "C" __declspec(dllexport) int   ffxvr_eye2_draws() { return static_cast<int>(g_eye2_draws_report); }
+extern "C" __declspec(dllexport) int   ffxvr_eye2_same_inputs() { return static_cast<int>(g_e2_same_inputs_report); }   // R23 step 1, last frame
 extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int source) {
     if (source == 1 || source == 2) {
+        snap_request(3);   // side effect: requests snapshots (R3), so the preview starts even before the first one exists
         if (g_snap_tex == nullptr) return 0;
         D3D11_TEXTURE2D_DESC d; g_snap_tex->GetDesc(&d);
         if (w) *w = static_cast<int>(d.Width); if (h) *h = static_cast<int>(d.Height);

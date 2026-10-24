@@ -1521,3 +1521,55 @@ settings pushes only; nothing retuned.
   checked) and logs how many other files it kept;
   captures (`img_*.bmp`, `ui_atlas_*.dds`, `ffxvr_bones_*.bin`) survive a deploy.
   run-ffx also collects `.dds` and `.bin`.
+
+## Review fixes, build 2 (24 Oct 2026)
+
+Free frame time (review items R2, R3, R7c, R19, R20, R23 step 1, R24). The diagnostics
+stay; they cost nothing while nobody looks at them.
+
+- **Diagnostics gate (M1).** `g_diag_until`: the costly per-frame diagnostics run for
+  the first 1800 frames (about 30 s) and while the overlay's Debug header is expanded
+  (managed calls `ffxvr_diag_keepalive(2)` every such frame; closing the header or the
+  window disarms them within two frames). Gated: the slot-0 readback and its latch,
+  and the heartbeat cadence. Not gated: the captures (F9 pick, frame census, cb dump,
+  Measure, 8-frame sequence) - they read data that is always kept. ABI 2 (two new
+  exports, both required).
+- **Slot-0 readback (R2).** It mapped a staging copy with a blocking Map every frame,
+  so the CPU waited for the GPU to finish the frame (frame time near CPU + GPU instead
+  of max(CPU, GPU)). Its only reader is the heartbeat's "changed since previous frame"
+  line. Now: only while armed; a ring of three staging buffers tagged with their frame,
+  mapped with DO_NOT_WAIT oldest first (stop at the first still in flight); the diff
+  is printed as "n/a" when the two copies are not consecutive frames. Disarmed, the
+  latched buffer is released and nothing is copied. If head motion feels laggier, the
+  blocking Map was acting as a frame limiter: a one-frame-old event query wait is the
+  fallback.
+- **Scene snapshots on demand (R3).** Two full-resolution copies of the scene target
+  (eye 1 and its twin) were taken every stereo frame for the eye preview and Measure.
+  Now only while wanted (`g_snap_until`): the preview on "scene"/"scene eye 1" asks for
+  them through `ffxvr_eye2_size/srv`, Measure through `ffxvr_measure` - which runs at
+  once if the frame just finished has a snapshot, else at the end of the next
+  begin_frame that has one (5 frames at most). Snapshots idle for 600 frames are freed
+  (2x scene-target VRAM), with the preview's two scene-size copies of them. The per-bind `texture_of` in `ffxvr_on_ps_srvs` only runs
+  while a snapshot is wanted (and stereo is on).
+- **Heartbeat (R7c).** Every 1 s while armed, every 30 s otherwise. The buffer list
+  (capped at 300 lines + "... N more") and the override stats are copied under the
+  lock and printed after it. The trace header says so.
+- **CB copies (R19).** `rec.data` keeps the first 256 bytes of each upload (nothing
+  reads past 64 floats); printers show the real size. `record_buffer` itself is never
+  gated: the camera and world extraction run on every write.
+- **Camera scan (R20).** A buffer with no recognised camera is skipped at once when the
+  frame has no known proj*view yet; otherwise the scan reads the original and copies
+  into the scratch only at the first hit (`wr != rd`: the eye-2 call works in place),
+  and the comparison tolerance is computed once per product instead of per block.
+- **XInput (R24).** While the game polls XInput through its own import, stick turning
+  uses what the game's call returned (recorded by the hook, per slot) and makes no
+  XInput calls of its own - the 2-s probe of absent pads was a periodic 0.5-4 ms spike.
+  Without the hook, or when the game is not polling, the old direct read stays (starting
+  at the slot the game last read successfully), probing one slot every 2 s. The
+  heartbeat log counts the game's XInputGetState calls.
+- **Eye-2 same inputs (R23 step 1, measurement only).** `g_e2_same_inputs` counts eye-2
+  re-issues that swap no input texture and upload no eye-2 constant data that differs
+  from eye 1's (uploads with identical bytes do not count as different): an upper
+  bound of the passes whose eye-2 output could equal eye 1's. On the `perf:` line,
+  the heartbeat's eye-2 line and Debug > Second eye. Step 2 (skipping them) only if
+  this shows a big target.

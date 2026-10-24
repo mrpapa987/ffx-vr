@@ -22,7 +22,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 1;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 2;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -202,6 +202,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, nint> _fn_eye2_srv;
     private int _eye2_source = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_draws;
+    private delegate* unmanaged[Cdecl]<int> _fn_eye2_same_inputs;      // eye-2 draws last frame with no swapped input and no eye-2 constants (an upper bound)
+    private delegate* unmanaged[Cdecl]<int, void> _fn_diag_keepalive;  // keeps the native per-frame diagnostics armed; only while Debug is expanded
     private delegate* unmanaged[Cdecl]<int*, int*, int, int> _fn_eye2_size;
     private bool  _stereo_on = false;
     private float _ipd = 6f;
@@ -392,6 +394,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_xr_status");
             _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)req("ffxvr_eye2_srv");
             _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_eye2_draws");
+            _fn_eye2_same_inputs = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_eye2_same_inputs");
+            _fn_diag_keepalive = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_diag_keepalive");
             _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)req("ffxvr_eye2_size");
             _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)req("ffxvr_on_updatesub");
             _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)req("ffxvr_on_rendertargets");
@@ -485,7 +489,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
-        _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null;
+        _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null;
         _fn_eye2_size = null; _fn_on_updatesub = null; _fn_on_rendertargets = null; _fn_on_rendertargets_uav = null; _fn_on_resolve = null; _fn_on_viewport = null;
         _fn_on_clear = null; _fn_frame_arm = null; _fn_ui_hide = null; _fn_ui_hidden_draws = null; _fn_ui_hide_cursor = null; _fn_ui_rect_stats = null;
         _fn_ui_hide_list = null; _fn_ui_hide_hits = null; _fn_draw_skip = null; _fn_ui_hide_pointers = null; _fn_ui_pointer_stats = null; _fn_blitz_overlay = null;
@@ -1170,6 +1174,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
     private void draw_debug() {
         if (!ImGui.CollapsingHeader("Debug")) return;   // settings reach the native side through push_all, whatever is drawn
+        // Expanded: keep the native diagnostics armed (1 s heartbeat, slot-0 readback). Closing the header disarms them.
+        if (_fn_diag_keepalive != null) _fn_diag_keepalive(2);
 
         ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {_native_status}   detours: {_detour_status}");
         if (_fn_counter != null)
@@ -1224,7 +1230,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("final", ref _eye2_source, 0); ImGui.SameLine();
             ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
             ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
-            if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}");
+            if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}" + (_fn_eye2_same_inputs != null ? $"   (with the same inputs as eye 1, at most: {_fn_eye2_same_inputs()})" : ""));
             ImGui.TreePop();
         }
 
