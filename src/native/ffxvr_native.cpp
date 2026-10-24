@@ -479,7 +479,9 @@ bool  g_cut_recentre = true, g_cut_blink = false, g_follow_pans = false;
 float g_follow_rate = 20.f;                    // deg/s
 uint32_t g_cut_count = 0; int g_blink_frames = 0;
 float g_cam_prev_pos[3] = {}, g_cam_prev_fwd[3] = {}; bool g_cam_prev_valid = false;
-float g_dt = 1.f / 72.f;
+float g_dt = 1.f / 72.f;                      // the last Present-to-Present interval, measured at the top of ffxvr_begin_frame
+constexpr float k_dt_min = 0.001f, k_dt_max = 0.05f;   // clamp: slow motion and load stalls must not make the filters jump
+bool  g_dt_measured = false;                   // once true, the managed dt passed to ffxvr_cuts_set is ignored
 
 // Turning: the right stick (XInput, read directly) and the turn keys rotate
 // the latched heading, in first person and in the seat alike. Snap turns are
@@ -3054,6 +3056,8 @@ void dump_capture() {
     fclose(f);
 }
 
+/// Once per frame, from ffxvr_begin_frame (outside its locks). The capture-done dump runs at the end of
+/// begin_frame with the normal capture end.
 void tick() {
     // Ctrl+F9: the constant-buffer capture (a large dump; plain F9 is the UI pick in the managed side).
     const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -3063,11 +3067,6 @@ void tick() {
         g_arm_next = true;   // begin at the next frame boundary, not mid-overlay
     }
     g_f9_was_down = down;
-
-    if (g_capture_done) {
-        g_capture_done = false;
-        dump_capture();
-    }
 
     heartbeat(false);
 }
@@ -3217,8 +3216,7 @@ void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT 
         }
     }
 
-    g_orig_unmap(c, r, sub);
-    tick();
+    g_orig_unmap(c, r, sub);   // tick() runs once per frame from ffxvr_begin_frame, not per Unmap
 }
 
 void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub,
@@ -3318,6 +3316,11 @@ static void ui_pass_begin();        // the UI pass opener, defined with the clea
 
 
 // ---------------------------------------------------------------------------
+
+// The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
+// bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
+constexpr int FFXVR_ABI = 1;
+extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_context) {
     if (g_installed) return 0;
@@ -3492,6 +3495,16 @@ static void perf_tick() {
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    {   // the frame time every filter uses (stick turn, follow pans, auto depth): measured here, whatever the overlay does
+        static LARGE_INTEGER s_dt_prev = {};
+        if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
+        LARGE_INTEGER now; QueryPerformanceCounter(&now);
+        if (s_dt_prev.QuadPart && g_qpf.QuadPart) {
+            const float dt = (float)((now.QuadPart - s_dt_prev.QuadPart) / (double)g_qpf.QuadPart);
+            g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt; g_dt_measured = true;
+        }
+        s_dt_prev = now;
+    }
     if (g_pick_armed) {
         g_pick_armed = false;
         if (g_pick_hits == 0) { snprintf(g_pick_summary, sizeof(g_pick_summary), "no UI draw under the point (%.0f,%.0f); UI draws recognised last frame: %u (stereo %d, headset %d); scene-pass draws using a 2048x4096 sheet (text drawn in the world?): %u; nearest: %s", g_pick_nx * 1920.f - 960.f, g_pick_ny * 1080.f - 540.f, g_ui_draws_report, g_stereo ? 1 : 0, g_xr_want ? 1 : 0, g_pick_scene_text, g_pick_best); diag("pick: %s", g_pick_summary); }
@@ -3506,7 +3519,11 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_frames++;
 
-        if (g_capturing) {
+        if (g_capture_done) {                // record_buffer's safety valve ended the capture: dump it below, outside the lock
+            g_capture_done = false;
+            dump_now       = true;
+        }
+        else if (g_capturing) {
             if (--g_frames_left <= 0) {      // enough frames collected
                 g_capturing    = false;
                 dump_now       = true;
@@ -3522,6 +3539,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             g_capturing   = true;
         }
     }
+    tick();                         // Ctrl+F9 poll + heartbeat, once per frame (takes g_mutex itself)
     read_camera();
     sweep_caches();
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
@@ -5087,7 +5105,13 @@ extern "C" __declspec(dllexport) int   ffxvr_eye2_size(int* w, int* h, int sourc
 // ---------------------------------------------------------------- headset
 int g_seq_left = 0, g_seq_index = 0;          // consecutive-frame image dump (F3)
 uint32_t g_e2_begin_fail_prev = 0;
-static void xr_diag(const char* fmt, ...) { va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
+// Headset start back-off (ffxvr_xr_set): after a failed xr_start, wait 2 s, then 5 s, between attempts; from the
+// third failed attempt on, xr_start runs muted (g_xr_quiet) and a summary line is logged now and then instead.
+// A session that dies within 5 s of starting (Virtual Desktop half-connected) counts as a failed attempt too; the
+// failure count is only cleared once a session has lived 5 s.
+static ULONGLONG g_xr_retry_at = 0, g_xr_started_at = 0; static uint32_t g_xr_fails = 0; static bool g_xr_quiet = false;
+constexpr ULONGLONG k_xr_short_life_ms = 5000;
+static void xr_diag(const char* fmt, ...) { if (g_xr_quiet) return; va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
@@ -5178,21 +5202,35 @@ extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float depth, float 
 /// What the auto depth is doing: visible actors, nearest depth, subject depth, current plane and separation.
 extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* near_d, float* subject, float* plane, float* sep) { *vis = g_s3_vis; *near_d = g_s3_near; *subject = g_s3_subject; *plane = g_screen3d_conv; *sep = g_screen3d_sep; }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
+/// Every exit from the headset (unticked, session lost, shutdown): the VR-only per-frame state goes back to flat
+/// defaults, so the desktop view does not inherit a screen mode, a suspended override or a held grab.
+static void leave_xr_state() {
+    g_xr_want = false; g_xr_active = false;
+    g_ovr_suspend = false; g_xr_screen_now = false; g_screen3d_now = false; g_backdrop_room = false;
+    g_frames_without_cam = 0; g_blink_frames = 0; g_move_delta = 0.f; g_move_held = false;
+    g_ui_state = UI_IDLE; g_ui_early = g_ui_early_keep = false; g_ui_last_frame_had_pass = false;   // robustness
+    g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
+    g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
+    g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
+    diag("xr: headset off, VR-only state reset");
+}
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
-    if (on && !g_xr_want) {
-        if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe)
-        XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
-        g_xr_want = xr_start(h);
-        g_xr_recenter_pending = true;
-        return g_xr_want ? 1 : 0;
-    }
-    if (!on && g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; }
-    return g_xr_want ? 1 : 0;
+    if (!on) { g_xr_fails = 0; g_xr_retry_at = 0; if (g_xr_want) { xr_stop(); leave_xr_state(); } return 0; }   // unticking resets the back-off
+    if (g_xr_want) return 1;
+    if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
+    const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
+    g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
+    if (g_xr_want) { if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true; return 1; }   // g_xr_fails clears in xr_tick after 5 s alive
+    g_xr_fails++; g_xr_retry_at = now + (g_xr_fails < 3 ? 2000 : 5000);
+    if (g_xr_fails == 2 || g_xr_fails % 60 == 0) diag("xr: start failed %u times (last: %s); retrying every %d s without logging", g_xr_fails, xr_status(), g_xr_fails < 3 ? 2 : 5);
+    return 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; }
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
-    g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate; if (dt > 0.f && dt < 1.f) g_dt = dt;
+    g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
+    if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
 }
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
@@ -5318,11 +5356,13 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 /// Re-use the game's pointer sprites at the markers (needs the pointer hiding to capture them); returns sprites drawn since the last call.
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
-extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); g_xr_want = false; g_xr_active = false; } }
+extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); leave_xr_state(); } }
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
     const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
     if (!g_xr_want && (!g_cam_valid || g_backbuffer == nullptr)) { snprintf(buf, static_cast<size_t>(n), "waiting for the game to render a 3D frame before the headset can start"); return; }
+    const ULONGLONG now = GetTickCount64();
+    if (!g_xr_want && g_xr_retry_at > now) { snprintf(buf, static_cast<size_t>(n), "%s - retrying in %u s", xr_status(), (unsigned)((g_xr_retry_at - now + 999) / 1000)); return; }
     snprintf(buf, static_cast<size_t>(n), "%s%s  yaw %.0f pitch %.0f  pos (%.2f %.2f %.2f) m  eye sep %.2f m = %.1f units  fov L %.0f..%.0f U %.0f..%.0f deg",
              xr_status(), g_xr_active ? " [tracking]" : "",
              atan2f(-d[0], -d[2]) * 57.2958f, asinf(fmaxf(-1.f, fminf(1.f, d[1]))) * 57.2958f,
@@ -5486,7 +5526,15 @@ static void xr_tick() {
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
     else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
-    if (!xr_active()) { g_xr_want = false; g_xr_active = false; }
+    const ULONGLONG now_ms = GetTickCount64();
+    if (!xr_active()) {   // the session went away (the runtime stopped it): back to flat
+        leave_xr_state();
+        if (now_ms - g_xr_started_at < k_xr_short_life_ms) {   // died at once: back off as for a failed start
+            g_xr_fails++; g_xr_retry_at = now_ms + (g_xr_fails < 3 ? 2000 : 5000);
+            if (g_xr_fails <= 2 || g_xr_fails % 60 == 0) diag("xr: session ended %.1f s after starting; counted as failed attempt %u", (now_ms - g_xr_started_at) / 1000.0, g_xr_fails);
+        }
+    }
+    else if (g_xr_fails && now_ms - g_xr_started_at >= k_xr_short_life_ms) { g_xr_fails = 0; g_xr_retry_at = 0; }
 }
 
 

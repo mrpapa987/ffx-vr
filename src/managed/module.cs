@@ -22,6 +22,16 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
+    private const int k_abi = 1;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
+                                    // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
+    private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
+    private bool   _native_failed;  // a hard failure (missing DLL, mismatch, init failed): the window shows why
+    private bool   _native_mismatch; // of those, the ones a reinstall fixes: the DLL missing, failing to load, or not matching
+    private string _ui_fault_last = "";   // draw_window's last exception message (logged once per distinct message)
+    private bool   _window_open_forced, _window_open_pre_force;   // a failure opened the window; the ini keeps the previous overlay_open until F8
+    private ulong  _push_frame = ulong.MaxValue;                  // push_all runs once per frame
+    private bool   _xr_want_prev, _ovr_before_xr, _stereo_before_xr;   // what the headset forced on, restored when it goes off
 
     private nint _game_device;
     private nint _game_context;
@@ -100,6 +110,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private bool _btl_aeon_out = false; private int _btl_cycle_req = 0;
     private readonly byte[] _btl_roster = new byte[3], _btl_roster_prev = new byte[3];
     private const int k_roster_off = 0xD2C895, k_roster_saved_off = 0xD2C89C, k_aeon_summoner_off = 0x6D1;
+    private const int k_ply_n = 18, k_mon_n = 16;   // battle entity slots: players 18 (party, Aeons, the Magus Sisters), monsters 16
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
     private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
@@ -173,7 +184,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_gesture_set;
     private delegate* unmanaged[Cdecl]<void> _fn_gesture_reset;
     private delegate* unmanaged[Cdecl]<float*, float*, int*, uint> _fn_gesture_poll;
-    private bool _chord_toggle_pending = false; private bool _gestures = true; private float _gest_tilt = 1f; private float _gest_scale_mul = 1f; private int _gest_active = 0; private float _gest_move_x, _gest_move_y, _gest_move_z;
+    private bool _gestures = true; private float _gest_tilt = 1f; private float _gest_scale_mul = 1f; private int _gest_active = 0; private float _gest_move_x, _gest_move_y, _gest_move_z;
     private delegate* unmanaged[Cdecl]<int, void> _fn_msaa_set;
     private delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void> _fn_msaa_status;
     private int _msaa = 4;   // 0 = game default (8x), 2, 4
@@ -312,140 +323,191 @@ public sealed unsafe class FFXVRModule : FhModule {
         string path = Path.Join(mod_context.Paths.ModDir.FullName, NativeDll);
 
         if (!File.Exists(path)) {
-            _native_status = "missing: " + NativeDll;
+            _native_mismatch = true; native_hard_fail("missing: " + NativeDll);
             _logger.Warning($"Native helper not found at {path}. Constant buffer capture is off.");
             return;
         }
 
         try {
             _native_handle = NativeLibrary.Load(path);
+            // Every export is required: both DLLs ship together and nothing is compiled conditionally, so a missing
+            // name means a mismatched pair. Nothing is called until the whole set (and ffxvr_abi) checks out.
+            var missing = new List<string>();
+            nint req(string name) { if (NativeLibrary.TryGetExport(_native_handle, name, out nint a)) return a; missing.Add(name); return 0; }
+            var fn_abi = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_abi");
 
-            _fn_init         = (delegate* unmanaged[Cdecl]<nint, nint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_init");
-            _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_buffer_count");
-            _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_dump_count");
-            _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_hook_calls");
-            _fn_begin_frame  = (delegate* unmanaged[Cdecl]<void>)     NativeLibrary.GetExport(_native_handle, "ffxvr_begin_frame");
-            _fn_frame_writes = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_frame_writes");
-            _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_get_camera");
-            _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_camera_reads");
-            _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      NativeLibrary.GetExport(_native_handle, "ffxvr_slot0_count");
-            _fn_camera_changes = (delegate* unmanaged[Cdecl]<int>)    NativeLibrary.GetExport(_native_handle, "ffxvr_camera_changes");
-            _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) NativeLibrary.GetExport(_native_handle, "ffxvr_counter");
-            _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_draw");
-            _fn_draw_ctx     = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_ctx");
-            try { _fn_draw_args = (delegate* unmanaged[Cdecl]<int, uint, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_args"); } catch { }
-            _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_begin");
-            _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_end");
-            _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_stereo_set");
-            _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_set");
-            _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_recenter");
-            _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_set");
-            _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_set");
-            _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_draws");
-            _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_pitch_follow");
-            _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_cuts_set");
-            _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_set");
-            _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn");
-            _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_turn_count");
-            _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_perf_status");
-            _fn_noimg_set    = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_set");
-            _fn_noimg_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_noimg_draws");
-            _fn_bisect_set   = (delegate* unmanaged[Cdecl]<int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bisect_set");
-            _fn_scene_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_scene_draws");
-            _fn_blend_off    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_blend_off");
-            _fn_blend_restore= (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_blend_restore");
-            _fn_hist_set     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hist_set");
-            _fn_hist_draws   = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hist_draws");
-            _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_set");
-            _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_move_status");
-            _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cut_count");
-            _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_set");
-            _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_set");
-            _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_player_head_set");
-            _fn_anchor_override = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_anchor_override");
-            _fn_floor_set    = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_floor_set");
-            _fn_fp_head_set  = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_head_set");
-            _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_hidden");
-            _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_set");
-            _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_3d");
-            try { _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_atlas_dump"); _fn_motion_log = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_motion_log"); } catch { }
-            _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_screen_now");
-            try { _fn_screen3d = (delegate* unmanaged[Cdecl]<int, float, float, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_screen3d"); _fn_screen3d_status = (delegate* unmanaged[Cdecl]<int*, float*, float*, float*, float*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_screen3d_status"); } catch { }
-            _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_seq");
-            _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_shutdown");
-            _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_xr_status");
-            _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_srv");
-            _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_draws");
-            _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_eye2_size");
-            _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_updatesub");
-            _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets");
-            _fn_on_rendertargets_uav = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_rendertargets_uav");
-            _fn_on_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_resolve");
-            _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_viewport");
-            _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear");
-            _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_frame_arm");
-            try { _fn_ui_hide = (delegate* unmanaged[Cdecl]<uint, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide"); _fn_ui_hidden_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hidden_draws"); _fn_ui_hide_cursor = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_cursor"); _fn_ui_rect_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_rect_stats");
-                  _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_hits"); _fn_draw_skip = (delegate* unmanaged[Cdecl]<uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_draw_skip");
-                  _fn_ui_hide_pointers = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hide_pointers"); _fn_ui_pointer_stats = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pointer_stats");
-                  _fn_blitz_overlay = (delegate* unmanaged[Cdecl]<int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_blitz_overlay");
-                  _fn_ui_pick = (delegate* unmanaged[Cdecl]<float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick"); _fn_ui_pick_result = (delegate* unmanaged[Cdecl]<nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_pick_result");
-                  _fn_slowmo = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_slowmo");
-                  _fn_ui_hover = (delegate* unmanaged[Cdecl]<float, float, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover"); _fn_ui_hover_rects = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_ui_hover_rects"); } catch { }
-            _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_dump_cb");
-            _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_census_arm");
-            _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_set");
-            _fn_cull_dist_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_set");
-            _fn_cull_dist_get = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_dist_get");
-            _fn_cull_scene_set = (delegate* unmanaged[Cdecl]<int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_scene_set");
-            _fn_cull_scene_get = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_cull_scene_get");
-            _fn_msaa_set     = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_msaa_set");
-            _fn_vrpad_set    = (delegate* unmanaged[Cdecl]<int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_vrpad_set");
-            _fn_imgui_layer_set = (delegate* unmanaged[Cdecl]<int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_imgui_layer_set");
-            _fn_imgui_draws  = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_imgui_draws");
-            _fn_vrpad_status = (delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_vrpad_status");
-            _fn_haptic       = (delegate* unmanaged[Cdecl]<int, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_haptic");
-            _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_set");
-            _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_reset");
-            _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_tp_set");
-            _fn_bones_capture = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_capture");
-            _fn_bone_wiggle  = (delegate* unmanaged[Cdecl]<int, int, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bone_wiggle");
-            _fn_bone_status  = (delegate* unmanaged[Cdecl]<int*, int*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bone_status");
-            _fn_bones_seq    = (delegate* unmanaged[Cdecl]<int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_seq");
-            _fn_bones_seq_left = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_bones_seq_left");
-            _fn_hands_set    = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, float, int, int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_set");
-            _fn_hands_status = (delegate* unmanaged[Cdecl]<uint*, nint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_status");
-            _fn_hands_calibrate = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_calibrate");
-            _fn_hands_dump   = (delegate* unmanaged[Cdecl]<void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_dump");
-            _fn_hands_method = (delegate* unmanaged[Cdecl]<int, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_method");
-            _fn_hands_side   = (delegate* unmanaged[Cdecl]<int, float, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_side");
-            _fn_hands_cal_data  = (delegate* unmanaged[Cdecl]<float*, int, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_hands_cal_data");
-            _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_gesture_poll");
-            _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_body_set");
-            _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_fp_parts");
-            _fn_msaa_status  = (delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_msaa_status");
-            _fn_patch_set    = (delegate* unmanaged[Cdecl]<int, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_set");
-            _fn_patch_count  = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_count");
-            _fn_patch_name   = (delegate* unmanaged[Cdecl]<int, byte*>)NativeLibrary.GetExport(_native_handle, "ffxvr_patch_name");
-            _fn_backdrop_draws = (delegate* unmanaged[Cdecl]<uint>)NativeLibrary.GetExport(_native_handle, "ffxvr_backdrop_draws");
-            _fn_measure      = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_measure");
-            _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_ps_srvs");
-            _fn_on_clear_twin = (delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_clear_twin");
-            _fn_set_backbuffer = (delegate* unmanaged[Cdecl]<nint, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_set_backbuffer");
-            _fn_on_copy      = (delegate* unmanaged[Cdecl]<nint, uint, uint, uint, uint, nint, uint, nint, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_on_copy");
-            _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_set");
-            _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_applied");
-            _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)NativeLibrary.GetExport(_native_handle, "ffxvr_override_mask");
-            _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_safe_read");
-            _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_project");
-            _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)NativeLibrary.GetExport(_native_handle, "ffxvr_world_positions");
+            _fn_init         = (delegate* unmanaged[Cdecl]<nint, nint, int>)req("ffxvr_init");
+            _fn_buffer_count = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_buffer_count");
+            _fn_dump_count   = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_dump_count");
+            _fn_hook_calls   = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_hook_calls");
+            _fn_begin_frame  = (delegate* unmanaged[Cdecl]<void>)     req("ffxvr_begin_frame");
+            _fn_frame_writes = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_frame_writes");
+            _fn_get_camera   = (delegate* unmanaged[Cdecl]<float*, int>)req("ffxvr_get_camera");
+            _fn_camera_reads = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_camera_reads");
+            _fn_slot0_count  = (delegate* unmanaged[Cdecl]<int>)      req("ffxvr_slot0_count");
+            _fn_camera_changes = (delegate* unmanaged[Cdecl]<int>)    req("ffxvr_camera_changes");
+            _fn_counter      = (delegate* unmanaged[Cdecl]<int, int>) req("ffxvr_counter");
+            _fn_on_draw      = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_on_draw");
+            _fn_draw_ctx     = (delegate* unmanaged[Cdecl]<nint, void>)req("ffxvr_draw_ctx");
+            _fn_draw_args = (delegate* unmanaged[Cdecl]<int, uint, uint, int, void>)req("ffxvr_draw_args");
+            _fn_eye2_begin   = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_eye2_begin");
+            _fn_eye2_end     = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_eye2_end");
+            _fn_stereo_set   = (delegate* unmanaged[Cdecl]<int, float, int, int, int, void>)req("ffxvr_stereo_set");
+            _fn_xr_set       = (delegate* unmanaged[Cdecl]<int, float, int, int, int, int, int>)req("ffxvr_xr_set");
+            _fn_xr_recenter  = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_xr_recenter");
+            _fn_xr_screen_set = (delegate* unmanaged[Cdecl]<int, float, float, void>)req("ffxvr_xr_screen_set");
+            _fn_ui_set       = (delegate* unmanaged[Cdecl]<int, float, float, void>)req("ffxvr_ui_set");
+            _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_ui_draws");
+            _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_xr_pitch_follow");
+            _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
+            _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
+            _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_turn");
+            _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
+            _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
+            _fn_noimg_set    = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_noimg_set");
+            _fn_noimg_draws  = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_noimg_draws");
+            _fn_bisect_set   = (delegate* unmanaged[Cdecl]<int, int, int, void>)req("ffxvr_bisect_set");
+            _fn_scene_draws  = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_scene_draws");
+            _fn_blend_off    = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_blend_off");
+            _fn_blend_restore= (delegate* unmanaged[Cdecl]<void>)req("ffxvr_blend_restore");
+            _fn_hist_set     = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_hist_set");
+            _fn_hist_draws   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_hist_draws");
+            _fn_move_set     = (delegate* unmanaged[Cdecl]<int, float, void>)req("ffxvr_move_set");
+            _fn_move_status  = (delegate* unmanaged[Cdecl]<float*, float*, float*, uint*, int*, void>)req("ffxvr_move_status");
+            _fn_cut_count    = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cut_count");
+            _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)req("ffxvr_fp_set");
+            _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_set");
+            _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_head_set");
+            _fn_anchor_override = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_anchor_override");
+            _fn_floor_set    = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_floor_set");
+            _fn_fp_head_set  = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_fp_head_set");
+            _fn_fp_hidden    = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_fp_hidden");
+            _fn_markers_set  = (delegate* unmanaged[Cdecl]<float*, uint*, int, void>)req("ffxvr_markers_set");
+            _fn_markers_3d   = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_markers_3d");
+            _fn_markers_game_art = (delegate* unmanaged[Cdecl]<int, uint>)req("ffxvr_markers_game_art"); _fn_markers_scale = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_markers_scale"); _fn_ui_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_ui_atlas_dump"); _fn_motion_log = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_motion_log");
+            _fn_xr_screen_now = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_xr_screen_now");
+            _fn_screen3d = (delegate* unmanaged[Cdecl]<int, float, float, int, float, void>)req("ffxvr_screen3d"); _fn_screen3d_status = (delegate* unmanaged[Cdecl]<int*, float*, float*, float*, float*, void>)req("ffxvr_screen3d_status");
+            _fn_dump_seq     = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_dump_seq");
+            _fn_shutdown     = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_shutdown");
+            _fn_xr_status    = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_xr_status");
+            _fn_eye2_srv     = (delegate* unmanaged[Cdecl]<int, nint>)req("ffxvr_eye2_srv");
+            _fn_eye2_draws   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_eye2_draws");
+            _fn_eye2_size    = (delegate* unmanaged[Cdecl]<int*, int*, int, int>)req("ffxvr_eye2_size");
+            _fn_on_updatesub = (delegate* unmanaged[Cdecl]<nint, nint, nint, nint>)req("ffxvr_on_updatesub");
+            _fn_on_rendertargets = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)req("ffxvr_on_rendertargets");
+            _fn_on_rendertargets_uav = (delegate* unmanaged[Cdecl]<uint, nint*, nint, void>)req("ffxvr_on_rendertargets_uav");
+            _fn_on_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)req("ffxvr_on_resolve");
+            _fn_on_viewport  = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)req("ffxvr_on_viewport");
+            _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)req("ffxvr_on_clear");
+            _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_frame_arm");
+            _fn_ui_hide = (delegate* unmanaged[Cdecl]<uint, uint, int, void>)req("ffxvr_ui_hide"); _fn_ui_hidden_draws = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_hidden_draws"); _fn_ui_hide_cursor = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_ui_hide_cursor"); _fn_ui_rect_stats = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_rect_stats");
+            _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_ui_hide_hits"); _fn_draw_skip = (delegate* unmanaged[Cdecl]<uint*, uint*, void>)req("ffxvr_draw_skip");
+            _fn_ui_hide_pointers = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_ui_hide_pointers"); _fn_ui_pointer_stats = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_pointer_stats");
+            _fn_blitz_overlay = (delegate* unmanaged[Cdecl]<int, uint>)req("ffxvr_blitz_overlay");
+            _fn_ui_pick = (delegate* unmanaged[Cdecl]<float, float, void>)req("ffxvr_ui_pick"); _fn_ui_pick_result = (delegate* unmanaged[Cdecl]<nint>)req("ffxvr_ui_pick_result");
+            _fn_slowmo = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_slowmo");
+            _fn_ui_hover = (delegate* unmanaged[Cdecl]<float, float, int, void>)req("ffxvr_ui_hover"); _fn_ui_hover_rects = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ui_hover_rects");
+            _fn_dump_cb      = (delegate* unmanaged[Cdecl]<uint, int, void>)req("ffxvr_dump_cb");
+            _fn_census_arm   = (delegate* unmanaged[Cdecl]<uint, uint, void>)req("ffxvr_census_arm");
+            _fn_backdrop_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_backdrop_set");
+            _fn_cull_dist_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_cull_dist_set");
+            _fn_cull_dist_get = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cull_dist_get");
+            _fn_cull_scene_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_cull_scene_set");
+            _fn_cull_scene_get = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cull_scene_get");
+            _fn_msaa_set     = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_msaa_set");
+            _fn_vrpad_set    = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_vrpad_set");
+            _fn_imgui_layer_set = (delegate* unmanaged[Cdecl]<int, int, int, void>)req("ffxvr_imgui_layer_set");
+            _fn_imgui_draws  = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_imgui_draws");
+            _fn_vrpad_status = (delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int>)req("ffxvr_vrpad_status");
+            _fn_haptic       = (delegate* unmanaged[Cdecl]<int, float, float, void>)req("ffxvr_haptic");
+            _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)req("ffxvr_gesture_set");
+            _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_gesture_reset");
+            _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)req("ffxvr_tp_set");
+            _fn_bones_capture = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_bones_capture");
+            _fn_bone_wiggle  = (delegate* unmanaged[Cdecl]<int, int, float, void>)req("ffxvr_bone_wiggle");
+            _fn_bone_status  = (delegate* unmanaged[Cdecl]<int*, int*, int>)req("ffxvr_bone_status");
+            _fn_bones_seq    = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_bones_seq");
+            _fn_bones_seq_left = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_bones_seq_left");
+            _fn_hands_set    = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, float, int, int, int, void>)req("ffxvr_hands_set");
+            _fn_hands_status = (delegate* unmanaged[Cdecl]<uint*, nint>)req("ffxvr_hands_status");
+            _fn_hands_calibrate = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_hands_calibrate");
+            _fn_hands_dump   = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_hands_dump");
+            _fn_hands_method = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_hands_method");
+            _fn_hands_side   = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_hands_side");
+            _fn_hands_cal_data  = (delegate* unmanaged[Cdecl]<float*, int, uint>)req("ffxvr_hands_cal_data");
+            _fn_gesture_poll = (delegate* unmanaged[Cdecl]<float*, float*, int*, uint>)req("ffxvr_gesture_poll");
+            _fn_fp_body_set  = (delegate* unmanaged[Cdecl]<int, uint, int, void>)req("ffxvr_fp_body_set");
+            _fn_fp_parts     = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_fp_parts");
+            _fn_msaa_status  = (delegate* unmanaged[Cdecl]<uint*, uint*, uint*, uint*, uint*, void>)req("ffxvr_msaa_status");
+            _fn_patch_set    = (delegate* unmanaged[Cdecl]<int, int, int>)req("ffxvr_patch_set");
+            _fn_patch_count  = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_patch_count");
+            _fn_patch_name   = (delegate* unmanaged[Cdecl]<int, byte*>)req("ffxvr_patch_name");
+            _fn_backdrop_draws = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_backdrop_draws");
+            _fn_measure      = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_measure");
+            _fn_on_ps_srvs   = (delegate* unmanaged[Cdecl]<uint, uint, nint*, void>)req("ffxvr_on_ps_srvs");
+            _fn_on_clear_twin = (delegate* unmanaged[Cdecl]<nint, int, float*, uint, float, byte, void>)req("ffxvr_on_clear_twin");
+            _fn_set_backbuffer = (delegate* unmanaged[Cdecl]<nint, void>)req("ffxvr_set_backbuffer");
+            _fn_on_copy      = (delegate* unmanaged[Cdecl]<nint, uint, uint, uint, uint, nint, uint, nint, int, int>)req("ffxvr_on_copy");
+            _fn_override_set = (delegate* unmanaged[Cdecl]<int, int, float, float, float, float, float, void>)req("ffxvr_override_set");
+            _fn_override_applied = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_override_applied");
+            _fn_override_mask    = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_override_mask");
+            _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)req("ffxvr_safe_read");
+            _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)req("ffxvr_project");
+            _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_world_positions");
 
+            int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
+            if (missing.Count > 0 || abi != k_abi) {
+                string why = missing.Count > 0 ? "missing " + string.Join(", ", missing.Count > 6 ? missing.GetRange(0, 6) : missing) + (missing.Count > 6 ? $" and {missing.Count - 6} more" : "") : $"abi {abi} vs {k_abi}";
+                clear_native_fns();   // nothing may reach a mismatched DLL, even a future call site gated only on its pointer
+                _native_mismatch = true; native_hard_fail($"ffxvr_native.dll does not match ffxvr.dll ({why}); reinstall the mod");
+                _logger.Error($"Native helper mismatch: {why}. Nothing native will be called.");
+                return;
+            }
+            _native_ok = true;
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
         }
         catch (Exception ex) {
-            _native_status = "load threw: " + ex.GetType().Name;
+            _native_ok = false; clear_native_fns();
+            _native_mismatch = true; native_hard_fail("load threw: " + ex.GetType().Name);
             _logger.Error($"Failed to load the native helper: {ex}");
         }
+    }
+
+    /// <summary>Every bound export back to null (after a mismatch or a failed load).</summary>
+    private void clear_native_fns() {
+        _fn_init = null; _fn_buffer_count = null; _fn_dump_count = null; _fn_hook_calls = null; _fn_begin_frame = null; _fn_frame_writes = null;
+        _fn_get_camera = null; _fn_camera_reads = null; _fn_slot0_count = null; _fn_camera_changes = null; _fn_counter = null; _fn_on_draw = null;
+        _fn_draw_ctx = null; _fn_draw_args = null; _fn_eye2_begin = null; _fn_eye2_end = null; _fn_stereo_set = null; _fn_xr_set = null;
+        _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
+        _fn_turn_set = null; _fn_turn = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
+        _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
+        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null;
+        _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
+        _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
+        _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null;
+        _fn_eye2_size = null; _fn_on_updatesub = null; _fn_on_rendertargets = null; _fn_on_rendertargets_uav = null; _fn_on_resolve = null; _fn_on_viewport = null;
+        _fn_on_clear = null; _fn_frame_arm = null; _fn_ui_hide = null; _fn_ui_hidden_draws = null; _fn_ui_hide_cursor = null; _fn_ui_rect_stats = null;
+        _fn_ui_hide_list = null; _fn_ui_hide_hits = null; _fn_draw_skip = null; _fn_ui_hide_pointers = null; _fn_ui_pointer_stats = null; _fn_blitz_overlay = null;
+        _fn_ui_pick = null; _fn_ui_pick_result = null; _fn_slowmo = null; _fn_ui_hover = null; _fn_ui_hover_rects = null; _fn_dump_cb = null;
+        _fn_census_arm = null; _fn_backdrop_set = null; _fn_cull_dist_set = null; _fn_cull_dist_get = null; _fn_cull_scene_set = null; _fn_cull_scene_get = null;
+        _fn_msaa_set = null; _fn_vrpad_set = null; _fn_imgui_layer_set = null; _fn_imgui_draws = null; _fn_vrpad_status = null; _fn_haptic = null;
+        _fn_gesture_set = null; _fn_gesture_reset = null; _fn_tp_set = null; _fn_bones_capture = null; _fn_bone_wiggle = null; _fn_bone_status = null;
+        _fn_bones_seq = null; _fn_bones_seq_left = null; _fn_hands_set = null; _fn_hands_status = null; _fn_hands_calibrate = null; _fn_hands_dump = null;
+        _fn_hands_method = null; _fn_hands_side = null; _fn_hands_cal_data = null; _fn_gesture_poll = null; _fn_fp_body_set = null; _fn_fp_parts = null;
+        _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
+        _fn_on_ps_srvs = null; _fn_on_clear_twin = null; _fn_set_backbuffer = null; _fn_on_copy = null; _fn_override_set = null; _fn_override_applied = null;
+        _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
+    }
+    /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
+    /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
+    private void native_hard_fail(string status) {
+        _native_status = status; _native_failed = true;
+        force_window_open();
+    }
+    private void force_window_open() {
+        if (!_window_open_forced) { _window_open_pre_force = _window_open; _window_open_forced = true; }
+        _window_open = true;
     }
 
     /// <summary>
@@ -460,7 +522,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     ///     created device, whose vtable shares nothing with it.
     /// </remarks>
     private void try_install_hooks() {
-        if (_native_init_done || _fn_init == null) return;
+        if (_native_init_done || !_native_ok || _fn_init == null) return;
 
         nint backend = (nint)ImGui.GetIO().BackendRendererUserData;
         if (backend == 0) return;   // backend not up yet; try again next frame
@@ -472,7 +534,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _game_context = fields[1];
 
         if (_game_context == 0) {
-            _native_status = "ImGui backend gave no device context";
+            native_hard_fail("ImGui backend gave no device context");
             _logger.Error("BackendRendererUserData held a null device context.");
             return;
         }
@@ -488,9 +550,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         };
 
         if (rc == 0) _logger.Info($"Hooks installed on the game's context 0x{_game_context:X8} (device 0x{_game_device:X8}).");
-        else         _logger.Error($"Native init failed with code {rc} for context 0x{_game_context:X8}.");
+        else         { _logger.Error($"Native init failed with code {rc} for context 0x{_game_context:X8}."); native_hard_fail(_native_status); return; }
 
-        if (rc == 0) install_draw_detours();
+        _native_ready = true;   // the vtable hooks are in and cannot be rolled back: run on, even if a detour below fails
+        try { install_draw_detours(); }
+        catch (Exception e) { _detour_status = "FAILED: " + e.GetType().Name + " (see core.log)"; _logger.Error($"Draw detours: {e}"); }
+        if (_detour_status != "installed") force_window_open();   // shown in red at the top of the window
     }
 
     private void install_draw_detours() {
@@ -557,7 +622,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (partial) { _fn_draw_skip(&skip_first, &skip_count); if (skip_first + skip_count > n) partial = false; }
         if (noblend) _fn_blend_off();
         draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count);
-        for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count); _fn_eye2_end(); }
+        for (int k = 0; k < eye2 && _fn_eye2_begin != null; k++) if (_fn_eye2_begin(k) != 0) { draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count); _fn_eye2_end(); }
         if (noblend) _fn_blend_restore();
     }
     // Outlines, on the monitor, the UI quads the native side collected this frame (hover highlight), and
@@ -602,7 +667,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         int eye2 = r & 15; bool noblend = (r & 16) != 0 && _fn_blend_off != null;
         if (noblend) _fn_blend_off();
         _o_draw!(ctx, n, start);
-        for (int k = 0; k < eye2; k++) if (_fn_eye2_begin(k) != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
+        for (int k = 0; k < eye2 && _fn_eye2_begin != null; k++) if (_fn_eye2_begin(k) != 0) { _o_draw!(ctx, n, start); _fn_eye2_end(); }
         if (noblend) _fn_blend_restore();
     }
 
@@ -905,7 +970,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"fp_head_parts={_fp_head_parts}\n" +
             $"screen_width={_xr_screen_width.ToString("F2", ci)}\n" +
             $"screen_distance={_xr_screen_dist.ToString("F2", ci)}\n" +
-            $"overlay_open={(_window_open ? 1 : 0)}\n" +
+            $"overlay_open={((_window_open_forced ? _window_open_pre_force : _window_open) ? 1 : 0)}\n" +   // a failure's forced open is not saved
             $"eye2_preview={(_eye2_preview ? 1 : 0)}\n" +
             $"ui_panel={(_ui_on ? 1 : 0)}\n" +
             $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
@@ -972,18 +1037,14 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_xr_set == null) { ImGui.Text($"Native helper: {_native_status}"); return; }
 
         // Headset
-        bool want = _xr_want;
-        ImGui.Checkbox("Headset", ref want);
-        ImGui.SameLine(); if (ImGui.Button("Recentre (Home)")) _fn_xr_recenter();
+        ImGui.Checkbox("Headset", ref _xr_want);   // pushed every frame by push_all, until the native side accepts (it waits for the first 3D frame)
+        ImGui.SameLine(); if (ImGui.Button("Recentre (Home)") && _fn_xr_recenter != null) _fn_xr_recenter();
         ImGui.SameLine(); ImGui.Checkbox("start automatically", ref _headset_autostart);
         if (_headset_autostart) {
             ImGui.SameLine(); ImGui.Checkbox("overlay open at start", ref _overlay_at_start); ImGui.SameLine(); ImGui.Text("start in:"); ImGui.SameLine();
             ImGui.RadioButton("seat##sv", ref _start_view, 0); ImGui.SameLine(); ImGui.RadioButton("first person##sv", ref _start_view, 1); ImGui.SameLine();
             ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
         }
-        if (want) { _ovr_enabled = true; _stereo_on = true; }   // the headset needs the override and both eyes
-        _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
-        _xr_want = want;   // asked each frame until the native side accepts (it waits for the first 3D frame)
         ImGui.TextWrapped(xr_status_text());
         if (_fn_xr_screen_now != null && _xr_on) { int sn = _fn_xr_screen_now(); ImGui.Text(sn == 1 ? "showing: virtual screen" : sn == 2 ? "showing: stereo screen" : "showing: 3D scene"); }
 
@@ -1017,13 +1078,11 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("seat (head owns orientation)", ref _xr_seat);
         ImGui.SliderFloat("pitch follow", ref _xr_pitch_follow, 0f, 1f, "%.2f");
         ImGui.SameLine(); ImGui.TextDisabled("0 level horizon .. 1 the original view");
-        if (_fn_xr_pitch_follow != null) _fn_xr_pitch_follow(_xr_pitch_follow);
         ImGui.Text("camera cuts:"); ImGui.SameLine();
         ImGui.Checkbox("recentre on cut", ref _cut_recentre); ImGui.SameLine();
         ImGui.Checkbox("blink", ref _cut_blink); ImGui.SameLine();
         ImGui.Checkbox("follow pans", ref _follow_pans);
         if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 90f);
-        if (_fn_cuts_set != null) _fn_cuts_set(_cut_recentre ? 1 : 0, _cut_blink ? 1 : 0, _follow_pans ? 1 : 0, _follow_rate, ImGui.GetIO().DeltaTime);
         if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
@@ -1038,8 +1097,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("third person", ref _fp_mode, 3); ImGui.SameLine();
         ImGui.RadioButton("diorama (follows the player)", ref _fp_mode, 2);
         ImGui.SameLine(); ImGui.TextDisabled("End / right grip + right stick click: first person -> third person -> diorama.   left grip + left stick click: reset the view");
-        if (ImGui.IsKeyPressed(ImGuiKey.End)) _fp_mode = next_view_mode(_fp_mode);
-        if (_chord_toggle_pending) { _chord_toggle_pending = false; _fp_mode = next_view_mode(_fp_mode); }
 
         // Turning (first person and seat alike)
         ImGui.Text("turning:"); ImGui.SameLine();
@@ -1054,10 +1111,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
         }
         if (_fp_mode != fp_before) apply_mode_scale(fp_before, _fp_mode);
-        push_player();
-        if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
-        push_hands();
-        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
 
         // View
         ImGui.Separator();
@@ -1066,7 +1119,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("never", ref _xr_screen_mode, 2);
-        if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
         ImGui.Text("stereo screen (3D scenes on the big screen, through the game's own camera, in 3D):"); ImGui.SameLine();
         ImGui.Checkbox("in blitzball##s3", ref _s3_blitz); ImGui.SameLine(); ImGui.Checkbox("everywhere##s3", ref _s3_all);
         if (_s3_blitz || _s3_all) {
@@ -1085,7 +1137,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("whole room on the screen", ref _backdrop_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("3D props over the flat backdrop", ref _backdrop_mode, 0);
         if (_fn_backdrop_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}"); }
-        if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
         ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
         if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
@@ -1107,8 +1158,6 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.RadioButton("game default", ref _hist_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("skip pass", ref _hist_mode, 2);
         if (_fn_hist_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"blend draws seen: {_fn_hist_draws()}"); }
-        if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
-        if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
 
         ImGui.Separator();
         if (_fn_perf_status != null) {
@@ -1120,11 +1169,7 @@ public sealed unsafe class FFXVRModule : FhModule {
 
     /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
     private void draw_debug() {
-        if (!ImGui.CollapsingHeader("Debug")) {
-            // The override and eye-2 settings must still reach the native side.
-            push_override_and_stereo();
-            return;
-        }
+        if (!ImGui.CollapsingHeader("Debug")) return;   // settings reach the native side through push_all, whatever is drawn
 
         ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {_native_status}   detours: {_detour_status}");
         if (_fn_counter != null)
@@ -1205,14 +1250,13 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_noimg_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"such draws so far: {_fn_noimg_draws()}"); }
             ImGui.TreePop();
         }
-        if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
 
         if (ImGui.TreeNode("Culling (code patches)")) {
             ImGui.TextWrapped("Patches to the game's visibility tests, verified against the expected bytes before writing; untick restores. The two checkboxes above (characters, scene) are the normal way to drive these.");
             if (_fn_patch_set != null && _fn_patch_count != null) {
                 int np = Math.Min(_fn_patch_count(), _patch_on.Length);
                 for (int i = 0; i < np; i++) {
-                    string name = System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) ?? $"patch {i}";
+                    string name = (_fn_patch_name != null ? System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) : null) ?? $"patch {i}";
                     bool on = _patch_on[i];
                     if (ImGui.Checkbox(name, ref on)) { if (_fn_patch_set(i, on ? 1 : 0) == 0) _patch_on[i] = on; }
                 }
@@ -1234,7 +1278,6 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (ImGui.Button("split: upper")) { _bisect_a = (_bisect_a + _bisect_b) / 2 + 1; }
             ImGui.TreePop();
         }
-        if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
 
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
@@ -1434,11 +1477,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_dump_seq != null)  { if (ImGui.Button("8-frame sequence")) _fn_dump_seq(8); ImGui.SameLine(); ImGui.Text("seq_*.bmp: both eyes, 8 consecutive frames"); }
             ImGui.TreePop();
         }
-
-        push_override_and_stereo();
     }
 
-    /// <summary>Numpad nudges and the per-frame push of override + eye-2 state to the native side.</summary>
     /// First person -> third person -> diorama (the chord and the End key).
     private static int next_view_mode(int m) => m == 1 ? 3 : m == 3 ? 2 : 1;
     private static bool life_size(int m) => m == 1 || m == 3;
@@ -1451,7 +1491,20 @@ public sealed unsafe class FFXVRModule : FhModule {
         int before = _fp_mode; _fp_mode = next_view_mode(_fp_mode);
         apply_mode_scale(before, _fp_mode);
     }
-    private void push_override_and_stereo() {
+    /// <summary>Every key, once per frame, whether the window is open or not. F8, F9-F11 always work; the rest are
+    /// ignored while a text box has the keyboard (typing "2,3" with the numpad must not move the camera).</summary>
+    private void handle_hotkeys() {
+        if (ImGui.IsKeyPressed(ImGuiKey.F8)) { _window_open = !_window_open; _window_open_forced = false; }   // the player's own choice is saved again
+        if (ImGui.IsKeyPressed(ImGuiKey.F10)) _slowmo_on = !_slowmo_on;
+        if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
+        if (_native_ready && ImGui.IsKeyPressed(ImGuiKey.F9) && _fn_ui_pick != null) {
+            Vector2 m = ImGui.GetMousePos(), ds = ImGui.GetIO().DisplaySize;
+            if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
+        }
+        if (Convert.ToBoolean(ImGui.GetIO().WantTextInput) || !_native_ready) return;   // Convert: builds whether Hexa exposes bool or byte
+        if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
+        if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
+        if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;   // battle: the eyes to the next party member (consumed by push_player this frame)
         float dt   = ImGui.GetIO().DeltaTime;
         float rot  = 60f  * dt;     // deg/s
         float move = 400f * dt;     // units/s
@@ -1463,8 +1516,42 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.IsKeyDown(ImGuiKey.KeypadSubtract)) _ovr_forward -= move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad9))        _ovr_up      += move;
         if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
-        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; if (_fn_gesture_reset != null) _fn_gesture_reset(); }
+        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; if (_fn_gesture_reset != null) _fn_gesture_reset(); if (_fn_motion_log != null) _fn_motion_log(180); }
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
+        if (_fn_turn != null) {
+            float step = _turn_rate * dt;
+            if (ImGui.IsKeyDown(ImGuiKey.Keypad1)) _fn_turn(-step);
+            if (ImGui.IsKeyDown(ImGuiKey.Keypad3)) _fn_turn(step);
+        }
+    }
+
+    /// <summary>The only call of ffxvr_gesture_poll (it reads and clears): grab state for the overlay, and the chords.</summary>
+    private void poll_gestures() {
+        if (_fn_gesture_poll == null) return;
+        float* mv = stackalloc float[3]; float mul; int act;
+        uint toggles = _fn_gesture_poll(mv, &mul, &act);
+        _gest_move_x = mv[0]; _gest_move_y = mv[1]; _gest_move_z = mv[2]; _gest_scale_mul = mul; _gest_active = act;
+        if ((toggles & 0xFF) != 0) toggle_first_person();
+        if (((toggles >> 8) & 0xFF) != 0) _btl_cycle_req++;
+    }
+
+    /// <summary>Every setting to the native side, exactly once per frame, whether the window is open or not. The window
+    /// only draws widgets, reads status and runs one-shot buttons. Several setters are not idempotent (xr_set and fp_set
+    /// are edge-triggered, player_set / player_head_set integrate per call, the stats reads clear), so none of them may
+    /// be called anywhere else.</summary>
+    private void push_all() {
+        if (_push_frame == _frames) return;
+        _push_frame = _frames;
+        // The headset needs the override and both eyes. What they were before it went on comes back when it goes off.
+        if (_xr_want != _xr_want_prev) {
+            if (_xr_want) { _ovr_before_xr = _ovr_enabled; _stereo_before_xr = _stereo_on; }
+            else { _ovr_enabled = _ovr_before_xr; _stereo_on = _stereo_before_xr; }
+            _xr_want_prev = _xr_want;
+        }
+        if (_xr_want) { _ovr_enabled = true; _stereo_on = true; }
+        // xr_set first: on the untick frame native clears g_xr_want before the override and eye 2 are pushed (it ORs
+        // g_xr_want into both), so the next frame is already flat; and _xr_on is current for the hide rules below.
+        if (_fn_xr_set != null) _xr_on = _fn_xr_set(_xr_want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
         if (_fn_override_set != null) _fn_override_set(_ovr_enabled ? 1 : 0, _ovr_freeze ? 1 : 0, _ovr_yaw, _ovr_pitch, _ovr_right, _ovr_up, _ovr_forward);
         if (_fn_stereo_set != null) _fn_stereo_set(_stereo_on ? 1 : 0, _ipd, 0, 0, 0);
         if (_fn_turn_set != null) _fn_turn_set(_turn_stick ? 1 : 0, _turn_mode, _turn_snap, _turn_rate, _turn_blink ? 1 : 0);
@@ -1478,25 +1565,23 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_vrpad_set != null) _fn_vrpad_set(_vrpad ? 1 : 0);
         if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || save_screen_state() != 0) ? 1 : 0, _imgui_min_draws);
         if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
-        if (_fn_gesture_poll != null) {
-            float mv0, mv1, mv2; float* mv = stackalloc float[3]; float mul; int act;
-            uint toggles = _fn_gesture_poll(mv, &mul, &act);
-            mv0 = mv[0]; mv1 = mv[1]; mv2 = mv[2];
-            _gest_move_x = mv0; _gest_move_y = mv1; _gest_move_z = mv2; _gest_scale_mul = mul; _gest_active = act;
-            if ((toggles & 0xFF) != 0) { if (_window_open) _chord_toggle_pending = true; else toggle_first_person(); }
-            if (((toggles >> 8) & 0xFF) != 0) _btl_cycle_req++;
-        }
         if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, parse_mask(_fp_head_parts), _fp_solo);
         if (_fn_cull_scene_set != null && _fn_cull_scene_get != null && (_fn_cull_scene_get() != 0) != _cull_scene) {
             _cull_scene_rc = _fn_cull_scene_set(_cull_scene ? 1 : 0);
             if (_cull_scene_rc != 0) _cull_scene = _fn_cull_scene_get() != 0;
             if (_patch_on.Length > 4) _patch_on[3] = _patch_on[4] = _fn_cull_scene_get() != 0;
         }
-        if (_fn_turn != null) {
-            float step = _turn_rate * ImGui.GetIO().DeltaTime;
-            if (ImGui.IsKeyDown(ImGuiKey.Keypad1)) _fn_turn(-step);
-            if (ImGui.IsKeyDown(ImGuiKey.Keypad3)) _fn_turn(step);
-        }
+        if (_fn_xr_pitch_follow != null) _fn_xr_pitch_follow(_xr_pitch_follow);
+        if (_fn_cuts_set != null) _fn_cuts_set(_cut_recentre ? 1 : 0, _cut_blink ? 1 : 0, _follow_pans ? 1 : 0, _follow_rate, ImGui.GetIO().DeltaTime);   // dt: a fallback only; native measures its own
+        if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
+        if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
+        if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
+        if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
+        if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
+        push_player();   // before fp_set: it can switch the view for a battle
+        push_hands();
+        if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
+        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
     }
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
@@ -1655,10 +1740,10 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (!read(btl, out Btl btl_v) || btl_v.battle_state == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
         Chr* mons = Globals.Battle.monster_characters; Chr* plys = Globals.Battle.player_characters;
         float sx = 0, sy = 0, sz = 0; int n = 0;
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < k_ply_n; i++)
             if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa) && live(pa)) { sx += pa.chr_pos_vec.X; sy += pa.chr_pos_vec.Y; sz += pa.chr_pos_vec.Z; n++; }
+        for (int i = 0; i < k_mon_n; i++)
             if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma) && live(ma) && mc.stat_visible != 0) { sx += ma.chr_pos_vec.X; sy += ma.chr_pos_vec.Y; sz += ma.chr_pos_vec.Z; n++; }
-        }
         _battle_anchor_n = n;
         if (n == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
         _fn_anchor_override(-sx / n, -sy / n, sz / n, 1);   // render space negates X and Y
@@ -1671,11 +1756,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (!_hands_side_pushed) { _hands_side_pushed = true; if (_hands_px_left >= 0) _fn_hands_side(_hands_px_left, _hands_stretch); }
             int r = _fn_hands_side(-1, _hands_stretch); if ((r & 2) != 0) _hands_px_left = r & 1;   // the measurement, once made, is what gets saved
         }
-        if (_fn_hands_set != null) _fn_hands_set(_hands_on ? 1 : 0, (_hands_head ? 1 : 0) | (_hands_show << 1), _hands_yaw * 0.0174533f, _hands_pitch * 0.0174533f, _hands_roll * 0.0174533f, _hands_off_r, _hands_off_u, _hands_off_b, _hands_swap ? 1 : 0, _hands_mirror ? 1 : 0, _hands_only); }
+        if (_fn_hands_set != null) _fn_hands_set((_hands_dev && _hands_on) ? 1 : 0, (_hands_head ? 1 : 0) | (_hands_show << 1), _hands_yaw * 0.0174533f, _hands_pitch * 0.0174533f, _hands_roll * 0.0174533f, _hands_off_r, _hands_off_u, _hands_off_b, _hands_swap ? 1 : 0, _hands_mirror ? 1 : 0, _hands_only); }
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
-        if (actors == null) { _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; return; }
+        if (actors == null) { _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
@@ -1729,7 +1814,6 @@ public sealed unsafe class FFXVRModule : FhModule {
                     // Tidus joining the field takes the eyes, whoever they were on.
                     if (on_field(0) && !was_on(0) && want != 0) { want = 0; why = "Tidus joined the field"; }
                     // Manual: next party member on the field (left grip + right stick click, or Insert), in slot order.
-                    if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;
                     if (_btl_cycle_req > 0) {
                         _btl_cycle_req = 0; int k = slot_of(want);
                         for (int step = 1; step <= 3; step++) { byte id = _btl_roster[(k + step + 3) % 3]; if (is_party(id) && id != want) { want = id; why = "manual"; break; } }
@@ -1775,6 +1859,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                 }
             }
         }
+        _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
         if (pick >= 0) { }
         else if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
         else {
@@ -1797,30 +1882,36 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (_fn_player_head_set != null) _fn_player_head_set(-head.X, -head.Y, head.Z, have ? 1 : 0);
         }
         else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); }
+        push_view_rules(in_battle);
+    }
+    /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,
+    /// markers. Each call has its own null check (they used to sit inside an unrelated `_fn_ui_hide != null`), and they
+    /// also run when there is no actor table yet (the title screen's virtual-screen mode).</summary>
+    private void push_view_rules(bool in_battle) {
         if (_fn_fp_head_set != null) _fn_fp_head_set(_fp_head_anchor, _fp_head_up, _fp_head_smooth, _fp_head_fwd);
         push_battle_anchor();
         if (_fn_floor_set != null) _fn_floor_set(_diorama_floor);
         if (_fn_ui_hide != null) {
             bool hide = _ui_hide == 1 || _ui_hide == 2 || (_ui_hide == 3 && in_battle);
             _fn_ui_hide(hide ? 1024u : 0u, 1024u, (_ui_hide == 2 || (_ui_hide == 4 && in_battle)) ? 1 : (_ui_hide == 5 && in_battle) ? 2 : 0);
-            if (_fn_ui_hidden_draws != null) _ui_hidden_n = _fn_ui_hidden_draws();
-            if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
-            if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on ? 1 : 0);
-            if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
-            if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
-            // stereo screen (pushed with the window hidden too; the screen's size and mode go with it)
-            if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
-            if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
-            if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
-            if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
-            if (_hide_list_dirty && _fn_ui_hide_list != null) {
-                _hide_list_dirty = false; float* buf = stackalloc float[16 * 6]; int cnt = Math.Min(_hide_list.Count, 16);
-                for (int i = 0; i < cnt; i++) for (int k = 0; k < 6; k++) buf[i * 6 + k] = _hide_list[i][k];
-                _fn_ui_hide_list(buf, cnt);
-            }
-            if (_fn_ui_hide_hits != null) { fixed (uint* hp = _hide_hits) _fn_ui_hide_hits(hp, 16); }
-            if (_fn_ui_rect_stats != null) _rect_stats = _fn_ui_rect_stats();
         }
+        if (_fn_ui_hidden_draws != null) _ui_hidden_n = _fn_ui_hidden_draws();
+        if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
+        if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on ? 1 : 0);
+        if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
+        if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
+        // stereo screen (pushed with the window hidden too; the screen's size and mode go with it)
+        if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
+        if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
+        if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
+        if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
+        if (_hide_list_dirty && _fn_ui_hide_list != null) {
+            _hide_list_dirty = false; float* buf = stackalloc float[16 * 6]; int cnt = Math.Min(_hide_list.Count, 16);
+            for (int i = 0; i < cnt; i++) for (int k = 0; k < 6; k++) buf[i * 6 + k] = _hide_list[i][k];
+            _fn_ui_hide_list(buf, cnt);
+        }
+        if (_fn_ui_hide_hits != null) { fixed (uint* hp = _hide_hits) _fn_ui_hide_hits(hp, 16); }
+        if (_fn_ui_rect_stats != null) _rect_stats = _fn_ui_rect_stats();
     }
 
     private void push_markers() {
@@ -1872,8 +1963,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                 $"window: state={w.state} type={w.type} cur_chr_id={w.cur_chr_id} depth={w.submenu_depth} cmd={w.window_command_id} "
               + $"sel_idx={w.sel_idx} sel_idx_render={w.sel_idx_render} sel_cmd={w.sel_command_id} sel_chrs=0x{w.sel_chrs:X4} sel_mons=0x{w.sel_mons:X4}"
               + $"  field={btl_field_str()}  actors:");
-            for (int i = 0; i < 16; i++) {
-                if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
+            for (int i = 0; i < k_ply_n; i++) {
+                if (i < k_mon_n && mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma))
                     sb.Append($" mon{i}[id={mc.id} chr_id={mc.chr_id} vis={mc.stat_visible}]=({ma.chr_pos_vec.X:F1},{ma.chr_pos_vec.Y:F1},{ma.chr_pos_vec.Z:F1})");
                 if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa))
                     sb.Append($" ply{i}[id={pc.id} chr_id={pc.chr_id} vis={pc.stat_visible} hide={pc.stat_hide}]=({pa.chr_pos_vec.X:F1},{pa.chr_pos_vec.Y:F1},{pa.chr_pos_vec.Z:F1})");
@@ -1889,12 +1980,12 @@ public sealed unsafe class FFXVRModule : FhModule {
         // 0..15 (party), sel_mons ids 16..31 (monsters are 20 + slot). Keyed on
         // the id each slot reports, so sparse or reordered slots don't matter.
         uint selected = w.sel_chrs | ((uint)w.sel_mons << 16);
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < k_ply_n; i++)   // 18: Aeon chr ids run to 0x11, so Sandy and Mindy are combatant ids 16-17 (bits 16-17 of the mask above)
             if (plys != null && read(plys + i, out Chr pc) && pc.id < 32 && (selected & (1u << pc.id)) != 0) mark(plys + i, 0xFF4040FF, "target");
+        for (int i = 0; i < k_mon_n; i++)
             if (mons != null && read(mons + i, out Chr mc) && mc.id < 32 && (selected & (1u << mc.id)) != 0) mark(mons + i, 0xFF4040FF, "target");
-        }
         if (plys != null) {
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < k_ply_n; i++) {
                 if (read(plys + i, out Chr pc) && pc.id == w.cur_chr_id) { mark(plys + i, 0xFF40E0FF, "turn"); break; }
             }
         }
@@ -1947,52 +2038,54 @@ public sealed unsafe class FFXVRModule : FhModule {
         _frames++;
 
         try_install_hooks();
-        if (_native_init_done) draw_markers();
-        if (_native_init_done) actors_auto_log();
-        if (_native_init_done) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
-        if (_native_init_done) draw_eye2_preview();   // its own top-level window, never nested
+        if (_native_ready) draw_markers();
+        if (_native_ready) actors_auto_log();
+        if (_native_ready) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
+        if (_native_ready) draw_eye2_preview();   // its own top-level window, never nested
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.
-        if (_fn_begin_frame != null) _fn_begin_frame();
+        if (_native_ok && _fn_begin_frame != null) _fn_begin_frame();
 
-        if (ImGui.IsKeyPressed(ImGuiKey.F8)) _window_open = !_window_open;
-        if (ImGui.IsKeyPressed(ImGuiKey.F10)) _slowmo_on = !_slowmo_on;
-        if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
-        if (ImGui.IsKeyPressed(ImGuiKey.Keypad5) && _fn_motion_log != null) _fn_motion_log(180);
-        draw_hover_highlight();
-        if (_fn_slowmo != null) _fn_slowmo(_slowmo_on ? _slowmo_ms : 0);
-        if (ImGui.IsKeyPressed(ImGuiKey.F9) && _fn_ui_pick != null) {
-            Vector2 m = ImGui.GetMousePos(), ds = ImGui.GetIO().DisplaySize;
-            if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
+        handle_hotkeys();
+        if (_native_ready) {
+            draw_hover_highlight();
+            if (_fn_slowmo != null) _fn_slowmo(_slowmo_on ? _slowmo_ms : 0);
+            if (_fn_ui_pick_result != null) { try { string r = Marshal.PtrToStringAnsi(_fn_ui_pick_result()) ?? ""; if (r.Length > 0) _pick_text = r; } catch { } }
+            poll_gestures();
         }
-        if (_fn_ui_pick_result != null) { try { string r = Marshal.PtrToStringAnsi(_fn_ui_pick_result()) ?? ""; if (r.Length > 0) _pick_text = r; } catch { } }
-        if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
+        if (_window_open) {   // widgets, status and one-shot buttons only; a fault in there must not stop push_all
+            try { draw_window(); }
+            catch (Exception e) { if (e.Message != _ui_fault_last) { _ui_fault_last = e.Message; _logger.Error($"overlay fault: {e}"); } }
+        }
+        if (_native_ready) push_all();      // every setting, once per frame, open or closed
+        settings_reload_if_edited();
+        settings_save_if_changed();
+    }
 
-        if (_window_open && _native_init_done) {
-            ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.FirstUseEver);
-            try {
-                if (ImGui.Begin("FFX VR", ref _window_open)) {
+    /// <summary>The F8 window. Without a working native helper it shows why (and the hint), never an empty frame.</summary>
+    private void draw_window() {
+        ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.FirstUseEver);
+        try {
+            if (ImGui.Begin("FFX VR", ref _window_open)) {
+                if (!_native_ready) {
+                    ImGui.TextWrapped($"Native helper: {_native_status}");
+                    if (_native_mismatch) ImGui.TextWrapped("The VR mod is not running. Reinstall the mod, so that ffxvr.dll and ffxvr_native.dll come from the same build; core.log has the details.");
+                    else if (_native_failed) ImGui.TextWrapped("The VR mod is not running: it could not hook the game's renderer. core.log and ffxvr_native.log have the details.");
+                    else ImGui.TextDisabled("starting: waiting for the game's renderer");
+                    ImGui.TextDisabled("F8: hide");
+                }
+                else {
+                    if (_detour_status != "installed") {
+                        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
+                        ImGui.TextWrapped($"Draw detours: {_detour_status}. Stereo, cursor hiding and the UI panel may not work; core.log has the details.");
+                        ImGui.PopStyleColor(1);
+                    }
                     draw_main();
                     draw_debug();
                 }
             }
-            finally { ImGui.End(); }
         }
-        else if (_native_init_done) {
-            push_override_and_stereo();   // state still flows to the native side with the window hidden
-            push_player();
-            if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
-            if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
-            push_hands();
-            if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
-            if (_fn_xr_set != null) {
-                bool want = _xr_want;
-                if (want) { _ovr_enabled = true; _stereo_on = true; }
-                _xr_on = _fn_xr_set(want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;
-            }
-        }
-        settings_reload_if_edited();
-        settings_save_if_changed();
+        finally { ImGui.End(); }
     }
 }

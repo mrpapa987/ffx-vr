@@ -251,9 +251,21 @@ const char* res_str(XrResult r) {
     return buf;
 }
 
+// One log line per distinct failure; a failure repeating every frame (xrWaitFrame, xrEndFrame) is summarised at
+// most every 10 s. The status line still updates on every call.
+char g_fail_last[200] = ""; uint32_t g_fail_reps = 0; DWORD g_fail_tick = 0;
+void xr_fail_reset() { g_fail_last[0] = '\0'; g_fail_reps = 0; g_fail_tick = 0; }
 bool fail(const char* what, XrResult r) {
     char line[200]; snprintf(line, sizeof(line), "%s: %s", what, res_str(r));
-    g_h.diag("xr: %s", line); set_status(line);
+    const DWORD now = GetTickCount(); set_status(line);
+    if (strcmp(line, g_fail_last) == 0) {
+        ++g_fail_reps;
+        if (now - g_fail_tick >= 10000) { g_h.diag("xr: %s (x%u in the last %lu s)", line, g_fail_reps, (unsigned long)((now - g_fail_tick) / 1000)); g_fail_reps = 0; g_fail_tick = now; }
+        return false;
+    }
+    if (g_fail_reps) g_h.diag("xr: (previous failure repeated %u more times)", g_fail_reps);
+    strncpy_s(g_fail_last, line, _TRUNCATE); g_fail_reps = 0; g_fail_tick = now;
+    g_h.diag("xr: %s", line);
     return false;
 }
 
@@ -307,6 +319,7 @@ void xr_stop() {
 
 bool xr_start(const XrHost& host) {
     if (xr_active()) return true;
+    xr_fail_reset();                                        // each attempt logs its failures afresh (the previous one may have been muted)
     g_h = host;
     if (g_loader == nullptr) {
         wchar_t path[MAX_PATH];

@@ -185,13 +185,14 @@ if ($NoDeploy) {
 $dest = Join-Path $modsDir $modId
 Log ''
 Log "[deploy] -> $dest"
-# Keep the user's files: settings, hand calibration, bone labels, captures and logs live next to the
-# DLLs. Only the build output is replaced (the whole folder used to be wiped, which reset the ini
-# on every build).
-$keep = @('*.ini', '*.ini.bak', '*.log', '*.txt', '*.bin', '*.json')
-if (Test-Path $dest) {
-    Get-ChildItem $dest -Recurse -File | Where-Object {
-        $n = $_.Name; -not ($keep | Where-Object { $n -like $_ }) -or $n -like '*.deps.json' -or $n -like '*.runtimeconfig.json'
+# Keep the user's files: settings, hand calibration, bone labels, captures (img_*.bmp, seq_*.bmp,
+# ui_atlas_*.dds, ffxvr_bones_*.bin) and logs live next to the DLLs. Only the build output is deleted
+# and replaced. The managed output has no subfolders (owner checked, 24 Oct 2026), so the delete is not recursive: a hand-made
+# subfolder (an old\ copy for A/B tests) survives. ffxvr.manifest.json is overwritten by the copy.
+$buildOut = @('*.dll', '*.pdb', '*.deps.json', '*.runtimeconfig.json')
+if (Test-Path -LiteralPath $dest) {
+    Get-ChildItem -LiteralPath $dest -File | Where-Object {
+        $n = $_.Name; [bool]($buildOut | Where-Object { $n -like $_ })
     } | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -201,6 +202,8 @@ Copy-Item $natDll                 -Destination $dest -Force
 Copy-Item $oxrDll.FullName        -Destination $dest -Force
 
 Get-ChildItem $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
+$kept = @(Get-ChildItem -LiteralPath $dest -Recurse -File | Where-Object { $n = $_.Name; -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' })
+Log ("[deploy] kept {0} settings/capture/log files ({1:N1} MB)" -f $kept.Count, (($kept | Measure-Object Length -Sum).Sum / 1MB))
 
 if (-not (Test-Path (Join-Path $dest "$modId.manifest.json"))) {
     Log ''

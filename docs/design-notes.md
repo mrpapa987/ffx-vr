@@ -1457,3 +1457,67 @@ forearm segments (the cut did not check `g_hands_on`), so the player's
 model lost forearm pieces in every view within the hide radius -
 including the blitz model. `hands_apply` now returns at once when the
 hands are off.
+
+## Review fixes, build 1 (24 Oct 2026)
+
+From the 24 Oct review (items R1, R5, R6, R7a/b/d, R13, R34-R38). Frame time and
+settings pushes only; nothing retuned.
+
+- **Settings reach native every frame (R1).** Before, the setters ran inside the F8
+  window code, so with the overlay closed some never ran (pitch follow, cuts and pans,
+  backdrop, hist, UI panel, noimg, bisect) and the frame time came from the last push
+  of the overlay - stale or the 1/72 default. Turning and follow ran at about 83% speed
+  with the overlay closed, about 42% in blitzball. Now `push_all()` sends everything
+  once per frame (guarded: several setters are edge-triggered, integrate per call, or
+  read-and-clear, so none may run twice), and the window only draws widgets, reads
+  status and runs one-shot buttons. Keys live in `handle_hotkeys()`, the gesture poll
+  in `poll_gestures()` (its only caller). The native side measures its own frame time
+  with QueryPerformanceCounter at the top of `ffxvr_begin_frame`, clamped 1-50 ms;
+  the dt that `ffxvr_cuts_set` still receives is only used until that first measure.
+  The screen3d / hide-list / virtual-screen pushes sat inside an unrelated
+  `if (_fn_ui_hide != null)`: each now has its own check (`push_view_rules`), and they
+  also run before the actor table exists. `xr_set` goes first in `push_all`, so on the
+  frame the headset is unticked native has already left XR when the override and
+  eye 2 are pushed (it ORs the headset flag into both): no one-frame flash. No defaults changed: the 90 deg/s turn was
+  tuned with the overlay open, where dt was right. Blitzball turning and auto depth
+  get about 2.4x quicker - the intended speed.
+- **One ABI (R13, R38).** Every export is required (`TryGetExport`, missing names
+  collected), plus `ffxvr_abi()` = 1 on both sides; bump it with any export change. A
+  missing DLL, a mismatched pair, an init failure or failed detours open the F8
+  window with the reason (detours: a red line over the normal UI). That forced open is
+  not written to the ini; `overlay_open` keeps the earlier value until F8 is pressed.
+  F8 always shows something: without the native helper, a status panel (the reinstall
+  hint only for a missing or mismatched DLL; an init failure says the renderer could
+  not be hooked). After a mismatch every bound export pointer is nulled. A fault in
+  the window code is caught and logged once per message, so `push_all` still runs.
+- **Hotkeys while typing (R36).** F8, F10 and F11 always work, F9 once the native helper
+  is running; Home, End, Insert and the numpad are ignored while a text box has the
+  keyboard (`WantTextInput`).
+- **Battle cycle (R34).** Insert and the left-grip chord set a request that the battle
+  follow uses in the same frame or drops; it no longer fires late at the next battle.
+- **hands=1 with hands_dev=0 (R35)** no longer runs the VR hands.
+- **Magus Sisters (R37).** Player loops run to 18 entries (Sandy and Mindy are ids
+  16-17), monsters stay 16.
+- **Headset off (R6).** `leave_xr_state()` resets the VR-only per-frame state on every
+  exit (unticked, session lost, shutdown): screen mode, override suspend, stereo
+  screen, backdrop room, blink, stick remap, UI pass state, gesture/grab and pad
+  suppression, anchor and latches. Owner decision: the desktop view goes back to how
+  it was - managed remembers the override and eye-2 switches when the headset goes on
+  (which forces both on) and restores them when it goes off.
+- **Headset start back-off (R7a).** With autostart on and Virtual Desktop not
+  connected, `xr_start` used to run (instance create/destroy, log lines) every frame.
+  Now in `ffxvr_xr_set`: retry after 2 s, then every 5 s; from the third failure on
+  the attempt is muted and a summary line is logged on the 2nd and every 60th. The
+  status line says "retrying in N s". Unticking resets it. A session that ends within
+  5 s of starting (Virtual Desktop half-connected) counts as a failed attempt too; the
+  count only clears once a session has lived 5 s.
+- **Quiet XR failures (R7b).** `fail()` logs a repeating failure once, then
+  "(xN in the last S s)" at most every 10 s; the status line still updates every time.
+  Reset at the start of each `xr_start`.
+- **tick() once per frame (R7d)** from `begin_frame` (Ctrl+F9 poll, heartbeat), not per
+  Unmap; the safety-valve capture dump moved into begin_frame's first locked block.
+- **Scripts (R5).** build-mod deletes only build output (`*.dll *.pdb *.deps.json
+  *.runtimeconfig.json`, not recursive: the managed output has no subfolders, owner
+  checked) and logs how many other files it kept;
+  captures (`img_*.bmp`, `ui_atlas_*.dds`, `ffxvr_bones_*.bin`) survive a deploy.
+  run-ffx also collects `.dds` and `.bin`.

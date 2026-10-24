@@ -47,9 +47,9 @@ finally {
     Pop-Location
 }
 
-# Gather any log files produced during this run
+# Gather any log and capture files produced during this run (UI atlas dumps are .dds, bone captures .bin)
 $collected = Join-Path $logDir "run-$stamp-gamelogs"
-$found = Get-ChildItem -Path $game -Recurse -Include *.log, *.txt, *.bmp -ErrorAction SilentlyContinue |
+$found = Get-ChildItem -Path $game -Recurse -Include *.log, *.txt, *.bmp, *.dds, *.bin -ErrorAction SilentlyContinue |
          Where-Object { $_.LastWriteTime -ge $startTime }
 
 foreach ($f in $found) {
