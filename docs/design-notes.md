@@ -429,7 +429,9 @@ The authored-camera seat latched its heading across cuts but kept the
 camera's position, so every cut teleported the viewer; and the authored
 cameras often start nearly side-on. The diorama is now the follow mode
 (`fp_mode 2`): anchored to the player's position (smoothed, 0.5 per frame,
-since the actor table moves at 30 Hz under 60 Hz rendering), heading latched
+since the actor table moves at 30 Hz under 60 Hz rendering; see build 4 below:
+it ran per camera upload, effectively a snap, and is now a time constant,
+`anchor_smooth_ms`, 0 by default, 24 ms to try), heading latched
 and turned by the stick (which orbits the seat around the player, as the
 offset lives in the heading frame), pitch from the tilt gesture (starts 20
 degrees down), offset from the grab gestures (starts behind and above:
@@ -450,7 +452,8 @@ for "replaces file" lines and the `perf:` vram figure. No EFL DLL, no UPX.
 In battle the party leader may be swapped out, so the diorama anchors to the
 centre of all combatants (the battle's player and monster lists, actors with
 a live position; monsters only while visible), passed from the managed side
-as an anchor override and smoothed slowly (0.05 per frame) so the table is
+as an anchor override and smoothed slowly (0.05 per frame; since build 4 the
+time constant `battle_anchor_smooth_ms`, 0 by default, 325 ms to try) so the table is
 near-static. Battle start and end snap the anchor. First person is left as it
 is (watching from where Tidus stands, even when he is out of the fight, is
 part of the fun).
@@ -1620,3 +1623,62 @@ the R45/R46 hands reorder). No feel or default changes; ABI unchanged (2).
   and the two sRGB 8-bit formats are dumped too; the never-installed hk_Draw*,
   hk_UpdateSubresource and twin_plain_srv are deleted (the UpdateSubresource geometry
   capture they held never ran, so `g_vb_updates` was always 0).
+
+## Review fixes, build 4 (24 Oct 2026)
+
+Smoothing once per frame (review item R4), a low-resolution warning, and a
+troubleshooting row.
+
+- **Once-per-frame view filters (R4).** The diorama / third-person anchor
+  smoothing (0.5 per update), the battle-centre smoothing (0.05 per update), the
+  third-person heading slew and the seat follow-pans all ran inside the view
+  builder, which runs for **every camera upload** (dozens per frame), both eyes
+  and the marker / projection callers. So the anchor converged within a frame
+  (effectively a snap), different objects in one frame saw different anchors,
+  and the rate-limited slews ran far faster than their deg/s said. Now they
+  advance once per frame: at the first eye-1 upload of a real 3D camera
+  (|P0|,|P5| > 0.2), on the render thread. Every other call (eye 2,
+  `ffxvr_project`, the markers) only reads them. The latches (heading, seat)
+  still fire from any caller; they are idempotent within a frame. The anchor is
+  a time constant, `k = 1 - exp(-dt * gap / tau)` with the native frame time:
+  `anchor_smooth_ms` (field, 0-500) and `battle_anchor_smooth_ms` (0-3000),
+  **both 0 = snap by default**, the closest to before, so this build changes
+  consistency only (one anchor for every object and both eyes). It snaps after
+  more than 2 frames without advancing (screen, stereo screen, backdrop, seat,
+  first person, loading), on a 50-unit warp in the field, and at battle start /
+  end. Sliders: Debug > First person / follow, under third person. A/B targets:
+  24 ms (halves the 30 Hz step at 60 fps, about one frame of lag) and 325 ms.
+  The `view:` diag line every 10 s gives frames, ticks, eye-1 camera uploads per
+  frame and "uploads with another camera" (if that is ever non-zero in a scene,
+  the follow-pans should take their yaw from the frame's main camera).
+- **Honest rates.** `tp_follow_rate` (third-person heading follows the run) and
+  `follow_rate` (seat follow pans) are now real deg/s, frame-rate independent.
+  Defaults unchanged (both off by default; the owner's ini has both off).
+  Before, the pans ran on every view build (both eyes of every camera upload,
+  the markers, the projections: 20-60x the slider) and the third-person slew on
+  every eye-1 build, so at the default 20 deg/s the seat was locked to the
+  camera within a frame or two. Now: the pans turn at the slider's real deg/s
+  (a 90-degree pan at 20 deg/s takes 4.5 s), the seat pitch (with pitch follow
+  > 0) eases over about 0.5 s, and the third-person heading approaches with a
+  real 2/3 s time constant under its rate cap. Anyone turning them on should
+  start around 120 deg/s. The pan rate slider now goes to 360.
+  `ffxvr_anchor_set` (never bound) is replaced by `ffxvr_view_smooth_set`.
+  At 0/0 the battle table now jumps to a new centre at once where it used to
+  glide over 3-4 frames in small fights (0.05 per call converged 70-95% per
+  frame); 325 ms is the A/B candidate for that. The `view:` line prints only
+  with the headset on or diagnostics armed, and also counts eye-1 uploads
+  before the tick (drawn with last frame's anchor; expected 0 in 3D scenes).
+- **Low-resolution warning.** Exclusive fullscreen only gets the modes of the
+  display that is active at launch; with the monitor off, Virtual Desktop's
+  virtual display offers 1920x1080 and the game renders at that, so the headset
+  image is blurry. With the headset on, the backbuffer is compared each frame
+  with the eye images' size (the headset's recommended width at 16:9; the raw
+  recommended height is a taller-than-16:9 shape that even 4K would fail): below
+  it, the overlay shows one line and `ffxvr_diag.log` gets a `resolution:` line
+  once per change. Two causes, and the line names the likely one: at 1920x1080
+  or less, the monitor off at launch (or the game set that low); above it, the
+  game's resolution below a high VD quality preset (2560x1440 from
+  `game-settings.ps1 -Profile vr` can trip it at the highest presets), so raise the
+  game's resolution or lower the preset. INSTALL-ALPHA and the zip README have a
+  troubleshooting row for both. The flag is cleared when the headset goes off.
+- ABI 3 (`ffxvr_view_smooth_set`, `ffxvr_lowres_status`; `ffxvr_anchor_set` gone).

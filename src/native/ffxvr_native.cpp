@@ -882,12 +882,19 @@ bool     g_gest_enabled = true;
 float    g_gest_move[3] = {};                // right, up, forward (units), added to the manual seat offset
 float    g_gest_scale = 1.f;                 // multiplies g_xr_scale
 float    g_gest_pitch = 0.f;                 // diorama (follow) view: the seat's pitch, set by the tilt gesture (radians, + looks up)
-// Diorama anchor: the player's position smoothed over a couple of frames,
-// since the actor table moves at the logic rate (30 Hz) under a 60 Hz render.
-float    g_fp_anchor[3] = {}; bool g_fp_anchor_valid = false; float g_fp_anchor_k = 0.5f;
-// Battle: the diorama anchors to the centre of the combatants (set by the
-// managed side from the battle lists), smoothed slowly so it is near-static.
-float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was = false; float g_anchor_ovr_k = 0.05f;
+// Diorama / third-person anchor: the player's position, optionally smoothed (the actor table moves at the logic
+// rate, 30 Hz, under a 60 Hz render). A time constant, applied once per frame (R4); 0 = snap, the closest to the
+// behaviour before Oct 2026, when the 0.5-per-update factor ran on every camera upload (effectively a snap).
+// A/B target: 24 ms (design-notes' "0.5 per frame" at 60 fps).
+float    g_fp_anchor[3] = {}; bool g_fp_anchor_valid = false; float g_fp_anchor_tau = 0.f;   // s
+// Battle: the diorama anchors to the centre of the combatants (set by the managed side from the battle lists).
+// Its own time constant; 0 = snap. A/B target: 325 ms ("0.05 per frame").
+float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was = false; float g_anchor_ovr_tau = 0.f;   // s
+// The once-per-frame view tick (R4): the third-person slew, the anchor and the seat follow-pans advance at the first
+// eye-1 upload of a real 3D camera in each frame, on the render thread. g_anchor_frame: the last frame the anchor
+// advanced (a gap of more than 2 frames snaps it).
+uint32_t g_view_tick_frame = 0xFFFFFFFFu, g_anchor_frame = 0;
+uint32_t g_view_ticks = 0, g_view_uploads = 0, g_view_othercam = 0, g_view_early = 0; float g_tick_v[12] = {};   // diag: the 10 s "view:" line
 // Diorama floor: the eye never goes below this many units above the anchor
 // (the player's feet / the fight's centre), except while a grip is held so a
 // deliberate drag below is possible; 0 = off.
@@ -1179,7 +1186,11 @@ static void turn_tick() {
     if (x != 0.f) turn_by(x * fabsf(x) * g_turn_rate * g_dt);   // smooth, with a gentle curve near centre
 }
 
-static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3]) {
+/// advance = this call moves the per-frame filters on (once per frame: write_camera's first eye-1 3D upload). Every
+/// other caller (eye 2, ffxvr_project, the markers) passes false and only reads them. The latches (fp heading, seat
+/// heading) still fire from any caller; they are idempotent within a frame (every reset happens at Present), and
+/// g_cam is the post-cut camera, so that is harmless.
+static void build_override_view(const float v[12], float Vn[16], float In[16], float Pn[3], bool advance) {
     float R[9] = { v[0], v[1], v[2],  v[4], v[5], v[6],  v[8], v[9], v[10] };
     const float t[3] = { v[3], v[7], v[11] };
     float P[3];
@@ -1210,7 +1221,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
         }
-        if (g_fp_mode == 3 && primary && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
+        if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
             // travel. Proportional with a rate cap, and weighted by how far
             // round it has to go, so running toward the camera does not swing
@@ -1250,11 +1261,21 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             // battle centroid stands in for the player in the diorama only.
             const bool ovr_on = g_anchor_ovr_valid && g_fp_mode == 2;
             const float* target = ovr_on ? g_anchor_ovr : g_fp_pos;
-            const float k = ovr_on ? g_anchor_ovr_k : g_fp_anchor_k;
-            if (ovr_on != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = ovr_on; }   // battle start / end: snap
-            if (!g_fp_anchor_valid) { memcpy(g_fp_anchor, target, sizeof(g_fp_anchor)); g_fp_anchor_valid = true; }
-            else for (int i = 0; i < 3; ++i) g_fp_anchor[i] += (target[i] - g_fp_anchor[i]) * k;
-            P[0] = g_fp_anchor[0]; P[1] = g_fp_anchor[1]; P[2] = g_fp_anchor[2];
+            if (advance) {
+                if (ovr_on != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = ovr_on; }   // battle start / end: snap
+                const uint32_t gap = g_frames - g_anchor_frame; g_anchor_frame = g_frames;
+                if (gap > 2) g_fp_anchor_valid = false;                 // idle for a while (screen, stereo screen, backdrop, seat, first person, loading): snap
+                if (g_fp_anchor_valid && !ovr_on) {                     // a warp (ffxvr_player_set's 50-unit rule): snap; the battle centre keeps its glide
+                    const float dx = target[0] - g_fp_anchor[0], dy = target[1] - g_fp_anchor[1], dz = target[2] - g_fp_anchor[2];
+                    if (dx*dx + dy*dy + dz*dz > 50.f * 50.f) g_fp_anchor_valid = false;
+                }
+                const float tau = ovr_on ? g_anchor_ovr_tau : g_fp_anchor_tau;
+                const float k = tau > 1e-4f ? 1.f - expf(-g_dt * (float)gap / tau) : 1.f;   // g_dt: the native frame time (clamped in begin_frame)
+                if (!g_fp_anchor_valid) { memcpy(g_fp_anchor, target, sizeof(g_fp_anchor)); g_fp_anchor_valid = true; }
+                else for (int i = 0; i < 3; ++i) g_fp_anchor[i] += (target[i] - g_fp_anchor[i]) * k;
+            }
+            const float* A = g_fp_anchor_valid ? g_fp_anchor : target;
+            P[0] = A[0]; P[1] = A[1]; P[2] = A[2];
         }
     }
 
@@ -1288,8 +1309,8 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
             const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
             if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode >= 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's
-            else if (g_follow_pans) {
-                // slew the latched yaw toward the live one, rate-limited
+            else if (g_follow_pans && advance) {
+                // slew the latched yaw toward the live one, rate-limited (once per frame: an honest deg/s)
                 float d = live_yaw - g_seat_yaw;
                 while (d >  3.14159265f) d -= 6.2831853f;
                 while (d < -3.14159265f) d += 6.2831853f;
@@ -1442,7 +1463,17 @@ static void screen3d_auto(const float v[12], const float* Pj) {
 static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT base, const float v[12]) {
     if (g_screen3d_now && g_s3_auto && g_eye_shift == 0.f && g_s3_frame != g_frames) { g_s3_frame = g_frames; screen3d_auto(v, reinterpret_cast<const float*>(orig + base + 64)); }
     float Vn[16], In[16], Pn[3];
-    build_override_view(v, Vn, In, Pn);
+    bool advance = false;
+    if (g_eye_shift == 0.f) {   // eye 1: the first upload of a real 3D camera in this frame, on the render thread, moves the filters on
+        g_view_uploads++;
+        const float* mp = reinterpret_cast<const float*>(orig + base + 192);   // main projection (|P0|,|P5| <= 0.2: the intro's near-2D camera)
+        const bool real3d = fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f;
+        const bool rt = g_render_tid == 0 || GetCurrentThreadId() == g_render_tid;
+        if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); }
+        else if (g_view_tick_frame == g_frames && real3d && memcmp(v, g_tick_v, sizeof(g_tick_v)) != 0) g_view_othercam++;
+        else if (g_view_tick_frame != g_frames) g_view_early++;   // before the tick (not 3D, or another thread): drawn with last frame's anchor
+    }
+    build_override_view(v, Vn, In, Pn, advance);
 
     // Layout relative to the view block.
     const UINT o_pos = base - 16, o_view = base, o_projn = base + 64, o_vp = base + 128,
@@ -1737,7 +1768,7 @@ extern "C" __declspec(dllexport) int ffxvr_project(float x, float y, float z, fl
     float V[16];
     if (g_ovr_enabled) {
         float In[16], Pn[3];
-        build_override_view(v, V, In, Pn);
+        build_override_view(v, V, In, Pn, false);   // read-only: the filters advance once per frame in write_camera
     }
     else {
         memcpy(V, v, 48);
@@ -3419,7 +3450,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 2;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs
+constexpr int FFXVR_ABI = 3;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Keeps the costly diagnostics armed for `frames` more frames (see g_diag_until). Managed calls it with 2 every
@@ -3689,6 +3720,15 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             if (g_ui_frames_3d) diag("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u)",
                 g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws);
             g_ui_frames_3d = g_ui_frames_with_pass = 0; resolves_acc = clears_acc = no_pass_acc = 0;
+        }
+    }
+    {   // R4: how the once-per-frame view tick behaves (every 10 s while 3D frames run)
+        static ULONGLONG next = 0; static uint32_t f0 = 0; const ULONGLONG now = GetTickCount64();
+        if (now >= next) {
+            next = now + 10000; const uint32_t nf = g_frames - f0; f0 = g_frames;
+            if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
+                diag("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early);
+            g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0;
         }
     }
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
@@ -5190,8 +5230,8 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
     float v[12];
     { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); }
     float V1[16], V2[16], I[16], Pn[3];
-    g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn);
-    g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn);
+    g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn, false);   // read-only (the markers are drawn at Present)
+    g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn, false);
     g_eye_shift = 0.f;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0]); }
@@ -5331,6 +5371,8 @@ extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* nea
     if (vis) *vis = g_s3_vis; if (near_d) *near_d = g_s3_near; if (subject) *subject = g_s3_subject; if (plane) *plane = g_screen3d_conv; if (sep) *sep = g_screen3d_sep;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
+// Low resolution (see lowres_check, with xr_tick): the game's backbuffer and the eye image size it was compared with.
+static UINT g_lowres_bw = 0, g_lowres_bh = 0, g_lowres_ew = 0, g_lowres_eh = 0; static bool g_lowres = false;
 /// Every exit from the headset (unticked, session lost, shutdown): the VR-only per-frame state goes back to flat
 /// defaults, so the desktop view does not inherit a screen mode, a suspended override or a held grab.
 static void leave_xr_state() {
@@ -5341,6 +5383,7 @@ static void leave_xr_state() {
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
     g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
+    g_lowres = false;   // no stale low-resolution line when the headset comes back on
     diag("xr: headset off, VR-only state reset");
 }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
@@ -5383,7 +5426,12 @@ extern "C" __declspec(dllexport) void ffxvr_vrpad_set(int enabled) { g_vrpad_ena
 extern "C" __declspec(dllexport) void ffxvr_gesture_set(int enabled, float tilt_gain) { g_gest_enabled = enabled != 0; g_gest_tilt_gain = tilt_gain; }
 extern "C" __declspec(dllexport) void ffxvr_gesture_reset() { view_reset(); }
 extern "C" __declspec(dllexport) void ffxvr_tp_set(float dist, float h, float pitch, float follow_rate) { g_tp_dist = dist; g_tp_h = h; g_tp_pitch = pitch; g_tp_follow_rate = follow_rate; }
-extern "C" __declspec(dllexport) void ffxvr_anchor_set(float k) { g_fp_anchor_k = k; }
+/// The anchor smoothing time constants in ms (R4): field (diorama / third person) and battle centre; 0 = snap.
+extern "C" __declspec(dllexport) void ffxvr_view_smooth_set(float field_ms, float battle_ms) {
+    const float f = field_ms < 0.f ? 0.f : field_ms > 500.f ? 500.f : field_ms, b = battle_ms < 0.f ? 0.f : battle_ms > 3000.f ? 3000.f : battle_ms;
+    if (!(f == f)) { g_fp_anchor_tau = 0.f; } else g_fp_anchor_tau = f * 0.001f;   // NaN -> snap
+    if (!(b == b)) { g_anchor_ovr_tau = 0.f; } else g_anchor_ovr_tau = b * 0.001f;
+}
 extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_floor = units; }
 /// Diorama anchor override (render space): the centre of the battle while one is on; valid = 0 hands it back to the player.
 extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; }
@@ -5488,6 +5536,19 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); leave_xr_state(); } }
+/// The overlay's low-resolution line: 1 and the text while the headset is on and the game renders below its per-eye size.
+extern "C" __declspec(dllexport) int ffxvr_lowres_status(char* buf, int n) {
+    if (buf == nullptr || n <= 0) return 0;
+    buf[0] = 0;
+    if (!g_xr_want || !g_lowres) return 0;
+    if (g_lowres_bw <= 1920 && g_lowres_bh <= 1080)   // the typical fallback: the monitor off, the game on Virtual Desktop's 1080p virtual display
+        snprintf(buf, static_cast<size_t>(n), "Game renders at %ux%u, below the headset's per-eye %ux%u. Was the monitor off or asleep at launch (the game then only gets Virtual Desktop's 1080p display), or is the game's resolution set this low?",
+                 g_lowres_bw, g_lowres_bh, g_lowres_ew, g_lowres_eh);
+    else
+        snprintf(buf, static_cast<size_t>(n), "Game renders at %ux%u, below the headset's per-eye %ux%u. For full sharpness raise the game's resolution (tools\\game-settings.ps1 -Width ... -Height ...) or lower Virtual Desktop's quality preset.",
+                 g_lowres_bw, g_lowres_bh, g_lowres_ew, g_lowres_eh);
+    return 1;
+}
 extern "C" __declspec(dllexport) void ffxvr_xr_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;
     const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d);
@@ -5544,8 +5605,25 @@ static void detect_cut() {
     memcpy(g_cam_prev_pos, pos, sizeof(pos)); memcpy(g_cam_prev_fwd, fwd, sizeof(fwd)); g_cam_prev_valid = true;
 }
 
+// The game renders below the headset's per-eye size (the monitor off at launch: exclusive fullscreen only gets the
+// active display's modes, and Virtual Desktop's virtual display offers 1080p). Checked once per frame with the
+// headset on; logged once per change; shown by the overlay through ffxvr_lowres_status.
+static void lowres_check() {
+    if (g_backbuffer == nullptr || !xr_active()) { g_lowres = false; return; }
+    D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+    unsigned ew = 0, eh = 0; xr_eye_size(&ew, &eh);
+    if (ew == 0 || eh == 0) { g_lowres = false; return; }
+    const bool low = bd.Width < ew || bd.Height < eh;
+    if (bd.Width != g_lowres_bw || bd.Height != g_lowres_bh || ew != g_lowres_ew || eh != g_lowres_eh) {
+        if (low || g_lowres) diag("resolution: the game renders at %ux%u, the headset's per-eye image is %ux%u: %s", bd.Width, bd.Height, ew, eh, low ? "BELOW (monitor off at launch, or the game's resolution set lower)" : "ok");
+        g_lowres_bw = bd.Width; g_lowres_bh = bd.Height; g_lowres_ew = ew; g_lowres_eh = eh;
+    }
+    g_lowres = low;
+}
+
 static void xr_tick() {
     if (!g_xr_want) return;
+    lowres_check();
     detect_cut();
     turn_tick();
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says

@@ -290,6 +290,7 @@ void destroy_eyes() {
 
 bool xr_active() { return g_session != XR_NULL_HANDLE; }
 const char* xr_status() { return g_status; }
+void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
 
 void xr_stop() {
     if (g_session != XR_NULL_HANDLE) {

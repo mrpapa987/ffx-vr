@@ -193,6 +193,7 @@ on by default). A normal gamepad works too.
 | Fahrenheit doesn't start at all | Not as administrator. Re-run `install-fahrenheit.ps1`. Check `logs\run-*.txt`. |
 | Black for a few seconds at some scene changes | Known (the game is loading; the headset has nothing new to show). Fix planned. |
 | Ghosting when turning with the stick | Virtual Desktop refresh rate and SSW, above. If the game drops below the refresh rate, use `game-settings.ps1 -Profile vr`. |
+| Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for Fahrenheit to support the new version, then rebuild with `-Latest`. |
 
 For a bug report, send the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next

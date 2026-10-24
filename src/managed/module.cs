@@ -22,7 +22,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 2;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 3;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -118,6 +118,11 @@ public sealed unsafe class FFXVRModule : FhModule {
     private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 0.75f;
     private float _tp_dist = 24f, _tp_h = 22f, _tp_pitch = -8f, _tp_follow_rate = 0f;   // third person: units, units, degrees, deg/s (0 = heading never follows)
     private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_tp_set;
+    // Anchor smoothing (diorama / third person, and the battle centre): time constants in ms, applied once per frame
+    // natively; 0 = snap (the closest to the behaviour before Oct 2026). A/B candidates: 24 and 325.
+    private float _anchor_smooth_ms = 0f, _battle_anchor_smooth_ms = 0f;
+    private delegate* unmanaged[Cdecl]<float, float, void> _fn_view_smooth_set;
+    private delegate* unmanaged[Cdecl]<byte*, int, int> _fn_lowres_status;   // the "game renders below the headset" line
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_bones_capture; private int _bones_take = 0;
     private delegate* unmanaged[Cdecl]<int, int, float, void> _fn_bone_wiggle; private delegate* unmanaged[Cdecl]<int*, int*, int> _fn_bone_status;
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_bones_seq; private delegate* unmanaged[Cdecl]<int> _fn_bones_seq_left; private int _seq_frames = 240;
@@ -427,6 +432,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_gesture_set  = (delegate* unmanaged[Cdecl]<int, float, void>)req("ffxvr_gesture_set");
             _fn_gesture_reset = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_gesture_reset");
             _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)req("ffxvr_tp_set");
+            _fn_view_smooth_set = (delegate* unmanaged[Cdecl]<float, float, void>)req("ffxvr_view_smooth_set");
+            _fn_lowres_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lowres_status");
             _fn_bones_capture = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_bones_capture");
             _fn_bone_wiggle  = (delegate* unmanaged[Cdecl]<int, int, float, void>)req("ffxvr_bone_wiggle");
             _fn_bone_status  = (delegate* unmanaged[Cdecl]<int*, int*, int>)req("ffxvr_bone_status");
@@ -496,7 +503,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _fn_ui_pick = null; _fn_ui_pick_result = null; _fn_slowmo = null; _fn_ui_hover = null; _fn_ui_hover_rects = null; _fn_dump_cb = null;
         _fn_census_arm = null; _fn_backdrop_set = null; _fn_cull_dist_set = null; _fn_cull_dist_get = null; _fn_cull_scene_set = null; _fn_cull_scene_get = null;
         _fn_msaa_set = null; _fn_vrpad_set = null; _fn_imgui_layer_set = null; _fn_imgui_draws = null; _fn_vrpad_status = null; _fn_haptic = null;
-        _fn_gesture_set = null; _fn_gesture_reset = null; _fn_tp_set = null; _fn_bones_capture = null; _fn_bone_wiggle = null; _fn_bone_status = null;
+        _fn_gesture_set = null; _fn_gesture_reset = null; _fn_tp_set = null; _fn_view_smooth_set = null; _fn_lowres_status = null; _fn_bones_capture = null; _fn_bone_wiggle = null; _fn_bone_status = null;
         _fn_bones_seq = null; _fn_bones_seq_left = null; _fn_hands_set = null; _fn_hands_status = null; _fn_hands_calibrate = null; _fn_hands_dump = null;
         _fn_hands_method = null; _fn_hands_side = null; _fn_hands_cal_data = null; _fn_gesture_poll = null; _fn_fp_body_set = null; _fn_fp_parts = null;
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
@@ -879,6 +886,8 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "tp_height":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_h); break;
                     case "tp_pitch":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_pitch); break;
                     case "tp_follow_rate":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_follow_rate); break;
+                    case "anchor_smooth_ms":  if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float asm) && float.IsFinite(asm)) _anchor_smooth_ms = Math.Clamp(asm, 0f, 500f); break;
+                    case "battle_anchor_smooth_ms": if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float bsm) && float.IsFinite(bsm)) _battle_anchor_smooth_ms = Math.Clamp(bsm, 0f, 3000f); break;
                     case "hands_dev":         _hands_dev = v == "1"; break;
                     case "hands":             _hands_on = v == "1"; break;
                     case "hands_head":        _hands_head = v != "0"; break;
@@ -1003,6 +1012,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"tp_height={_tp_h.ToString("F0", ci)}\n" +
             $"tp_pitch={_tp_pitch.ToString("F0", ci)}\n" +
             $"tp_follow_rate={_tp_follow_rate.ToString("F0", ci)}\n" +
+            $"anchor_smooth_ms={_anchor_smooth_ms.ToString("F0", ci)}\n" +
+            $"battle_anchor_smooth_ms={_battle_anchor_smooth_ms.ToString("F0", ci)}\n" +
             $"hands_dev={(_hands_dev ? 1 : 0)}\n" +
             $"hands={(_hands_on ? 1 : 0)}\n" +
             $"hands_head={(_hands_head ? 1 : 0)}\n" +
@@ -1050,6 +1061,14 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
         }
         ImGui.TextWrapped(xr_status_text());
+        if (_fn_lowres_status != null) {   // the game renders below the headset's per-eye size (monitor off at launch, a lower desktop mode)
+            byte* lr = stackalloc byte[320];
+            if (_fn_lowres_status(lr, 320) != 0) {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
+                ImGui.TextWrapped(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)lr) ?? "");
+                ImGui.PopStyleColor(1);
+            }
+        }
         if (_fn_xr_screen_now != null && _xr_on) { int sn = _fn_xr_screen_now(); ImGui.Text(sn == 1 ? "showing: virtual screen" : sn == 2 ? "showing: stereo screen" : "showing: 3D scene"); }
 
         // Controllers
@@ -1086,7 +1105,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         ImGui.Checkbox("recentre on cut", ref _cut_recentre); ImGui.SameLine();
         ImGui.Checkbox("blink", ref _cut_blink); ImGui.SameLine();
         ImGui.Checkbox("follow pans", ref _follow_pans);
-        if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 90f);
+        if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 360f);
         if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
@@ -1327,6 +1346,9 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.SetNextItemWidth(120); ImGui.SliderFloat("pitch", ref _tp_pitch, -60f, 30f, "%.0f deg"); ImGui.SameLine();
             ImGui.SetNextItemWidth(140); ImGui.SliderFloat("heading follows the run", ref _tp_follow_rate, 0f, 180f, "%.0f deg/s");
             ImGui.SameLine(); ImGui.TextDisabled("0 = fixed heading like first person (recommended); grips zoom the distance, not the world");
+            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("anchor smoothing (ms, 0 = snap)", ref _anchor_smooth_ms, 0f, 150f, "%.0f"); ImGui.SameLine();
+            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("battle anchor smoothing (ms, 0 = snap)", ref _battle_anchor_smooth_ms, 0f, 1000f, "%.0f"); ImGui.SameLine();
+            ImGui.TextDisabled("third person / diorama follow the player, and the battle diorama its centre, with this lag (24 / 325 to try)");
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
             ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.1f, 12f); ImGui.SameLine(); ImGui.TextDisabled("the player's parts sit exactly on the actor position; an NPC you talk to is 1+ units away, so keep this small");
             ImGui.Text("in first person:"); ImGui.SameLine();
@@ -1587,6 +1609,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         push_player();   // before fp_set: it can switch the view for a battle
         push_hands();
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
+        if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
     }
 

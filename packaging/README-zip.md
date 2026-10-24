@@ -169,6 +169,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | No F8 overlay | The mod didn't load: re-run `install-mod.ps1` and check the .NET x86 runtime. |
 | Black for a few seconds at some scene changes | Known: the game is loading and the headset has nothing new to show. A fix is planned. |
 | Ghosting when turning with the stick | Virtual Desktop refresh rate and SSW, above. If the game drops below the refresh rate, try `game-settings.ps1 -Profile vr`. |
+| Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit (and maybe FFX VR) update. |
 
 **Bug reports:** send the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next to
