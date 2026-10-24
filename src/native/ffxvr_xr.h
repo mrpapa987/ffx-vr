@@ -61,6 +61,8 @@ bool        xr_start(const XrHost& host);                   // loads the loader,
 void        xr_stop();
 bool        xr_active();                                    // session exists (may not be running yet)
 const char* xr_status();
+void        xr_debug(int sim_timeouts);                     // test hook: the next N swapchain image waits report a timeout
+void        xr_counters(unsigned* held_frames, unsigned* wait_timeouts);   // frames held (no eye image), swapchain wait timeouts (for the heartbeat)
 void        xr_eye_size(unsigned* w, unsigned* h);          // the eye swapchains' size: the headset's recommended width at 16:9 (0 x 0 while no session)
 void xr_timing(double* wait_ms, double* end_ms);
 bool        xr_take_space_change();                        // true once after the runtime recentred its reference space (the headset's own recentre gesture)           // last frame: xrWaitFrame / xrEndFrame durations                                    // one line for the overlay

@@ -1682,3 +1682,64 @@ troubleshooting row.
   game's resolution or lower the preset. INSTALL-ALPHA and the zip README have a
   troubleshooting row for both. The flag is cleared when the headset goes off.
 - ABI 3 (`ffxvr_view_smooth_set`, `ffxvr_lowres_status`; `ffxvr_anchor_set` gone).
+
+Owner feedback on builds 1-4 (24 Oct 2026): stick-turn ghosting is much improved,
+most likely from the correct turn timestep (build 1's native frame time, the same
+with the overlay closed) and steadier frame pacing (build 2 removed the blocking
+per-frame GPU readback). Head-movement-only motion is very clear. In first person,
+`fp_head_smooth` 0.35 vs 1.0 and the new anchor smoothing made no visible
+difference. Defaults stay as they are.
+
+## Review fixes, build 5 (24 Oct 2026)
+
+OpenXR robustness (review items R8a, R15, R41, the watchdog wake, xrEndSession).
+
+- **Swapchain images (R8a).** `submit_eye` acquired, waited 250 ms and, on a
+  timeout, released an image it had not waited for (invalid by the spec), then
+  repeated the 250 ms wait every frame of a Virtual Desktop stall (the monitor
+  crawled). Now each swapchain is a small state machine: acquire if idle, wait if
+  acquired, and only a waited image is written and released. A wait that times
+  out leaves the image acquired; the next frame retries with a 2 ms timeout. The
+  base layer's swapchains are prepared as a set (both eyes, or screen + right
+  screen) and only released together, so a layer never pairs a new left eye with
+  an old right one; once one member of a set has failed in a frame, the others'
+  first waits use the short timeout too (one 250 ms wait per stalled frame, not
+  one per swapchain). Only a timeout or an error is retried; other success codes
+  (SESSION_LOSS_PENDING) count as waited. Log: every timeout until 5 have
+  happened since launch; after that, try 1 of each episode per swapchain and
+  every 300th try; plus "recovered after N tries". On failure the layer is
+  dropped as before.
+- **No eye image (R15).** xr_tick returned early when the frame had no eye image
+  (e.g. the backbuffer copy failed), skipping xrEndFrame / xrWaitFrame for that
+  Present. Now xr_frame always runs. As an interim part of R8b (holding the last
+  frame on timeouts too comes later), the last base layer submitted with fresh
+  images is kept and re-sent for up to 30 frames when a frame has no eye image
+  (the swapchains still hold those images), then zero layers (black). Logged as
+  "no eye image this frame: holding the last one" / "fresh frames again after N
+  held". Swapchain timeouts still drop the layer (black) as before.
+- **Lost position tracking (R41).** With the headset cameras covered, the views
+  came without a valid position and both eyes were put at the origin (zero eye
+  separation, the world jumping). Now the last valid head centre is held and the
+  eyes sit at +-IPD/2 along each view's own right axis, with the IPD measured
+  while tracking was good (0.04-0.09 m, default 0.063). The held position resets
+  on xr_stop and when the runtime recentres its space. One diag line when it is
+  lost, one when it comes back.
+- **Watchdog wake.** The stall watchdog slept 1 s per loop, so xr_stop could
+  block up to a second (headset off, game exit). It now waits on an auto-reset
+  event that xr_stop signals.
+- **xrEndSession only in STOPPING.** xr_stop called it in any running state
+  (invalid outside STOPPING); poll_events already ends the session on STOPPING,
+  and destroying a running session is allowed.
+- **Test hooks** (Debug > Headset tests, session only): "drop the eye image every
+  frame" and "simulate 20 / 60 swapchain wait timeouts". While the drop toggle is
+  on, the main window shows a red "TEST ON" line (it stays on when Debug is
+  collapsed). The heartbeat counts held frames and wait timeouts. ABI 4
+  (`ffxvr_xr_debug`).
+- Small ones from the review: the hold is cleared when the runtime stops the
+  session and its episode counter on xr_stop; the watchdog's handles are closed
+  only once the thread has exited.
+- **Still open (for the R8b build):** hold the last frame on swapchain timeouts
+  too (and the UI / ImGui quads); escalate a swapchain whose wait keeps failing
+  with a hard error (not a timeout): after ~300 consecutive failures (~5 s) set
+  the status "swapchain N stuck" and xr_stop, so build 1's back-off restarts the
+  session (today it retries forever with the headset black).

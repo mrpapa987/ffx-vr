@@ -22,7 +22,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 3;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 4;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -123,6 +123,8 @@ public sealed unsafe class FFXVRModule : FhModule {
     private float _anchor_smooth_ms = 0f, _battle_anchor_smooth_ms = 0f;
     private delegate* unmanaged[Cdecl]<float, float, void> _fn_view_smooth_set;
     private delegate* unmanaged[Cdecl]<byte*, int, int> _fn_lowres_status;   // the "game renders below the headset" line
+    private delegate* unmanaged[Cdecl]<int, int, void> _fn_xr_debug;          // headset test hooks: drop the eye image, simulate swapchain timeouts
+    private bool _xr_drop_image = false; private int _xr_sim_timeouts_req = 0;  // session only, never saved
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_bones_capture; private int _bones_take = 0;
     private delegate* unmanaged[Cdecl]<int, int, float, void> _fn_bone_wiggle; private delegate* unmanaged[Cdecl]<int*, int*, int> _fn_bone_status;
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_bones_seq; private delegate* unmanaged[Cdecl]<int> _fn_bones_seq_left; private int _seq_frames = 240;
@@ -434,6 +436,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_tp_set       = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)req("ffxvr_tp_set");
             _fn_view_smooth_set = (delegate* unmanaged[Cdecl]<float, float, void>)req("ffxvr_view_smooth_set");
             _fn_lowres_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lowres_status");
+            _fn_xr_debug = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_xr_debug");
             _fn_bones_capture = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_bones_capture");
             _fn_bone_wiggle  = (delegate* unmanaged[Cdecl]<int, int, float, void>)req("ffxvr_bone_wiggle");
             _fn_bone_status  = (delegate* unmanaged[Cdecl]<int*, int*, int>)req("ffxvr_bone_status");
@@ -503,7 +506,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _fn_ui_pick = null; _fn_ui_pick_result = null; _fn_slowmo = null; _fn_ui_hover = null; _fn_ui_hover_rects = null; _fn_dump_cb = null;
         _fn_census_arm = null; _fn_backdrop_set = null; _fn_cull_dist_set = null; _fn_cull_dist_get = null; _fn_cull_scene_set = null; _fn_cull_scene_get = null;
         _fn_msaa_set = null; _fn_vrpad_set = null; _fn_imgui_layer_set = null; _fn_imgui_draws = null; _fn_vrpad_status = null; _fn_haptic = null;
-        _fn_gesture_set = null; _fn_gesture_reset = null; _fn_tp_set = null; _fn_view_smooth_set = null; _fn_lowres_status = null; _fn_bones_capture = null; _fn_bone_wiggle = null; _fn_bone_status = null;
+        _fn_gesture_set = null; _fn_gesture_reset = null; _fn_tp_set = null; _fn_view_smooth_set = null; _fn_lowres_status = null; _fn_xr_debug = null; _fn_bones_capture = null; _fn_bone_wiggle = null; _fn_bone_status = null;
         _fn_bones_seq = null; _fn_bones_seq_left = null; _fn_hands_set = null; _fn_hands_status = null; _fn_hands_calibrate = null; _fn_hands_dump = null;
         _fn_hands_method = null; _fn_hands_side = null; _fn_hands_cal_data = null; _fn_gesture_poll = null; _fn_fp_body_set = null; _fn_fp_parts = null;
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
@@ -1061,6 +1064,11 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
         }
         ImGui.TextWrapped(xr_status_text());
+        if (_xr_drop_image) {   // a test toggle that blacks out the headset after 30 frames: always visible while it is on
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
+            ImGui.TextWrapped("TEST ON: the eye image is being dropped (Debug > Headset tests). The headset holds the last frame, then goes black. Untick it to resume.");
+            ImGui.PopStyleColor(1);
+        }
         if (_fn_lowres_status != null) {   // the game renders below the headset's per-eye size (monitor off at launch, a lower desktop mode)
             byte* lr = stackalloc byte[320];
             if (_fn_lowres_status(lr, 320) != 0) {
@@ -1250,6 +1258,14 @@ public sealed unsafe class FFXVRModule : FhModule {
             ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
             ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
             if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}" + (_fn_eye2_same_inputs != null ? $"   (with the same inputs as eye 1, at most: {_fn_eye2_same_inputs()})" : ""));
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("Headset tests (frame hold, swapchain timeouts)")) {
+            ImGui.Checkbox("drop the eye image every frame (the headset holds the last frame for 30 frames, then goes black; untick to resume)", ref _xr_drop_image);
+            if (ImGui.SmallButton("simulate 20 swapchain wait timeouts")) _xr_sim_timeouts_req = 20; ImGui.SameLine();
+            if (ImGui.SmallButton("simulate 60")) _xr_sim_timeouts_req = 60; ImGui.SameLine();
+            ImGui.TextDisabled("ffxvr_diag.log: 'swapchain N wait ... (try N)' then 'recovered after N tries'");
             ImGui.TreePop();
         }
 
@@ -1610,6 +1626,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         push_hands();
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
+        if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
         if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
     }
 

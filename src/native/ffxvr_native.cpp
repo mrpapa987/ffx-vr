@@ -3090,6 +3090,7 @@ void heartbeat(bool force) {
     else fprintf(f, "\n  latched slot-0 buffer: not latched (diagnostics disarmed), reads %u\n", g_cam_reads);
     fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0);
     fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
+    { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held without an eye image %u, swapchain wait timeouts %u\n", held, waits); }
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
     if (!diag_armed()) fprintf(f, "  changed since previous frame: not measured (open the overlay's Debug header)");
     else if (g_diff_count < 0) fprintf(f, "  changed since previous frame: n/a (frames not consecutive)");
@@ -3450,7 +3451,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 3;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set
+constexpr int FFXVR_ABI = 4;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Keeps the costly diagnostics armed for `frames` more frames (see g_diag_until). Managed calls it with 2 every
@@ -5371,6 +5372,14 @@ extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* nea
     if (vis) *vis = g_s3_vis; if (near_d) *near_d = g_s3_near; if (subject) *subject = g_s3_subject; if (plane) *plane = g_screen3d_conv; if (sep) *sep = g_screen3d_sep;
 }
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
+bool g_xr_drop_image = false;   // Debug test (ffxvr_xr_debug): xr_tick drops the eye image, to exercise the hold (R15)
+/// Debug test hooks (R8a/R15): drop_image 1 = every frame goes to the headset without an eye image (the last one is
+/// held up to 30 frames, then black); sim_timeouts > 0 = the next N swapchain image waits report a timeout.
+extern "C" __declspec(dllexport) void ffxvr_xr_debug(int drop_image, int sim_timeouts) {
+    if ((drop_image != 0) != g_xr_drop_image) diag("xr debug: drop the eye image %s", drop_image ? "ON" : "off");
+    g_xr_drop_image = drop_image != 0;
+    if (sim_timeouts > 0) { diag("xr debug: simulating %d swapchain wait timeouts", sim_timeouts); xr_debug(sim_timeouts); }
+}
 // Low resolution (see lowres_check, with xr_tick): the game's backbuffer and the eye image size it was compared with.
 static UINT g_lowres_bw = 0, g_lowres_bh = 0, g_lowres_ew = 0, g_lowres_eh = 0; static bool g_lowres = false;
 /// Every exit from the headset (unticked, session lost, shutdown): the VR-only per-frame state goes back to flat
@@ -5666,13 +5675,15 @@ static void xr_tick() {
     XrFrameOut out = {};
     g_xr_fov_applied = false;
     auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
-    if (e1 == nullptr) { clear_imgui(); return; }
+    if (g_xr_drop_image) e1 = nullptr;              // Debug test: as if this frame had no eye image
+    // R15: no early return without an eye image. xr_frame still runs (events, wait, begin, locate) and re-sends the
+    // last frame for up to 30 frames; the session never stalls because one Present had nothing to show.
     if (g_screen3d_now) g_blink_frames = 0;         // the screen shows the game's cuts as cuts
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
     }
-    if (g_seq_left > 0) {
+    if (e1 && g_seq_left > 0) {
         wchar_t n1[64], n2[64];
         _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
         dump_bmp(e1, n1); if (e2) dump_bmp(e2, n2);

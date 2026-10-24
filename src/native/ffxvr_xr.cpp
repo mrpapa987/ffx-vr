@@ -26,6 +26,7 @@ char g_status[160] = "off";
 volatile const char* g_stage = "idle";
 volatile DWORD g_stage_tick = 0;
 HANDLE g_watchdog = nullptr;
+HANDLE g_watchdog_wake = nullptr;                   // auto-reset: xr_stop wakes the watchdog at once instead of waiting out its 1 s sleep
 volatile bool g_watchdog_stop = false;
 void stage(const char* s) { g_stage = s; g_stage_tick = GetTickCount(); }
 double g_t_wait_ms = 0, g_t_end_ms = 0;            // last frame: time in xrWaitFrame, time in submit+xrEndFrame
@@ -33,7 +34,8 @@ static double qpc_ms() { static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerf
 DWORD WINAPI watchdog_main(LPVOID) {
     const char* last_reported = nullptr; DWORD last_tick_reported = 0;
     while (!g_watchdog_stop) {
-        Sleep(1000);
+        if (g_watchdog_wake) WaitForSingleObject(g_watchdog_wake, 1000); else Sleep(1000);
+        if (g_watchdog_stop) break;
         const DWORD now = GetTickCount(); const DWORD t0 = g_stage_tick; const char* s = const_cast<const char*>(g_stage);
         if (now - t0 > 5000 && (s != last_reported || t0 != last_tick_reported)) {
             g_h.diag("xr: STALL -- render thread has been in stage '%s' for %lu ms", s, now - t0);
@@ -73,14 +75,34 @@ bool         g_render_views_valid = false;
 XrView       g_submit_views[2] = {};            // located one wait earlier: what the frame being submitted was rendered with
 bool         g_submit_views_valid = false;
 
+// Per swapchain (R8a): an image is acquired, then waited, then (only then) written and released. A wait that
+// times out leaves it acquired, and the wait is retried next frame with a short timeout; an image that was not
+// waited is never released.
+enum ScState : uint8_t { SC_IDLE, SC_ACQUIRED, SC_WAITED };
 struct Eye {
     XrSwapchain sc = XR_NULL_HANDLE;
     UINT w = 0, h = 0;
+    ScState st = SC_IDLE; uint32_t idx = 0; uint32_t retries = 0; bool ever_released = false;
     std::vector<ID3D11Texture2D*> images;
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
 Eye g_eye[6];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye
+// R15 interim hold (the minimal part of R8b): the last base layer submitted with fresh images. A frame with no eye
+// image re-sends it (the swapchains still hold those images: the compositor uses each one's last released image)
+// for up to 30 frames instead of a black zero-layer frame. Timeouts still drop the layer, as before (R8b, later).
+struct HeldBase {
+    bool have = false, use_screen = false, stereo = false; uint32_t age = 0;
+    XrCompositionLayerProjectionView pv[2] = {}; XrCompositionLayerQuad quad = {}, quad_r = {};
+};
+HeldBase g_held;
+uint32_t g_held_frames = 0, g_held_episode = 0;
+uint32_t g_wait_timeouts = 0;
+int g_sim_timeouts = 0;                          // Debug: the next N swapchain waits report a timeout (xr_debug)
+// R41: position tracking lost (cameras covered): hold the last valid head centre, eyes at +-IPD/2 along each view's
+// own right axis, with the IPD measured from the located views while tracking was good.
+constexpr float kIpdMin = 0.04f, kIpdMax = 0.09f, kIpdDefault = 0.063f;
+bool g_have_last_pos = false, g_pos_lost = false; XrVector3f g_last_head = {}; float g_last_ipd = kIpdDefault;
 XrSpace g_view_space = XR_NULL_HANDLE;           // head-locked space for the UI panel
 DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
 
@@ -283,13 +305,17 @@ void destroy_eyes() {
         if (e.mid)     { e.mid->Release();     e.mid = nullptr; }
         if (e.sc != XR_NULL_HANDLE && p_xrDestroySwapchain) p_xrDestroySwapchain(e.sc);
         e.sc = XR_NULL_HANDLE; e.images.clear(); e.w = e.h = 0;
+        e.st = SC_IDLE; e.idx = 0; e.retries = 0; e.ever_released = false;
     }
+    g_held.have = false; g_held_episode = 0;
 }
 
 } // namespace
 
 bool xr_active() { return g_session != XR_NULL_HANDLE; }
 const char* xr_status() { return g_status; }
+void xr_debug(int sim_timeouts) { if (sim_timeouts > 0) g_sim_timeouts += sim_timeouts; }
+void xr_counters(unsigned* held_frames, unsigned* wait_timeouts) { if (held_frames) *held_frames = g_held_frames; if (wait_timeouts) *wait_timeouts = g_wait_timeouts; }
 void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
 
 void xr_stop() {
@@ -298,7 +324,10 @@ void xr_stop() {
             XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO }; end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
             p_xrEndFrame(g_session, &end); g_frame_open = false;
         }
-        if (g_running && p_xrEndSession) { p_xrEndSession(g_session); g_running = false; }
+        // xrEndSession is only valid in STOPPING. poll_events already ends the session there, so this is a backstop that
+        // should never fire; otherwise the session is destroyed while running, which the spec allows.
+        if (g_running && g_state == XR_SESSION_STATE_STOPPING && p_xrEndSession) p_xrEndSession(g_session);
+        g_running = false;
         g_submit_views_valid = false;
         input_destroy();
         destroy_eyes();
@@ -312,9 +341,18 @@ void xr_stop() {
     input_destroy();
     if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance) { p_xrDestroyInstance(g_instance); g_instance = XR_NULL_HANDLE; }
     g_state = XR_SESSION_STATE_UNKNOWN; g_render_views_valid = false; g_running = false;
+    g_held.have = false; g_have_last_pos = false; g_pos_lost = false; g_last_ipd = kIpdDefault; g_sim_timeouts = 0;
     set_status("off");
     stage("stopped");
-    if (g_watchdog) { g_watchdog_stop = true; WaitForSingleObject(g_watchdog, 3000); CloseHandle(g_watchdog); g_watchdog = nullptr; }
+    if (g_watchdog) {
+        g_watchdog_stop = true; if (g_watchdog_wake) SetEvent(g_watchdog_wake);
+        if (WaitForSingleObject(g_watchdog, 3000) == WAIT_OBJECT_0) {   // exited: both handles can go
+            CloseHandle(g_watchdog);
+            if (g_watchdog_wake) { CloseHandle(g_watchdog_wake); g_watchdog_wake = nullptr; }
+        }
+        else g_h.diag("xr: watchdog did not exit within 3 s; its handles are left open");   // never close an event a live thread may wait on
+        g_watchdog = nullptr;
+    }
     g_h.diag("xr: stopped");
 }
 
@@ -435,7 +473,11 @@ bool xr_start(const XrHost& host) {
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
     stage("session created");
-    if (g_watchdog == nullptr) { g_watchdog_stop = false; g_watchdog = CreateThread(nullptr, 0, watchdog_main, nullptr, 0, nullptr); }
+    if (g_watchdog == nullptr) {
+        g_watchdog_stop = false;
+        if (g_watchdog_wake == nullptr) g_watchdog_wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);   // before the thread that waits on it
+        g_watchdog = CreateThread(nullptr, 0, watchdog_main, nullptr, 0, nullptr);
+    }
     return true;
 }
 
@@ -455,7 +497,7 @@ void poll_events() {
             }
             else if (g_state == XR_SESSION_STATE_STOPPING) {
                 if (g_frame_open) { XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO }; end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE; p_xrEndFrame(g_session, &end); g_frame_open = false; }
-                p_xrEndSession(g_session); g_running = false; g_render_views_valid = false; set_status("stopped by the runtime");
+                p_xrEndSession(g_session); g_running = false; g_render_views_valid = false; g_held.have = false; set_status("stopped by the runtime");   // no held layer across a stop
             }
             else if (g_state == XR_SESSION_STATE_LOSS_PENDING || g_state == XR_SESSION_STATE_EXITING) {
                 xr_stop(); return;
@@ -468,30 +510,71 @@ void poll_events() {
         else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             // the runtime recentred its LOCAL space (Quest: hold the Meta button): our reference must follow
             auto* rc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
-            if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) { g_space_changed = true; g_h.diag("xr: LOCAL space recentred by the runtime"); }
+            if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
+                g_space_changed = true; g_held.have = false; g_have_last_pos = false;   // a held frame / held head position belong to the old space
+                g_h.diag("xr: LOCAL space recentred by the runtime");
+            }
         }
         ev = { XR_TYPE_EVENT_DATA_BUFFER };
     }
 }
 
-uint32_t g_wait_timeouts = 0;
-bool submit_eye(int i, ID3D11Texture2D* src) {
+// Acquire if idle, wait if acquired. Never releases. True when the image is waited (ours to write).
+// short_wait: another member of the same set already failed this frame, so a first wait gets the short timeout too
+// (a stall then costs one 250 ms wait per frame, not one per swapchain).
+bool prepare(int i, bool short_wait) {
     Eye& e = g_eye[i];
-    uint32_t idx = 0;
-    stage(i == 0 ? "acquire eye 0" : "acquire eye 1");
-    XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
-    if (XR_FAILED(p_xrAcquireSwapchainImage(e.sc, &ai, &idx))) return false;
-    stage(i == 0 ? "wait image eye 0" : "wait image eye 1");
-    XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO }; wi.timeout = 250000000;   // 250 ms, never forever
-    XrResult r = p_xrWaitSwapchainImage(e.sc, &wi);
-    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-    if (r == XR_TIMEOUT_EXPIRED) { g_wait_timeouts++; if (g_wait_timeouts <= 5) g_h.diag("xr: swapchain image wait timed out (eye %d)", i); p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
-    if (XR_FAILED(r)) { p_xrReleaseSwapchainImage(e.sc, &ri); return false; }
-    stage(i == 0 ? "copy eye 0" : "copy eye 1");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 || i == 4)) g_h.ctx->CopyResource(e.images[idx], e.mid);
-    stage("release image");
-    p_xrReleaseSwapchainImage(e.sc, &ri);
+    if (e.st == SC_IDLE) {
+        stage(i == 0 ? "acquire eye 0" : i == 1 ? "acquire eye 1" : "acquire");
+        XrSwapchainImageAcquireInfo ai = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+        if (XR_FAILED(p_xrAcquireSwapchainImage(e.sc, &ai, &e.idx))) return false;
+        e.st = SC_ACQUIRED; e.retries = 0;
+    }
+    if (e.st == SC_ACQUIRED) {
+        stage(i == 0 ? "wait image eye 0" : i == 1 ? "wait image eye 1" : "wait image");
+        XrResult r;
+        if (g_sim_timeouts > 0) { g_sim_timeouts--; r = XR_TIMEOUT_EXPIRED; }   // Debug: a simulated timeout
+        else {
+            XrSwapchainImageWaitInfo wi = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+            wi.timeout = (e.retries || short_wait) ? 2000000 : 250000000;   // 250 ms after an acquire, 2 ms on retries: a long stall costs the monitor ~2 ms a frame
+            r = p_xrWaitSwapchainImage(e.sc, &wi);
+        }
+        if (r == XR_TIMEOUT_EXPIRED || XR_FAILED(r)) {               // a timeout or an error: stays acquired, wait again next frame
+                                                                     // (other success codes, e.g. SESSION_LOSS_PENDING, mean the image was waited)
+            e.retries++; ++g_wait_timeouts;                          // count first, then decide whether to log
+            if (g_wait_timeouts <= 5 || e.retries % 300 == 1) g_h.diag("xr: swapchain %d wait %s (try %u)", i, res_str(r), e.retries);
+            return false;
+        }
+        if (e.retries) g_h.diag("xr: swapchain %d wait recovered after %u tries", i, e.retries);
+        e.st = SC_WAITED;
+    }
     return true;
+}
+// Only for SC_WAITED: copy the source in and release.
+void copy_release(int i, ID3D11Texture2D* src) {
+    Eye& e = g_eye[i];
+    stage(i == 0 ? "copy eye 0" : i == 1 ? "copy eye 1" : "copy");
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 || i == 4)) g_h.ctx->CopyResource(e.images[e.idx], e.mid);
+    stage("release image");
+    XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    if (XR_SUCCEEDED(p_xrReleaseSwapchainImage(e.sc, &ri))) e.ever_released = true;
+    e.st = SC_IDLE;
+}
+// All or nothing: prepare every needed swapchain (no short-circuit), then copy and release all. If any is not
+// ready, nothing is released, and the ready ones stay SC_WAITED into the next frame (legal): a layer never gets a
+// left-new / right-old pair.
+bool submit_set(const int* ids, ID3D11Texture2D* const* srcs, int n) {
+    bool all = true;
+    for (int k = 0; k < n; ++k) all &= prepare(ids[k], !all);   // no short-circuit: every member is acquired; after a failure, short waits
+    if (!all) return false;
+    for (int k = 0; k < n; ++k) copy_release(ids[k], srcs[k]);
+    return true;
+}
+bool submit_eye(int i, ID3D11Texture2D* src) { return submit_set(&i, &src, 1); }
+
+// R41 helper: the view's right axis (x of its orientation).
+XrVector3f right_axis(const XrQuaternionf& q) {
+    return { 1.f - 2.f * (q.y * q.y + q.z * q.z), 2.f * (q.x * q.y + q.w * q.z), 2.f * (q.x * q.z - q.w * q.y) };
 }
 
 } // namespace
@@ -508,12 +591,12 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         XrCompositionLayerQuad quad_r = { XR_TYPE_COMPOSITION_LAYER_QUAD };   // the stereo screen's right eye
-        const bool use_screen = screen != nullptr && screen->on;
-        const bool stereo_screen = use_screen && screen->stereo && screen->eye2 != nullptr;
-        bool ok = g_should_render && g_render_views_valid;
+        bool use_screen = screen != nullptr && screen->on;
+        bool stereo_screen = use_screen && screen->stereo && screen->eye2 != nullptr;
+        bool ok = g_should_render && g_render_views_valid && eye1 != nullptr;   // R15: a frame without an eye image still runs (events, wait, begin, locate)
         if (ok && use_screen) {
-            ok = submit_eye(2, eye1);
-            if (ok && stereo_screen) ok = submit_eye(5, screen->eye2);
+            const int ids[2] = { 2, 5 }; ID3D11Texture2D* const srcs[2] = { eye1, screen->eye2 };
+            ok = submit_set(ids, srcs, stereo_screen ? 2 : 1);
             quad.space = g_space; quad.eyeVisibility = stereo_screen ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = g_eye[2].sc;
             quad.subImage.imageRect.offset = { 0, 0 };
@@ -528,8 +611,9 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             }
         }
         else if (ok) {
-            for (int i = 0; i < 2; ++i) {
-                if (!submit_eye(i, i == 0 ? eye1 : (eye2 ? eye2 : eye1))) { ok = false; break; }
+            const int ids[2] = { 0, 1 }; ID3D11Texture2D* const srcs[2] = { eye1, eye2 ? eye2 : eye1 };
+            ok = submit_set(ids, srcs, 2);   // both eyes or neither
+            for (int i = 0; i < 2 && ok; ++i) {
                 pv[i].pose = g_render_views[i].pose;
                 pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
                 pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
@@ -539,12 +623,29 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
                 pv[i].subImage.imageArrayIndex = 0;
             }
         }
+        // R15 interim hold: keep the last fresh base layer; a frame with no eye image re-sends it (up to 30 frames).
+        bool held = false;
+        if (ok) {
+            g_held.have = true; g_held.age = 0; g_held.use_screen = use_screen; g_held.stereo = stereo_screen;
+            if (use_screen) { g_held.quad = quad; g_held.quad_r = quad_r; } else { g_held.pv[0] = pv[0]; g_held.pv[1] = pv[1]; }
+            if (g_held_episode) { g_h.diag("xr: fresh frames again after %u held", g_held_episode); g_held_episode = 0; }
+        }
+        else if (eye1 == nullptr && g_should_render && g_held.have && g_held.age < 30) {
+            bool ready = g_held.use_screen ? (g_eye[2].ever_released && (!g_held.stereo || g_eye[5].ever_released)) : (g_eye[0].ever_released && g_eye[1].ever_released);
+            if (ready) {
+                held = true; g_held.age++; g_held_frames++;
+                if (g_held_episode++ == 0) g_h.diag("xr: no eye image this frame: holding the last one (at most 30 frames)");
+                use_screen = g_held.use_screen; stereo_screen = g_held.stereo;
+                if (use_screen) { quad = g_held.quad; quad_r = g_held.quad_r; } else { pv[0] = g_held.pv[0]; pv[1] = g_held.pv[1]; }   // the poses those images were rendered with
+            }
+        }
+        const bool base = ok || held;
         XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
         layer.space = g_space; layer.viewCount = 2; layer.views = pv;
         // The UI panel: head-locked (VIEW space), alpha-blended over the scene.
         XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_ui = false;
-        if (ok && !use_screen && ui != nullptr && ui->tex != nullptr && submit_eye(3, ui->tex)) {
+        if (base && !use_screen && ui != nullptr && ui->tex != nullptr && submit_eye(3, ui->tex)) {
             have_ui = true;
             uiq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
             uiq.space = g_view_space; uiq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -557,7 +658,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         }
         XrCompositionLayerQuad imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_imgui = false;
-        if (ok && ui != nullptr && ui->tex2 != nullptr && submit_eye(4, ui->tex2)) {
+        if (base && ui != nullptr && ui->tex2 != nullptr && submit_eye(4, ui->tex2)) {
             have_imgui = true;
             imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
             imq.space = g_view_space; imq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -577,7 +678,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        end.layerCount = ok ? nl : 0u; end.layers = ok ? layers : nullptr;
+        end.layerCount = base ? nl : 0u; end.layers = base ? layers : nullptr;
         stage("xrEndFrame");
         const double t_end0 = qpc_ms();
         XrResult r = p_xrEndFrame(g_session, &end);
@@ -615,16 +716,33 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     g_render_views_valid = valid;
     stage("game");
     if (!valid) return;
+    // R41: with position tracking lost, hold the last valid head centre and keep the eyes apart (they used to
+    // collapse to the origin: zero eye separation, the world jumping).
+    const bool pos_ok = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+    if (pos_ok) {
+        const XrVector3f a = views[0].pose.position, b = views[1].pose.position;
+        g_last_head = { 0.5f * (a.x + b.x), 0.5f * (a.y + b.y), 0.5f * (a.z + b.z) }; g_have_last_pos = true;
+        const float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z, ipd = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (ipd >= kIpdMin && ipd <= kIpdMax) g_last_ipd = ipd;
+        if (g_pos_lost) { g_pos_lost = false; g_h.diag("xr: position tracking back"); }
+    }
+    else {
+        if (!g_pos_lost) { g_pos_lost = true; g_h.diag("xr: position tracking lost: holding the head at (%.2f %.2f %.2f), eye separation %.3f m", g_have_last_pos ? g_last_head.x : 0.f, g_have_last_pos ? g_last_head.y : 0.f, g_have_last_pos ? g_last_head.z : 0.f, g_last_ipd); }
+        const XrVector3f c = g_have_last_pos ? g_last_head : XrVector3f{ 0.f, 0.f, 0.f };
+        for (int i = 0; i < 2; ++i) {
+            const XrVector3f rx = right_axis(views[i].pose.orientation); const float h = (i == 0 ? -0.5f : 0.5f) * g_last_ipd;
+            views[i].pose.position = { c.x + rx.x * h, c.y + rx.y * h, c.z + rx.z * h };
+        }
+    }
     memcpy(g_render_views, views, sizeof(views));
     if (next) {
         next->have_views = true;
         for (int i = 0; i < 2; ++i) {
             next->view[i].q[0] = views[i].pose.orientation.x; next->view[i].q[1] = views[i].pose.orientation.y;
             next->view[i].q[2] = views[i].pose.orientation.z; next->view[i].q[3] = views[i].pose.orientation.w;
-            const bool pos_ok = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
-            next->view[i].p[0] = pos_ok ? views[i].pose.position.x : 0.f;
-            next->view[i].p[1] = pos_ok ? views[i].pose.position.y : 0.f;
-            next->view[i].p[2] = pos_ok ? views[i].pose.position.z : 0.f;
+            next->view[i].p[0] = views[i].pose.position.x;   // valid, or held by R41 above
+            next->view[i].p[1] = views[i].pose.position.y;
+            next->view[i].p[2] = views[i].pose.position.z;
             next->fov[i].l = tanf(views[i].fov.angleLeft); next->fov[i].r = tanf(views[i].fov.angleRight);
             next->fov[i].u = tanf(views[i].fov.angleUp);   next->fov[i].d = tanf(views[i].fov.angleDown);
         }
