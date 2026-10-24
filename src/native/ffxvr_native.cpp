@@ -39,6 +39,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -86,23 +87,13 @@ inline void bump(CounterId id) { InterlockedIncrement(&g_counters[id]); }
 // ---------------------------------------------------------------- originals
 
 using PFN_VSSetConstantBuffers = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
-using PFN_DrawIndexed          = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, INT);
-using PFN_Draw                 = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT);
-using PFN_DrawIndexedInstanced = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, INT, UINT);
-using PFN_DrawInstanced        = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, UINT, UINT);
 using PFN_Map                  = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 using PFN_Unmap                = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT);
-using PFN_UpdateSubresource    = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, const D3D11_BOX*, const void*, UINT, UINT);
 using PFN_CreateBuffer         = HRESULT (STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_BUFFER_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
 
 PFN_VSSetConstantBuffers g_orig_vssetcb        = nullptr;
-PFN_DrawIndexed          g_orig_drawindexed    = nullptr;
-PFN_Draw                 g_orig_draw           = nullptr;
-PFN_DrawIndexedInstanced g_orig_drawidxinst    = nullptr;
-PFN_DrawInstanced        g_orig_drawinst       = nullptr;
 PFN_Map                  g_orig_map            = nullptr;
 PFN_Unmap                g_orig_unmap          = nullptr;
-PFN_UpdateSubresource    g_orig_updatesub      = nullptr;
 PFN_CreateBuffer         g_orig_createbuffer   = nullptr;
 typedef HRESULT (STDMETHODCALLTYPE* PFN_CreateTexture2D)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
 PFN_CreateTexture2D      g_orig_createtex2d    = nullptr;
@@ -369,6 +360,17 @@ struct InEye2 {                        // scoped: sets the guard, restores the p
 struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2, eye1b, eye2b; uint32_t frame; int kind; bool has_world; float world_pos[3]; bool pal_hands, split; };   // pal_hands: this part carries hand bones; split: drawn twice per eye (eye1/eye2 = left hand, eye1b/eye2b = right hand)
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
+/// The next ring slot, with every field from its previous use reset (R14): a slot that last held a split hand
+/// record must not ask for 3 passes or upload its old eye1b/eye2b for a different buffer.
+static EyeImage& ring_take(ID3D11Buffer* buf, UINT size, int kind) {
+    EyeImage& e = g_eye_ring[g_eye_ring_next]; g_eye_ring_next = (g_eye_ring_next + 1) % 32;
+    e.cb = buf; e.size = size; e.frame = g_frames; e.kind = kind;
+    e.has_world = false; e.pal_hands = false; e.split = false;
+    e.eye1b.clear(); e.eye2b.clear();               // clear() keeps the capacity: no reallocation
+    return e;
+}
+/// A split (two-hand) record whose variants really are this buffer's size: only then 3 passes / the eye1b, eye2b uploads.
+static bool split_ok(const EyeImage* e) { return e != nullptr && e->split && e->eye1b.size() == e->size && e->eye2b.size() == e->size; }
 EyeImage* g_eye2_cur = nullptr;       // the entry in use for the current eye-2 draw
 bool      g_split_pass = false;       // the current extra pass is the right-hand variant into eye 1 (targets unchanged)
 EyeImage* g_eye2_slots[14] = {};      // entries uploaded for each VS slot in the current eye-2 draw
@@ -432,7 +434,7 @@ ID3D11DepthStencilView* g_cur_dsv    = nullptr;
 // game's own actor positions.
 constexpr int k_world_max = 128;
 float g_world_live[k_world_max][3];   int g_world_live_n = 0;
-float g_world_report[k_world_max][3]; int g_world_report_n = 0;
+float g_world_report[k_world_max][3]; int g_world_report_n = 0; uint32_t g_world_report_frame = 0;   // frame the report was last refreshed
 static void census_write(UINT size);   // defined with the census code below
 
 
@@ -585,7 +587,7 @@ unsigned g_skip_first = 0, g_skip_count = 0;   // partial hide of the draw being
 // a spinning billboard whose width and height vary with the camera distance) or from the 1024 atlas (the
 // target pointer). So: a small quad of those kinds that sits in the column above where an actor projects
 // through the game camera is a pointer. Size-independent, batching-independent, no list to maintain.
-bool g_hide_pointers = false; float g_actor_ui[k_world_max][2]; int g_actor_ui_n = 0; uint32_t g_pointer_hits = 0; int g_actor_ui_frame = -1;
+bool g_hide_pointers = false; float g_actor_ui[k_world_max][2]; int g_actor_ui_src[k_world_max]; int g_actor_ui_n = 0; uint32_t g_pointer_hits = 0; int g_actor_ui_frame = -1;
 // Window backgrounds seen so far this frame (large quads: the CTB list panel, the command and status windows).
 // A small quad lying inside one is an icon on a window, never a pointer - the CTB portraits sit right where
 // a character at the right of the screen can project.
@@ -602,7 +604,7 @@ struct PtrSprite {
     ID3D11BlendState* bs; float bf[4]; UINT bm; ID3D11Buffer* cb0; ID3D11Buffer* vb[8]; UINT stride[8], off[8];   // every bound stream (UVs turned out not to be in slots 1-2)
     float w, h; float world[3]; bool has_world; unsigned q;
 };
-PtrSprite g_ptr_sprites[6]; int g_ptr_sprite_n = 0; bool g_ptr_reuse = true; uint32_t g_ptr_drawn = 0, g_ptr_unpaired = 0, g_ptr_captured = 0; double g_ptr_log_t = 0;
+PtrSprite g_ptr_sprites[6]; int g_ptr_sprite_n = 0; bool g_ptr_reuse = false; uint32_t g_ptr_drawn = 0, g_ptr_unpaired = 0, g_ptr_captured = 0; double g_ptr_log_t = 0;
 ID3D11Buffer* g_ptr_vb = nullptr; ID3D11Buffer* g_ptr_ib = nullptr;
 static void ptr_sprites_release() {
     for (int i = 0; i < g_ptr_sprite_n; ++i) {
@@ -613,7 +615,7 @@ static void ptr_sprites_release() {
     g_ptr_sprite_n = 0;
 }
 // Called from the UI draw path for a quad about to be hidden: quad q of the draw, its UI rect, the actor it
-// sits over (index into g_actor_ui / g_world_live, or -1).
+// sits over (index into g_world_live, or -1).
 static void ptr_sprite_capture(unsigned q, float x0, float y0, float x1, float y1, int actor) {
     if (!g_ptr_reuse || g_ptr_sprite_n >= 6 || !g_ctx) return;
     PtrSprite p = {};
@@ -1691,6 +1693,24 @@ extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsign
 // Support for the mod's own in-world markers
 // ---------------------------------------------------------------------------
 
+/// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
+/// access violation fatal even inside __try, so this check, not SEH, is what keeps a stale pointer harmless.
+static bool range_readable(const void* p, size_t len) {
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    if (p == nullptr || len == 0 || a < 0x10000 || a + len < a) return false;
+    uintptr_t q = a;
+    while (q < a + len) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<const void*>(q), &mbi, sizeof(mbi)) == 0) return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        const DWORD prot = mbi.Protect & 0xFF;
+        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+        if (prot != PAGE_READONLY && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READ && prot != PAGE_EXECUTE_READWRITE && prot != PAGE_WRITECOPY && prot != PAGE_EXECUTE_WRITECOPY) return false;
+        q = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+    }
+    return true;
+}
+
 /// Copies `len` bytes from game memory. Returns 1 on success, 0 if the range
 /// is not readable (stale battle pointers, an uninitialised actor table at
 /// start-up). The pages are checked with VirtualQuery first: Fahrenheit's
@@ -1698,18 +1718,7 @@ extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsign
 /// inside __try, so faulting on purpose is not an option.
 extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
     if (src == nullptr || dst == nullptr || len == 0) return 0;
-    const uintptr_t a = reinterpret_cast<uintptr_t>(src);
-    if (a < 0x10000 || a + len < a) return 0;
-    uintptr_t p = a;
-    while (p < a + len) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(reinterpret_cast<const void*>(p), &mbi, sizeof(mbi)) == 0) return 0;
-        if (mbi.State != MEM_COMMIT) return 0;
-        const DWORD prot = mbi.Protect & 0xFF;
-        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return 0;
-        if (prot != PAGE_READONLY && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READ && prot != PAGE_EXECUTE_READWRITE && prot != PAGE_WRITECOPY && prot != PAGE_EXECUTE_WRITECOPY) return 0;
-        p = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    }
+    if (!range_readable(src, len)) return 0;
     __try { memcpy(dst, src, len); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -1749,6 +1758,7 @@ extern "C" __declspec(dllexport) int ffxvr_project(float x, float y, float z, fl
 /// Distinct world positions of skinned objects drawn last frame; out holds
 /// up to max*3 floats. Returns the count.
 extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) {
+    if (out == nullptr || max <= 0) return 0;
     std::lock_guard<std::mutex> lock(g_mutex);
     const int n = (g_world_report_n < max) ? g_world_report_n : max;
     for (int i = 0; i < n; ++i) { out[i*3] = g_world_report[i][0]; out[i*3+1] = g_world_report[i][1]; out[i*3+2] = g_world_report[i][2]; }
@@ -1775,9 +1785,21 @@ std::map<ID3D11Buffer*, std::vector<uint8_t>> g_vbufs;
 // (the streams are big dynamic ring buffers in write-combined memory: reading them froze battles), so
 // only the mapped pointer is remembered; a hide rule reads the few vertices it needs through a guarded
 // read, within the frame the game wrote them (the upload ring is not reused until the GPU is done).
-struct VbMap { void* p = nullptr; UINT size = 0; uint32_t frame = 0; };
+// R9: a record is re-checked for readability (VirtualQuery) once per frame before the guarded reads, and dropped
+// when a new buffer is created at its address (hk_CreateBuffer). No age window: the game maps the UI ring ahead,
+// and static UI can keep an old mapping (design-notes, Picks, 21 Oct).
+struct VbMap { void* p = nullptr; UINT size = 0; uint32_t frame = 0; uint32_t last_draw = 0; uint32_t checked_frame = ~0u; bool readable = false; };
 std::set<ID3D11Buffer*> g_ui_vbs;
 std::map<ID3D11Buffer*, VbMap> g_vb_last_map;
+std::atomic<bool> g_ui_vbs_any{ false };     // set at the first g_ui_vbs insert; read without the lock in hk_CreateBuffer
+uint32_t g_vb_purged = 0, g_vb_unreadable = 0, g_rect_age_max = 0;   // heartbeat diagnostics
+/// The record's mapping is still readable: checked once per frame per buffer (one syscall), under g_mutex.
+static bool vb_live(VbMap& m) {
+    m.last_draw = g_frames;
+    if (m.checked_frame != g_frames) { m.checked_frame = g_frames; m.readable = range_readable(m.p, m.size); if (!m.readable) g_vb_unreadable++; }
+    return m.readable;
+}
+static void ui_vbs_learn(ID3D11Buffer* vb) { if (g_ui_vbs.insert(vb).second) g_ui_vbs_any.store(true, std::memory_order_relaxed); }   // under g_mutex
 std::map<void*, std::pair<ID3D11Buffer*, UINT>> g_vb_in_flight;
 int   g_frame_draw_run = 0;        // draws since the last non-draw event
 int   g_frame_run_small = 0, g_frame_run_mid = 0, g_frame_run_big = 0, g_frame_run_none = 0;
@@ -1881,6 +1903,7 @@ extern "C" __declspec(dllexport) void ffxvr_ui_hide(unsigned w, unsigned h, int 
 extern "C" __declspec(dllexport) void ffxvr_ui_hide_cursor(int on) { g_ui_hide_cursor = on != 0; }
 /// Replaces the hide list: `count` entries of 6 floats each (tex_w, tex_h, w0, w1, h0, h1).
 extern "C" __declspec(dllexport) void ffxvr_ui_hide_list(const float* v, int count) {
+    if (v == nullptr) count = 0;
     g_hide_sig_n = 0;
     for (int i = 0; i < count && i < 16; ++i) { const float* e = v + i * 6; g_hide_sigs[g_hide_sig_n++] = { (unsigned)e[0], (unsigned)e[1], e[2], e[3], e[4], e[5] }; }
 }
@@ -1890,16 +1913,22 @@ extern "C" __declspec(dllexport) unsigned ffxvr_blitz_overlay(int on) { g_blitz_
 /// (pointer-rule hits since the last call) | (actors projected this frame) << 16
 extern "C" __declspec(dllexport) unsigned ffxvr_ui_pointer_stats() { unsigned n = (g_pointer_hits & 0xFFFF) | ((unsigned)g_actor_ui_n << 16); g_pointer_hits = 0; return n; }
 /// After ffxvr_on_draw returned with bit 17 set: the index range (first, count) of the draw to leave out.
-extern "C" __declspec(dllexport) void ffxvr_draw_skip(unsigned* first, unsigned* count) { *first = g_skip_first; *count = g_skip_count; }
+extern "C" __declspec(dllexport) void ffxvr_draw_skip(unsigned* first, unsigned* count) { if (!first || !count) return; *first = g_skip_first; *count = g_skip_count; }
 /// Hits per hide-list entry since the last call (up to 16), for the overlay.
-extern "C" __declspec(dllexport) void ffxvr_ui_hide_hits(unsigned* out, int count) { for (int i = 0; i < count && i < 16; ++i) { out[i] = g_hide_sig_hits[i]; g_hide_sig_hits[i] = 0; } }
+extern "C" __declspec(dllexport) void ffxvr_ui_hide_hits(unsigned* out, int count) { if (!out) return; for (int i = 0; i < count && i < 16; ++i) { out[i] = g_hide_sig_hits[i]; g_hide_sig_hits[i] = 0; } }
 static bool guarded_read_xy(const uint8_t* base, UINT stride, float* xy8);   // below
+// Exactly n (<= 4) contiguous floats under an SEH guard (the F9 pick's stream dump). No C++ objects (SEH).
+static bool guarded_read_floats(const uint8_t* p, float* out, unsigned n) {
+    __try { for (unsigned k = 0; k < n && k < 4; ++k) out[k] = reinterpret_cast<const float*>(p)[k]; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 /// Arms a pick at a normalised backbuffer position (0..1, y down) for the next frame's UI pass.
 extern "C" __declspec(dllexport) void ffxvr_ui_pick(float nx, float ny) { g_pick_nx = nx; g_pick_ny = ny; g_pick_hits = 0; g_pick_scene_text = 0; g_pick_best_d = 1e9f; g_pick_best[0] = 0; g_pick_summary[0] = 0; g_pick_armed = true; }
 extern "C" __declspec(dllexport) void ffxvr_ui_atlas_dump() { g_atlas_dump_armed = true; g_atlas_dumped_n = 0; }
 static void dump_dds(ID3D11Texture2D* tex, const wchar_t* name) {
     D3D11_TEXTURE2D_DESC d; tex->GetDesc(&d);
-    if (d.Format != DXGI_FORMAT_BC3_UNORM && d.Format != DXGI_FORMAT_BC3_UNORM_SRGB && d.Format != DXGI_FORMAT_BC1_UNORM && d.Format != DXGI_FORMAT_BC1_UNORM_SRGB && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_R8G8B8A8_UNORM) { diag("atlas dump %ls: format %u, skipped", name, (unsigned)d.Format); return; }
+    if (d.Format != DXGI_FORMAT_BC3_UNORM && d.Format != DXGI_FORMAT_BC3_UNORM_SRGB && d.Format != DXGI_FORMAT_BC1_UNORM && d.Format != DXGI_FORMAT_BC1_UNORM_SRGB && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM && d.Format != DXGI_FORMAT_R8G8B8A8_UNORM
+        && d.Format != DXGI_FORMAT_B8G8R8A8_UNORM_SRGB && d.Format != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB) { diag("atlas dump %ls: format %u, skipped", name, (unsigned)d.Format); return; }
     D3D11_TEXTURE2D_DESC sd = d; sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0; sd.MipLevels = 1; sd.ArraySize = 1;
     ID3D11Texture2D* st = nullptr; if (FAILED(g_device->CreateTexture2D(&sd, nullptr, &st)) || !st) return;
     { InEye2 guard; g_ctx->CopySubresourceRegion(st, 0, 0, 0, 0, tex, 0, nullptr); }
@@ -1914,7 +1943,10 @@ static void dump_dds(ID3D11Texture2D* tex, const wchar_t* name) {
             uint32_t h[32] = {}; h[0] = 124; h[1] = 0x1 | 0x2 | 0x4 | 0x1000 | (bc ? 0x80000 : 0x8); h[2] = d.Height; h[3] = d.Width; h[4] = bc ? bw * bpb * bh : d.Width * 4; h[6] = 1;
             // DDS_PIXELFORMAT starts at header dword 18 (size, flags, fourCC, bit count, R/G/B/A masks); caps at 26
             h[18] = 32; h[19] = bc ? 0x4 : 0x41; h[20] = bc ? (bc3 ? 0x35545844u : 0x31545844u) : 0; h[21] = bc ? 0 : 32;
-            if (!bc) { h[22] = 0x00FF0000; h[23] = 0x0000FF00; h[24] = 0x000000FF; h[25] = 0xFF000000; }
+            if (!bc) {   // channel masks by format: RGBA has red in the low byte (R42b)
+                const bool rgba = d.Format == DXGI_FORMAT_R8G8B8A8_UNORM || d.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                h[22] = rgba ? 0x000000FFu : 0x00FF0000u; h[23] = 0x0000FF00u; h[24] = rgba ? 0x00FF0000u : 0x000000FFu; h[25] = 0xFF000000u;
+            }
             h[26] = 0x1000;
             fwrite("DDS ", 1, 4, f); fwrite(h, 4, 31, f);
             for (UINT y = 0; y < bh; ++y) fwrite(static_cast<const uint8_t*>(ms.pData) + y * ms.RowPitch, 1, bw * bpb, f);
@@ -1929,6 +1961,7 @@ static void dump_dds(ID3D11Texture2D* tex, const wchar_t* name) {
 extern "C" __declspec(dllexport) void ffxvr_ui_hover(float nx, float ny, int mode) { g_hover_nx = nx; g_hover_ny = ny; g_hover_mode = mode; }
 /// The rectangles collected this frame: 7 floats each (x0 y0 x1 y1 tex_w tex_h hit), in UI units; returns the count and clears.
 extern "C" __declspec(dllexport) int ffxvr_ui_hover_rects(float* out, int max) {
+    if (out == nullptr || max <= 0) { g_hover_n = 0; return 0; }   // still clear, or the rects pile up and collection stops
     const int n = g_hover_n < max ? g_hover_n : max;
     for (int i = 0; i < n; ++i) { const HoverRect& r = g_hover_rects[i]; out[i*7] = r.x0; out[i*7+1] = r.y0; out[i*7+2] = r.x1; out[i*7+3] = r.y1; out[i*7+4] = (float)r.tw; out[i*7+5] = (float)r.th; out[i*7+6] = (float)r.hit; }
     g_hover_n = 0;
@@ -1954,13 +1987,16 @@ static void actors_project_ui() {
         if (c[3] <= 1e-4f) continue;
         const float ux = c[0] / c[3] * 960.f, uy = -c[1] / c[3] * 540.f;
         if (!std::isfinite(ux) || !std::isfinite(uy) || fabsf(ux) > 1500.f || fabsf(uy) > 900.f) continue;
-        g_actor_ui[g_actor_ui_n][0] = ux; g_actor_ui[g_actor_ui_n][1] = uy; g_actor_ui_n++;
+        g_actor_ui[g_actor_ui_n][0] = ux; g_actor_ui[g_actor_ui_n][1] = uy; g_actor_ui_src[g_actor_ui_n] = i; g_actor_ui_n++;   // src: off-screen actors are skipped, so keep the g_world_live index
     }
 }
 
 // Records this draw's large quads as window backgrounds (called for every UI draw while a rule is on).
 static void ui_backgrounds_note(const float* xy, unsigned nv) {
-    if (g_bg_frame != (int)g_frames) { g_bg_frame = (int)g_frames; g_bg_n = 0; }
+    static int last_draw = -1;
+    if (g_bg_frame != (int)g_frames) { g_bg_frame = (int)g_frames; g_bg_n = 0; last_draw = -1; }
+    if (last_draw == g_draw_in_frame) return;   // once per draw: the hover collector and the pointer rule both call this (R42a)
+    last_draw = g_draw_in_frame;
     for (unsigned q = 0; q < nv / 4 && g_bg_n < 48; ++q) {
         float x0 = xy[q*8], x1 = x0, y0 = xy[q*8+1], y1 = y0;
         for (unsigned k = 1; k < 4; ++k) { const float x = xy[q*8+k*2], y = xy[q*8+k*2+1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
@@ -2004,7 +2040,7 @@ static bool quad_is_pointer(float x0, float y0, float x1, float y1, int* actor =
         const float dx = cx - g_actor_ui[i][0], above = g_actor_ui[i][1] - y1;   // the actor's root projects below the pointer
         if (fabsf(dx) < 55.f && above > -30.f && above < 420.f && fabsf(dx) + above * 0.1f < best_d) { best_d = fabsf(dx) + above * 0.1f; best = i; }
     }
-    if (actor) *actor = best;
+    if (actor) *actor = best >= 0 ? g_actor_ui_src[best] : -1;   // an index into g_world_live (R44), not into g_actor_ui
     return best >= 0;
 }
 
@@ -2039,19 +2075,20 @@ extern "C" __declspec(dllexport) void ffxvr_slowmo(int ms) { g_slowmo_ms = ms < 
 static unsigned ui_sprite_xy(float* xy, unsigned max_v) {
     ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
     if (!vb) return 0;
-    const uint8_t* src = nullptr; unsigned nv = 0;
+    const uint8_t* src = nullptr; unsigned nv = 0; uint32_t age = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_ui_vbs.insert(vb);
+        ui_vbs_learn(vb);
         auto it = g_vb_last_map.find(vb);
-        if (it != g_vb_last_map.end() && it->second.p && stride >= 8) {
+        if (it != g_vb_last_map.end() && it->second.p && stride >= 8 && vb_live(it->second)) {
             nv = (g_draw_n / 6) * 4; if (nv > max_v) nv = max_v; if (nv < 4) nv = 4;
-            if ((size_t)voff + nv * stride <= it->second.size) src = static_cast<const uint8_t*>(it->second.p) + voff; else nv = 0;
+            if ((size_t)voff + nv * stride <= it->second.size) { src = static_cast<const uint8_t*>(it->second.p) + voff; age = g_frames - it->second.frame; } else nv = 0;
         }
     }
     vb->Release();
     if (!src) return 0;
     for (unsigned k = 0; k < nv; k += 4) { if (!guarded_read_xy(src + k * stride, stride, xy + k * 2)) return k; }
+    if (age > g_rect_age_max) g_rect_age_max = age;   // R9 diagnostic: the reads that hide pointers and digits come through here
     return nv;
 }
 
@@ -2112,18 +2149,17 @@ static void ui_pick_check(unsigned draw_idx) {
         const uint8_t* ssrc = nullptr;
         {
             std::lock_guard<std::mutex> lock(g_mutex);
-            g_ui_vbs.insert(sb);
+            ui_vbs_learn(sb);
             auto it = g_vb_last_map.find(sb);
-            if (it != g_vb_last_map.end() && it->second.p && sstride >= 4 && (size_t)soff + 4 * sstride <= it->second.size) ssrc = static_cast<const uint8_t*>(it->second.p) + soff;
+            if (it != g_vb_last_map.end() && it->second.p && sstride >= 4 && (size_t)soff + 4 * sstride <= it->second.size && vb_live(it->second)) ssrc = static_cast<const uint8_t*>(it->second.p) + soff;
         }
         sb->Release();
         tl += snprintf(st + tl, sizeof(st) - tl, " v%u(stride %u):", slot, sstride);
         if (!ssrc) { tl += snprintf(st + tl, sizeof(st) - tl, " ?"); continue; }
         const unsigned nf = sstride / 4 < 4 ? sstride / 4 : 4;
         for (unsigned k = 0; k < 4 && tl < sizeof(st) - 80; ++k) {
-            float v[4] = {}; if (!guarded_read_xy(ssrc + k * sstride, 8, v)) break;   // reads v[0], v[1]
-            float v2[4] = {}; if (nf > 2 && !guarded_read_xy(ssrc + k * sstride + 8, 8, v2)) break;
-            const float vals[4] = { v[0], v[1], v2[0], v2[1] }; const uint32_t* u = reinterpret_cast<const uint32_t*>(vals);
+            float vals[4] = {}; if (!guarded_read_floats(ssrc + k * sstride, vals, nf)) break;   // ends at soff + k*sstride + 4*nf <= soff + 4*sstride: checked above
+            const uint32_t* u = reinterpret_cast<const uint32_t*>(vals);
             tl += snprintf(st + tl, sizeof(st) - tl, " [");
             for (unsigned j = 0; j < nf; ++j) {
                 if (std::isfinite(vals[j]) && fabsf(vals[j]) < 1e6f && (vals[j] == 0.f || fabsf(vals[j]) > 1e-6f)) tl += snprintf(st + tl, sizeof(st) - tl, "%s%.4g", j ? " " : "", vals[j]);
@@ -2138,7 +2174,7 @@ static void ui_pick_check(unsigned draw_idx) {
 }
 
 // Reads the x,y of four vertices from a (possibly no longer mapped) pointer under an SEH guard. No C++
-// objects in here: __try cannot unwind them.
+// objects in here: __try cannot unwind them. Writes 8 floats.
 static bool guarded_read_xy(const uint8_t* base, UINT stride, float* xy8) {
     __try {
         for (unsigned k = 0; k < 4; ++k) { const float* f = reinterpret_cast<const float*>(base + k * stride); xy8[k * 2] = f[0]; xy8[k * 2 + 1] = f[1]; }
@@ -2154,19 +2190,22 @@ static bool guarded_read_xy(const uint8_t* base, UINT stride, float* xy8) {
 static bool ui_sprite_rect(float* x0, float* y0, float* x1, float* y1) {
     ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
     if (!vb) return false;
-    bool ok = false; const uint8_t* src = nullptr;
+    bool ok = false; const uint8_t* src = nullptr; uint32_t age = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_ui_vbs.insert(vb);   // learn the UI's streams as they are used; pointers are kept from the next Map on
+        ui_vbs_learn(vb);   // learn the UI's streams as they are used; pointers are kept from the next Map on
         auto it = g_vb_last_map.find(vb);
-        if (it != g_vb_last_map.end() && it->second.p && stride >= 8 && (size_t)voff + 4 * stride <= it->second.size)
+        if (it != g_vb_last_map.end() && it->second.p && stride >= 8 && (size_t)voff + 4 * stride <= it->second.size && vb_live(it->second)) {
             src = static_cast<const uint8_t*>(it->second.p) + voff;
+            age = g_frames - it->second.frame;
+        }
         else g_rect_unknown++;
     }
     vb->Release();
     if (!src) return false;
     float xy[8];
     if (!guarded_read_xy(src, stride, xy)) return false;
+    if (age > g_rect_age_max) g_rect_age_max = age;   // R9 diagnostic: how old a mapping a successful read used
     *x0 = *x1 = xy[0]; *y0 = *y1 = xy[1];
     for (unsigned k = 1; k < 4; ++k) { if (xy[k*2] < *x0) *x0 = xy[k*2]; if (xy[k*2] > *x1) *x1 = xy[k*2]; if (xy[k*2+1] < *y0) *y0 = xy[k*2+1]; if (xy[k*2+1] > *y1) *y1 = xy[k*2+1]; }
     ok = std::isfinite(*x0) && std::isfinite(*x1) && std::isfinite(*y0) && std::isfinite(*y1);
@@ -2759,9 +2798,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             memcpy(g_scratch.data(), p, size);
             write_backdrop_camera(p, g_scratch.data(), size, base);
             if (g_stereo && buf != nullptr) {
-                EyeImage& e = g_eye_ring[g_eye_ring_next];
-                g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-                e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 1; e.has_world = false;
+                EyeImage& e = ring_take(buf, size, 1);
                 e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
                 e.eye2.assign(p, p + size);
                 g_eye_shift = (g_ipd != 0.f) ? g_ipd : 1e-6f;
@@ -2806,14 +2843,9 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (!(g_stereo && buf != nullptr) && has_world && g_fp_have_pos) bones_record(p, size, wpos, g_scratch.data(), nullptr);   // flat screen: eye 1 only
 
         if (g_stereo && buf != nullptr) {               // the same buffer seen from the other eye
-            EyeImage& e = g_eye_ring[g_eye_ring_next];
-            g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 1;
-            e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
+            EyeImage& e = ring_take(buf, size, 1);
             e.eye2.assign(p, p + size);
             e.has_world = has_world; memcpy(e.world_pos, wpos, sizeof(wpos));
-            e.pal_hands = false; e.split = false;
-            if (has_world && g_fp_have_pos) e.pal_hands = bones_record(p, size, wpos, g_scratch.data(), &e) > 0;
 
             // write_camera also publishes the frame's known product for the
             // product-only buffers; that must stay eye 1's, so save and restore.
@@ -2824,15 +2856,20 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             g_eye_shift = 0.f;
             if (mask & 8) memcpy(g_last_PVn2, g_last_PVn, sizeof(g_last_PVn2));   // eye 2's proj*view
             memcpy(g_last_PV, savePV, sizeof(savePV)); memcpy(g_last_PVn, savePVn, sizeof(savePVn)); g_have_PV = saveHave;
+
+            // R45/R46: the hands (and the bone wiggle) after both cameras are written, and eye 1's image taken after
+            // them: the split variants then carry eye 2's camera, and restoring eye 1 keeps its hands. write_camera
+            // touches only the camera and world blocks, the hands only the palette, so with the hands off (and no
+            // wiggle) this order changes nothing.
+            if (has_world && g_fp_have_pos) e.pal_hands = bones_record(p, size, wpos, g_scratch.data(), &e) > 0;
+            e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
         }
     }
     else {
         if (replace_known_products(p, g_scratch.data(), size, g_last_PVn) == 0) return src;   // nothing of ours in here (and nothing copied)
         mask = 256;
         if (g_stereo && buf != nullptr) {
-            EyeImage& e = g_eye_ring[g_eye_ring_next];
-            g_eye_ring_next = (g_eye_ring_next + 1) % 32;
-            e.cb = buf; e.size = size; e.frame = g_frames; e.kind = 2; e.has_world = false;
+            EyeImage& e = ring_take(buf, size, 2);
             e.eye1.assign(g_scratch.data(), g_scratch.data() + size);
             e.eye2.assign(p, p + size);
             replace_known_products(e.eye2.data(), e.eye2.data(), size, g_last_PVn2);   // in place
@@ -3021,6 +3058,7 @@ void heartbeat(bool force) {
     if (diag_armed()) fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n", g_full.size(), g_draws_latched_at, g_cam_reads);
     else fprintf(f, "\n  latched slot-0 buffer: not latched (diagnostics disarmed), reads %u\n", g_cam_reads);
     fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0);
+    fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
     if (!diag_armed()) fprintf(f, "  changed since previous frame: not measured (open the overlay's Debug header)");
     else if (g_diff_count < 0) fprintf(f, "  changed since previous frame: n/a (frames not consecutive)");
@@ -3169,21 +3207,28 @@ void STDMETHODCALLTYPE hk_VSSetConstantBuffers(ID3D11DeviceContext* c, UINT s, U
 
 // The game creates constant buffers already populated, which is why so little
 // shows up through Map/Unmap. This catches the contents at creation time.
+// Never call CreateBuffer while holding g_mutex: this hook locks it.
 HRESULT STDMETHODCALLTYPE hk_CreateBuffer(ID3D11Device* dev, const D3D11_BUFFER_DESC* desc,
                                           const D3D11_SUBRESOURCE_DATA* init, ID3D11Buffer** out) {
+    if (dev != g_device) return g_orig_createbuffer(dev, desc, init, out);   // the vtable is shared by every device of the class: not ours
     const HRESULT hr = g_orig_createbuffer(dev, desc, init, out);
-
-    if (SUCCEEDED(hr) && desc != nullptr && init != nullptr && init->pSysMem != nullptr
-        && (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER) && out != nullptr && *out != nullptr) {
-        bump(C_CREATEBUF);
-        std::lock_guard<std::mutex> lock(g_mutex);
-        record_buffer(*out, desc->ByteWidth, init->pSysMem, "CreateBuffer");
-    }
+    if (FAILED(hr) || out == nullptr || *out == nullptr) return hr;
+    const bool cb_record = desc != nullptr && init != nullptr && init->pSysMem != nullptr && (desc->BindFlags & D3D11_BIND_CONSTANT_BUFFER);
+    const bool purge = g_ui_vbs_any.load(std::memory_order_relaxed);
+    if (!cb_record && !purge) return hr;
+    if (cb_record) bump(C_CREATEBUF);
+    std::lock_guard<std::mutex> lock(g_mutex);   // one lock for both
+    // A new buffer at the address of a freed UI stream must not inherit its mapping (R9). Only the pointer record
+    // goes: the UI membership stays, so the stream's next Map is recorded at once (a stream the game re-creates at the
+    // same address keeps working).
+    if (purge && g_vb_last_map.erase(*out)) g_vb_purged++;
+    if (cb_record) record_buffer(*out, desc->ByteWidth, init->pSysMem, "CreateBuffer");
     return hr;
 }
 
 HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* dev, const D3D11_TEXTURE2D_DESC* desc,
                                              const D3D11_SUBRESOURCE_DATA* init, ID3D11Texture2D** out) {
+    if (dev != g_device) return g_orig_createtex2d(dev, desc, init, out);   // another device: no MSAA override, no log
     if (desc != nullptr && desc->SampleDesc.Count > 1 && desc->Width >= 1280 && desc->Height >= 720
         && (desc->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0) {
         g_msaa_seen++;
@@ -3207,33 +3252,6 @@ HRESULT STDMETHODCALLTYPE hk_CreateTexture2D(ID3D11Device* dev, const D3D11_TEXT
     return g_orig_createtex2d(dev, desc, init, out);
 }
 
-void STDMETHODCALLTYPE hk_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT i, INT v) {
-    bump(C_DRAWINDEXED);
-    tick();
-    g_orig_drawindexed(c, n, i, v);
-}
-
-void STDMETHODCALLTYPE hk_Draw(ID3D11DeviceContext* c, UINT n, UINT s) {
-    bump(C_DRAW);
-    tick();
-    g_orig_draw(c, n, s);
-}
-
-// The game draws through the instanced variants only. Latching the slot-0
-// binding at the FIRST such draw of a frame targets the buffer feeding real
-// geometry, rather than whichever happened to be bound last.
-void STDMETHODCALLTYPE hk_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, INT e, UINT f) {
-    bump(C_DRAWIDXINST);
-    tick();
-    g_orig_drawidxinst(c, a, b, d, e, f);
-}
-
-void STDMETHODCALLTYPE hk_DrawInstanced(ID3D11DeviceContext* c, UINT a, UINT b, UINT d, UINT e) {
-    bump(C_DRAWINST);
-    tick();
-    g_orig_drawinst(c, a, b, d, e);
-}
-
 HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub, D3D11_MAP t, UINT fl, D3D11_MAPPED_SUBRESOURCE* m) {
     const HRESULT hr = g_orig_map(c, r, sub, t, fl, m);
     if (c != g_ctx) return hr;                                  // another context: not ours
@@ -3245,12 +3263,22 @@ HRESULT STDMETHODCALLTYPE hk_Map(ID3D11DeviceContext* c, ID3D11Resource* r, UINT
         std::lock_guard<std::mutex> lock(g_mutex);
         g_in_flight[m->pData] = { buf, size };
     }
-    else if (g_vb_capture || !g_ui_vbs.empty()) {
+    else if (g_vb_capture || g_ui_vbs_any.load(std::memory_order_relaxed)) {   // not g_ui_vbs.empty(): the set can change on another thread
         UINT bind = 0;
         if (as_geometry_buffer(r, &buf, &size, &bind) && size <= 64u * 1024 * 1024) {
             std::lock_guard<std::mutex> lock(g_mutex);
             if (g_vb_capture) g_vb_in_flight[m->pData] = { buf, size };
-            if (g_ui_vbs.count(buf)) { VbMap& vm = g_vb_last_map[buf]; vm.p = m->pData; vm.size = size; vm.frame = g_frames; }
+            if (g_ui_vbs.count(buf)) {
+                if (g_vb_last_map.size() >= 512 && g_vb_last_map.find(buf) == g_vb_last_map.end()) {   // cap (never reached in practice): drop the least recently drawn
+                    auto old = g_vb_last_map.begin();
+                    for (auto it = g_vb_last_map.begin(); it != g_vb_last_map.end(); ++it) if (it->second.last_draw < old->second.last_draw) old = it;
+                    g_vb_last_map.erase(old);
+                }
+                VbMap& vm = g_vb_last_map[buf];
+                if (vm.p != m->pData || vm.size != size) vm.checked_frame = ~0u;   // a new pointer or size: re-check it (not on every NO_OVERWRITE map)
+                vm.p = m->pData; vm.size = size; vm.frame = g_frames;
+                if (vm.last_draw == 0) vm.last_draw = g_frames;
+            }
         }
     }
     return hr;
@@ -3285,30 +3313,6 @@ void STDMETHODCALLTYPE hk_Unmap(ID3D11DeviceContext* c, ID3D11Resource* r, UINT 
     }
 
     g_orig_unmap(c, r, sub);   // tick() runs once per frame from ffxvr_begin_frame, not per Unmap
-}
-
-void STDMETHODCALLTYPE hk_UpdateSubresource(ID3D11DeviceContext* c, ID3D11Resource* r, UINT sub,
-                                            const D3D11_BOX* box, const void* src, UINT rp, UINT dp) {
-    bump(C_UPDATESUB);
-
-    ID3D11Buffer* buf = nullptr; UINT size = 0;
-    if (box == nullptr && as_constant_buffer(r, &buf, &size)) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        record_buffer(buf, size, src, "UpdateSubresource");
-    }
-    else if (g_vb_capture && c == g_ctx && src != nullptr) {
-        UINT bind = 0;
-        if (as_geometry_buffer(r, &buf, &size, &bind) && size <= 64u * 1024 * 1024) {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            g_vb_updates++;
-            std::vector<uint8_t>& d = g_vbufs[buf]; if (d.size() != size) d.assign(size, 0);
-            if (box == nullptr) memcpy(d.data(), src, size);
-            else if (box->left < box->right && box->right <= size) memcpy(d.data() + box->left, src, box->right - box->left);
-        }
-    }
-
-    g_orig_updatesub(c, r, sub, box, src, rp, dp);
-    tick();
 }
 
 // ---------------------------------------------------------------- install
@@ -3376,6 +3380,7 @@ void read_camera() {
 }
 
 bool patch(void** vtable, int index, void* replacement, void** out_original, const char* name = "?") {
+    if (vtable[index] == replacement) { diag("patch %s: already installed", name); return true; }   // never record ourselves as the original
     DWORD old = 0;
     if (!VirtualProtect(&vtable[index], sizeof(void*), PAGE_READWRITE, &old)) return false;
     *out_original = vtable[index];
@@ -3384,6 +3389,21 @@ bool patch(void** vtable, int index, void* replacement, void** out_original, con
 
     if (g_patched_n < 12) g_patched[g_patched_n++] = { vtable, index, name, replacement, *out_original };
     return true;
+}
+/// Only for a failed init: restore what we changed, newest first, and only slots that still hold our pointer.
+/// The g_orig_* pointers stay valid (they are the real functions), so a hook already running on another thread
+/// still completes.
+static void unpatch_all() {
+    for (int i = g_patched_n - 1; i >= 0; --i) {
+        Patched& pt = g_patched[i]; DWORD old = 0;
+        if (VirtualProtect(&pt.vt[pt.index], sizeof(void*), PAGE_READWRITE, &old)) {
+            const bool ours = pt.vt[pt.index] == pt.ours;
+            if (ours) pt.vt[pt.index] = pt.original;
+            VirtualProtect(&pt.vt[pt.index], sizeof(void*), old, &old);
+            diag("init failed: %s %s", pt.name, ours ? "restored" : "not ours any more, left alone");
+        }
+    }
+    g_patched_n = 0;
 }
 
 } // namespace
@@ -3444,7 +3464,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
         }
     }
 
-    if (!ok) return -2;
+    if (!ok) { unpatch_all(); g_ctx = nullptr; return -2; }   // no half-installed state: the hooks that went in come out
 
     g_installed       = true;
     g_patched_context = game_context;
@@ -3603,7 +3623,6 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     if (g_slowmo_ms > 0) Sleep((DWORD)g_slowmo_ms);
     if (g_atlas_dump_armed && g_atlas_dumped_n > 0) g_atlas_dump_armed = false;   // one frame with UI draws is enough
-    ptr_sprites_release();
     g_ui_flat_pass = false; g_ui_flat_resolved = false; g_flat_scene_tex = nullptr; g_flat_scene_draws = 0; g_flat_draws_per_target.clear();
     bool dump_now = false;
     {
@@ -3635,6 +3654,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     sweep_caches();
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     xr_tick();                      // submit the frame just finished, locate the head for the next one
+    ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
     perf_tick();
     g_overlay_phase = true;
     g_first_draw_pending = true;
@@ -3679,8 +3699,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_world_live_n > 0) {
             memcpy(g_world_report, g_world_live, sizeof(g_world_report));
-            g_world_report_n = g_world_live_n;
+            g_world_report_n = g_world_live_n; g_world_report_frame = g_frames;
         }
+        else if (g_frames - g_world_report_frame > 2) g_world_report_n = 0;   // nothing skinned for a few frames (an empty shot): the list is stale (R40)
         g_world_live_n = 0;
     }
 
@@ -4068,7 +4089,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             else g_frame_run_big++;
         }
     }
-    const int passes = (eye2 && g_eye2_cur && g_eye2_cur->split) ? 3 : (eye2 ? 1 : 0);
+    const int passes = (eye2 && split_ok(g_eye2_cur)) ? 3 : (eye2 ? 1 : 0);
     if (g_latched || g_ctx == nullptr || !diag_armed()) return passes | ret_flags;   // the latch only feeds read_camera
 
     ID3D11Buffer* b = nullptr;
@@ -4339,7 +4360,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     }
     if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
     if (g_cur_rtv_n == 0 && g_cur_dsv == nullptr) { g_e2_begin_fail++; return 0; }
-    const bool split = g_eye2_cur != nullptr && g_eye2_cur->split;
+    const bool split = split_ok(g_eye2_cur);
     if (split && pass == 0) {   // the right hand into eye 1: same targets and inputs, only the part's own buffer changes
         g_in_eye2 = true; g_split_pass = true;
         for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
@@ -4783,19 +4804,6 @@ extern "C" __declspec(dllexport) void  ffxvr_stereo_set(int on, float ipd, int s
     // While the headset is on, eye 2 is on: the overlay cannot turn it off.
     g_stereo = (on != 0) || g_xr_want; g_ipd = ipd; g_stereo_scope = scope; g_debug_red = red != 0; g_debug_leave = leave != 0;
 }
-/// A twin's plain SRV (whole texture), created on demand; null if none.
-static void* twin_plain_srv(ID3D11Texture2D* game) {
-    if (game == nullptr) return nullptr;
-    auto it = g_twins.find(game);
-    if (it == g_twins.end() || it->second.tex == nullptr) return nullptr;
-    Twin& t = it->second;
-    auto sit = t.srvs.find(nullptr);
-    if (sit != t.srvs.end()) return sit->second;
-    ID3D11ShaderResourceView* nv = nullptr;
-    g_device->CreateShaderResourceView(t.tex, nullptr, &nv);
-    t.srvs[nullptr] = nv;
-    return nv;
-}
 
 // ---------------------------------------------------------------------------
 // Opaque copy pass: colour of a texture with alpha forced to 1. The overlay
@@ -5170,7 +5178,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
 
 /// Markers for this frame, in render space. Called from the managed side each frame.
 extern "C" __declspec(dllexport) void ffxvr_markers_set(const float* xyz, const uint32_t* colors, int n) {
-    if (n < 0) n = 0; if (n > 32) n = 32;
+    if (n < 0) n = 0; if (n > 32) n = 32; if (!xyz || !colors) n = 0;
     for (int i = 0; i < n; ++i) { g_markers[i].x = xyz[i*3]; g_markers[i].y = xyz[i*3+1]; g_markers[i].z = xyz[i*3+2]; g_markers[i].color = colors[i] & 0x00FFFFFFu | 0xFF000000u; g_markers[i].kind = (colors[i] >> 24) == 0xFE ? 1 : 0; }
     g_marker_n = n;   // alpha 0xFE in the colour tags the turn pointer
 }
@@ -5319,7 +5327,9 @@ extern "C" __declspec(dllexport) void ffxvr_screen3d(int on, float depth, float 
     if (!g_s3_auto) { g_screen3d_conv = g_s3_plane_set; g_screen3d_sep = g_s3_depth * g_s3_plane_set / 30.f; g_s3_conv_cur = g_screen3d_conv; g_s3_sep_cur = g_screen3d_sep; }
 }
 /// What the auto depth is doing: visible actors, nearest depth, subject depth, current plane and separation.
-extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* near_d, float* subject, float* plane, float* sep) { *vis = g_s3_vis; *near_d = g_s3_near; *subject = g_s3_subject; *plane = g_screen3d_conv; *sep = g_screen3d_sep; }
+extern "C" __declspec(dllexport) void ffxvr_screen3d_status(int* vis, float* near_d, float* subject, float* plane, float* sep) {
+    if (vis) *vis = g_s3_vis; if (near_d) *near_d = g_s3_near; if (subject) *subject = g_s3_subject; if (plane) *plane = g_screen3d_conv; if (sep) *sep = g_screen3d_sep;
+}
 extern "C" __declspec(dllexport) void ffxvr_xr_pitch_follow(float f) { g_xr_pitch_follow = f; }
 /// Every exit from the headset (unticked, session lost, shutdown): the VR-only per-frame state goes back to flat
 /// defaults, so the desktop view does not inherit a screen mode, a suspended override or a held grab.
@@ -5357,6 +5367,7 @@ extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float 
 extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
+    if (buf == nullptr || n <= 0) return;   // a 0 size would hit the CRT's invalid-parameter handler (process abort)
     _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
         g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
         (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
@@ -5386,6 +5397,7 @@ extern "C" __declspec(dllexport) uint32_t ffxvr_gesture_poll(float* move3, float
 /// The controller state for the overlay: 2 hands x 12 floats (active, stick x, stick y, stick click, primary, secondary, trigger, squeeze, menu, grip valid, aim valid, 0), profiles as strings.
 extern "C" __declspec(dllexport) int ffxvr_vrpad_status(float* out24, char* prof_l, char* prof_r, int n, uint32_t* frames) {
     if (frames) *frames = g_vrpad_frames;
+    if (out24 == nullptr) return 0;
     for (int h = 0; h < 2; ++h) {
         const XrHand& hd = g_vrpad.hand[h]; float* o = out24 + h * 12;
         o[0] = hd.active ? 1.f : 0.f; o[1] = hd.stick[0]; o[2] = hd.stick[1]; o[3] = hd.stick_click ? 1.f : 0.f; o[4] = hd.primary ? 1.f : 0.f; o[5] = hd.secondary ? 1.f : 0.f;

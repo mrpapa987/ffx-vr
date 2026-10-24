@@ -1573,3 +1573,50 @@ stay; they cost nothing while nobody looks at them.
   bound of the passes whose eye-2 output could equal eye 1's. On the `perf:` line,
   the heartbeat's eye-2 line and Debug > Second eye. Step 2 (skipping them) only if
   this shows a big target.
+
+## Review fixes, build 3 (24 Oct 2026)
+
+Small crash-proofing (review items R9, R10, R14, R16, R40, R42 parts, R43, R44, with
+the R45/R46 hands reorder). No feel or default changes; ABI unchanged (2).
+
+- **UI vertex pointers (R9).** The UI hide rules read the game's vertex streams
+  through the pointer of their last Map. A buffer freed at an area change and a new
+  one created at the same address could be read through the dead mapping. Now
+  `hk_CreateBuffer` drops any record keyed by a newly created buffer's address (it is
+  learned again at its first UI draw), and each record is checked with VirtualQuery
+  once per frame before the guarded reads (an access violation is fatal under
+  Fahrenheit's debugger even inside __try, so the check, not SEH, is the guard). No
+  age window: the "mapped within two frames" test broke damage numbers and pointers
+  before (Picks, 21 Oct). The heartbeat's "ui vertex streams" line shows purges,
+  unreadable mappings and the oldest mapping a read used.
+- **F9 pick (R10).** The stream dump read 8 floats into 4-float stack arrays and up to
+  28 bytes past the checked range; it now reads exactly min(stride/4, 4) floats.
+- **Ring slots (R14).** Every reuse of an eye-image ring slot resets all its fields
+  (`ring_take`), and the split-hand passes run only when the right-hand variants
+  really have the buffer's size. With it, the hands reorder (R45/R46): in the 3D path,
+  eye 2's camera is written before the hands are applied and eye 1's image is taken
+  after them. With the hands off (and no bone wiggle) nothing changes: the camera
+  blocks and the bone palette don't overlap.
+- **Hook hygiene (R16).** `patch` refuses to record our own hook as the original; a
+  failed `ffxvr_init` (-2) puts back the vtable slots it changed (only those still
+  holding our pointer; the diag log lists them); CreateBuffer and CreateTexture2D
+  pass straight through for devices other than the game's (the vtable is shared by
+  every device of the class), so the MSAA override can't touch someone else's
+  targets. Unpatching at exit stays won't-fix (other threads may be inside a hook).
+- **Export argument checks (R42).** Null pointers and non-positive sizes return early
+  in world_positions, ui_hide_list, draw_skip, ui_hide_hits, ui_hover_rects,
+  markers_set, screen3d_status, perf_status (a size of 0 aborted the process through
+  the CRT) and vrpad_status.
+- **Stale actor list (R40).** `g_world_report` is emptied after 2 frames without
+  skinned draws, so an empty landscape shot drops the previous subject: auto depth
+  eases back to the set plane.
+- **Pointer sprites (R43, R44).** They were released at the top of begin_frame, before
+  xr_tick's marker pass could draw them; now released right after it. Each sprite now
+  keeps the index of its actor in the live list (the projected list skips off-screen
+  actors). Native default `g_ptr_reuse = false`, matching the overlay. The "game's own
+  cursor art" experiment can now really be run.
+- **Small ones (R42a, b, d).** Window backgrounds are recorded once per draw (hover mode
+  filled the 48 slots twice as fast); RGBA atlas dumps get the right channel masks,
+  and the two sRGB 8-bit formats are dumped too; the never-installed hk_Draw*,
+  hk_UpdateSubresource and twin_plain_srv are deleted (the UpdateSubresource geometry
+  capture they held never ran, so `g_vb_updates` was always 0).

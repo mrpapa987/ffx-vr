@@ -1463,7 +1463,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
-            ImGui.Checkbox("experimental: the game's own cursor art at the markers (did not work: the atlas coordinates' source is unknown)", ref _markers_game_art); ImGui.SameLine(); ImGui.TextDisabled($"sprites drawn last frame: {_markers_game_art_n}");
+            ImGui.Checkbox("experimental: the game's own cursor art at the markers (untested: until 24 Oct 2026 the sprites were released before they could be drawn)", ref _markers_game_art); ImGui.SameLine(); ImGui.TextDisabled($"sprites drawn last frame: {_markers_game_art_n}");
             ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f); ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
             ImGui.TreePop();
