@@ -12,7 +12,7 @@ namespace FFXVR;
 ///     helper that captures D3D11 constant buffer uploads.
 /// </remarks>
 [FhLoad(FhGameId.FFX)]
-public sealed unsafe class FFXVRModule : FhModule {
+public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the build-7 diagnostics live in diag7.cs
 
     private const string NativeDll = "ffxvr_native.dll";
 
@@ -22,7 +22,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 5;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 6;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -319,6 +319,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _logger.Info("FFX VR module initialized.");
         settings_load();
         load_native(mod_context);
+        diag7_init();   // build 7 (log only): game-function hooks must be queued here, at init (diag7.cs)
         return true;
     }
 
@@ -468,6 +469,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_safe_read        = (delegate* unmanaged[Cdecl]<void*, void*, uint, int>)req("ffxvr_safe_read");
             _fn_project          = (delegate* unmanaged[Cdecl]<float, float, float, float*, int>)req("ffxvr_project");
             _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_world_positions");
+            _fn_diag7_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_diag7_set"); _fn_diag_line = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_diag_line");
+            _fn_main_note = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_main_note"); _fn_motion_cols = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_motion_cols");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
             if (missing.Count > 0 || abi != k_abi) {
@@ -512,6 +515,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
         _fn_on_ps_srvs = null; _fn_on_clear_twin = null; _fn_set_backbuffer = null; _fn_on_copy = null; _fn_override_set = null; _fn_override_applied = null;
         _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
+        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -589,6 +593,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         _h_omrt = h_omrt; _h_vp = h_vp; _h_clr = h_clr; _h_clrd = h_clrd; _h_pssrv = h_pssrv; _h_copy = h_copy; _h_copyreg = h_copyreg; _h_resolve = h_resolve; _h_omrtuav = h_omrtuav;
 
         bool ok = true;
+        diag7_insert_begin();   // build 7 (B7-1): no main-thread detour resolves its original while these insertions write Fahrenheit's table
+        try {
         ok &= new FhCallHandle<d_DrawIndexed>         (new FhCallLocation((void*)_a_drawindexed)).hook(this, _h_drawindexed);
         ok &= new FhCallHandle<d_Draw>                (new FhCallLocation((void*)_a_draw))       .hook(this, _h_draw);
         ok &= new FhCallHandle<d_DrawIndexedInstanced>(new FhCallLocation((void*)_a_drawidxinst)).hook(this, _h_drawidxinst);
@@ -610,6 +616,8 @@ public sealed unsafe class FFXVRModule : FhModule {
         _a_exitprocess = NativeLibrary.GetExport(k32, "ExitProcess");
         _h_exitprocess = h_exitprocess;
         ok &= new FhCallHandle<d_ExitProcess>(new FhCallLocation((void*)_a_exitprocess)).hook(this, _h_exitprocess);
+        }
+        finally { diag7_insert_end(); }
 
         _detour_status = ok ? "installed" : "FAILED (see core.log)";
         _logger.Info($"Draw detours {_detour_status}: DrawIndexed 0x{_a_drawindexed:X8}, Draw 0x{_a_draw:X8}, "
@@ -913,6 +921,7 @@ public sealed unsafe class FFXVRModule : FhModule {
                     case "hands_cal":         _hands_cal_ini = v; break;
                     case "hands_px_left":     int.TryParse(v, out _hands_px_left); break;
                     case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
+                    case "diag_build7":       _diag7 = v != "0"; break;   // build 7 diagnostics (hooks at the next launch; logging at once)
                 }
             }
             if (_headset_autostart) {
@@ -1038,7 +1047,8 @@ public sealed unsafe class FFXVRModule : FhModule {
             $"hands_mirror={(_hands_mirror ? 1 : 0)}\n" +
             $"hands_cal={_hands_cal_ini}\n" +
             $"hands_px_left={_hands_px_left}\n" +
-            $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n";
+            $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
+            $"diag_build7={(_diag7 ? 1 : 0)}\n";
         if (text == _ini_last) return;
         if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
         try {
@@ -1212,6 +1222,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         if (_fn_diag_keepalive != null) _fn_diag_keepalive(2);
 
         ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {_native_status}   detours: {_detour_status}");
+        diag7_ui();   // build 7: status line, "show cursor anchors"
         if (_fn_counter != null)
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
 
@@ -1813,7 +1824,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
-        if (actors == null) { _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
+        if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
@@ -1923,6 +1934,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             if (pick < 0 && read(actors, out Actor a0) && live(a0)) pick = 0;
         }
         _fp_actor_idx = pick;
+        System.Threading.Volatile.Write(ref _d7_follow_actor, pick >= 0 ? (nint)(actors + pick) : 0);   // build 7: the actor the main-thread snapshot reads
         if (pick >= 0 && read(actors + pick, out Actor p)) {
             _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);
             // The head: the highest sub-position that is not at the origin. Actor
@@ -2090,11 +2102,14 @@ public sealed unsafe class FFXVRModule : FhModule {
     private void render_imgui_inner() {
         _frames++;
 
+        diag7_resolve();   // build 7 (B7-1): the game-function detours' originals, before try_install_hooks adds our late hooks
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready) actors_auto_log();
         if (_native_ready) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
         if (_native_ready) draw_eye2_preview();   // its own top-level window, never nested
+
+        if (_native_ready) diag7_present();   // build 7 (log only): before begin_frame, so the Motion log gets this frame's columns
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.

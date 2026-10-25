@@ -529,6 +529,21 @@ PFN_XInputGetState g_xi_get = nullptr, g_xi_orig = nullptr; bool g_xi_tried = fa
 // game's input thread, read on the render thread: aligned 32-bit fields, a torn read is harmless.
 struct XiSeen { DWORD res; LONG rx; DWORD tick; };
 XiSeen g_xi_seen[4] = {};
+// Build 7 diagnostics, log only (design-notes "Build 7: battle-cursor and engine diagnostics (log only)"), on with
+// ffxvr_diag7_set (ini diag_build7, default 1): the game's XInputSetState calls (6.11), the loading-stall watchdog (6.5),
+// the backbuffer desc (6.7), extra Motion-log columns (6.4). Off: none of it runs and XInputSetState is not hooked.
+bool g_diag7 = false;
+typedef DWORD (WINAPI *PFN_XInputSetState)(DWORD, XINPUT_VIBRATION*);
+PFN_XInputSetState g_xis_orig = nullptr; bool g_xis_hooked = false; uint32_t g_xis_calls = 0, g_xis_nonzero = 0;
+// Motor changes, written by the game's thread (single writer), logged at begin_frame: 20 per arm (battle start re-arms).
+struct XisRec { uint32_t frame, pad; uint16_t l, r; };
+XisRec g_xis_log[32] = {}; volatile LONG g_xis_w = 0; LONG g_xis_r = 0, g_xis_until = 20; uint16_t g_xis_last[4][2] = {};
+uint32_t g_bb_desc_logged = 0;                             // backbuffer desc lines (6.7), at most 10
+float g_motion_cols[12] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4)
+volatile LONG g_present_ms = 0;                            // GetTickCount at the last begin_frame: the watchdog's input
+volatile LONG g_stall_open = 0; LONG g_stall_from_ms = 0; uint32_t g_stalls = 0;   // a stall logged and not yet ended; stalls logged
+DWORD g_main_tid = 0; uint32_t g_main_other = 0;           // the game's main thread (first caller of ffxvr_main_note); joins seen elsewhere
+HANDLE g_wd_thread = nullptr, g_wd_stop = nullptr;
 // First person / follow: the view is built from the player's position, not
 // the authored camera. Heading latched at toggle (and at recentre); the
 // head owns orientation; the player's own skinned draws are hidden.
@@ -1141,6 +1156,130 @@ static void install_xinput_hook() {
         }
     }
     diag("xinput hook: XInputGetState import not found");
+}
+
+// -- Build 7 (log only) --------------------------------------------------------------------------------------------
+/// The game's rumble (6.11): every call passes straight through; motor changes per pad are kept for begin_frame to log.
+static DWORD WINAPI xi_set_state_hook(DWORD pad, XINPUT_VIBRATION* v) {
+    g_xis_calls++;
+    if (g_diag7 && v != nullptr && pad < 4) {
+        const uint16_t l = v->wLeftMotorSpeed, r = v->wRightMotorSpeed;
+        if (l | r) g_xis_nonzero++;
+        if (l != g_xis_last[pad][0] || r != g_xis_last[pad][1]) {
+            g_xis_last[pad][0] = l; g_xis_last[pad][1] = r;
+            const LONG w = g_xis_w;
+            if (w < g_xis_until && w - g_xis_r < 32) { XisRec& e = g_xis_log[w & 31]; e.frame = g_frames; e.pad = pad; e.l = l; e.r = r; InterlockedIncrement(&g_xis_w); }
+        }
+    }
+    return g_xis_orig ? g_xis_orig(pad, v) : ERROR_DEVICE_NOT_CONNECTED;
+}
+/// The game's XInputSetState import -> xi_set_state_hook (the XInputGetState pattern above). Build 7 only.
+static void install_xinput_set_hook() {
+    if (g_xis_hooked || !g_diag7) return;
+    const BYTE* base = (const BYTE*)GetModuleHandleA(nullptr);
+    const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) { diag("xinput set hook: no import table"); return; }
+    for (const IMAGE_IMPORT_DESCRIPTOR* imp = (const IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); imp->Name; ++imp) {
+        const char* dll = (const char*)(base + imp->Name);
+        if (_strnicmp(dll, "xinput", 6) != 0) continue;
+        const IMAGE_THUNK_DATA* names = (const IMAGE_THUNK_DATA*)(base + imp->OriginalFirstThunk);
+        IMAGE_THUNK_DATA* iat = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++iat) {
+            if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
+            if (strcmp(((const IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData))->Name, "XInputSetState") != 0) continue;
+            DWORD old = 0;
+            if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) { diag("xinput set hook: VirtualProtect failed"); return; }
+            g_xis_orig = (PFN_XInputSetState)iat->u1.Function;
+            iat->u1.Function = (DWORD_PTR)&xi_set_state_hook;
+            VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
+            g_xis_hooked = true;
+            diag("xinput set hook: %s!XInputSetState hooked (orig %p) - build 7, log only", dll, (void*)g_xis_orig);
+            return;
+        }
+    }
+    diag("xinput set hook: XInputSetState import not found (the game may not rumble through its import)");
+}
+
+/// A read of our own process that fails instead of faulting (no SEH: Fahrenheit's stage 0 is a debugger).
+static bool wd_read(uintptr_t a, void* out, SIZE_T n) {
+    SIZE_T got = 0;
+    return a >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(a), out, n, &got) && got == n;
+}
+/// Loading-stall watchdog (6.5): when no Present has come for 300 ms, once per stall, the game's loading state and where
+/// its main thread is. The main thread is suspended only for GetThreadContext and one ReadProcessMemory of its stack:
+/// no allocation, no lock, no logging and nothing that can raise until ResumeThread. Everything else runs outside it.
+static DWORD WINAPI stall_watchdog(LPVOID) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    uintptr_t text_lo = 0, text_hi = 0;
+    {
+        const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+        const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+            if (memcmp(sec[i].Name, ".text", 6) == 0) { text_lo = base + sec[i].VirtualAddress; text_hi = text_lo + sec[i].Misc.VirtualSize; }
+    }
+    static uint32_t stack[256];   // this thread only
+    HANDLE th = nullptr; DWORD th_tid = 0;
+    for (;;) {
+        if (WaitForSingleObject(g_wd_stop, 50) == WAIT_OBJECT_0) break;
+        if (!g_diag7 || g_frames == 0 || g_stalls >= 100 || g_slowmo_ms >= 300) continue;   // slow motion (the pick tool) is not a stall
+        if (g_main_tid != 0 && g_main_tid != th_tid) {   // opened ahead of any stall
+            if (th) CloseHandle(th);
+            th = nullptr; th_tid = g_main_tid;
+            // never the render thread or this one (B7-6: impossible today, 0xA44B30 is not on the render thread's path)
+            if (g_main_tid != g_render_tid && g_main_tid != GetCurrentThreadId()) th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, g_main_tid);
+        }
+        const LONG last = g_present_ms, now = static_cast<LONG>(GetTickCount());
+        if (g_stall_open || now - last < 300) continue;
+        uintptr_t app = 0, rend = 0; uint8_t app_flag = 0xEE, r96 = 0xEE, r97 = 0xEE; int8_t bstate = -99; char map[16] = {};
+        if (wd_read(base + 0x8C9CD8, &app, 4) && app) wd_read(app + 0x3A0, &app_flag, 1);   // PApplication +0x3A0: loads present frames
+        if (wd_read(base + 0x8CB9D8, &rend, 4) && rend) { wd_read(rend + 0x1196, &r96, 1); wd_read(rend + 0x1197, &r97, 1); }
+        wd_read(base + 0xD2A8E0, &bstate, 1); wd_read(base + 0x1FCBC60, map, 15);
+        if (g_present_ms != last) continue;   // a Present came while the state was read: not a stall after all (B7-7)
+        DWORD eip = 0, esp = 0; SIZE_T got = 0; bool ctx_ok = false;
+        if (th && SuspendThread(th) != static_cast<DWORD>(-1)) {
+            CONTEXT c = {}; c.ContextFlags = CONTEXT_CONTROL;
+            if (GetThreadContext(th, &c)) { ctx_ok = true; eip = c.Eip; esp = c.Esp; ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(esp)), stack, sizeof(stack), &got); }
+            ResumeThread(th);
+        }
+        // -- the main thread runs again from here --
+        g_stall_from_ms = last; InterlockedExchange(&g_stall_open, 1); g_stalls++;
+        char where[96] = "?";
+        if (ctx_ok) {
+            if (eip >= text_lo && eip < text_hi) snprintf(where, sizeof(where), "FFX.exe+0x%X", static_cast<unsigned>(eip - base));
+            else {
+                HMODULE m = nullptr; char path[MAX_PATH] = "";
+                if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(eip)), &m) && m && GetModuleFileNameA(m, path, MAX_PATH)) {
+                    const char* nm = strrchr(path, '\\'); snprintf(where, sizeof(where), "%s+0x%X", nm ? nm + 1 : path, static_cast<unsigned>(eip - reinterpret_cast<uintptr_t>(m)));
+                }
+                else snprintf(where, sizeof(where), "%08X", static_cast<unsigned>(eip));
+            }
+        }
+        char st[16 * 12 + 1] = ""; size_t sl = 0; int hits = 0;
+        for (SIZE_T k = 0; k < got / 4 && hits < 16; ++k)
+            if (stack[k] >= text_lo && stack[k] < text_hi) { sl += snprintf(st + sl, sizeof(st) - sl, " %X", static_cast<unsigned>(stack[k] - base)); hits++; }
+        for (int tries = 0; tries < 3; ++tries) {   // the render thread may hold the log open: a few short retries
+            wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, path, L"a") == 0 && f) {
+                fprintf(f, "stall #%u: no Present for %ld ms (frame %u): app+0x3A0 %d, renderer +0x1196 %d +0x1197 %d, battle_state %d, map '%s' | main thread %lu %s: eip %s, stack (FhUtil, first 16 in .text):%s\n",
+                        g_stalls, static_cast<long>(now - last), g_frames, app_flag, r96, r97, bstate, map, th_tid, th ? (ctx_ok ? "" : "(no context)") : "(not known yet)", where, sl ? st : " -");
+                fclose(f); break;
+            }
+            Sleep(5);
+        }
+    }
+    if (th) CloseHandle(th);
+    return 0;
+}
+/// Build 7, once per frame at begin_frame (render thread): the stall end, and the motor changes the hook kept.
+static void diag7_frame() {
+    g_present_ms = static_cast<LONG>(GetTickCount());
+    if (!g_diag7) return;
+    if (g_stall_open) { InterlockedExchange(&g_stall_open, 0); diag("stall #%u ended: %ld ms without a Present", g_stalls, static_cast<long>(g_present_ms - g_stall_from_ms)); }
+    const LONG w = g_xis_w;
+    if (w - g_xis_r > 32) g_xis_r = w - 32;
+    for (; g_xis_r < w; ++g_xis_r) { const XisRec& e = g_xis_log[g_xis_r & 31]; diag("xinput set: pad %u motors left %u right %u (frame %u)", e.pad, e.l, e.r, e.frame); }
 }
 
 /// Turn the current heading by `deg` (positive = right).
@@ -1905,6 +2044,13 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
             D3D11_TEXTURE2D_DESC d; t->GetDesc(&d);
             if ((d.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && d.Width >= 640 && d.SampleDesc.Count == 1) {
                 g_backbuffer = t; g_backbuffer_seen_this_frame = true;
+                if (g_diag7 && g_bb_desc_logged < 10) {   // build 7 (6.7): the prediction is format 28 (R8G8B8A8_UNORM; 29 would be _SRGB)
+                    g_bb_desc_logged++;
+                    const DWORD tid = GetCurrentThreadId();
+                    diag("backbuffer: %p %ux%u format %u samples %u mips %u array %u bind 0x%X usage %u misc 0x%X cpu 0x%X (frame %u, %s thread)", static_cast<void*>(t), d.Width, d.Height,
+                         static_cast<unsigned>(d.Format), d.SampleDesc.Count, d.MipLevels, d.ArraySize, d.BindFlags, static_cast<unsigned>(d.Usage), d.MiscFlags, d.CPUAccessFlags, g_frames,
+                         tid == g_render_tid ? "render" : tid == g_main_tid ? "main" : "another");
+                }
             }
         }
         else if (t == g_backbuffer) g_backbuffer_seen_this_frame = true;
@@ -2247,7 +2393,7 @@ static void ui_pick_check(unsigned draw_idx) {
             tl += snprintf(st + tl, sizeof(st) - tl, "]");
         }
     }
-    diag("pick (%.0f,%.0f): %s tex=%p%s%s%s", px, py, head, static_cast<void*>(t), cb, pcb, st);
+    diag("pick (%.0f,%.0f): %s tex=%p fmt %u%s%s%s", px, py, head, static_cast<void*>(t), static_cast<unsigned>(td.Format), cb, pcb, st);   // fmt: the SRV's texture format (build 7, 6.10)
     size_t sl = strlen(g_pick_summary);
     if (sl < sizeof(g_pick_summary) - 260) snprintf(g_pick_summary + sl, sizeof(g_pick_summary) - sl, "%s%s|sig=%u,%u,%.0f,%.0f", sl ? "\n" : "", head, td.Width, td.Height, x1 - x0, y1 - y0);
 }
@@ -3137,7 +3283,8 @@ void heartbeat(bool force) {
 
     if (diag_armed()) fprintf(f, "\n  latched slot-0 buffer: %zu bytes, latched at draw #%d, reads %u\n", g_full.size(), g_draws_latched_at, g_cam_reads);
     else fprintf(f, "\n  latched slot-0 buffer: not latched (diagnostics disarmed), reads %u\n", g_cam_reads);
-    fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0);
+    fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d; XInputSetState calls %u (non-zero %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0, g_xis_calls, g_xis_nonzero, g_xis_hooked ? 1 : 0);
+    fprintf(f, "  build 7 diagnostics: %s; main thread %lu (joins seen on other threads %u); loading stalls logged %u\n", g_diag7 ? "on" : "off", g_main_tid, g_main_other, g_stalls);
     fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
     { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held without an eye image %u, swapchain wait timeouts %u\n", held, waits); }
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
@@ -3500,8 +3647,38 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 5;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim)
+constexpr int FFXVR_ABI = 6;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
+
+/// Build 7 diagnostics (log only): bit 0 on (ini diag_build7; called once at module init, before ffxvr_init, so the
+/// XInputSetState hook and the stall watchdog follow it), bit 1 re-arms the per-battle rumble log (battle start).
+extern "C" __declspec(dllexport) void ffxvr_diag7_set(int flags) {
+    g_diag7 = (flags & 1) != 0;
+    if (!g_diag7) InterlockedExchange(&g_stall_open, 0);   // switched off mid-stall: no stale "ended" line later (B7-7)
+    if (flags & 2) g_xis_until = g_xis_w + 20;
+    if (g_diag7 && g_wd_thread == nullptr) {
+        g_wd_stop = CreateEventA(nullptr, FALSE, FALSE, nullptr);
+        if (g_wd_stop) g_wd_thread = CreateThread(nullptr, 64 * 1024, stall_watchdog, nullptr, 0, nullptr);
+        diag("build 7 diagnostics on: stall watchdog %s", g_wd_thread ? "started" : "FAILED to start");
+    }
+}
+/// One line from the managed side into ffxvr_diag.log (render thread only; the caller throttles).
+extern "C" __declspec(dllexport) void ffxvr_diag_line(const char* s) { if (s != nullptr) diag("%s", s); }
+/// Called by managed's job-join hook (the game's main thread): the first caller is taken as the main thread, for the
+/// stall watchdog. Returns 1 on that thread, 0 elsewhere (counted).
+extern "C" __declspec(dllexport) int ffxvr_main_note() {
+    const DWORD t = GetCurrentThreadId();
+    if (g_main_tid == 0) { g_main_tid = t; return 1; }
+    if (t == g_main_tid) return 1;
+    g_main_other++; return 0;
+}
+/// Extra Motion-log columns for this frame (6.4): post-join snapshot drawn root xyz, Present-time drawn root xyz,
+/// snapshot logic position xyz (render space), exec byte, frames since the snapshot, snapshot valid.
+extern "C" __declspec(dllexport) void ffxvr_motion_cols(const float* v, int n) {
+    if (v == nullptr || n <= 0) { g_motion_cols_fresh = false; return; }
+    for (int i = 0; i < 12; ++i) g_motion_cols[i] = i < n ? v[i] : 0.f;
+    g_motion_cols_fresh = true;
+}
 
 /// Keeps the costly diagnostics armed for `frames` more frames (see g_diag_until). Managed calls it with 2 every
 /// frame the overlay's Debug header is expanded, so closing the header (or the window) disarms them.
@@ -3526,6 +3703,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
     g_vt = vt;
     install_xinput_hook();
+    install_xinput_set_hook();   // build 7 (log only; nothing unless ffxvr_diag7_set turned it on)
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
@@ -3690,6 +3868,7 @@ static void perf_tick() {
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    diag7_frame();                  // build 7: Present time for the stall watchdog, its "ended" line, rumble changes
     {   // the frame time every filter uses (stick turn, follow pans, auto depth): measured here, whatever the overlay does
         static LARGE_INTEGER s_dt_prev = {};
         if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
@@ -4261,7 +4440,14 @@ static void diag(const char* fmt, ...) {
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
     FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) {
+        // The file opens unshared: another thread may hold it for a moment. Off the render thread (a resize's backbuffer
+        // line, a main-thread caller), a few 1 ms retries instead of a lost line (B7-13); the render thread never waits.
+        f = nullptr;
+        if (GetCurrentThreadId() == g_render_tid) return;
+        for (int k = 0; k < 3 && f == nullptr; ++k) { Sleep(1); if (_wfopen_s(&f, path, L"a") != 0) f = nullptr; }
+        if (f == nullptr) return;
+    }
     va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
     fputc('\n', f);
     fclose(f);
@@ -5592,7 +5778,14 @@ static void motion_log_tick() {
     }
     float hy = 0.f;
     { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d); hy = atan2f(-d[0], -d[2]); }
-    diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy);
+    char ex[240] = "";   // build 7 (6.4): managed's main-thread post-join snapshot of the followed actor, render space
+    if (g_motion_cols_fresh) {
+        const float* m = g_motion_cols;
+        snprintf(ex, sizeof(ex), " | snap drawn (%.2f %.2f %.2f) present drawn (%.2f %.2f %.2f) snap logic (%.2f %.2f %.2f) exec %d snap age %d%s",
+                 m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], (int)m[9], (int)m[10], m[11] != 0.f ? "" : " (no snapshot)");
+        g_motion_cols_fresh = false;
+    }
+    diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f%s", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy, ex);
 }
 
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {
@@ -5647,7 +5840,10 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 /// Re-use the game's pointer sprites at the markers (needs the pointer hiding to capture them); returns sprites drawn since the last call.
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
-extern "C" __declspec(dllexport) void ffxvr_shutdown() { if (g_xr_want) { xr_stop(); leave_xr_state(); } }
+extern "C" __declspec(dllexport) void ffxvr_shutdown() {
+    if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
+    if (g_xr_want) { xr_stop(); leave_xr_state(); }
+}
 /// The overlay's low-resolution line: 1 and the text while the headset is on and the game renders below its per-eye size.
 extern "C" __declspec(dllexport) int ffxvr_lowres_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return 0;

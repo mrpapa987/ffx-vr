@@ -1796,3 +1796,82 @@ R11 (real bindings in eye2_begin/end, the backbuffer sentinel) is build 7, on it
   not examined; "no depth twin" counts only draws that got an eye-2 pass; the
   F9 pick dumps streams 1-5 at the picked quad's own vertices (base vertex
   included), like stream 0.
+
+## Build 7: battle-cursor and engine diagnostics (log only)
+
+This is stage C1 of the battle-cursor plan, plus the section-6 diagnostics from the 24 Oct research round
+(research SYNTHESIS.md; exe-verify.md's corrections apply). Nothing visible changes. Every hooked game
+function is always called, and the old cursor path (hide list, pointer rule, markers) is untouched.
+
+All of it hangs off one ini switch, `diag_build7` (default 1). With `diag_build7=0` and a restart:
+- no game function is hooked;
+- XInputSetState is not hooked;
+- the stall watchdog does not run;
+- no build-7 diagnostic runs. Two things stay: the heartbeat still shows its state ("off"), and the F9 pick line still has the texture format.
+
+An edit while the game runs turns only the logging on or off. The hooks are only ever installed at launch.
+
+**Managed (diag7.cs, a partial of the module):** four game-function detours, queued at module `init()`.
+Fahrenheit applies them after every module has initialised, and refuses a late hook on a function that is
+already hooked.
+- **Target pointer**, FhUtil 0x49C870, cdecl void().
+- **Turn pointer**, 0x492590, cdecl void(int chr). It has its own delegate: Fahrenheit's generated handle has
+  no argument.
+- **Job-join wrapper**, 0x644B30, cdecl void(). Not Sg_MainLoop's entry: FFX-60fps checks that prologue.
+- **Backbuffer re-acquire**, 0x199210, thiscall void(obj, w, h).
+
+What the detours do:
+- They run on the game's main thread. Each calls the original first.
+- Each copies values into a two-slot seqlock. No strings, no logging, no D3D.
+- Target snapshot: the game frame counter (FhUtil 0x1FCBBF0), the candidate mask 0xF3D178, the gates, and
+  the windows whose draw callback is the target stub. Per target:
+  - the anchor exactly as 0x8354F0 computes it, with the fallback used;
+  - the logic and drawn roots, heading, attached/override flags;
+  - Chr+0xF34/F38.
+- Turn snapshot: the chr argument against 0x1FCC088, θ, both colours, and optpos[1].
+- Post-join snapshot of the followed actor: the first join after the frame counter moves is Sg_MainLoop's
+  post-join call. It records the drawn root, logic position, offset and exec byte. The exec byte is at VA
+  0xC496D4 = **FhUtil 0x8496D4**; SYNTHESIS section 6 prints 0x8C96D4 by mistake.
+
+At Present, managed reads the snapshots and writes these lines to ffxvr_diag.log through a new export:
+- `cursor:` on every change and once a second while a cursor is drawn. It includes our projection of the
+  anchor through the game's own camera minus the game's own screen anchor.
+- `timing (30 s)`: lag histograms, Presents vs post-join snapshots, call counts.
+- `cursor elements` once per battle.
+- `resize`.
+- `pan-scan:` on every map change and every 5 s.
+
+The Motion log (Numpad 5) gets the post-join and Present-time drawn root as extra columns.
+Debug > Build 7 has a status line and a "show cursor anchors" toggle. The toggle draws dots on the monitor
+only, never in the headset.
+
+**Native:**
+- The XInputSetState IAT hook logs motor changes, 20 per battle.
+- The loading-stall watchdog fires after 300 ms without a Present, once per stall. While the main thread is
+  suspended it only does GetThreadContext and one stack read: no allocation, no lock, no logging, nothing that
+  can raise. It logs after ResumeThread, and logs the stall's end at the next Present.
+- The backbuffer desc is logged on identification. The prediction is format 28, R8G8B8A8_UNORM.
+- The F9 pick line now includes the SRV's texture format.
+- Heartbeat lines report the counts.
+
+ABI 6: `ffxvr_diag7_set`, `ffxvr_diag_line`, `ffxvr_main_note`, `ffxvr_motion_cols`.
+
+Review fixes:
+- **The four originals are resolved on the render thread**, once, at the top of render_imgui_inner and before
+  our own late D3D hook insertions. Fahrenheit's chain table is not locked for readers. If a detour runs before
+  the first Present (the join and the resize can), it resolves on its own thread instead:
+  - from an absolute address cached at init, with no module lookup;
+  - it retries a miss or an exception until Fahrenheit has written the entry;
+  - an Interlocked handshake keeps it out of install_draw_detours' insertions.
+- The join is queued last.
+- The cursor-lag histograms count only Presents that brought a new snapshot (target, turn and join apart).
+- rot-err decays to 0 once a logic tick passes with no turn.
+- The turn line logs the game's own anchor A (0xF3FA68, written by the original) next to ours. The cyan dot uses it.
+- The watchdog:
+  - never watches the render thread or itself;
+  - re-checks for a Present before suspending;
+  - is idle in slow motion;
+  - drops an open stall when switched off.
+- diag() retries a contended open off the render thread.
+- The pan-scan map test compares raw bytes, and map changes bypass the line cap.
+- The follow actor is cleared when there is no actor table.
