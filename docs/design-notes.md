@@ -2306,3 +2306,170 @@ Session 1 (4cfb5a7, kl/klyt0000, 9 battles): stable, no mismatch, no brake, but 
 - **HC-T-5:** each held cluster counts max(measured, 64 KB) of game pool.
 - **HC-T-6:** the header VRAM size is rejected (file bytes stand in) when a field exceeds 512 MB or the sum exceeds 4x the file bytes read; counted as "out of bounds".
 - **HC-T-7 / HC-T-8:** a brake applied at a zone change ends there; the pool cap is computed with the transient block down and held over block-up frees, and eviction starts only past cap + 1/8.
+
+## Battle transition (glass break) (branch `transition`)
+
+Research: battle-transition.md. Code: native `bt_tick` and friends (`ffxvr_native.cpp`, before `xr_tick`), the capture / shard detection in `ffxvr_on_draw`, `xr_pin` / `xr_hold_uncapped` (`ffxvr_xr.cpp`), managed `battle_transition.cs`.
+
+- **Why it was lost.** The battle start's shatter is the HD port's `BrokenScreenEffect` (singleton `[0xCDEC98]`). It copies the previous frame into `BrokenScreen_capturedFrame` at the top of a renderer frame, then each frame draws a black/fade pass (depth clear, full-screen quad, resolve on the scene target) and two passes of shards that are projected on the CPU (NDC, no game camera) and sample the capture. The fade pass has the exact signature of the game's UI pass, so the UI detector opened the UI pass there:
+  - the eye images were copied before any shard was drawn;
+  - the fade quad went to the head-locked UI panel (the owner's "small black rectangle");
+  - the map free at battle_state 8 left the frames without a camera, so the view flipped to the virtual screen and R8b's held frame was dropped.
+- **Phases** (render thread, at the top of `xr_tick`; ReadProcessMemory reads only, no game-code hook):
+  - **armed:** `battle_trigger [0x112A8E2] == 1` at battle_state 0, or the transition handle `[0x112C024]`;
+  - **shatter:** from the capture draw (the overlay phase's one-target, no-depth draw that is not into the backbuffer), a shard draw (slot 0 samples that target), or the singleton's active byte (+5);
+  - **after:** handle 0, +5 clear and no shard draw for 6 Presents;
+  - **idle again:** battle_state 1 with a 3D camera.
+  - Other uses of the effect (+4/+5 alone, outside an encounter) only get the no-UI-split part. A new window opens only after every signal has been seen clear, so a stuck byte cannot keep the UI split off.
+- **`battle_transition`** (ini and overlay, applies at once):
+  - **2, frozen world (default).** No UI split, and the view stays in the mode the window started in. The override's head pose is frozen: `xr_apply_poses`, stick turning and the world grab are skipped. The projection layer is submitted with the poses and FOV of the frame the pin was taken on, so the player's own view breaks apart world-locked where it was. In the after phase the eye image is withheld, so the pinned last frame is re-sent with no 30-frame cap over the game's load black until the battle is live.
+  - **1, head-locked.** No UI split and the mode held only.
+  - **0, old behaviour.** The phases still run for the diagnostics.
+  - A recentre or a pin dropped by the runtime ends only the freeze; the window goes on head-locked.
+  - Frames without a camera inside a window are submitted with the headset's FOV, because their image is the capture of a headset-FOV view.
+- **Diagnostics.**
+  - `diag_transition=1` (default for this test build) writes one `bt:` line per Present inside a window: phase, states, handle, +4/+5, mode, UI frame, scene draws, camera uploads, depth clears, late draws, capture and shard draws, held frames, eye source and the Present gap. The lines are batched (one file open per ~30 lines) and capped at 900 per window and 6000 per session.
+  - The phase changes and one summary per window are always logged and shown in the overlay. The summary gives the phase durations, the battle_state range during the shards and the time of the map free: the race the research could not settle statically.
+- **Not in this build.**
+  - The render-thread keepalive (vr-opportunities.md 1). Frames where Present does not run at all still go to the runtime's own handling. The summary's longest Present gap shows whether it is needed here.
+  - The B+ stereo capture.
+  - The trail override during the shards.
+- **Also:** the battle start's VirtualQuery walk (load diagnostics, "at the start") now runs on the main thread just before MsBattleExe's wait-all blocks. It used to run on the render thread in the Present that opens the transition. A start not seen in the wait reads it at live, and the opt-in ntdll report (`diag_va_log`) is put off to live while a window is open.
+- **ABI 15:** + `ffxvr_bt_set`, `ffxvr_bt_status`.
+
+### Review fixes (battle transition)
+
+- **BT-3, the battle-live release.** The after phase ends on handle 0 and a 3D camera for 2 frames in a row, with battle_state in a running battle state: 1 or 2 (the 1 <-> 2 loop, 0x7917D0) or 0x17..0x21. The load chain 4..0x16 and 0x22 do not count. A battle that starts with an enemy acting (state 2, an ambush) is no longer held until the next state-1 frame or the 30 s backstop.
+- **BT-2, the end of the shards.** The shatter ends after 6 quiet Presents in a row: handle 0, +5 clear, no draw sampling the capture. That holds whether or not shards were detected. It used to be "6 frames since the last shard", which was always true without detection, so a mid-flight frame could be held.
+  - The capture candidate is tracked even while idle (pointer compares only, tagged with its frame), so a window that opens at the capture frame's own Present adopts it.
+  - Only the first match per frame becomes the candidate; a frame with 2+ matches is counted.
+- **BT-1, cancel without a battle.** An encounter window with no handle and no effect byte seen is cancelled after 20 Presents with trigger, battle_state and handle all 0. That is the case of an encounter cleared by 0x781530 at a map jump, or MsBattleExe's early return. Before, the 3 s rule left the view frozen for 3 s.
+- **BT-4 / BT-5, the log.**
+  - A bt: batch that cannot be written (the log is open on another thread, and the render thread never waits) is kept and retried; it is also flushed at headset-off (with the window's summary) and at shutdown.
+  - The buffer is 64 KB and is written at phase changes, at the window's end and when 3/4 full: about one file open during the shards.
+- **BT-6, the capture and shard rules.**
+  - Once per window, the capture target's size and sample count, from the bind-time cache, and the number of overlay matches.
+  - Per window, the draws sampling the capture, by case: the shard rule, slot 1-3, with a camera image, without depth. Near misses (probed in the shatter until the frame's first match) count as shard activity for the phases.
+  - The session's first shatter arms one frame census (`ffxvr_frame.log`).
+- **Nits.**
+  - The summary is 1 KB and starts with "ended: ...". "frozen" means the freeze was ever taken.
+  - The per-frame line in the after phase is thinned to every 10th Present while nothing but the frame, gap and held count changes, and the session cap is 12000 lines.
+  - The load diagnostics' put-off start walk is labelled with its real reason and runs 30 Presents after live (its own "load:" line), not on the transition's release frame.
+- **BT-9 (documented, not changed).** A runtime (Quest) recentre mid-freeze drops the pin inside the `xr_frame` that then submits. That frame and the next one go out with live poses although they were rendered from the frozen pose: 1-2 frames of the frozen image following the head. The old poses belong to the old space, so this is the least bad option.
+
+### Re-review fixes (battle transition)
+
+- **BT-R-1:** the 3 s "nothing happened" cancel also applies in the shatter phase. An encounter window that reached the shatter on a false start (no handle, no effect byte, battle_state 0) ends after 180 Presents and 3 s instead of staying frozen until the 30 s backstop.
+- **BT-R-2:** near-miss probes (draws outside the shard rule, checked against the capture) are limited to draws into the scene target, at most 64 per frame. The rule draws are checked as before.
+- **BT-R-3:** the one-time frame census at the first shatter runs only with `diag_transition=1`, as before; the gate is now stated in the code.
+- **BT-R-4:** the bt: log buffer has one user at a time (an interlocked owner flag), and only the render thread ends a window. At shutdown, the main thread flushes the kept lines first and keeps the buffer for good, so a render thread that is still presenting only drops lines. A window still open at exit gets a one-line note.
+
+### Session 1 fix: the view stayed frozen for the whole battle (battle transition)
+
+**What happened** (owner session 1, on 3783837). In mode 2 the glass showed, but the window never left the shatter phase, so the head pose stayed frozen through the live battle and the views could not be changed.
+- **The capture was replaced.** The window adopted the real capture (3840x2160). Later in the load, a second overlay-phase target (4096x4096, most likely a shadow atlas) replaced it. That is the summary's "capture 4096x4096 in 2 frames".
+- **Every frame then looked like the shards.** From battle_state 12 on, one battle draw a frame sampled that texture and matched the shard rule (`shard=1`), so the shatter never got 6 quiet Presents. The mode-0 windows ended only at the 30 s timeout.
+- **Present gaps:** at most 130 ms, so no keepalive is needed.
+- **The race:** the map free came at +390..515 ms, well inside the ~3 s of shards (battle_state 0x22).
+
+**Fixes:**
+- **The capture is taken once per window,** then dropped when the shards end. A later candidate is logged once and ignored.
+- **About the address:** `BrokenScreen_capturedFrame` is the singleton's render target, created lazily and resized only on a window resize. A reused address is not expected, but the drop at the end of the shards rules it out, and the per-window detail line below compares the matched texture's size with the capture's.
+- **The shatter ends on the first of these:**
+  - 6 Presents in a row with handle 0, +5 clear and fewer than 8 shard draws (the real effect draws ~100 a frame);
+  - the battle-live rule (handle 0, a 3D camera for 2 frames, battle_state 1, 2 or 0x17..0x21), which goes straight to idle and unpins;
+  - a 5 s cap, after which the window moves to the after phase.
+- **The after phase** has a 15 s cap, and can no longer return to the shatter.
+- **Any user view action ends the window at once:**
+  - Home or the headset's recentre;
+  - the turn keys and the view reset;
+  - a view hotkey (End, Insert, the keypad), a gesture chord or a world grab;
+  - any overlay widget in use (the managed side's flag, `ffxvr_bt_set` mode | 0x100);
+  - while frozen: a new controller grip or stick click, or right-stick turning.
+
+  The battle's automatic view switch (`battle_view`) is not a user action.
+- **Diagnostics:**
+  - once per window, the details of a capture-sampling draw after the real shards: slot, texture size / format / mips / samples against the capture's size, view format, RT0, depth, camera image, draw kind / count, topology;
+  - per-frame lines cover the shatter plus 2 s.
+- **ABI 16.**
+
+### Session 1 fix review (battle transition)
+
+- **BT-S-1:** the shatter's 5 s cap counts from the last Present with 8 or more shard draws, or from the phase start if there was none. The phase is limited to 12 s from its start. The real glass can no longer be cut off mid-flight and held, for example when the shatter phase opened well before the shards were drawn at battle_state 0x22.
+- **BT-S-2:** a capture candidate is adopted only if its size matches capturedFrame's size, read from the singleton's +0x6C/+0x70 with a guarded read. A candidate of another size also no longer moves armed to shatter. If the size cannot be read, the first candidate is adopted as before, and the window says so in its log.
+- **BT-S-3:** the battle-live rule is checked before the phase switch, in every phase including armed.
+- **BT-S-4:** "with another target, ignored" counts only during the shatter.
+
+## First person: finding Tidus by model name (FP-1, 25 Oct 2026)
+
+On the Luca dock (`lc/lchb0201`) first person followed the wrong actor. The
+actor table showed actor 0 = `f001` (chr_id 0x5001, a model from `chr/obj/`:
+an object) and Tidus at actor 1 as `c001` (chr_id 1). `fp_actor` was the
+single name `c101`, which is Tidus only in the opening; since then the player
+had only been found through the "actor 0" fallback (Besaid and blitzball
+captures also show Tidus as `c001` at actor 0). The actor table's chr_id is the
+model id: type in the high bits (0x0 `c` party models, 0x2 `n` NPCs, 0x4 `w`,
+0x5 `f` objects) and the model number below.
+
+- `fp_actor` is now a comma list, best first: default `c001,c101`. An ini that
+  still holds the old default `c101` is read as the new list.
+- Every live actor gets one score, lower is better: a listed name = its rank;
+  a party model (chr_id 1..0xFFF) = 1000 + chr_id, so Tidus beats a follower;
+  actor 0 = 100000 (last resort); NPCs and objects are no candidates. The
+  current actor is kept while it is live, has the same chr_id (slots are reused
+  across map changes) and scores 0; otherwise the table is rescanned at once if
+  it died or changed, every frame while on the actor-0 last resort, else every
+  30 frames. Ties keep the current actor.
+- To use only `c101`, write `c101,` (exactly `c101` is read as the old default).
+- Each change is logged: `first person: following actor N 'name' (how) on map X`;
+  the overlay shows the same text next to the model names.
+- Battle is unchanged (it follows the roster, not names).
+
+## Load lock: profiler and lock release (branch `loadlock`)
+
+Research: parse-time.md (sections 1.6, 4 and 5). Code: native "Load lock build" block at the end of `ffxvr_native.cpp` (before `DllMain`), the `XrHost` wait callbacks around `xrWaitFrame` (`ffxvr_xr.cpp`), managed `load_prof.cs` plus hooks in `load_diag.cs` / `hd_cache.cs`.
+
+- **The question.** The `load:` lines' "parse" (46-93 ms per HD texture cluster on a battle entry) is not CPU work: the texture section `0x465AB0` takes Phyre's global render-interface lock (`0xC94EE4`, a recursive lock: waiters +0x0C, owner tid +0x10, count +0x14) before its mip reads and keeps it through `CreateTexture2D` (`0x58FC20`). The render thread's list interpreter `0x615550` holds the same lock for every whole command list, the Present command included, so in VR also while our code sleeps in `xrWaitFrame`. The lock guards the immediate context: every function that reads `[0xC94F70]` takes it.
+- **`diag_load_prof`** (ini; 2 in this test build; the probes hook at launch, the sampler follows the setting at once; needs `diag_load=1`):
+  - A watcher thread samples the loading thread every ~1 ms. It runs while a battle load phase is open (the entry: from MsBattleExe's wait to the entry's `load:` line; the way back: from the teardown to the way-back line; at most 60 s) or while a `loadPCluster` call is in progress. With `diag_load_prof=2` it also samples the render thread on the ticks where the loader waits for the lock.
+  - Each sample is SuspendThread, GetThreadContext, one ReadProcessMemory of the stack (8 KB, 4 KB for the render thread), plain reads of the lock words (and the render thread's XR stage), then ResumeThread. Nothing else runs in between: no heap, no CRT, no log, no lock, no module or VirtualQuery call. Classification, the module table, formatting and the write happen with nothing suspended, into fixed buffers.
+  - The return addresses come from the EBP chain inside the stack copy, in chain order. Scanned FFX return addresses (values after a call instruction) go first only within 0x40 bytes of ESP, where a frameless leaf's caller sits; without a chain, the scan in slot order is used. This list gives the innermost FFX function in a range table. That decides the bucket: LOCK_WAIT (with the owner read while suspended), LOCK_REL, MGR_MUTEX, ALLOC_WAIT, ALLOC_FILL, TEX_CREATE (by leaf: d3d11, driver, ntdll), SRV, READ, OPEN, CLOSE, FIXUP, PLAT_CPU, MANAGED (JIT code), POST, IDLE, OTHER. Every tick also records the lock's owner (render, loader, main, other, free).
+  - The two probes (managed, last in the hook queue) time the texture section and its creates inside each window. "Before the first mip read" is the lock wait plus the 2x temporary buffer, and the misses are split by file size.
+  - One `prof:` block follows each `load:` line: the header, buckets in and out of window, the render thread while the loader waited, the owner per tick, the lock release's counts, the probes, the top exclusive addresses (FhUtil, mapped with `re/out/functions.tsv`) and the field loads in between.
+  - The `load:` line's "GPU create" (0x441620) segment is now called "post fixups": the textures are created inside parse.
+- **`load_lock_release`** (ini and overlay, live, default 0, **never saved**: every launch starts at 0):
+  - 1: the render thread gives the lock up around our `xrWaitFrame`. There is no other mode (see "Review fixes").
+  - It acts only while a battle load phase is open, only when the render thread owns the lock exactly once (owner == its tid, count == 1), and only when someone waits for it or a loadPCluster is in progress.
+  - The game's own release (`0x4319D0`) and acquire (`0x431840`) are called, so the waiter count and the event stay consistent, and the lock is taken back before the game runs again: the game sees exactly owner = us, count = 1. If a re-acquire ever finds anything else, the release turns itself off for the session.
+- **Why mode 1 is safe (and where it is not proven).**
+  - Across the wait the render thread relies on its command list (ring slot memory it owns until the list ends), the interpreter state on its stack, the renderer singleton's device / context / swapchain pointers, the immediate context's bound state, and the objects the rest of the list draws with.
+  - During `xrWaitFrame` the render thread runs no Phyre code and makes no D3D call. The device is created without SINGLETHREADED (D3D11CreateDeviceAndSwapChain at 0x595940 passes Flags 0), so it is free-threaded.
+  - The loader's locked section only creates objects through the device (CreateTexture2D, the SRV, CreateBuffer) and writes them into the PTexture it is loading. No list references those until the main thread registers them. Frees happen on the main thread after a full flush, and that flush waits for this list.
+  - Deadlock: no lock holder ever waits for the render thread (vanilla would deadlock at the next list start otherwise), and we hold no lock of ours across the wait.
+  - **Not proven:** about 28 lock-protected functions use the immediate context (Map / Update paths). If one runs on the main thread inside our window, its writes land in the middle of the current list instead of between lists. That is D3D-legal (we do not touch the context then), but the rest of this list could see next-frame data: at worst a one-frame visual glitch. The block's "owner per tick: main" and the release line's "holder main" show whether it happens.
+- **ABI 17:** + `ffxvr_prof_set`, `ffxvr_prof_mark`, `ffxvr_prof_phase`, `ffxvr_prof_report`, `ffxvr_lock_release_set`, `ffxvr_lock_release_status`.
+
+### Review fixes (load lock)
+
+- **LL-1, no release around the game's Present.** The draft's mode 2 (a call-site wrapper at 0x614D89) is deleted.
+  - Over the whole Present call, the DXGI Present, Fahrenheit's ImGui and our `ffxvr_begin_frame` all use the immediate context.
+  - The main thread's lock holders (Map / Unmap / UpdateSubresource paths such as 0x562E00, 0x564CB0, 0x59D8F0) would then share it unserialised: a crash or a device removal.
+  - The ini takes 0 or 1 only, and the native side treats anything else as 0.
+- **LL-2, a test toggle, not a setting.** `load_lock_release` is always written as 0 and forced to 0 at the launch read; a hand edit still applies live. The overlay says "not saved".
+- **LL-3, stack order.** The profiler takes the FFX return addresses in stack-slot order, innermost first. A frameless leaf's caller at [esp] then decides the stage. Example: the pool's 0xCD fill, `0x6FB910` → memset, is ALLOC_FILL, not PLAT_CPU. The top-exclusive table uses the same innermost address.
+- **LL-4.** The re-acquire runs under the XR stage name "lock re-acquire". A hang there is named as ours by the xr watchdog, not blamed on `xrWaitFrame`.
+- **LL-6, mid-list main-thread work made visible.** Every tick with our window open records who holds the lock. The prof block prints "inside our release windows … MAIN n". Main > 0 means main-thread lock work ran mid-list, which risks the one-frame glitch.
+- **LL-7.** If the window stays open for more than 1 s (the re-acquire is stuck), the watcher samples the holder thread once and logs its tid, owner class and innermost FFX return addresses.
+- **LL-8.** The way-back phase also ends when no way-back line will come: a battle that ended before live, or the early return in `ld_log_out`. The native phase timeout is 60 s, which matches the way back's own.
+- **LL-9.** If the release did not clear the owner, the lock is re-taken and the release disabled. After a re-acquire with a count above 1, the extra holds are released and the release disabled.
+- **Nits:**
+  - LL-10: Fahrenheit's managed `h_fopen` counts as OPEN.
+  - LL-11: "dxgi present" needs a dxgi return address that follows a call instruction.
+  - LL-12: the 1 ms timer runs only while sampling.
+  - LL-14: the render-thread suspends are reported separately, with their total, because they lengthen the measured wait.
+  - LL-15: the re-acquires are counted in bins (≤ 1, 1-5, 5-11, > 11 ms), so late VR frames are counted, not just the worst one.
+  - LL-16: dropped blocks are reported in the next block.
+  - LL-17: the release's state text is snapshotted on the render thread.
+- **Re-review (LL-R-1, LL-R-2).**
+  - The frame chain is the default order again. A scanned return address goes in front only within 0x40 bytes of ESP, or when the chain found nothing. Stale scan hits further up the stack no longer outrank real frames.
+  - The watcher thread also starts when `load_lock_release=1`, with `diag_load_prof=0` too. It then samples nothing, but the stuck re-acquire check (LL-7) always runs while the release is on.

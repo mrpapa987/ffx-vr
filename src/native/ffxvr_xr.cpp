@@ -106,6 +106,9 @@ const uint32_t k_hold_max = 30, k_hard_fail_max = 300;   // frames a held layer 
 int g_sc_stuck = -1;                                      // B5-2: a swapchain whose acquire / wait failed hard k_hard_fail_max times in a row
 bool g_stuck_stop = false;                                // R8-3: set by the B5-2 stop (xr_stop resets g_sc_stuck, not this); xr_take_stuck clears it
 bool g_frame_wait_failed = false;                         // R8-2: a swapchain wait failed in this frame's submits: later first waits use the short timeout
+// Battle transition (xr_pin): the projection layer's poses and field of view while pinned; the hold cap lifted.
+bool g_pin = false; XrPosef g_pin_pose[2] = {}; XrFovf g_pin_fov[2] = {};
+bool g_hold_uncapped = false;
 uint32_t g_wait_timeouts = 0;
 int g_sim_timeouts = 0;                          // Debug: the next N swapchain waits report a timeout (xr_debug)
 // R41: position tracking lost (cameras covered): hold the last valid head centre, eyes at +-IPD/2 along each view's
@@ -352,6 +355,7 @@ void xr_stop() {
     if (g_instance != XR_NULL_HANDLE && p_xrDestroyInstance) { p_xrDestroyInstance(g_instance); g_instance = XR_NULL_HANDLE; }
     g_state = XR_SESSION_STATE_UNKNOWN; g_render_views_valid = false; g_running = false;
     g_held = HeldBase{}; g_have_last_pos = false; g_pos_lost = false; g_last_ipd = kIpdDefault; g_sim_timeouts = 0; g_sc_stuck = -1;
+    g_pin = false; g_hold_uncapped = false;   // battle transition: nothing pinned across a stop
     set_status("off");
     stage("stopped");
     if (g_watchdog) {
@@ -507,7 +511,7 @@ void poll_events() {
             }
             else if (g_state == XR_SESSION_STATE_STOPPING) {
                 if (g_frame_open) { XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO }; end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE; p_xrEndFrame(g_session, &end); g_frame_open = false; }
-                p_xrEndSession(g_session); g_running = false; g_render_views_valid = false; g_held = HeldBase{}; set_status("stopped by the runtime");   // no held layer across a stop
+                p_xrEndSession(g_session); g_running = false; g_render_views_valid = false; g_held = HeldBase{}; g_pin = false; set_status("stopped by the runtime");   // no held layer (or pin) across a stop
             }
             else if (g_state == XR_SESSION_STATE_LOSS_PENDING || g_state == XR_SESSION_STATE_EXITING) {
                 xr_stop(); return;
@@ -521,7 +525,7 @@ void poll_events() {
             // the runtime recentred its LOCAL space (Quest: hold the Meta button): our reference must follow
             auto* rc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
             if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
-                g_space_changed = true; g_held = HeldBase{}; g_have_last_pos = false;   // held layers / a held head position belong to the old space
+                g_space_changed = true; g_held = HeldBase{}; g_have_last_pos = false; g_pin = false;   // held layers / a held head position / pinned poses belong to the old space
                 g_h.diag("xr: LOCAL space recentred by the runtime");
             }
         }
@@ -597,6 +601,8 @@ XrVector3f right_axis(const XrQuaternionf& q) {
 
 } // namespace
 
+const char* xr_stage() { return const_cast<const char*>(g_stage); }
+
 void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, const XrUiPanel* ui, XrFrameOut* next) {
     if (next) next->have_views = false;
     if (!xr_active()) return;
@@ -634,9 +640,12 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             const int ids[2] = { 0, 1 }; ID3D11Texture2D* const srcs[2] = { eye1, eye2 ? eye2 : eye1 };
             ok = submit_set(ids, srcs, 2);   // both eyes or neither
             for (int i = 0; i < 2 && ok; ++i) {
-                pv[i].pose = g_render_views[i].pose;
-                pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
-                pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
+                if (g_pin) { pv[i].pose = g_pin_pose[i]; pv[i].fov = g_pin_fov[i]; }   // battle transition: rendered from the frozen pose
+                else {
+                    pv[i].pose = g_render_views[i].pose;
+                    pv[i].fov.angleLeft = atanf(used[i].l); pv[i].fov.angleRight = atanf(used[i].r);
+                    pv[i].fov.angleUp   = atanf(used[i].u); pv[i].fov.angleDown  = atanf(used[i].d);
+                }
                 pv[i].subImage.swapchain = g_eye[i].sc;
                 pv[i].subImage.imageRect.offset = { 0, 0 };
                 pv[i].subImage.imageRect.extent = { static_cast<int32_t>(g_eye[i].w), static_cast<int32_t>(g_eye[i].h) };
@@ -655,11 +664,14 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             g_held.have = false;
             g_h.diag("xr: mode change (%s): the held frame is dropped%s", use_screen ? "3D -> screen" : "screen -> 3D", g_held_episode ? " during a hold" : "");   // HP-7
         }
-        else if (g_should_render && g_held.have && g_held.age < k_hold_max) {   // R8-4: the same mode only (mono/stereo screen may differ; a different mode was dropped above)
+        else if (g_should_render && g_held.have && (g_held.age < k_hold_max || g_hold_uncapped)) {   // R8-4: the same mode only (mono/stereo screen may differ; a different mode was dropped above); no cap inside a battle transition window
             bool ready = g_held.use_screen ? (g_eye[2].ever_released && (!g_held.stereo || g_eye[5].ever_released)) : (g_eye[0].ever_released && g_eye[1].ever_released);
             if (ready) {
                 held = true; g_held.age++; g_held_frames++;
-                if (g_held_episode++ == 0) g_h.diag("xr: %s: holding the last frame (at most %u frames)", eye1 == nullptr ? "no eye image this frame" : !g_render_views_valid ? "no located views" : "a swapchain was not ready (wait timeout or error)", k_hold_max);
+                if (g_held_episode++ == 0) {
+                    if (g_hold_uncapped) g_h.diag("xr: %s: holding the last frame (battle transition: no frame cap)", eye1 == nullptr ? "no eye image this frame" : !g_render_views_valid ? "no located views" : "a swapchain was not ready (wait timeout or error)");
+                    else g_h.diag("xr: %s: holding the last frame (at most %u frames)", eye1 == nullptr ? "no eye image this frame" : !g_render_views_valid ? "no located views" : "a swapchain was not ready (wait timeout or error)", k_hold_max);
+                }
                 use_screen = g_held.use_screen; stereo_screen = g_held.stereo;
                 if (use_screen) { quad = g_held.quad; quad_r = g_held.quad_r; } else { pv[0] = g_held.pv[0]; pv[1] = g_held.pv[1]; }   // the poses those images were rendered with
             }
@@ -737,9 +749,12 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
     stage("xrWaitFrame");
     XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
     XrFrameState fs = { XR_TYPE_FRAME_STATE };
+    const int lk = g_h.wait_begin ? g_h.wait_begin() : 0;   // load lock build (load_lock_release, default off): may give up the game's lock for the wait
     const double t_wait0 = qpc_ms();
     XrResult r = p_xrWaitFrame(g_session, &fwi, &fs);
-    g_t_wait_ms = qpc_ms() - t_wait0;
+    g_t_wait_ms = qpc_ms() - t_wait0;   // the wait alone; taking the lock back is timed by the host (the prof block)
+    if (lk) stage("lock re-acquire");      // LL-4: a hang here is ours (the game's lock), not the runtime's xrWaitFrame
+    if (g_h.wait_end) g_h.wait_end(lk);   // every path: the lock is ours again before anything else runs
     if (XR_FAILED(r)) { fail("xrWaitFrame", r); stage("game"); return; }
     stage("xrBeginFrame");
     XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
@@ -812,3 +827,24 @@ void xr_haptic(int hand, float amplitude, float seconds) {
 void xr_timing(double* wait_ms, double* end_ms) { if (wait_ms) *wait_ms = g_t_wait_ms; if (end_ms) *end_ms = g_t_end_ms; }
 
 bool xr_take_space_change() { const bool v = g_space_changed; g_space_changed = false; return v; }
+
+bool xr_pin(bool on, const XrFovTan used[2]) {
+    if (!on) {
+        if (g_pin && g_h.diag) g_h.diag("xr: transition pin released");
+        g_pin = false; return true;
+    }
+    if (g_pin) return true;
+    if (!xr_active() || !g_running || !g_render_views_valid || used == nullptr) return false;
+    for (int i = 0; i < 2; ++i) {
+        g_pin_pose[i] = g_render_views[i].pose;   // what the frame about to be submitted was rendered with (located at the last wait)
+        g_pin_fov[i].angleLeft = atanf(used[i].l); g_pin_fov[i].angleRight = atanf(used[i].r);
+        g_pin_fov[i].angleUp   = atanf(used[i].u); g_pin_fov[i].angleDown  = atanf(used[i].d);
+    }
+    g_pin = true;
+    if (g_h.diag) g_h.diag("xr: transition pin taken: left eye at (%.2f %.2f %.2f), fov L %.0f R %.0f U %.0f D %.0f deg",
+                           g_pin_pose[0].position.x, g_pin_pose[0].position.y, g_pin_pose[0].position.z,
+                           g_pin_fov[0].angleLeft * 57.2958f, g_pin_fov[0].angleRight * 57.2958f, g_pin_fov[0].angleUp * 57.2958f, g_pin_fov[0].angleDown * 57.2958f);
+    return true;
+}
+bool xr_pinned() { return g_pin; }
+void xr_hold_uncapped(bool on) { g_hold_uncapped = on; }

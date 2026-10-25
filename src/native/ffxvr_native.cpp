@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdarg>
 #include <cstdio>
@@ -49,6 +50,15 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 #pragma comment(lib, "d3d11.lib")
 
 static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
+static bool diag_try(const char* text);   // ... the same append, false when the log is busy on the render thread (a bt: batch keeps it)
+static void bt_flush();                   // battle transition log batch (defined with bt_tick)
+static void bt_add(const char* fmt, ...);
+static void bt_end(const char* why);
+static void bt_exit_flush();
+static int  lr_wait_begin();            // load lock: the Phyre lock release around xrWaitFrame (XrHost; defined with the load profiler, at the end)
+static void lr_wait_end(int y);
+static void pf_render_frame();          // load profiler: begin_frame's write of the prof block while there is no watcher thread
+static void pf_shutdown();
 static void g_plain_srvs_forget(ID3D11Texture2D* t);   // SRV cache, defined below
 static uint32_t g_plain_srvs_count();
 
@@ -462,6 +472,14 @@ static ID3D11Texture2D* ps_tex(UINT slot) {
     ID3D11Texture2D* t = texture_of(v);
     v->Release();
     return t;
+}
+/// The first of PS slots 0-3 really bound to a view of `want`, or -1: one context call for the four (battle transition).
+static int ps_find_tex(ID3D11Texture2D* want) {
+    if (g_ctx == nullptr || want == nullptr) return -1;
+    ID3D11ShaderResourceView* v[4] = { nullptr, nullptr, nullptr, nullptr }; g_ctx->PSGetShaderResources(0, 4, v);
+    int hit = -1;
+    for (int i = 0; i < 4; ++i) { if (v[i] == nullptr) continue; if (hit < 0 && texture_of(v[i]) == want) hit = i; v[i]->Release(); }
+    return hit;
 }
 uint32_t g_twin_count = 0;
 // backbuffer diagnostics
@@ -932,6 +950,47 @@ ID3D11Texture2D* g_c3_stage = nullptr; UINT g_c3_stage_aw = 0, g_c3_stage_ah = 0
 const uint32_t k_c3_stale = 600;
 ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
 bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
+// Battle transition, the "glass break" (research battle-transition.md; bt_tick, with xr_tick, has the phase machine).
+// The game's BrokenScreenEffect copies the previous frame into BrokenScreen_capturedFrame at the top of a renderer frame,
+// then every frame draws a black / fade quad (a depth clear, a draw, a resolve on the scene target: the UI pass's own
+// signature) and two passes of CPU-projected shards sampling the capture. Left alone, the fade pass opens our UI pass: the
+// eye images are copied before the glass, the fade lands on the UI panel (the "small black rectangle"), and the field's
+// map free flips the view to the virtual screen. Mode (ini battle_transition): 0 the old behaviour (the phases still run
+// for the bt: lines), 1 head-locked (no UI split, the screen mode held), 2 frozen world (also the pose freeze, the pinned
+// submit poses and the uncapped hold over the load black).
+enum BtPhase { BT_IDLE = 0, BT_ARMED = 1, BT_SHATTER = 2, BT_AFTER = 3 };
+int  g_bt_mode = 2; bool g_bt_diag = true;      // ffxvr_bt_set (managed, every frame)
+int  g_bt_phase = BT_IDLE;
+bool g_bt_encounter = false;                    // the window came from the battle trigger / the transition handle (pin, freeze and hold allowed)
+bool g_bt_want_freeze = false, g_bt_frozen = false;   // decided by bt_tick / in effect (the xr pin taken); the edges are applied around xr_frame
+bool g_bt_hold = false;                         // AFTER in mode 2: the eye image is withheld, so xr_frame re-sends the pinned last frame
+bool g_bt_screen_pin = false, g_bt_s3_pin = false;   // the screen modes at the window's start, held through it
+bool g_bt_h_seen = false, g_bt_recentre = false;
+ID3D11Texture2D* g_bt_cap_tex = nullptr;        // BrokenScreen_capturedFrame as seen at its capture draw (a key only, never dereferenced)
+// The capture candidate, tracked even while idle (BT-2: a window can open at the capture frame's own Present): the first
+// overlay-phase draw into one target that is not the backbuffer, without depth, in frame g_bt_cap_frame; pointer compares and
+// the bind-time size cache only. g_bt_caps_frame counts every such draw of that frame (2+ flags a false candidate).
+ID3D11Texture2D* g_bt_cap_cand = nullptr; uint32_t g_bt_cap_frame = 0xFFFFFFFFu, g_bt_caps_frame = 0; UINT g_bt_cap_w = 0, g_bt_cap_h = 0, g_bt_cap_samples = 0;
+uint32_t g_bt_shards_frame = 0, g_bt_late_frame = 0;   // ffxvr_on_draw, this frame: draws sampling the capture, depth draws into the scene after UI_DONE
+uint32_t g_bt_m_rule = 0, g_bt_m_slot = 0, g_bt_m_cam = 0, g_bt_m_nodsv = 0;
+uint32_t g_bt_probes_frame = 0;                 // BT-R-2: non-rule probes this frame (scene-target draws only, at most 64)
+// Session 1 fix: the capture is taken ONCE per window (the first candidate: in session 1 a later 4096x4096 overlay-phase
+// target, a shadow atlas, replaced it and a battle draw sampling that matched the shard rule every frame, so the shatter never
+// ended) and dropped when the shards end (g_bt_cap_done). Its size at adoption is kept to tell a reused address apart.
+bool g_bt_cap_done = false; UINT g_bt_capt_w = 0, g_bt_capt_h = 0, g_bt_capt_s = 0;
+// BT-S-2: capturedFrame's size from the singleton (+0x6C / +0x70: what 0x6D5050 creates it with), read each bt_tick; 0 = not
+// readable (then the first candidate is adopted, as before, and that is logged). Only a candidate of that size is adopted.
+UINT g_bt_capsz_w = 0, g_bt_capsz_h = 0;
+static inline bool bt_cap_size_ok(UINT w, UINT h) { return g_bt_capsz_w == 0 || (w == g_bt_capsz_w && h == g_bt_capsz_h); }
+// Once per window: the details of a capture-sampling draw seen after the real shards (fewer than 8 in a frame that follows
+// a frame of 8+), so the rule can be tightened. Filled in ffxvr_on_draw, logged by bt_tick.
+bool g_bt_real_seen = false, g_bt_detail_want = false, g_bt_detail_done = false; char g_bt_detail[480] = "";
+// A user view action inside a window ends it at once (bt_tick): Home / the headset's recentre, a turn key, a view reset, the
+// managed side's flag (view hotkeys, gestures, any overlay widget in use), a controller grip / stick click or stick turn
+// while frozen. The player is never locked out of the views.
+const char* g_bt_user_why = nullptr;
+static inline void bt_user(const char* what) { if (g_bt_phase != BT_IDLE && g_bt_user_why == nullptr) g_bt_user_why = what; }   // BT-6, per window: capture-sampling draws by case (the shard rule; slot 1-3; with a camera image; no depth)
+static inline bool bt_no_split() { return g_bt_mode >= 1 && g_bt_phase != BT_IDLE; }   // no UI pass, the screen mode held
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
 
 static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
@@ -3913,7 +3972,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 14;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build)
+constexpr int FFXVR_ABI = 17;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -4525,6 +4584,7 @@ static void perf_tick() {
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
     diag7_frame();                  // build 7: Present time for the stall watchdog, its "ended" line, rumble changes
+    pf_render_frame();              // load lock build: a prof block waiting for the log (only before the profiler's watcher exists)
     {   // the frame time every filter uses (stick turn, follow pans, auto depth): measured here, whatever the overlay does
         static LARGE_INTEGER s_dt_prev = {};
         if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
@@ -4762,6 +4822,34 @@ static void ui_census_geometry() {
     if (vs) vs->Release(); if (ps) ps->Release(); if (bs) bs->Release(); if (vb) vb->Release(); if (ib) ib->Release();
 }
 
+/// Battle transition, once per window: what a capture-sampling draw after the real shards is (render thread, inside
+/// ffxvr_on_draw: every object comes from the context with a reference, released here). The texture's size is compared with
+/// the capture's size at adoption: a mismatch means the address now names another resource (a reused address).
+static void bt_detail_capture(int slot, bool rule) {
+    g_bt_detail_done = true; g_bt_detail_want = false;
+    if (g_ctx == nullptr || slot < 0 || slot > 3) return;
+    ID3D11ShaderResourceView* v = nullptr; g_ctx->PSGetShaderResources(static_cast<UINT>(slot), 1, &v);
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {}; D3D11_TEXTURE2D_DESC td = {}; bool have_td = false;
+    if (v != nullptr) {
+        v->GetDesc(&sd);
+        ID3D11Resource* res = nullptr; v->GetResource(&res);
+        if (res != nullptr) {
+            ID3D11Texture2D* t = nullptr;
+            if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&t))) && t != nullptr) { t->GetDesc(&td); have_td = true; t->Release(); }
+            res->Release();
+        }
+        v->Release();
+    }
+    D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED; g_ctx->IAGetPrimitiveTopology(&topo);
+    const bool same_size = have_td && td.Width == g_bt_capt_w && td.Height == g_bt_capt_h && td.SampleDesc.Count == g_bt_capt_s;
+    snprintf(g_bt_detail, sizeof(g_bt_detail),
+             "slot %d (%s); texture %p %ux%u fmt %u mips %u samples %u, view fmt %u dim %u -> %s the capture's %ux%u x%u at adoption; RT0 %p %ux%u x%u%s, depth %s, camera image %s; %s n=%u topology %d",
+             slot, rule ? "the shard rule" : "a probe", static_cast<void*>(g_bt_cap_tex), have_td ? td.Width : 0u, have_td ? td.Height : 0u, have_td ? static_cast<unsigned>(td.Format) : 0u,
+             have_td ? td.MipLevels : 0u, have_td ? td.SampleDesc.Count : 0u, static_cast<unsigned>(sd.Format), static_cast<unsigned>(sd.ViewDimension),
+             !have_td ? "no texture behind the view, unlike" : same_size ? "the same size as" : "NOT the size of (a reused address?)", g_bt_capt_w, g_bt_capt_h, g_bt_capt_s,
+             static_cast<void*>(g_cur_rtv0_tex), g_cur_rtv0_w, g_cur_rtv0_h, g_cur_rtv0_samples, g_cur_rtv0_tex == g_scene_live_tex ? " (the scene target)" : "",
+             g_cur_dsv != nullptr ? "bound" : "none", g_eye2_cur != nullptr ? "yes" : "no", g_draw_kind == 1 ? "DrawIndexed" : g_draw_kind == 2 ? "Draw" : "draw", g_draw_n, static_cast<int>(topo));
+}
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
@@ -4794,7 +4882,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             }
         }
     }
-    if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && g_eye2_cur == nullptr
+    if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && !bt_no_split() && g_eye2_cur == nullptr
         && g_cur_rtv_n > 0 && g_ctx && g_cur_rtv0_tex == g_scene_live_tex) {
         ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
         bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
@@ -4954,6 +5042,41 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     }
     g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_backbuffer);
     if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
+    // Battle transition, render-thread truth (battle-transition.md 4.2). The capture is the overlay phase's draw into one target
+    // that is not the backbuffer, without depth (BrokenScreen_capturedFrame: 0x6D4E20 runs first in the renderer frame, before
+    // its first clear): tracked even while idle (pointer compares and the bind-time cache only), the first match per frame.
+    if (g_overlay_phase) {
+        if (g_cur_rtv_n == 1 && g_cur_dsv == nullptr && g_cur_rtv0_tex != nullptr && g_cur_rtv0_tex != g_backbuffer) {
+            if (g_bt_cap_frame != g_frames) {
+                g_bt_cap_frame = g_frames; g_bt_caps_frame = 0; g_bt_cap_cand = g_cur_rtv0_tex;
+                g_bt_cap_w = g_cur_rtv0_w; g_bt_cap_h = g_cur_rtv0_h; g_bt_cap_samples = g_cur_rtv0_samples;
+                if (g_bt_phase != BT_IDLE && g_bt_cap_tex == nullptr && !g_bt_cap_done && bt_cap_size_ok(g_cur_rtv0_w, g_cur_rtv0_h)) {   // the first capture of the window only, of capturedFrame's size (BT-S-2); this frame's shards sample it
+                    g_bt_cap_tex = g_cur_rtv0_tex; g_bt_capt_w = g_cur_rtv0_w; g_bt_capt_h = g_cur_rtv0_h; g_bt_capt_s = g_cur_rtv0_samples;
+                }
+            }
+            g_bt_caps_frame++;
+        }
+    }
+    else if (g_bt_phase != BT_IDLE && g_ctx) {
+        // A shard samples the capture. The rule (slot 0, scene depth bound, no camera image: 0x6D5680 binds colorBuffer +
+        // depthBuffer and the shards are CPU-projected) is checked on every qualifying draw; any other draw is probed only in
+        // SHATTER until the frame's first match, only into the scene target (where 0x6D5680 draws) and at most 64 a frame
+        // (BT-R-2), so a near miss is counted by case (BT-6) and still counts as shard activity.
+        if (g_bt_cap_tex != nullptr && g_cur_rtv_n > 0) {
+            const bool rule = g_eye2_cur == nullptr && g_cur_dsv != nullptr;
+            const bool probe = !rule && g_bt_shards_frame == 0 && g_bt_phase == BT_SHATTER && g_cur_rtv0_tex == g_scene_live_tex && g_bt_probes_frame < 64;
+            if (probe) g_bt_probes_frame++;
+            if (rule || probe) {
+                const int sl = ps_find_tex(g_bt_cap_tex);
+                if (sl >= 0) {
+                    g_bt_shards_frame++;
+                    if (sl == 0 && rule) g_bt_m_rule++; else if (sl > 0) g_bt_m_slot++; else if (g_eye2_cur != nullptr) g_bt_m_cam++; else g_bt_m_nodsv++;
+                    if (g_bt_detail_want && !g_bt_detail_done) bt_detail_capture(sl, rule);
+                }
+            }
+        }
+        if (g_ui_state == UI_DONE && g_cur_dsv != nullptr && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_scene_live_tex) g_bt_late_frame++;   // drawn after the eye images were taken (mode 0's lost glass)
+    }
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
     if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_backbuffer) {
         g_bb_draws_seen++;
@@ -5122,6 +5245,22 @@ static void diag(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
     fputc('\n', f);
     fclose(f);
+}
+/// diag's append for a whole batch of lines (BT-4): returns false instead of losing the text when the log is open
+/// elsewhere and this is the render thread (which never waits), so the caller keeps it and tries again.
+static bool diag_try(const char* text) {
+    wchar_t path[MAX_PATH];
+    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) {
+        f = nullptr;
+        if (GetCurrentThreadId() == g_render_tid) return false;
+        for (int k = 0; k < 3 && f == nullptr; ++k) { Sleep(1); if (_wfopen_s(&f, path, L"a") != 0) f = nullptr; }
+        if (f == nullptr) return false;
+    }
+    fputs(text, f); fputc('\n', f);
+    fclose(f);
+    return true;
 }
 
 static ID3D11Texture2D* texture_of(ID3D11View* view) {
@@ -5603,7 +5742,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
         else if (depth && bound == g_scene_live_tex) {
             g_ui_depth_clears_frame++;
-            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame
+            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && !bt_no_split()) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame; a battle transition window has no UI split (its fade pass has the UI pass's signature)
             else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
         }
     }
@@ -6468,6 +6607,10 @@ static void leave_xr_state() {
     g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
     g_lowres = false;   // no stale low-resolution line when the headset comes back on
     g_hap[0] = g_hap[1] = HapHand{};   // the session is gone: nothing to stop
+    const bool rt = g_render_tid != 0 && GetCurrentThreadId() == g_render_tid;   // BT-R-4: the bt state is the render thread's
+    if (rt) { if (g_bt_phase != BT_IDLE) bt_end("the headset is off"); else bt_flush(); }   // its summary, flushed (BT-4)
+    else if (g_bt_phase != BT_IDLE) diag("bt: frame %u: a window was still open at exit (phase %d: 1 armed, 2 shatter, 3 after)", g_frames, g_bt_phase);
+    g_bt_phase = BT_IDLE; g_bt_want_freeze = g_bt_frozen = g_bt_hold = false; g_bt_recentre = false; g_bt_cap_tex = nullptr;   // xr_stop dropped the pin
     diag("xr: headset off, VR-only state reset");
 }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
@@ -6476,14 +6619,14 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_want) return 1;
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
-    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass };
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
     if (g_xr_want) { if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true; return 1; }   // g_xr_fails clears in xr_tick after 5 s alive
     g_xr_fails++; g_xr_retry_at = now + (g_xr_fails < 3 ? 2000 : 5000);
     if (g_xr_fails == 2 || g_xr_fails % 60 == 0) diag("xr: start failed %u times (last: %s); retrying every %d s without logging", g_xr_fails, xr_status(), g_xr_fails < 3 ? 2 : 5);
     return 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; }
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; bt_user("Home (recentre)"); }   // in a battle transition window a recentre ends the window (bt_tick)
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
@@ -6491,7 +6634,7 @@ extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, in
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { turn_by(deg); }
+extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { bt_user("a turn key"); turn_by(deg); }
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;   // a 0 size would hit the CRT's invalid-parameter handler (process abort)
@@ -6508,7 +6651,7 @@ extern "C" __declspec(dllexport) void ffxvr_msaa_status(uint32_t* seen, uint32_t
 extern "C" __declspec(dllexport) void ffxvr_move_set(int remap, float sign) { g_move_remap = remap != 0; g_move_sign = sign < 0 ? -1.f : 1.f; }
 extern "C" __declspec(dllexport) void ffxvr_vrpad_set(int enabled) { g_vrpad_enabled = enabled != 0; }
 extern "C" __declspec(dllexport) void ffxvr_gesture_set(int enabled, float tilt_gain) { g_gest_enabled = enabled != 0; g_gest_tilt_gain = tilt_gain; }
-extern "C" __declspec(dllexport) void ffxvr_gesture_reset() { view_reset(); }
+extern "C" __declspec(dllexport) void ffxvr_gesture_reset() { bt_user("a view reset"); view_reset(); }
 extern "C" __declspec(dllexport) void ffxvr_tp_set(float dist, float h, float pitch, float follow_rate) { g_tp_dist = dist; g_tp_h = h; g_tp_pitch = pitch; g_tp_follow_rate = follow_rate; }
 /// The anchor smoothing time constants in ms (R4): field (diorama / third person) and battle centre; 0 = snap.
 extern "C" __declspec(dllexport) void ffxvr_view_smooth_set(float field_ms, float battle_ms) {
@@ -6638,6 +6781,8 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() {
+    bt_exit_flush();   // BT-4 / BT-R-4: the kept bt: lines first, and the buffer is taken for good (the render thread may still present)
+    pf_shutdown();     // load lock build: the profiler's watcher stops (its last block written); the lock release needs no teardown
     if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
     InterlockedExchange(&g_va_on, 0);   // the reservation log: nothing recorded during exit (the patch stays: the DLL is never unloaded)
     if (g_xr_want) { xr_stop(); leave_xr_state(); }
@@ -6770,11 +6915,316 @@ static void haptics_tick() {
     }
     g_hap_b[0] = b[0]; g_hap_b[1] = b[1]; g_hap_src = src;
 }
+// ---------------------------------------------------------------------------
+// Battle transition phases (research battle-transition.md 4.2; the globals are with the UI panel's). Polled at the top of
+// xr_tick (render thread, every Present while the headset is on) with ReadProcessMemory reads (wd_read: a bad address fails,
+// it never faults, so it is safe under Fahrenheit's stage-0 debugger). No game-code hook.
+//   IDLE -> ARMED     battle_trigger [0x112A8E2] == 1 at battle_state 0 (seen at the Present before MsBattleExe's stall), or
+//                     the transition handle [0x112C024] != 0: an encounter window. Or the BrokenScreen singleton
+//                     [0xCDEC98]'s capture request (+4) / active (+5) alone: another use (in battle), no pin, no freeze.
+//   ARMED -> SHATTER  the capture draw (also when it was drawn in the frame just finished, before the window opened) or a
+//                     shard draw (ffxvr_on_draw), or +5.
+//   ARMED -> IDLE     no transition: battle_state left 0 with no handle ever seen; trigger, state and handle all 0 for 20
+//                     Presents (BT-1: an encounter cleared by 0x781530, or MsBattleExe's early return); 180 Presents and 3 s.
+//   SHATTER -> AFTER  6 quiet Presents in a row (handle 0, +5 clear, no shard draw: the render thread lags the main thread),
+//                     once a battle is under way (handle seen or state != 0). Not an encounter window: straight to IDLE. The
+//                     20-Present "cleared" rule applies here too while no handle was ever seen.
+//   AFTER -> IDLE     handle 0 and a 3D camera in 2 frames in a row with battle_state a running battle state (1, 2 or
+//                     0x17..0x21; not the load chain) (BT-3); 90 Presents in those states without a camera; back on the field
+//                     (state 0 with a 3D camera, 30 Presents in: aborted).
+//   any -> IDLE       the session gone, the headset off, 30 s. A recentre (Home or the headset's) or a pin the runtime
+//                     dropped only ends the freeze: the window goes on head-locked (no UI split, the mode held).
+// After a window, a new one opens only once every signal has been seen clear (a stuck byte cannot keep the UI split off).
+// Inside a window (mode >= 1): no UI split, the screen mode held, the headset's FOV submitted for frames without a camera.
+// Mode 2 encounter windows that start in 3D also freeze the override's head pose (xr_apply_poses, turn_tick and the grab are
+// skipped) and pin the submit poses (xr_pin), and in AFTER withhold the eye image so the pinned last frame is re-sent, with
+// no frame cap, over the game's load black until the battle is live.
+struct BtRead { int8_t bst; uint8_t trig, bs4, bs5; uint32_t h, bs; };
+static BtRead   g_bt_r = {};
+static uint32_t g_bt_win_n = 0, g_bt_phase_frame = 0, g_bt_win_frame = 0, g_bt_st1 = 0, g_bt_shard_frames = 0;
+static uint32_t g_bt_quiet = 0, g_bt_clear_n = 0, g_bt_live_n = 0;   // BT-2 quiet Presents; BT-1 trigger/state/handle all 0; BT-3 live frames in a row
+static uint32_t g_bt_capf = 0, g_bt_capf2 = 0, g_bt_cap_other = 0;   // ... and frames whose candidate was another target (ignored: one capture a window)
+static ID3D11Texture2D* g_bt_cap_adopted = nullptr; static bool g_bt_other_logged = false, g_bt_detail_logged = false;   // keys only
+static ULONGLONG g_bt_last_real_t = 0;     // BT-S-1: the last Present with 8+ shard draws (the shatter's 5 s cap counts from it)
+static bool g_bt_capsz_logged = false;     // BT-S-2: the size line, once a window
+                       // frames with a capture match / with 2+ matches (a false candidate), this window
+static bool     g_bt_cap_logged = false, g_bt_was_frozen = false, g_bt_census_done = false;
+static ULONGLONG g_bt_t0 = 0, g_bt_phase_t = 0, g_bt_t_ph[4] = {}, g_bt_t_free = 0;   // window start, phase start, ms per phase, first state 8/9
+static int      g_bt_bst_first_shard = -99, g_bt_bst_last_shard = -99, g_bt_bst_shatter_end = -99;
+static LARGE_INTEGER g_bt_prev_qpc = {};
+static double   g_bt_gap = 0, g_bt_gap_max = 0, g_bt_gap_sum = 0;   // Present-to-Present ms: this frame, the window's longest, the sum of those over 50 ms
+static unsigned g_bt_held0 = 0;                                      // xr's held-frame counter at the window start
+static uint32_t g_bt_live_s = 0, g_bt_cam_s = 0, g_bt_dclr_s = 0, g_bt_caps_s = 0, g_bt_shards_s = 0, g_bt_late_s = 0;   // the frame just finished (bt_tick runs before xr_tick's resets)
+static bool     g_bt_line_due = false;
+static bool     g_bt_rearm_block = false;   // after a window: no new one until every signal has been seen clear (a stuck byte cannot keep the UI split off)
+static uint32_t g_bt_lines_win = 0, g_bt_lines_all = 0, g_bt_after_lines = 0, g_bt_dropped = 0;
+static const uint32_t k_bt_lines_win = 900, k_bt_lines_all = 12000;  // per-frame lines: per window, per session (BT-10; AFTER is thinned too)
+static char     g_bt_buf[65536]; static size_t g_bt_len = 0;         // bt: lines, written at phase changes, at a window's end and when 3/4 full (BT-5)
+static bool     g_bt_flush_failed = false;                           // BT-4: the log was busy; the batch is kept and retried
+static char     g_bt_summary[1024] = "none yet";
+static char     g_bt_why[160] = "";
+static const char* const k_bt_names[4] = { "idle", "armed", "shatter", "after" };
+
+// BT-R-4: g_bt_buf / g_bt_len have one user at a time. The render thread does all the bt work; the exit flush
+// (ffxvr_shutdown, main thread) takes the buffer for good, so a render thread still presenting then only drops its lines.
+static volatile LONG g_bt_buf_owner = 0;
+static bool bt_buf_take() { return InterlockedCompareExchange(&g_bt_buf_owner, 1, 0) == 0; }
+static void bt_buf_give() { InterlockedExchange(&g_bt_buf_owner, 0); }
+static void bt_flush_owned() {   // the caller holds the buffer
+    if (g_bt_len == 0) { g_bt_flush_failed = false; return; }
+    if (!diag_try(g_bt_buf)) { g_bt_flush_failed = true; return; }   // BT-4: kept for the next try (render thread: the log was open elsewhere)
+    g_bt_len = 0; g_bt_buf[0] = 0; g_bt_flush_failed = false;
+}
+static void bt_flush() { if (!bt_buf_take()) return; bt_flush_owned(); bt_buf_give(); }
+static void bt_add(const char* fmt, ...) {
+    char line[1024]; va_list a; va_start(a, fmt); int n = vsnprintf(line, sizeof(line), fmt, a); va_end(a);
+    if (n < 0) return;
+    if (n >= static_cast<int>(sizeof(line))) n = static_cast<int>(sizeof(line)) - 1;
+    if (!bt_buf_take()) { g_bt_dropped++; return; }   // the exit flush owns it
+    if (g_bt_len + static_cast<size_t>(n) + 2 > sizeof(g_bt_buf)) bt_flush_owned();
+    if (g_bt_len + static_cast<size_t>(n) + 2 > sizeof(g_bt_buf)) g_bt_dropped++;   // the log stayed busy with the buffer full
+    else {
+        if (g_bt_len) g_bt_buf[g_bt_len++] = '\n';   // diag_try ends the batch with its own newline
+        memcpy(g_bt_buf + g_bt_len, line, static_cast<size_t>(n)); g_bt_len += static_cast<size_t>(n); g_bt_buf[g_bt_len] = 0;
+    }
+    bt_buf_give();
+}
+/// ffxvr_shutdown (any thread): the kept lines, written once; the buffer stays taken so nothing else touches it.
+static void bt_exit_flush() {
+    for (int k = 0; k < 50; ++k) { if (bt_buf_take()) { bt_flush_owned(); return; } Sleep(1); }   // the render thread holds it only for one line
+}
+static void bt_set_phase(int ph, const char* why) {
+    const ULONGLONG now = GetTickCount64();
+    if (g_bt_phase >= 0 && g_bt_phase < 4) g_bt_t_ph[g_bt_phase] += now - g_bt_phase_t;
+    const BtRead& r = g_bt_r;
+    bt_add("bt: frame %u: %s -> %s: %s (%llu ms in %s, +%llu ms in window %u) bst %d trig %u h %08X bs4 %u bs5 %u",
+           g_frames, k_bt_names[g_bt_phase & 3], k_bt_names[ph & 3], why, now - g_bt_phase_t, k_bt_names[g_bt_phase & 3], now - g_bt_t0, g_bt_win_n,
+           static_cast<int>(r.bst), static_cast<unsigned>(r.trig), r.h, static_cast<unsigned>(r.bs4), static_cast<unsigned>(r.bs5));
+    if (g_bt_phase == BT_SHATTER && ph != BT_SHATTER) { g_bt_bst_shatter_end = r.bst; g_bt_cap_tex = nullptr; g_bt_cap_done = true; }   // the shards are over: no more matching against that address
+    g_bt_phase = ph; g_bt_phase_t = now; g_bt_phase_frame = g_frames; g_bt_quiet = 0;
+    if (ph == BT_SHATTER && g_bt_diag && !g_bt_census_done) {   // BT-11.6 / BT-R-3: one frame census (ffxvr_frame.log) of the session's first shatter, only with diag_transition=1
+        g_bt_census_done = true; ffxvr_frame_arm();
+        bt_add("bt: frame %u: the next frame is written to ffxvr_frame.log (the frame census, once a session)", g_frames);
+    }
+    bt_flush();
+}
+static void bt_begin(bool encounter, const char* why) {
+    g_bt_win_n++; g_bt_t0 = GetTickCount64(); g_bt_phase_t = g_bt_t0; g_bt_win_frame = g_frames;
+    for (int i = 0; i < 4; ++i) g_bt_t_ph[i] = 0;
+    g_bt_t_free = 0; g_bt_bst_first_shard = g_bt_bst_last_shard = g_bt_bst_shatter_end = -99; g_bt_shard_frames = 0;
+    g_bt_gap_max = 0; g_bt_gap_sum = 0; g_bt_st1 = 0; g_bt_lines_win = 0; g_bt_after_lines = 0;
+    g_bt_quiet = g_bt_clear_n = g_bt_live_n = 0; g_bt_capf = g_bt_capf2 = 0; g_bt_cap_logged = false; g_bt_was_frozen = false;
+    g_bt_m_rule = g_bt_m_slot = g_bt_m_cam = g_bt_m_nodsv = 0; g_bt_cap_other = 0; g_bt_other_logged = false;
+    g_bt_cap_done = false; g_bt_real_seen = g_bt_detail_want = g_bt_detail_done = g_bt_detail_logged = false; g_bt_detail[0] = 0; g_bt_user_why = nullptr;
+    g_bt_last_real_t = 0; g_bt_capsz_logged = false;
+    unsigned wt = 0; xr_counters(&g_bt_held0, &wt);
+    g_bt_encounter = encounter; g_bt_h_seen = g_bt_r.h != 0; g_bt_recentre = false; g_bt_hold = false;
+    g_bt_cap_tex = (g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h)) ? g_bt_cap_cand : nullptr;   // BT-2: the capture drawn in the frame just finished, before the window opened (BT-S-2: of the right size)
+    if (g_bt_cap_tex) { g_bt_capt_w = g_bt_cap_w; g_bt_capt_h = g_bt_cap_h; g_bt_capt_s = g_bt_cap_samples; }
+    g_bt_cap_adopted = g_bt_cap_tex;
+    g_bt_screen_pin = g_xr_screen_now; g_bt_s3_pin = g_screen3d_now;
+    g_bt_want_freeze = g_bt_mode == 2 && encounter && g_xr_active && !g_xr_screen_now && !g_screen3d_now;
+    bt_add("bt: window %u opens (%s; %s; mode %d = %s%s; the view is %s)", g_bt_win_n, why, encounter ? "encounter" : "another BrokenScreen use",
+           g_bt_mode, g_bt_mode == 2 ? "frozen world" : g_bt_mode == 1 ? "head-locked" : "old behaviour, diagnostics only",
+           (g_bt_mode == 2 && !g_bt_want_freeze) ? (encounter ? ": no freeze, the view is not the tracked 3D view" : ": no freeze outside an encounter") : "",
+           g_xr_screen_now ? "the virtual screen" : g_screen3d_now ? "the stereo screen" : "3D");
+    g_bt_phase = BT_IDLE; bt_set_phase(BT_ARMED, why);
+}
+static void bt_end(const char* why) {
+    const ULONGLONG now = GetTickCount64();
+    if (g_bt_phase >= 0 && g_bt_phase < 4) g_bt_t_ph[g_bt_phase] += now - g_bt_phase_t;
+    unsigned held = 0, wt = 0; xr_counters(&held, &wt);
+    char fr[64] = "not seen";
+    if (g_bt_t_free) snprintf(fr, sizeof(fr), "at +%llu ms", g_bt_t_free - g_bt_t0);
+    char cap[160] = "no capture draw seen";
+    if (g_bt_cap_adopted) snprintf(cap, sizeof(cap), "capture %ux%u x%u (candidate frames %u, %u with 2+ matches, %u with another target, ignored)", g_bt_capt_w, g_bt_capt_h, g_bt_capt_s, g_bt_capf, g_bt_capf2, g_bt_cap_other);
+    else if (g_bt_capf) snprintf(cap, sizeof(cap), "no capture adopted (%u candidate frames)", g_bt_capf);
+    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
+             why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : "", g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
+             g_bt_bst_first_shard, g_bt_bst_last_shard, g_bt_bst_shatter_end, g_bt_t_ph[BT_AFTER], fr, g_frames - g_bt_win_frame, held - g_bt_held0, g_bt_gap_max, cap,
+             g_bt_m_rule, g_bt_m_slot, g_bt_m_cam, g_bt_m_nodsv, g_bt_dropped ? " (some bt: lines were dropped: the log stayed busy)" : "");
+    bt_add("bt: frame %u: %s -> idle: %s", g_frames, k_bt_names[g_bt_phase & 3], why);
+    bt_add("bt: %s; Present gaps over 50 ms add up to %.0f ms", g_bt_summary, g_bt_gap_sum);
+    g_bt_phase = BT_IDLE; g_bt_phase_t = now; g_bt_phase_frame = g_frames;
+    g_bt_want_freeze = false; g_bt_hold = false; g_bt_recentre = false; g_bt_cap_tex = nullptr; g_bt_cap_done = true; g_bt_user_why = nullptr;   // the pin is released after this frame's submit (xr_tick)
+    g_bt_rearm_block = true;
+    bt_flush();
+}
+static bool bt_running_state(int bst) { return bst == 1 || bst == 2 || (bst >= 0x17 && bst <= 0x21); }   // BT-3: in battle (1 <-> 2, 0x7917D0) or its end states; not 0, the load chain 4..0x16 or 0x22
+/// Top of xr_tick: the frame just finished (its counters, before xr_tick resets them) and the game's state now.
+static void bt_tick() {
+    g_bt_line_due = false;
+    if (g_bt_flush_failed && (g_frames % 30) == 0) bt_flush();   // BT-4: a kept batch is retried about twice a second, also between windows
+    g_bt_live_s = g_scene_live_draws; g_bt_cam_s = g_cam3d_uploads_frame; g_bt_dclr_s = g_ui_depth_clears_frame;
+    g_bt_caps_s = (g_bt_cap_frame + 1 == g_frames) ? g_bt_caps_frame : 0;   // the overlay-phase capture candidate of the frame just finished (tagged, kept even while idle)
+    g_bt_shards_s = g_bt_shards_frame; g_bt_late_s = g_bt_late_frame;
+    g_bt_shards_frame = g_bt_late_frame = 0; g_bt_probes_frame = 0;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    g_bt_gap = (g_bt_prev_qpc.QuadPart != 0 && g_qpf.QuadPart != 0) ? static_cast<double>(q.QuadPart - g_bt_prev_qpc.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
+    g_bt_prev_qpc = q;
+    if (g_bt_mode == 0 && !g_bt_diag) { if (g_bt_phase != BT_IDLE) bt_end("battle_transition=0 with the diagnostics off"); return; }
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    BtRead r = {}; r.bst = -1;
+    // battle_state first, then the handle: MsBattleExe stores the handle before state 4, so (x86 store order) state 4 read
+    // here with handle 0 read after it means no transition was started
+    const bool ok = wd_read(base + 0xD2A8E0, &r.bst, 1) && wd_read(base + 0xD2A8E2, &r.trig, 1) && wd_read(base + 0xD2C024, &r.h, 4);
+    {   // the singleton is 0 before the renderer's init
+        uint8_t b45[2] = { 0, 0 };
+        if (wd_read(base + 0x8DEC98, &r.bs, 4) && r.bs >= 0x10000u && wd_read(static_cast<uintptr_t>(r.bs) + 4, b45, 2)) { r.bs4 = b45[0]; r.bs5 = b45[1]; }
+        uint32_t wh[2] = { 0, 0 };   // BT-S-2: capturedFrame's width / height (+0x6C / +0x70)
+        const bool sz = r.bs >= 0x10000u && wd_read(static_cast<uintptr_t>(r.bs) + 0x6C, wh, 8) && wh[0] >= 16 && wh[0] <= 16384 && wh[1] >= 16 && wh[1] <= 16384;
+        g_bt_capsz_w = sz ? wh[0] : 0; g_bt_capsz_h = sz ? wh[1] : 0;
+    }
+    g_bt_r = r;
+    if (!ok) { if (g_bt_phase != BT_IDLE) bt_end("the game's battle state is not readable"); return; }
+    const uint32_t f = g_frames;
+    const bool sig_bs = r.bs4 != 0 || r.bs5 != 0;
+    if (g_bt_phase == BT_IDLE) {
+        const bool trig = r.trig == 1 && r.bst == 0;
+        if (!trig && r.h == 0 && !sig_bs) { if (g_bt_rearm_block) { g_bt_rearm_block = false; bt_add("bt: frame %u: every signal clear: armed for the next transition", f); bt_flush(); } return; }
+        if (g_bt_rearm_block) return;   // the window that just ended (a cancel, a timeout) left a signal set: wait for it to clear
+        bt_begin(trig || r.h != 0, trig ? "battle_trigger 1 at battle_state 0" : r.h != 0 ? "the transition handle is set" : r.bs5 ? "BrokenScreen active" : "BrokenScreen capture requested");
+    }
+    g_bt_line_due = true;
+    if (!g_bt_capsz_logged) {
+        g_bt_capsz_logged = true;
+        if (g_bt_capsz_w) bt_add("bt: frame %u: BrokenScreen capture target %ux%u (singleton +0x6C/+0x70): only a candidate of that size is adopted", f, g_bt_capsz_w, g_bt_capsz_h);
+        else bt_add("bt: frame %u: the BrokenScreen capture target's size is not readable (singleton +0x6C/+0x70): the first candidate is adopted, as before", f);
+    }
+    if (g_bt_cap_adopted == nullptr && g_bt_cap_tex != nullptr) g_bt_cap_adopted = g_bt_cap_tex;   // adopted in ffxvr_on_draw this frame
+    if (g_bt_caps_s) {   // BT-6: the capture target, once per window (the bind-time size cache: nothing is dereferenced)
+        g_bt_capf++; if (g_bt_caps_s >= 2) g_bt_capf2++;
+        if (g_bt_cap_cand == g_bt_cap_adopted) {
+            if (!g_bt_cap_logged) { g_bt_cap_logged = true; bt_add("bt: frame %u: capture %ux%u x%u samples adopted (once a window), %u overlay-phase match%s in that frame", f, g_bt_capt_w, g_bt_capt_h, g_bt_capt_s, g_bt_caps_s, g_bt_caps_s == 1 ? "" : "es"); }
+        }
+        else {
+            if (g_bt_phase == BT_SHATTER) g_bt_cap_other++;   // BT-S-4: a conflicting target during the shards only
+            if (!g_bt_other_logged) { g_bt_other_logged = true; bt_add("bt: frame %u: another overlay-phase target %ux%u x%u samples (%p) ignored (%s; the capture target is %ux%u)", f, g_bt_cap_w, g_bt_cap_h, g_bt_cap_samples, static_cast<void*>(g_bt_cap_cand), g_bt_cap_adopted ? "the capture is taken once a window" : "not the capture target's size", g_bt_capsz_w, g_bt_capsz_h); }
+        }
+    }
+    if (g_bt_shards_s >= 8) { g_bt_real_seen = true; g_bt_last_real_t = GetTickCount64(); }
+    else if (g_bt_shards_s > 0 && g_bt_real_seen && !g_bt_detail_done) g_bt_detail_want = true;   // a stray match after the real shards: describe the next one
+    if (g_bt_detail_done && !g_bt_detail_logged) { g_bt_detail_logged = true; bt_add("bt: frame %u: a capture-sampling draw after the real shards: %s", f, g_bt_detail); }
+    if (g_bt_shards_s) { g_bt_shard_frames++; if (g_bt_bst_first_shard == -99) g_bt_bst_first_shard = r.bst; g_bt_bst_last_shard = r.bst; }
+    if (r.h != 0) g_bt_h_seen = true;
+    g_bt_quiet   = (r.h == 0 && !r.bs5 && g_bt_shards_s < 8) ? g_bt_quiet + 1 : 0;   // BT-2; fewer than 8 counts as quiet (the real effect draws ~100 a frame; a stray match must not keep it alive)
+    g_bt_clear_n = (r.trig == 0 && r.bst == 0 && r.h == 0) ? g_bt_clear_n + 1 : 0;      // BT-1
+    if (g_bt_gap > g_bt_gap_max) g_bt_gap_max = g_bt_gap;
+    if (g_bt_gap > 50.0) g_bt_gap_sum += g_bt_gap;
+    const ULONGLONG now = GetTickCount64();
+    if (g_bt_t_free == 0 && (r.bst == 8 || r.bst == 9)) g_bt_t_free = now;
+    if (g_bt_frozen && g_bt_mode != 2) g_bt_want_freeze = false;   // switched away from frozen world mid-window: let go after this frame
+    if (g_bt_user_why != nullptr) {   // a user view action ends the window at once (the pin is released after this frame's submit)
+        snprintf(g_bt_why, sizeof(g_bt_why), "a user view action: %s", g_bt_user_why); g_bt_user_why = nullptr;
+        bt_end(g_bt_why); return;
+    }
+    g_bt_recentre = false;
+    if (g_bt_frozen && !xr_pinned()) {   // the runtime dropped the pin (a stop): the freeze lets go after this frame's submit; the window goes on head-locked
+        if (g_bt_want_freeze) bt_add("bt: frame %u: the runtime dropped the pin: the freeze lets go, the window goes on head-locked", f);
+        g_bt_want_freeze = false;
+    }
+    const char* end_why = nullptr;
+    if (!xr_active()) end_why = "the headset session ended";
+    else if (now - g_bt_t0 > 30000) end_why = "30 s timeout";
+    if (end_why) { bt_end(end_why); return; }
+    const uint32_t in_ph = f - g_bt_phase_frame;
+    const bool nothing = !g_bt_h_seen && !sig_bs;   // an encounter window with no handle and no effect byte seen so far
+    const bool running = bt_running_state(r.bst);
+    g_bt_live_n = (g_bt_encounter && running && r.h == 0 && g_bt_cam_s > 0) ? g_bt_live_n + 1 : 0;   // BT-3
+    if (g_bt_live_n >= 2) {   // BT-S-3: in every phase (armed included): a frozen pose never reaches a live battle
+        snprintf(g_bt_why, sizeof(g_bt_why), "the battle is live in the %s phase (battle_state %d with a 3D camera, 2 frames)", k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst));
+        bt_end(g_bt_why); return;
+    }
+    switch (g_bt_phase) {
+    case BT_ARMED:
+        if ((g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h)) || g_bt_shards_s || r.bs5)   // BT-S-2: a candidate of another size is not the capture
+            bt_set_phase(BT_SHATTER, g_bt_shards_s ? "a shard draw" : r.bs5 && !g_bt_caps_s ? "BrokenScreen active" : "the capture draw");
+        else if (g_bt_h_seen && !sig_bs && g_bt_quiet >= 6) {
+            if (g_bt_encounter) bt_set_phase(BT_AFTER, "the handle cleared without a shard draw seen (6 quiet Presents)");
+            else bt_end("the handle cleared without a shard draw seen (6 quiet Presents)");
+        }
+        else if (g_bt_encounter && nothing && r.h == 0 && r.bst != 0) bt_end("no transition (battle_state moved on with no handle: a script battle, or no BrokenScreen type)");
+        else if (g_bt_encounter && nothing && g_bt_clear_n >= 20) bt_end("cancelled: trigger, battle_state and handle all 0 for 20 Presents (an encounter cleared without a battle)");
+        else if (!g_bt_h_seen && r.h == 0 && !sig_bs && in_ph >= 180 && now - g_bt_phase_t > 3000) bt_end("nothing within 3 s");
+        break;
+    case BT_SHATTER:
+        if (g_bt_encounter && !g_bt_h_seen && g_bt_clear_n >= 20) bt_end("cancelled: trigger, battle_state and handle all 0 for 20 Presents (an encounter cleared without a battle)");
+        else if (g_bt_encounter && nothing && r.h == 0 && r.bst == 0 && in_ph >= 180 && now - g_bt_phase_t > 3000) bt_end("nothing within 3 s (no handle, no battle: a false start)");   // BT-R-1
+        else if (g_bt_quiet >= 6 && in_ph >= 6) {
+            if (!g_bt_encounter) bt_end("the effect ended (6 quiet Presents: handle 0, not active, fewer than 8 shard draws)");
+            else if (g_bt_h_seen || r.bst != 0) bt_set_phase(BT_AFTER, "6 quiet Presents: handle 0, not active, fewer than 8 shard draws");
+            // else: no battle under way (state 0, no handle ever seen): the cancels above decide
+        }
+        else {   // BT-S-1: 5 s after the last Present with 8+ shard draws (or the phase start, if none), 12 s from the phase start at most
+            const ULONGLONG ref = g_bt_last_real_t > g_bt_phase_t ? g_bt_last_real_t : g_bt_phase_t;
+            const char* cap = now - ref > 5000 ? (g_bt_last_real_t > g_bt_phase_t ? "5 s after the last frame of real shards" : "5 s in the shatter phase without real shards")
+                            : now - g_bt_phase_t > 12000 ? "the shatter phase's 12 s limit" : nullptr;
+            if (cap != nullptr) {
+                if (g_bt_encounter && (g_bt_h_seen || r.bst != 0)) bt_set_phase(BT_AFTER, cap);
+                else bt_end(cap);
+            }
+        }
+        break;
+    case BT_AFTER:
+        if (running) g_bt_st1++;
+        if (g_bt_st1 >= 90) bt_end("90 Presents in a battle state without a 3D camera");
+        else if (r.bst == 0 && r.h == 0 && g_bt_cam_s > 0 && in_ph >= 30) bt_end("aborted: back on the field (state 0 with a 3D camera)");
+        else if (now - g_bt_phase_t > 15000) bt_end("the after phase's 15 s cap");
+        break;
+    default: break;
+    }
+    g_bt_hold = g_bt_frozen && g_bt_want_freeze && g_bt_phase == BT_AFTER;
+}
+/// After xr_frame: one line per Present inside a window (section 3's line; diag_transition, capped per window and session).
+/// In AFTER a line that repeats the previous one (all but f / gap / held) is written only every 10th Present (BT-10).
+static void bt_frame_line(bool ui_frame, const char* e1src) {
+    if (!g_bt_line_due || !g_bt_diag) return;
+    if (g_bt_phase == BT_AFTER && GetTickCount64() - g_bt_phase_t > 2000) return;   // per-frame lines: the shatter plus 2 s (the phase changes and the summary still come)
+    const BtRead& r = g_bt_r;
+    const char* mode = g_xr_screen_now ? "SCREEN" : g_screen3d_now ? "S3" : "3D";
+    {
+        struct Sig { int ph; BtRead r; const char* mode; const char* src; uint32_t live, cam, dclr, late, caps, shards; bool ui, frz; };
+        static Sig prev;                                    // static storage: zero-initialised, padding included
+        Sig s; memset(&s, 0, sizeof(s)); s.ph = g_bt_phase; s.r = r; s.mode = mode; s.src = e1src; s.live = g_bt_live_s; s.cam = g_bt_cam_s; s.dclr = g_bt_dclr_s;
+        s.late = g_bt_late_s; s.caps = g_bt_caps_s; s.shards = g_bt_shards_s; s.ui = ui_frame; s.frz = g_bt_frozen;
+        const bool same = memcmp(&s, &prev, sizeof(s)) == 0;   // memset / memcpy only: the padding compares equal
+        memcpy(&prev, &s, sizeof(s));
+        if (g_bt_phase == BT_AFTER && same && (g_bt_after_lines++ % 10) != 0) return;
+    }
+    if (g_bt_lines_win >= k_bt_lines_win || g_bt_lines_all >= k_bt_lines_all) {
+        if (g_bt_lines_win == k_bt_lines_win || g_bt_lines_all == k_bt_lines_all) bt_add("bt: per-frame lines capped (%u this window, %u this session)", g_bt_lines_win, g_bt_lines_all);
+        g_bt_lines_win++; g_bt_lines_all++; return;
+    }
+    g_bt_lines_win++; g_bt_lines_all++;
+    unsigned held = 0, wt = 0; xr_counters(&held, &wt);
+    bt_add("bt: f=%u ph=%s bst=%d trig=%u h=%08X bs4=%u bs5=%u mode=%s uiframe=%d uidraws=%u live=%u cam3d=%u dclr=%u late=%u cap=%u shard=%u held=%u e1src=%s frz=%d gap=%.0f",
+           g_frames, k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst), static_cast<unsigned>(r.trig), r.h, static_cast<unsigned>(r.bs4), static_cast<unsigned>(r.bs5),
+           mode, ui_frame ? 1 : 0, ui_frame ? g_ui_draws_report : 0u, g_bt_live_s, g_bt_cam_s, g_bt_dclr_s,
+           g_bt_late_s, g_bt_caps_s, g_bt_shards_s, held - g_bt_held0, e1src, g_bt_frozen ? 1 : 0, g_bt_gap);
+    if (g_bt_len > sizeof(g_bt_buf) * 3 / 4) bt_flush();   // BT-5: otherwise only at phase changes and the window's end
+}
+/// Battle transition: the mode (0 old, 1 head-locked, 2 frozen world) and the per-frame bt: lines; managed, every frame.
+/// ABI 16: mode | 0x100 = the managed side saw a user view action this frame (a view hotkey, a gesture chord, a grab, an overlay
+/// widget in use): an open window ends at once.
+extern "C" __declspec(dllexport) void ffxvr_bt_set(int mode, int diag_on) {
+    if (mode & 0x100) bt_user("a view hotkey, a gesture or the overlay");
+    mode &= 0xFF; g_bt_mode = mode > 2 ? 2 : mode; g_bt_diag = diag_on != 0;
+}
+/// The overlay's line: the phase now (returned: 0 idle, 1 armed, 2 shatter, 3 after) and the last window's summary.
+extern "C" __declspec(dllexport) int ffxvr_bt_status(char* buf, int n) {
+    if (buf != nullptr && n > 0) {
+        if (g_bt_phase != BT_IDLE) snprintf(buf, static_cast<size_t>(n), "%s%s (window %u, %.1f s) | last: %s", k_bt_names[g_bt_phase & 3], g_bt_frozen ? ", frozen" : "", g_bt_win_n, (GetTickCount64() - g_bt_t0) / 1000.0, g_bt_summary);
+        else snprintf(buf, static_cast<size_t>(n), "- | last: %s", g_bt_summary);
+    }
+    return g_bt_phase;
+}
 static void xr_tick() {
     if (!g_xr_want) return;
     lowres_check();
     detect_cut();
-    turn_tick();
+    bt_tick();                                   // battle transition phases (before anything this tick decides from them)
+    if (!g_bt_frozen) turn_tick();               // frozen world: no stick turning while the view is pinned...
+    else if (g_turn_stick && right_stick_x() != 0.f) bt_user("stick turning");   // ... a push ends the window instead (the player is never locked out)
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
         static bool said = false;
         if (!said) { said = true; diag("xr: forcing override + eye 2 on (were %d/%d)", g_ovr_enabled ? 1 : 0, g_stereo ? 1 : 0); }
@@ -6812,10 +7262,15 @@ static void xr_tick() {
     XrFovTan used[2];
     if (g_xr_fov_applied) { used[0] = g_xr_fov_used[0]; used[1] = g_xr_fov_used[1]; }
     else { used[0] = used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
+    // Battle transition: once the field is freed the frames have no camera (the shards are drawn in NDC over black), but their
+    // image is the capture of a headset-FOV view: submitted with the headset's FOV, not the stale game projection.
+    if (bt_no_split() && !g_xr_fov_applied && g_xr_active && g_xr_use_fov && !g_xr_screen_now && !g_screen3d_now) { used[0] = g_xr_fov_used[0]; used[1] = g_xr_fov_used[1]; }
     XrFrameOut out = {};
     g_xr_fov_applied = false;
     auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
     if (g_xr_drop_image) e1 = nullptr;              // Debug test: as if this frame had no eye image
+    const char* bt_e1src = e1 == nullptr ? "none" : ui_frame ? "finals" : "bb";
+    if (g_bt_hold && e1 != nullptr) { e1 = nullptr; bt_e1src = "held"; }   // frozen world, after the shards: the pinned last frame is re-sent over the load black
     // R15: no early return without an eye image. xr_frame still runs (events, wait, begin, locate) and re-sends the
     // last frame for up to 30 frames; the session never stalls because one Present had nothing to show.
     if (g_screen3d_now) g_blink_frames = 0;         // the screen shows the game's cuts as cuts
@@ -6840,7 +7295,8 @@ static void xr_tick() {
     const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3 || backdrop);
     if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
     const bool is2d = g_frames_without_cam >= 2;
-    const bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
+    bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
+    if (bt_no_split()) screen_next = g_bt_screen_pin;   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
     if (screen_next != g_xr_screen_now) {
         static int logged = 0;
         if (logged++ < 400) {
@@ -6855,7 +7311,7 @@ static void xr_tick() {
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
     {   // the stereo screen: 3D frames that would otherwise be shown in 3D (the frame just finished decides for the next)
-        const bool s3 = g_screen3d && !screen_next && !g_backdrop_room;
+        const bool s3 = bt_no_split() ? g_bt_s3_pin : (g_screen3d && !screen_next && !g_backdrop_room);
         if (s3 != g_screen3d_now) diag("mode -> %s at frame %u (stereo screen: eye separation %.1f, screen plane at %.0f)", s3 ? "STEREO SCREEN" : "3D (headset view)", g_frames, g_screen3d_sep, g_screen3d_conv);
         g_screen3d_now = s3;
     }
@@ -6873,17 +7329,35 @@ static void xr_tick() {
         // twinned, its draws re-issued and its texture mistaken for the
         // backbuffer -- which hung the GPU.
         InEye2 guard;
+        // Battle transition, frozen world: the pin is taken before this submit (the frame being submitted was rendered with the
+        // views located at the last xr_frame, the pose the override keeps from now on) and released after the submit of the
+        // last frame rendered frozen; in between the held base may be re-sent with no frame cap.
+        if (g_bt_want_freeze && !g_bt_frozen) {
+            if (xr_pin(true, used)) { g_bt_frozen = true; g_bt_was_frozen = true; }
+            else { g_bt_want_freeze = false; g_bt_hold = false; bt_add("bt: frame %u: no pin (no located views): this window is head-locked", g_frames); }
+        }
+        xr_hold_uncapped(g_bt_frozen);
         LARGE_INTEGER ta, tb; QueryPerformanceCounter(&ta);
         xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
+        if (g_bt_frozen && !g_bt_want_freeze) { xr_pin(false, nullptr); xr_hold_uncapped(false); g_bt_frozen = false; g_bt_hold = false; }
     }
-    xr_apply_poses(out);
+    bt_frame_line(ui_frame, bt_e1src);
+    if (!g_bt_frozen) xr_apply_poses(out);         // frozen: the override keeps the head pose the pin was taken with (eye poses, IPD offset, FOV)
     motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
     xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
     haptics_tick();   // rumble to haptics (render thread: every xrApplyHapticFeedback stays here, next to xrSyncActions)
-    if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; diag("xr: recentre (headset gesture)"); }   // same as Home
-    gesture_tick();
+    if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; bt_user("the headset's recentre"); diag("xr: recentre (headset gesture)"); }   // same as Home
+    {   // frozen world: no world grab or chords; a new grip or stick click ends the window, and the next frame's gesture_tick acts on it
+        static bool s_any_prev = false;
+        const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
+        const bool any = g_vrpad.ready && g_vrpad_enabled && (L.squeeze > 0.5f || R.squeeze > 0.5f || L.stick_click || R.stick_click);
+        if (g_bt_frozen && any && !s_any_prev) bt_user("a controller grip or stick click");
+        s_any_prev = any;
+    }
+    if (g_bt_frozen) { g_vrpad_suppress = false; g_gest_active = false; g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false; }
+    else gesture_tick();
     // What the next frame renders with.
     if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
     else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
@@ -6922,6 +7396,630 @@ extern "C" __declspec(dllexport) int ffxvr_hook_calls() {
     long total = 0;
     for (int i = 0; i < C_CB_CAPTURED; ++i) total += g_counters[i];
     return static_cast<int>(total);
+}
+
+// ---------------------------------------------------------------------------
+// Load lock build (research parse-time.md sections 4 and 5; design-notes "Load lock: profiler and lock release").
+//
+// The battle-entry "parse" time is most likely the loader thread waiting for Phyre's global render-interface lock
+// (VA 0xC94EE4 / FhUtil 0x894EE4): 0x465AB0 takes it before its mip reads and holds it through CreateTexture2D
+// (0x58FC20); the render thread's list interpreter 0x615550 holds it for every whole command list, Present included, so
+// in VR also while we sleep in xrWaitFrame. Two parts, both here:
+//
+// 1. The load profiler (ini diag_load_prof; managed ffxvr_prof_set every frame). A watcher thread samples the loader
+//    thread every ~1 ms while a battle load phase is open (ffxvr_prof_phase, from load_diag.cs) or a loadPCluster call is
+//    in progress (ffxvr_prof_mark), and, in mode 2, the render thread on the ticks where the loader is waiting for the
+//    lock. The return addresses are taken in stack order, innermost first (LL-3). Each sample: SuspendThread, GetThreadContext, one ReadProcessMemory of the stack, plain reads of the lock words
+//    (and g_stage / g_lr_open for the render thread), ResumeThread. Nothing else runs between Suspend and Resume: no heap,
+//    no CRT, no logging, no lock of ours, no module or VirtualQuery call (the suspended thread may hold the heap lock, the
+//    loader lock, the CRT lock, Phyre's lock, a driver lock or g_mutex). All other work (classification, the module table,
+//    formatting, the log write) runs with nothing suspended, into fixed static buffers. Memory is read with RPM (stacks)
+//    or plain reads of ranges checked once with range_readable (FFX.exe's .text, the lock object): Fahrenheit's stage-0
+//    debugger makes any access violation fatal, even inside __try.
+// 2. The lock release (ini load_lock_release, live, never saved: every launch starts at 0; managed ffxvr_lock_release_set
+//    every frame): 1 = around our xrWaitFrame, nothing else (LL-1: a release around the game's Present call would leave
+//    the immediate context unserialised against the main thread's lock holders: removed). Only while a battle load phase is open, only when this thread owns the lock exactly once (owner == our tid, count == 1),
+//    and only when someone waits for it or a loadPCluster is in progress. The game's own release (0x4319D0) and acquire
+//    (0x431840) are called, so the waiter count, the event and the owner / count words stay the game's; the lock is taken
+//    back before control returns to the game, which then sees exactly the state it had (owner us, count 1).
+// ---------------------------------------------------------------------------
+
+// The Phyre render-interface lock (0x4315E0 init, 0x431850 acquire, 0x4319D0 release; checked against the disassembly).
+struct PhyreRil { uint8_t inited, _a[3]; HANDLE ev; uint8_t ev_ok, _b[3]; volatile LONG waiters; volatile DWORD owner; volatile LONG count; };
+static_assert(sizeof(PhyreRil) == 0x18, "PhyreRil layout");
+static_assert(offsetof(PhyreRil, waiters) == 0x0C && offsetof(PhyreRil, owner) == 0x10 && offsetof(PhyreRil, count) == 0x14, "PhyreRil offsets");
+typedef void (__fastcall* ril_fn)(void* lock);          // ecx = the lock, no stack arguments, plain ret (thiscall without arguments)
+static PhyreRil* g_ril = nullptr; static ril_fn g_ril_acq = nullptr, g_ril_rel = nullptr;
+static bool g_ril_checked = false, g_ril_ok = false; static char g_ril_why[96] = "not checked yet";
+static uintptr_t g_pf_base = 0, g_pf_text_lo = 0, g_pf_text_hi = 0;   // FFX.exe and its .text (checked readable once)
+static constexpr uintptr_t k_ril_lock = 0x894EE4, k_ril_acq = 0x31840, k_ril_rel = 0x319D0;   // FhUtil offsets
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+// -- shared state (written by the managed side's threads, read by the watcher and the render thread) -------------------
+static volatile LONG  g_pf_mode = 0;           // 0 off, 1 the loader, 2 the loader + the render thread while the loader waits
+static volatile LONG  g_pf_phase = 0;          // 0 none, 1 battle entry, 2 way back (also arms the lock release)
+static volatile DWORD g_pf_phase_t = 0;        // GetTickCount at the phase's start (a phase older than 60 s is ignored, LL-8)
+static volatile LONG  g_pf_in = 0;             // the loader thread is inside an outermost loadPCluster
+static volatile DWORD g_pf_loader_tid = 0, g_pf_main_tid = 0;   // the loading thread (last non-main marker), the main thread (its own marks)
+static LONGLONG       g_pf_mark_q = 0;         // the loader's last mark-in (QPC; loader thread only)
+static volatile LONG  g_pf_win_n[3] = {}, g_pf_win_ms_sum[3] = {}, g_pf_win_ms_max[3] = {};   // loadPCluster windows per phase kind (ms)
+static volatile LONG  g_lr_mode = 0;           // load_lock_release: 0 off, 1 around our xrWaitFrame
+static volatile LONG  g_lr_open = 0;           // the render thread has released the lock and not yet taken it back
+static volatile DWORD g_lr_open_tick = 0;      // GetTickCount when it was released (LL-7: the watcher logs a re-acquire stuck for 1 s)
+static volatile LONG  g_lr_open_seq = 0;       // one per release
+static bool g_lr_disabled = false; static char g_lr_disabled_why[128] = "";
+static constexpr DWORD k_pf_phase_max_ms = 60000;   // LL-8: a phase older than this counts as closed (the way back's own timeout is 60 s)
+static HANDLE g_pf_thread = nullptr, g_pf_stop = nullptr;   // the watcher (created on the render thread by ffxvr_prof_set)
+
+struct LrStats { uint32_t n_wait, with_waiters, contended, by_loader, by_main, by_other, skip_owner, skip_count, skip_idle, bad, bins[4]; double reacq_ms, reacq_max, open_ms; };   // bins: re-acquire <= 1, 1-5, 5-11, > 11 ms (LL-15)
+static LrStats g_lr_st = {}, g_lr_total = {};  // render thread only: since the last prof block / the session
+
+static double pf_qpc_ms() { static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f); LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
+static bool pf_phase_live() { const LONG p = g_pf_phase; return p != 0 && GetTickCount() - g_pf_phase_t < k_pf_phase_max_ms; }
+
+/// Once (render thread, from ffxvr_prof_set / ffxvr_lock_release_set): the image, its .text, the lock object and the two
+/// lock functions' bytes. A mismatch disables the release; the profiler then reads no lock words.
+static void ril_init() {
+    if (g_ril_checked) return;
+    g_ril_checked = true;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    g_pf_base = b;
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + reinterpret_cast<const IMAGE_DOS_HEADER*>(b)->e_lfanew);
+    const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+        if (memcmp(sec[i].Name, ".text", 6) == 0) { g_pf_text_lo = b + sec[i].VirtualAddress; g_pf_text_hi = g_pf_text_lo + sec[i].Misc.VirtualSize; }
+    if (g_pf_text_lo == 0 || !range_readable(reinterpret_cast<const void*>(g_pf_text_lo), g_pf_text_hi - g_pf_text_lo)) { g_pf_text_lo = g_pf_text_hi = 0; snprintf(g_ril_why, sizeof(g_ril_why), "FFX.exe .text not found or not readable"); return; }
+    static const uint8_t acq[] = { 0x8D, 0x41, 0x10, 0x50, 0xE8, 0x07, 0x00, 0x00, 0x00, 0xC3 };          // 0x431840: lea eax,[ecx+0x10]; push eax; call 0x431850; ret
+    static const uint8_t rel[] = { 0x55, 0x8B, 0xEC, 0x51, 0x56, 0x57, 0x8B, 0xF9, 0x8D, 0x77, 0x10 };    // 0x4319D0: push ebp ... lea esi,[edi+0x10]
+    if (memcmp(reinterpret_cast<const void*>(b + k_ril_acq), acq, sizeof(acq)) != 0 || memcmp(reinterpret_cast<const void*>(b + k_ril_rel), rel, sizeof(rel)) != 0) { snprintf(g_ril_why, sizeof(g_ril_why), "the lock functions' bytes do not match (another game version?)"); return; }
+    if (!range_readable(reinterpret_cast<const void*>(b + k_ril_lock), sizeof(PhyreRil))) { snprintf(g_ril_why, sizeof(g_ril_why), "the lock object is not readable"); return; }
+    g_ril = reinterpret_cast<PhyreRil*>(b + k_ril_lock);
+    g_ril_acq = reinterpret_cast<ril_fn>(b + k_ril_acq); g_ril_rel = reinterpret_cast<ril_fn>(b + k_ril_rel);
+    g_ril_ok = true; snprintf(g_ril_why, sizeof(g_ril_why), "signature ok");
+    diag("load lock: Phyre lock 0x%p (FFX+0x%X), acquire FFX+0x%X, release FFX+0x%X: %s", static_cast<void*>(g_ril), static_cast<unsigned>(k_ril_lock), static_cast<unsigned>(k_ril_acq), static_cast<unsigned>(k_ril_rel), g_ril_why);
+}
+
+// -- the lock release (render thread) ------------------------------------------------------------------------------------
+/// Right before our xrWaitFrame. Returns 1 when the lock was released (lr_release_end takes it back).
+static int lr_release_begin() {
+    if (!g_ril_ok || g_lr_disabled || g_lr_mode < 1) return 0;
+    const DWORD me = GetCurrentThreadId();
+    if (me != g_render_tid || g_lr_open != 0 || !pf_phase_live()) return 0;   // the render thread only; only in a battle load
+    PhyreRil* L = g_ril;
+    if (L->owner != me) { g_lr_st.skip_owner++; return 0; }      // not held by us here (should not happen inside a list)
+    if (L->count != 1) { g_lr_st.skip_count++; return 0; }       // held more than once: an inner holder is still active, never released
+    const LONG w = L->waiters;
+    if (w <= 0 && g_pf_in == 0) { g_lr_st.skip_idle++; return 0; }   // nobody waits and no load is in progress: nothing to gain
+    if (w > 0) g_lr_st.with_waiters++;
+    g_lr_open_tick = GetTickCount(); InterlockedIncrement(&g_lr_open_seq);
+    InterlockedExchange(&g_lr_open, 1);
+    g_ril_rel(L);                                                // the game's release: count 1 -> 0, owner -> 0, SetEvent if anyone waits
+    if (L->owner == me) {                                        // LL-9: the release did not take effect (count was above 1 after all): keep it, stop
+        InterlockedExchange(&g_lr_open, 0);
+        g_ril_acq(L);                                            // back to the count we found
+        g_lr_st.bad++; g_lr_disabled = true;
+        snprintf(g_lr_disabled_why, sizeof(g_lr_disabled_why), "the release left the owner unchanged (count %ld): the lock was held more than once", static_cast<long>(L->count));
+        diag("load lock: RELEASE DISABLED for the session: %s", g_lr_disabled_why);
+        return 0;
+    }
+    g_lr_st.n_wait++;
+    return 1;
+}
+static void lr_release_end(int y, double t_released) {
+    if (!y) return;
+    PhyreRil* L = g_ril;
+    const DWORD o = L->owner;                                    // who holds it now (diagnostic)
+    const double t1 = pf_qpc_ms();
+    g_ril_acq(L);                                                // the game's acquire: waits (20 ms polls) until the holder leaves
+    const double t2 = pf_qpc_ms();
+    InterlockedExchange(&g_lr_open, 0);
+    const double ra = t2 - t1;
+    g_lr_st.open_ms += t1 - t_released; g_lr_st.reacq_ms += ra; if (ra > g_lr_st.reacq_max) g_lr_st.reacq_max = ra;
+    g_lr_st.bins[ra <= 1.0 ? 0 : ra <= 5.0 ? 1 : ra <= 11.0 ? 2 : 3]++;
+    if (o != 0 || ra > 0.2) {
+        g_lr_st.contended++;
+        if (o != 0 && o == g_pf_loader_tid) g_lr_st.by_loader++; else if (o != 0 && (o == g_main_tid || o == g_pf_main_tid)) g_lr_st.by_main++; else if (o != 0) g_lr_st.by_other++;
+    }
+    const DWORD me = GetCurrentThreadId();
+    if (L->owner != me || L->count != 1) {                       // must never happen: repair to the game's state (owner us, count 1), then stop for the session
+        g_lr_st.bad++; g_lr_disabled = true;
+        snprintf(g_lr_disabled_why, sizeof(g_lr_disabled_why), "after a re-acquire the lock read owner %lu count %ld (expected %lu, 1)", static_cast<unsigned long>(L->owner), static_cast<long>(L->count), static_cast<unsigned long>(me));
+        for (int k = 0; k < 64 && L->owner == me && L->count > 1; ++k) g_ril_rel(L);   // LL-9: extra holds would keep it held after the list's own release
+        diag("load lock: RELEASE DISABLED for the session: %s", g_lr_disabled_why);
+    }
+}
+static double g_lr_t_wait = 0;
+/// XrHost callbacks around xrWaitFrame (ffxvr_xr.cpp xr_frame). The wait itself is unchanged.
+static int lr_wait_begin() { const int y = lr_release_begin(); if (y) g_lr_t_wait = pf_qpc_ms(); return y; }
+static void lr_wait_end(int y) { lr_release_end(y, g_lr_t_wait); }
+
+// -- the profiler ----------------------------------------------------------------------------------------------------------
+enum PfStage : uint8_t { ST_NONE, ST_LOCKACQ, ST_LOCKWAIT, ST_RILGUARD, ST_LOCKREL, ST_MGR, ST_POOLALLOC, ST_POOL, ST_TEXC, ST_SRV, ST_READ, ST_OPEN, ST_CLOSE,
+                         ST_FIXUP, ST_PLAT, ST_FILELOAD, ST_POST, ST_LOADERPROC, ST_INTERP, ST_EXEC, ST_PRESENT, ST_RLOOP };
+struct PfRange { uint32_t va, size; PfStage st; };
+static const PfRange k_pf_ranges[] = {   // VA (image base 0x400000), sizes from the Ghidra export (re/out/functions.tsv)
+    { 0x431850, 0x70, ST_LOCKACQ }, { 0x431840, 0x10, ST_LOCKACQ }, { 0x430280, 0x14, ST_LOCKWAIT }, { 0x463D50, 0x101, ST_RILGUARD },
+    { 0x4319D0, 0x40, ST_LOCKREL }, { 0x463E90, 0xC7, ST_LOCKREL },
+    { 0x69B940, 0x1B6, ST_MGR }, { 0x6FB910, 0x83, ST_POOLALLOC }, { 0x942B60, 0x155, ST_POOL },
+    { 0x58FC20, 0x6AF, ST_TEXC }, { 0x5903A0, 0x44B, ST_TEXC }, { 0x590800, 0x3C8, ST_TEXC }, { 0x58F710, 0x16F, ST_SRV },
+    { 0x608090, 0x45, ST_READ }, { 0x5766D0, 0x78, ST_OPEN }, { 0x607BC0, 0x33, ST_OPEN }, { 0x607F40, 0x149, ST_OPEN },
+    { 0x576930, 0x8, ST_CLOSE }, { 0x5767C0, 0x5A, ST_CLOSE }, { 0x607D80, 0x36, ST_CLOSE },
+    { 0x57BCE0, 0x44C, ST_FIXUP }, { 0x57C130, 0x34E, ST_FIXUP }, { 0x578830, 0xBF, ST_FIXUP }, { 0x47C190, 0x479, ST_FIXUP },
+    { 0x465AB0, 0x12D9, ST_PLAT }, { 0x4406C0, 0x11F, ST_FILELOAD },
+    { 0x623580, 0x4D, ST_POST }, { 0x441620, 0x23D, ST_POST }, { 0x441F20, 0xBA, ST_POST }, { 0x666880, 0x6A, ST_POST }, { 0x691360, 0x1B8, ST_LOADERPROC },
+    { 0x615550, 0x52D, ST_INTERP }, { 0x614C60, 0x43F, ST_EXEC }, { 0x593760, 0x26, ST_PRESENT }, { 0x616010, 0xEB, ST_RLOOP },
+};
+enum PfMcls : uint8_t { M_FFX, M_NTDLL, M_KBASE, M_K32, M_D3D11, M_DXGI, M_DRV, M_CRT, M_CLR, M_OURS, M_XR, M_OTHER, M_NONE };
+enum PfBucket { B_LOCK_WAIT, B_LOCK_REL, B_MGR_MUTEX, B_ALLOC_WAIT, B_ALLOC_FILL, B_TEX_CREATE, B_SRV, B_READ, B_OPEN, B_CLOSE, B_FIXUP, B_PLAT_CPU, B_MANAGED, B_POST, B_IDLE, B_OTHER, B_N };
+static const char* const k_pf_bname[B_N] = { "LOCK_WAIT", "LOCK_REL", "MGR_MUTEX", "ALLOC_WAIT", "ALLOC_FILL", "TEX_CREATE", "SRV", "READ", "OPEN", "CLOSE", "FIXUP", "PLAT_CPU", "MANAGED", "POST", "IDLE", "OTHER" };
+enum PfRbucket { R_WAIT, R_END, R_XR, R_RELEASED, R_DXGI, R_HOOK, R_EXEC, R_IDLE, R_OTHER, R_FAIL, R_N };
+static const char* const k_pf_rname[R_N] = { "xrWaitFrame (holding the lock)", "xrEndFrame", "other xr", "lock released by us", "dxgi present", "the Present hook (ImGui, ours)", "executing commands", "ring idle", "other", "sample failed" };
+static const char* const k_pf_oname[5] = { "render", "loader", "main", "other", "free" };
+static constexpr int k_pf_mods = 512, k_pf_top = 512;   // a .NET process maps every assembly as a module: 150+ is normal
+struct PfMod { uintptr_t lo, hi; uint8_t cls; char name[28]; };
+static PfMod g_pf_mod[k_pf_mods]; static int g_pf_mod_n = 0;   // watcher thread only (built at each activation, never inside a tick's suspension)
+static uintptr_t g_pf_dxgi_lo = 0, g_pf_dxgi_hi = 0;           // dxgi.dll's .text (checked readable), for the render samples (a dxgi return address = the real Present)
+struct PfTop { uint32_t fh; uint16_t mod; uint16_t pad; uint32_t n; };
+struct PfAgg {
+    uint32_t ticks, lsamp[2], fails, rsamp, rfails, susp_n, top_over, timed_out;
+    uint32_t b[2][B_N], lw_owner[5], tc_leaf[4], tc_mod[k_pf_mods], rd_leaf[2], r[R_N], owner_tick[5], waiters_tick;
+    double susp_us, susp_max, rsusp_us, rsusp_max;               // loader / render-thread suspends (LL-14)
+    uint32_t lr_ticks, lr_owner[5];                              // LL-6: ticks with our release window open, by the lock's owner then
+    DWORD t_first, t_last;
+    PfTop top[k_pf_top];
+};
+static PfAgg g_pf_agg[3];   // by phase kind: 0 outside a battle load (a loadPCluster window only), 1 entry, 2 way back (watcher thread only)
+struct PfStk { DWORD tid; HANDLE h; uintptr_t lo, hi; };
+static PfStk g_pf_ls = {}, g_pf_rs = {};
+static uint32_t g_pf_lbuf[2048], g_pf_rbuf[1024];   // the stack copies (8 KB loader, 4 KB render)
+// reports: the render thread queues them (two slots), the watcher (or the render thread, without one) formats and writes
+struct PfReq { LONG phase; LONG lr_mode; char label[160]; char extra[3072]; char lr_why[160]; LrStats lr; };   // lr_why: snapshot of the release's state text (LL-17)
+static PfReq g_pf_req[2]; static volatile LONG g_pf_req_w = 0, g_pf_req_r = 0, g_pf_req_drop = 0, g_pf_fmt_drop = 0;   // LL-16: reports dropped (queue full / log busy for seconds)
+static char g_pf_out[24 * 1024]; static int g_pf_out_len = 0;   // formatted lines not yet in the log (one owner: the watcher, or the render thread before it exists)
+
+static int pf_mod_of(uintptr_t a) { for (int i = 0; i < g_pf_mod_n; ++i) if (a >= g_pf_mod[i].lo && a < g_pf_mod[i].hi) return i; return -1; }
+static uint8_t pf_cls_of(int m) { return m < 0 ? static_cast<uint8_t>(M_NONE) : g_pf_mod[m].cls; }
+static bool pf_in_text(uintptr_t a) { return a >= g_pf_text_lo + 8 && a < g_pf_text_hi; }
+/// A return address in a checked code range: the bytes before it are a call (E8 rel32; FF 15 / FF 9x; FF D0..D7 / FF 1x; FF 5x).
+static bool pf_is_ra_in(uintptr_t a, uintptr_t lo, uintptr_t hi) {
+    if (lo == 0 || a < lo + 8 || a >= hi) return false;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(a);
+    if (p[-5] == 0xE8) return true;
+    if (p[-6] == 0xFF && (p[-5] == 0x15 || (p[-5] & 0xF8) == 0x90)) return true;
+    if (p[-2] == 0xFF && ((p[-1] >= 0xD0 && p[-1] <= 0xD7) || (p[-1] & 0xF8) == 0x10)) return true;
+    if (p[-3] == 0xFF && (p[-2] & 0xF8) == 0x50) return true;
+    return false;
+}
+static bool pf_is_ra(uintptr_t a) { return pf_is_ra_in(a, g_pf_text_lo, g_pf_text_hi); }
+static PfStage pf_stage_of(uintptr_t a) {
+    if (a < g_pf_base) return ST_NONE;
+    const uint32_t va = static_cast<uint32_t>(a - g_pf_base + 0x400000);
+    for (const PfRange& r : k_pf_ranges) if (va >= r.va && va < r.va + r.size) return r.st;
+    return ST_NONE;
+}
+/// The FFX return addresses on a copied stack, innermost first, at most `cap` (LL-R-1). The EBP chain inside the copy
+/// gives the order. A scan hit (an FFX .text value after a call instruction) goes in front of the chain only within 0x40
+/// bytes of ESP: the return address of a frameless leaf's call, such as 0x6FB910's memset, sits at [esp]. Without a
+/// chain, every scan hit counts, in stack-slot order. Remaining scan hits follow the chain (only a fallback stage).
+static int pf_ras(const uint32_t* stk, SIZE_T got, uintptr_t esp, uintptr_t ebp, uint32_t* out, int cap) {
+    int n = 0;
+    auto add = [&](uint32_t v) { for (int i = 0; i < n; ++i) if (out[i] == v) return; if (n < cap) out[n++] = v; };
+    const SIZE_T words = got / 4;
+    for (SIZE_T k = 0; k < words && k < 0x40 / 4 && n < cap; ++k) if (pf_is_ra(stk[k])) add(stk[k]);   // near ESP: the leaf's caller
+    uintptr_t f = ebp;
+    for (int i = 0; i < 32 && n < cap; ++i) {   // the frame chain
+        if (f < esp || f + 8 > esp + got || (f & 3) != 0) break;
+        const uint32_t nx = stk[(f - esp) / 4], ra = stk[(f - esp) / 4 + 1];
+        if (pf_is_ra(ra)) add(ra);
+        if (nx <= f) break;
+        f = nx;
+    }
+    for (SIZE_T k = 0x40 / 4; k < words && n < cap; ++k) if (pf_is_ra(stk[k])) add(stk[k]);   // the rest: in slot order (the whole order when no chain)
+    return n;
+}
+static void pf_mods_build() {
+    g_pf_mod_n = 0; g_pf_dxgi_lo = g_pf_dxgi_hi = 0;
+    static HMODULE mods[k_pf_mods]; DWORD need = 0;   // watcher thread only
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &need)) return;
+    const int n = static_cast<int>((need / sizeof(HMODULE)) < static_cast<DWORD>(k_pf_mods) ? need / sizeof(HMODULE) : k_pf_mods);
+    for (int i = 0; i < n; ++i) {
+        MODULEINFO mi = {}; if (!GetModuleInformation(GetCurrentProcess(), mods[i], &mi, sizeof(mi))) continue;
+        PfMod& m = g_pf_mod[g_pf_mod_n];
+        m.lo = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll); m.hi = m.lo + mi.SizeOfImage; m.name[0] = 0;
+        char nm[MAX_PATH] = ""; if (!GetModuleBaseNameA(GetCurrentProcess(), mods[i], nm, MAX_PATH)) nm[0] = 0;
+        for (char* c = nm; *c; ++c) if (*c >= 'A' && *c <= 'Z') *c = static_cast<char>(*c + 32);
+        strncpy_s(m.name, nm, _TRUNCATE);
+        auto pre = [&](const char* p) { return strncmp(nm, p, strlen(p)) == 0; };
+        m.cls = m.lo == g_pf_base ? M_FFX : strcmp(nm, "ntdll.dll") == 0 ? M_NTDLL : strcmp(nm, "kernelbase.dll") == 0 ? M_KBASE : strcmp(nm, "kernel32.dll") == 0 ? M_K32
+              : strcmp(nm, "d3d11.dll") == 0 ? M_D3D11 : strcmp(nm, "dxgi.dll") == 0 ? M_DXGI : (pre("nv") || pre("amd") || pre("ati") || pre("igd")) ? M_DRV
+              : strcmp(nm, "msvcr110.dll") == 0 ? M_CRT : (strcmp(nm, "coreclr.dll") == 0 || strcmp(nm, "clrjit.dll") == 0) ? M_CLR : strcmp(nm, "ffxvr_native.dll") == 0 ? M_OURS
+              : (strstr(nm, "openxr") || strstr(nm, "virtualdesktop") || strstr(nm, "vdxr")) ? M_XR : M_OTHER;
+        if (m.cls == M_DXGI && range_readable(reinterpret_cast<const void*>(m.lo), 0x400)) {   // LL-11: its .text, checked readable here (nothing is suspended)
+            const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(m.lo + reinterpret_cast<const IMAGE_DOS_HEADER*>(m.lo)->e_lfanew);
+            if (range_readable(nt, sizeof(IMAGE_NT_HEADERS)) && nt->FileHeader.NumberOfSections < 64 && range_readable(IMAGE_FIRST_SECTION(nt), sizeof(IMAGE_SECTION_HEADER) * nt->FileHeader.NumberOfSections)) {
+                const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+                for (WORD k = 0; k < nt->FileHeader.NumberOfSections; ++k)
+                    if (memcmp(sec[k].Name, ".text", 6) == 0) { const uintptr_t lo = m.lo + sec[k].VirtualAddress, hi = lo + sec[k].Misc.VirtualSize; if (range_readable(reinterpret_cast<const void*>(lo), hi - lo)) { g_pf_dxgi_lo = lo; g_pf_dxgi_hi = hi; } }
+            }
+        }
+        g_pf_mod_n++;
+    }
+}
+/// Opens (or re-opens after a tid change) a sampled thread. Never this thread, never the other sampled one.
+static void pf_open(PfStk& s, DWORD tid, DWORD other) {
+    if (s.tid == tid) return;
+    if (s.h) CloseHandle(s.h);
+    s = PfStk{}; s.tid = tid;
+    if (tid == 0 || tid == GetCurrentThreadId() || tid == other) return;
+    s.h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+}
+struct PfSample { bool ok; uint32_t eip, esp, ebp; SIZE_T got; DWORD owner; const char* stage; LONG lr_open; };
+/// The strict suspended section. Everything it needs is prepared before SuspendThread; between Suspend and Resume only
+/// GetThreadContext, one ReadProcessMemory and plain reads of words checked readable at init.
+static bool pf_sample(PfStk& s, uint32_t* buf, SIZE_T cap, bool render, PfSample& o, double& us) {
+    o = PfSample{}; us = 0;
+    if (s.h == nullptr) return false;
+    CONTEXT c; memset(&c, 0, sizeof(c)); c.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    const uintptr_t lo = s.lo, hi = s.hi; PhyreRil* const L = g_ril;
+    LARGE_INTEGER q0, q1; QueryPerformanceCounter(&q0);
+    if (SuspendThread(s.h) == static_cast<DWORD>(-1)) return false;
+    // ---- suspended ----
+    const BOOL ok = GetThreadContext(s.h, &c);
+    if (ok) {
+        o.eip = c.Eip; o.esp = c.Esp; o.ebp = c.Ebp;
+        if (o.esp >= lo && o.esp < hi) { const SIZE_T n = (hi - o.esp) < cap ? (hi - o.esp) : cap; if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(o.esp)), buf, n, &o.got)) o.got = 0; }
+        o.owner = L != nullptr ? L->owner : 0;
+        if (render) { o.stage = xr_stage(); o.lr_open = g_lr_open; }
+    }
+    ResumeThread(s.h);
+    // ---- running again ----
+    QueryPerformanceCounter(&q1);
+    static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    us = (q1.QuadPart - q0.QuadPart) * 1e6 / static_cast<double>(f.QuadPart);
+    if (!ok) return false;
+    o.ok = true;
+    if (o.got == 0 || o.esp < lo || o.esp >= hi) {   // the stack range for the next sample (VirtualQuery: nothing is suspended now)
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(o.esp)), &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT) { s.lo = reinterpret_cast<uintptr_t>(mbi.BaseAddress); s.hi = s.lo + mbi.RegionSize; }
+    }
+    return true;
+}
+static int pf_owner_cls(DWORD o) { return o == 0 ? 4 : o == g_render_tid ? 0 : o == g_pf_loader_tid ? 1 : (o == g_main_tid || o == g_pf_main_tid) ? 2 : 3; }
+static void pf_top_add(PfAgg& a, uint32_t fh, int mod) {
+    const uint16_t m = static_cast<uint16_t>(mod < 0 ? 0xFFFF : mod);
+    uint32_t h = (fh * 2654435761u) ^ (m * 40503u);
+    for (int i = 0; i < 16; ++i) {
+        PfTop& t = a.top[(h + i) & (k_pf_top - 1)];
+        if (t.n == 0) { t.fh = fh; t.mod = m; t.n = 1; return; }
+        if (t.fh == fh && t.mod == m) { t.n++; return; }
+    }
+    a.top_over++;
+}
+/// One loader sample, classified (after the resume). Returns the bucket; `own` is the lock owner class while suspended.
+static int pf_classify(const PfSample& s, bool in_win, PfAgg& a, int& own) {
+    uint32_t ras[24]; const int n = pf_ras(g_pf_lbuf, s.got, s.esp, s.ebp, ras, 24);
+    const int lm = pf_mod_of(s.eip); const uint8_t leaf = pf_cls_of(lm);
+    PfStage st = ST_NONE; bool fileload = false; uint32_t inner = 0;
+    if (pf_in_text(s.eip)) { inner = s.eip; st = pf_stage_of(s.eip); }
+    for (int i = 0; i < n; ++i) {
+        const PfStage x = pf_stage_of(ras[i]);
+        if (inner == 0) inner = ras[i];
+        if (x == ST_FILELOAD) fileload = true;
+        if (st == ST_NONE && x != ST_NONE) st = x;
+    }
+    pf_top_add(a, inner ? static_cast<uint32_t>(inner - g_pf_base) : 0u, lm);
+    own = pf_owner_cls(s.owner);
+    const bool wait_leaf = leaf == M_NTDLL || leaf == M_KBASE || leaf == M_K32;
+    if (st == ST_OPEN) return B_OPEN;                        // LL-10: Fahrenheit's managed h_fopen counts as the open, as the spec says
+    if (leaf == M_NONE || leaf == M_CLR) return B_MANAGED;   // JIT code (ours, Fahrenheit's) or the runtime itself
+    switch (st) {
+        case ST_LOCKACQ: case ST_LOCKWAIT: case ST_RILGUARD: return B_LOCK_WAIT;
+        case ST_LOCKREL: return B_LOCK_REL;
+        case ST_MGR: return wait_leaf && !fileload ? B_MGR_MUTEX : B_OTHER;
+        case ST_POOLALLOC: return leaf == M_NTDLL ? B_ALLOC_WAIT : B_ALLOC_FILL;
+        case ST_POOL: return B_ALLOC_FILL;
+        case ST_TEXC: { const int k = leaf == M_D3D11 ? 0 : leaf == M_DRV ? 1 : leaf == M_NTDLL ? 2 : 3; a.tc_leaf[k]++; if (lm >= 0) a.tc_mod[lm]++; return B_TEX_CREATE; }
+        case ST_SRV: return B_SRV;
+        case ST_READ: a.rd_leaf[leaf == M_NTDLL ? 0 : 1]++; return B_READ;
+        case ST_OPEN: return B_OPEN;
+        case ST_CLOSE: return B_CLOSE;
+        case ST_FIXUP: return B_FIXUP;
+        case ST_PLAT: return B_PLAT_CPU;
+        case ST_POST: return B_POST;
+        case ST_LOADERPROC: return !in_win && wait_leaf ? B_IDLE : B_OTHER;
+        default: return B_OTHER;
+    }
+}
+static int pf_classify_render(const PfSample& s) {
+    if (s.lr_open) return R_RELEASED;
+    const char* g = s.stage;
+    if (g != nullptr) {
+        if (strcmp(g, "xrWaitFrame") == 0) return R_WAIT;
+        if (strcmp(g, "xrEndFrame") == 0) return R_END;
+        if (strncmp(g, "xr", 2) == 0 || strcmp(g, "poll events") == 0) return R_XR;
+    }
+    uint32_t ras[24]; const int n = pf_ras(g_pf_rbuf, s.got, s.esp, s.ebp, ras, 24);
+    const uint8_t leaf = pf_cls_of(pf_mod_of(s.eip));
+    PfStage first = pf_in_text(s.eip) ? pf_stage_of(s.eip) : ST_NONE; bool in_present = first == ST_PRESENT;
+    for (int i = 0; i < n; ++i) { const PfStage x = pf_stage_of(ras[i]); if (first == ST_NONE) first = x; if (x == ST_PRESENT) in_present = true; }
+    if (in_present) {   // inside the game's Present call: the real DXGI Present (a dxgi.dll frame on the stack) or Fahrenheit's hook before it
+        bool dx = leaf == M_DXGI;
+        for (SIZE_T k = 0; k < s.got / 4 && !dx; ++k) dx = pf_is_ra_in(g_pf_rbuf[k], g_pf_dxgi_lo, g_pf_dxgi_hi);   // LL-11: a dxgi return address (after a call), not any stale dxgi value
+        return dx ? R_DXGI : R_HOOK;
+    }
+    if (first == ST_INTERP || first == ST_EXEC) return R_EXEC;
+    if (first == ST_RLOOP) return R_IDLE;
+    return R_OTHER;
+}
+/// LL-7 (watcher, each loop): our release window open for more than 1 s means the render thread is stuck re-acquiring.
+/// Once per window: the holder's tid and its innermost FFX return addresses (two short suspensions: the first finds its
+/// stack range, the second copies it), on one log line.
+static LONG g_pf_stuck_seq = 0;
+static void pf_check_stuck() {
+    if (g_lr_open == 0 || GetTickCount() - g_lr_open_tick < 1000u) return;
+    const LONG seq = g_lr_open_seq; if (seq == g_pf_stuck_seq) return;
+    g_pf_stuck_seq = seq;
+    const DWORD o = g_ril != nullptr ? g_ril->owner : 0;
+    char line[512]; int len = 0; const int cap = static_cast<int>(sizeof(line)); char* out = line;
+    #define PF_L(...) do { if (len < cap) { const int k_ = snprintf(out + len, static_cast<size_t>(cap - len), __VA_ARGS__); if (k_ > 0) len = (len + k_ < cap) ? len + k_ : cap - 1; } } while (0)
+    PF_L("load lock: the render thread has waited %lu ms to take the lock back; holder tid %lu (%s, %ld waiting)", static_cast<unsigned long>(GetTickCount() - g_lr_open_tick), static_cast<unsigned long>(o),
+         k_pf_oname[pf_owner_cls(o)], g_ril != nullptr ? static_cast<long>(g_ril->waiters) : -1L);
+    if (g_pf_mod_n == 0) pf_mods_build();   // LL-R-2: the sampler may never have run (diag_load_prof=0); nothing is suspended here
+    if (o != 0 && o != GetCurrentThreadId()) {
+        PfStk t = {}; t.tid = o; t.h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, o);
+        PfSample sm; double us = 0;
+        if (t.h && pf_sample(t, g_pf_lbuf, sizeof(g_pf_lbuf), false, sm, us) && pf_sample(t, g_pf_lbuf, sizeof(g_pf_lbuf), false, sm, us)) {
+            uint32_t ras[12]; const int n = pf_ras(g_pf_lbuf, sm.got, sm.esp, sm.ebp, ras, 12);
+            const int lm = pf_mod_of(sm.eip);
+            PF_L("; eip %s+0x%X, FFX return addresses (FhUtil, innermost first):", lm >= 0 ? g_pf_mod[lm].name : "(no module)", static_cast<unsigned>(lm >= 0 ? sm.eip - g_pf_mod[lm].lo : sm.eip));
+            for (int k = 0; k < n; ++k) PF_L(" %X", static_cast<unsigned>(ras[k] - g_pf_base));
+            if (n == 0) PF_L(" none");
+        }
+        else PF_L("; the holder could not be sampled");
+        if (t.h) CloseHandle(t.h);
+    }
+    #undef PF_L
+    for (int k = 0; k < 20 && !diag_try(line); ++k) Sleep(2);
+}
+/// One tick (watcher thread, nothing suspended on entry or exit).
+static void pf_tick() {
+    const LONG ph = g_pf_phase; PfAgg& a = g_pf_agg[ph >= 0 && ph <= 2 ? ph : 0];
+    const DWORD now = GetTickCount();
+    if (a.ticks == 0) a.t_first = now;
+    a.ticks++; a.t_last = now;
+    if (g_ril != nullptr) {
+        const int oc = pf_owner_cls(g_ril->owner);
+        a.owner_tick[oc]++; if (g_ril->waiters > 0) a.waiters_tick++;
+        if (g_lr_open != 0) { a.lr_ticks++; a.lr_owner[oc]++; }   // LL-6: who is inside the lock while our window is open (main = mid-list main-thread work)
+    }
+    pf_open(g_pf_ls, g_pf_loader_tid, g_render_tid);
+    const bool in_win = g_pf_in != 0;
+    PfSample s; double us = 0;
+    if (!pf_sample(g_pf_ls, g_pf_lbuf, sizeof(g_pf_lbuf), false, s, us)) { if (g_pf_ls.h) a.fails++; return; }
+    a.susp_n++; a.susp_us += us; if (us > a.susp_max) a.susp_max = us;
+    a.lsamp[in_win ? 0 : 1]++;
+    int own = 4; const int b = pf_classify(s, in_win, a, own);
+    a.b[in_win ? 0 : 1][b]++;
+    if (b == B_LOCK_WAIT) a.lw_owner[own]++;
+    if (b == B_LOCK_WAIT && g_pf_mode >= 2) {
+        pf_open(g_pf_rs, g_render_tid, g_pf_loader_tid);
+        PfSample r; double ru = 0;
+        if (pf_sample(g_pf_rs, g_pf_rbuf, sizeof(g_pf_rbuf), true, r, ru)) { a.rsamp++; a.r[pf_classify_render(r)]++; a.rsusp_us += ru; if (ru > a.rsusp_max) a.rsusp_max = ru; }
+        else if (g_pf_rs.h) { a.rfails++; a.r[R_FAIL]++; }
+    }
+}
+#define PF_ADD(...) do { if (len < cap) { const int k_ = snprintf(out + len, static_cast<size_t>(cap - len), __VA_ARGS__); if (k_ > 0) len = (len + k_ < cap) ? len + k_ : cap - 1; } } while (0)
+static double pf_pct(uint32_t a, uint32_t b) { return b ? 100.0 * a / b : 0.0; }
+/// The loader bucket line for one side (in / out of a window).
+static void pf_fmt_buckets(char* out, int cap, int& len, const PfAgg& a, int side) {
+    const uint32_t tot = a.lsamp[side];
+    bool any = false;
+    for (int k = 0; k < B_N; ++k) {
+        const uint32_t v = a.b[side][k]; if (v == 0) continue;
+        PF_ADD("%s%s %u (%.0f%%", any ? " | " : "", k_pf_bname[k], v, pf_pct(v, tot)); any = true;
+        if (k == B_LOCK_WAIT) PF_ADD(": owner render %u, loader %u, main %u, other %u, none %u", a.lw_owner[0], a.lw_owner[1], a.lw_owner[2], a.lw_owner[3], a.lw_owner[4]);
+        if (k == B_TEX_CREATE && side == 0) {
+            int best = -1; for (int m = 0; m < g_pf_mod_n; ++m) if (g_pf_mod[m].cls == M_DRV && a.tc_mod[m] > 0 && (best < 0 || a.tc_mod[m] > a.tc_mod[best])) best = m;
+            PF_ADD(": d3d11 %u, driver %u%s%s%s, ntdll %u, other %u", a.tc_leaf[0], a.tc_leaf[1], best >= 0 ? " [" : "", best >= 0 ? g_pf_mod[best].name : "", best >= 0 ? "]" : "", a.tc_leaf[2], a.tc_leaf[3]);
+        }
+        if (k == B_READ && side == 0) PF_ADD(": ntdll %u, other %u", a.rd_leaf[0], a.rd_leaf[1]);
+        PF_ADD(")");
+    }
+    if (!any) PF_ADD("none");
+}
+static void pf_fmt_lr(char* out, int cap, int& len, const LrStats& s, LONG mode, const char* why) {
+    PF_ADD("\nprof:  lock release (load_lock_release=%ld%s): %u around xrWaitFrame (%u with a waiter at release); re-acquire contended %u (holder loader %u, main %u, other %u), re-acquire %.1f ms in all (max %.2f ms; <= 1 ms %u, 1-5 %u, 5-11 %u, > 11 %u), lock open %.0f ms in all; skipped: not the owner %u, held twice or more %u, no waiter and no load %u; bad %u",
+           static_cast<long>(mode), why[0] ? ", " : "", s.n_wait, s.with_waiters, s.contended, s.by_loader, s.by_main, s.by_other, s.reacq_ms, s.reacq_max, s.bins[0], s.bins[1], s.bins[2], s.bins[3], s.open_ms,
+           s.skip_owner, s.skip_count, s.skip_idle, s.bad);
+    if (why[0]) PF_ADD(" (%s)", why);
+}
+/// One report into g_pf_out (watcher thread, or the render thread when there is no watcher).
+static void pf_format(const PfReq& rq) {
+    char* out = g_pf_out + g_pf_out_len; const int cap = static_cast<int>(sizeof(g_pf_out)) - g_pf_out_len; int len = 0;
+    if (cap < 2048) { g_pf_fmt_drop++; return; }   // the log has not taken the previous blocks (busy for seconds): this one is dropped, and counted
+    if (g_pf_out_len > 0) PF_ADD("\n");   // one write per batch: diag_try adds only the last newline
+    const int p = rq.phase >= 0 && rq.phase <= 2 ? rq.phase : 0;
+    PfAgg& a = g_pf_agg[p];
+    const int wi = p;
+    const LONG wn = InterlockedExchange(&g_pf_win_n[wi], 0), ws = InterlockedExchange(&g_pf_win_ms_sum[wi], 0), wm = InterlockedExchange(&g_pf_win_ms_max[wi], 0);
+    if (g_pf_thread == nullptr || a.ticks == 0) {
+        PF_ADD("prof: %s: sampler %s; loadPCluster windows %ld (%ld ms in all, longest %ld ms)", rq.label, g_pf_mode == 0 ? "off (diag_load_prof=0)" : "on but no tick in this phase", static_cast<long>(wn), static_cast<long>(ws), static_cast<long>(wm));
+    }
+    else {
+        const double avg = a.susp_n ? a.susp_us / a.susp_n : 0.0, ravg = a.rsamp ? a.rsusp_us / a.rsamp : 0.0;
+        PF_ADD("prof: %s: %u ticks over %.1f s, loader samples %u (in window %u, out %u; thread %lu%s), fails %u, loader suspend %.0f us avg / %.0f max; loadPCluster windows %ld (%ld ms in all, longest %ld ms); render samples %u (fails %u, suspend %.0f us avg / %.0f max, %.0f ms in all: it lengthens the measured lock wait)%s",
+               rq.label, a.ticks, (a.t_last - a.t_first) / 1000.0, a.lsamp[0] + a.lsamp[1], a.lsamp[0], a.lsamp[1], static_cast<unsigned long>(g_pf_ls.tid), g_pf_ls.h ? "" : ", NOT OPENED", a.fails, avg, a.susp_max,
+               static_cast<long>(wn), static_cast<long>(ws), static_cast<long>(wm), a.rsamp, a.rfails, ravg, a.rsusp_max, a.rsusp_us / 1000.0, a.timed_out ? " (the phase timed out after 60 s)" : "");
+        PF_ADD("\nprof:  in window: "); pf_fmt_buckets(out, cap, len, a, 0);
+        PF_ADD("\nprof:  out of window: "); pf_fmt_buckets(out, cap, len, a, 1);
+        if (g_pf_mode >= 2 || a.rsamp) {
+            PF_ADD("\nprof:  render thread while the loader waited:");
+            bool any = false; for (int k = 0; k < R_N; ++k) if (a.r[k]) { PF_ADD("%s %s %u", any ? " |" : "", k_pf_rname[k], a.r[k]); any = true; }
+            if (!any) PF_ADD(" no sample");
+        }
+        const uint32_t ot = a.owner_tick[0] + a.owner_tick[1] + a.owner_tick[2] + a.owner_tick[3] + a.owner_tick[4];
+        PF_ADD("\nprof:  lock 0xC94EE4 owner per tick:"); for (int k = 0; k < 5; ++k) PF_ADD("%s %s %.0f%%", k ? " |" : "", k_pf_oname[k], pf_pct(a.owner_tick[k], ot));
+        PF_ADD("; waiters > 0 on %.0f%% of ticks", pf_pct(a.waiters_tick, ot));
+        if (a.lr_ticks) PF_ADD("\nprof:  inside our release windows (%u ticks), the lock was held by: render %u | loader %u | MAIN %u | other %u | free %u",
+                               a.lr_ticks, a.lr_owner[0], a.lr_owner[1], a.lr_owner[2], a.lr_owner[3], a.lr_owner[4]);   // LL-6: main > 0 = main-thread lock work ran mid-list
+    }
+    pf_fmt_lr(out, cap, len, rq.lr, rq.lr_mode, rq.lr_why);
+    { const LONG d1 = InterlockedExchange(&g_pf_req_drop, 0); const LONG d2 = g_pf_fmt_drop; g_pf_fmt_drop = 0;
+      if (d1 || d2) PF_ADD("\nprof:  (%ld earlier prof blocks were dropped: %ld with the report queue full, %ld with the log busy)", static_cast<long>(d1 + d2), static_cast<long>(d1), static_cast<long>(d2)); }
+    if (rq.extra[0]) PF_ADD("\n%s", rq.extra);
+    if (g_pf_thread != nullptr && a.ticks != 0) {
+        PF_ADD("\nprof:  top exclusive (innermost FFX address as FhUtil @ the leaf module):");
+        bool used[k_pf_top] = {};
+        for (int r = 0; r < 10; ++r) {
+            int best = -1; for (int i = 0; i < k_pf_top; ++i) if (!used[i] && a.top[i].n && (best < 0 || a.top[i].n > a.top[best].n)) best = i;
+            if (best < 0) break;
+            used[best] = true; const PfTop& t = a.top[best];
+            const char* mn = t.mod == 0xFFFF ? "(no module)" : t.mod < g_pf_mod_n ? g_pf_mod[t.mod].name : "?";
+            if (t.fh) PF_ADD("%s FFX+0x%X@%s %u", r ? " |" : "", t.fh, mn, t.n); else PF_ADD("%s (no FFX frame)@%s %u", r ? " |" : "", mn, t.n);
+        }
+        if (a.top_over) PF_ADD(" | (%u samples not tabled)", a.top_over);
+    }
+    // the samples taken outside a battle load since the last block (field loads with a loadPCluster in progress)
+    PfAgg& z = g_pf_agg[0];
+    if (p != 0 && g_pf_thread != nullptr && z.lsamp[0] + z.lsamp[1] > 0) {
+        const LONG zn = InterlockedExchange(&g_pf_win_n[0], 0), zs = InterlockedExchange(&g_pf_win_ms_sum[0], 0); InterlockedExchange(&g_pf_win_ms_max[0], 0);
+        PF_ADD("\nprof:  outside battle loads since the last block (%ld loadPCluster windows, %ld ms): ", static_cast<long>(zn), static_cast<long>(zs));
+        pf_fmt_buckets(out, cap, len, z, 0);
+        memset(&z, 0, sizeof(z));
+    }
+    memset(&a, 0, sizeof(a));
+    g_pf_out_len += len;
+}
+#undef PF_ADD
+/// Formats the queued reports and writes what is formatted (one owner thread; see g_pf_out). `retry`: wait a little for a
+/// busy log (the watcher; the render thread never waits and tries again next frame).
+static void pf_service(bool retry) {
+    for (LONG r = g_pf_req_r; r != g_pf_req_w; r = g_pf_req_r) { MemoryBarrier(); pf_format(g_pf_req[r & 1]); InterlockedIncrement(&g_pf_req_r); }
+    if (g_pf_out_len == 0) return;
+    for (int k = 0; k < (retry ? 20 : 1); ++k) {
+        if (diag_try(g_pf_out)) { g_pf_out_len = 0; g_pf_out[0] = 0; return; }
+        if (retry) Sleep(2);
+    }
+}
+static bool pf_active() { return g_pf_mode > 0 && g_ril != nullptr && g_pf_text_lo != 0 && (pf_phase_live() || g_pf_in != 0) && g_pf_loader_tid != 0; }
+static DWORD WINAPI pf_watch(LPVOID) {
+    typedef HRESULT (WINAPI* sd_fn)(HANDLE, PCWSTR);
+    if (HMODULE k = GetModuleHandleW(L"kernel32.dll")) if (sd_fn sd = reinterpret_cast<sd_fn>(GetProcAddress(k, "SetThreadDescription"))) sd(GetCurrentThread(), L"ffxvr load profiler");
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);   // the 1 ms tick must land while the ABOVE_NORMAL loader runs
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (timer == nullptr) timer = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);   // before Windows 10 1803: ~1 ms with timeBeginPeriod(1) (FFX-60fps sets it)
+    bool was = false, armed = false; DWORD built_at = 0;
+    for (;;) {
+        const bool act = pf_active();
+        if (timer && act != armed) {   // LL-12: the 1 ms timer runs only while sampling
+            if (act) { LARGE_INTEGER due; due.QuadPart = -10000; armed = SetWaitableTimer(timer, &due, 1, nullptr, nullptr, FALSE) != FALSE; }
+            else { CancelWaitableTimer(timer); armed = false; }
+        }
+        DWORD w;
+        if (act && armed) { HANDLE hs[2] = { g_pf_stop, timer }; w = WaitForMultipleObjects(2, hs, FALSE, 50); }
+        else w = WaitForSingleObject(g_pf_stop, act ? 1 : 20);
+        if (w == WAIT_OBJECT_0) break;
+        pf_service(true);
+        pf_check_stuck();   // LL-7
+        const LONG ph = g_pf_phase;
+        if (ph != 0 && GetTickCount() - g_pf_phase_t >= k_pf_phase_max_ms) { if (InterlockedCompareExchange(&g_pf_phase, 0, ph) == ph) g_pf_agg[ph >= 0 && ph <= 2 ? ph : 0].timed_out = 1; }
+        if (!pf_active()) { was = false; continue; }
+        if (!was && (g_pf_mod_n == 0 || GetTickCount() - built_at > 2000u)) { pf_mods_build(); built_at = GetTickCount(); }   // the module table at an activation, at most every 2 s (never inside a tick)
+        was = true;
+        pf_tick();
+    }
+    pf_service(true);
+    if (timer) { CancelWaitableTimer(timer); CloseHandle(timer); }
+    if (g_pf_ls.h) CloseHandle(g_pf_ls.h);
+    if (g_pf_rs.h) CloseHandle(g_pf_rs.h);
+    g_pf_ls = PfStk{}; g_pf_rs = PfStk{};
+    return 0;
+}
+/// begin_frame (render thread): without a watcher, the render thread owns g_pf_out and writes it (never waiting).
+static void pf_render_frame() { if (g_pf_thread == nullptr && (g_pf_out_len > 0 || g_pf_req_r != g_pf_req_w)) pf_service(false); }
+static void pf_shutdown() {
+    if (g_pf_stop) { SetEvent(g_pf_stop); if (g_pf_thread) WaitForSingleObject(g_pf_thread, 300); }
+}
+
+/// The watcher thread (render thread only: ffxvr_prof_set / ffxvr_lock_release_set). Once started it stays; it only idles.
+static void pf_start(const char* why) {
+    if (g_pf_thread != nullptr || !g_ril_ok) return;
+    if (g_pf_stop == nullptr) g_pf_stop = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+    if (g_pf_stop) g_pf_thread = CreateThread(nullptr, 256 * 1024, pf_watch, nullptr, 0, nullptr);
+    diag("load profiler: watcher %s (%s; profiler mode %ld%s)", g_pf_thread ? "started" : "FAILED to start", why, static_cast<long>(g_pf_mode),
+         g_pf_mode >= 2 ? ": the loader every ~1 ms during battle loads and loadPCluster calls, the render thread while the loader waits for the Phyre lock" : g_pf_mode == 1 ? ": the loader every ~1 ms during battle loads and loadPCluster calls" : ": no sampling, only the stuck re-acquire check");
+}
+/// Profiler mode (render thread, every frame from push_all): 0 off, 1 the loader, 2 the loader + the render thread while the
+/// loader waits for the lock. The watcher starts at the first non-zero mode (or at load_lock_release=1, LL-R-2) and then
+/// only idles.
+extern "C" __declspec(dllexport) void ffxvr_prof_set(int mode) {
+    ril_init();
+    const LONG m = mode < 0 ? 0 : mode > 2 ? 2 : mode;
+    if (g_pf_mode != m) InterlockedExchange(&g_pf_mode, m);
+    if (m > 0) pf_start("diag_load_prof");
+}
+/// The loader's outermost loadPCluster (managed hl_pcl): bit 0 = in (1 before the original, 0 after it, in a finally),
+/// bit 1 = the call is on the game's main thread (not sampled; it names the main thread for the owner table).
+extern "C" __declspec(dllexport) void ffxvr_prof_mark(int flags) {
+    const DWORD t = GetCurrentThreadId();
+    if (flags & 2) { if (g_pf_main_tid != t) g_pf_main_tid = t; return; }
+    if (t == g_render_tid) return;
+    if (g_pf_loader_tid != t) InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_pf_loader_tid), static_cast<LONG>(t));
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    const LONG ph = g_pf_phase; const int wi = ph >= 0 && ph <= 2 ? ph : 0;
+    if (flags & 1) { g_pf_mark_q = q.QuadPart; InterlockedExchange(&g_pf_in, 1); InterlockedIncrement(&g_pf_win_n[wi]); return; }
+    InterlockedExchange(&g_pf_in, 0);
+    static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    if (g_pf_mark_q == 0 || f.QuadPart == 0) return;
+    const LONG d = static_cast<LONG>((q.QuadPart - g_pf_mark_q) * 1000 / f.QuadPart); g_pf_mark_q = 0;
+    InterlockedExchangeAdd(&g_pf_win_ms_sum[wi], d);
+    for (LONG m = g_pf_win_ms_max[wi]; d > m; m = g_pf_win_ms_max[wi]) if (InterlockedCompareExchange(&g_pf_win_ms_max[wi], d, m) == m) break;
+}
+/// The battle load phase (managed, any thread): v > 0 opens phase v (1 entry, 2 way back); -v ends phase v if it is the
+/// current one; 0 ends any. The phase also arms the lock release.
+extern "C" __declspec(dllexport) void ffxvr_prof_phase(int v) {
+    if (v > 0) { g_pf_phase_t = GetTickCount(); InterlockedExchange(&g_pf_phase, v); }
+    else if (v < 0) InterlockedCompareExchange(&g_pf_phase, 0, -v);
+    else InterlockedExchange(&g_pf_phase, 0);
+}
+/// The prof block for a finished phase (render thread, right after its load: line): `label` names it, `extra` holds the
+/// managed probe lines. The lock release's counts since the last block go with it.
+extern "C" __declspec(dllexport) void ffxvr_prof_report(int phase, const char* label, const char* extra) {
+    if (g_pf_req_w - g_pf_req_r >= 2) { InterlockedIncrement(&g_pf_req_drop); return; }
+    PfReq& q = g_pf_req[g_pf_req_w & 1];
+    q.phase = phase; q.lr_mode = g_lr_mode; q.lr = g_lr_st;
+    snprintf(q.lr_why, sizeof(q.lr_why), "%s", g_lr_disabled ? g_lr_disabled_why : !g_ril_ok ? g_ril_why : "");   // LL-17: snapshot on the thread that writes them
+    strncpy_s(q.label, label != nullptr ? label : "?", _TRUNCATE);
+    strncpy_s(q.extra, extra != nullptr ? extra : "", _TRUNCATE);
+    LrStats& t = g_lr_total;
+    t.n_wait += g_lr_st.n_wait; t.contended += g_lr_st.contended; t.bad += g_lr_st.bad; t.reacq_ms += g_lr_st.reacq_ms; if (g_lr_st.reacq_max > t.reacq_max) t.reacq_max = g_lr_st.reacq_max;
+    g_lr_st = LrStats{};
+    MemoryBarrier();
+    InterlockedIncrement(&g_pf_req_w);
+    if (g_pf_thread == nullptr) pf_service(false);   // no watcher: the render thread formats and writes (or keeps it for the next frame)
+}
+/// load_lock_release (render thread, every frame from push_all): 0 off, 1 around our xrWaitFrame (anything else is 0:
+/// LL-1). Returns 1 while the release can work.
+extern "C" __declspec(dllexport) int ffxvr_lock_release_set(int mode) {
+    ril_init();
+    const LONG m = mode == 1 ? 1 : 0;
+    if (m == 1) pf_start("load_lock_release=1: the stuck re-acquire check (LL-7) runs whenever the release is on");   // LL-R-2
+    if (g_lr_mode != m) { InterlockedExchange(&g_lr_mode, m); diag("load lock: load_lock_release=%ld%s", static_cast<long>(m), g_ril_ok ? "" : " (unavailable: the lock signature did not match)"); }
+    return g_ril_ok && !g_lr_disabled ? 1 : 0;
+}
+/// The overlay's line (render thread). Returns the mode.
+extern "C" __declspec(dllexport) int ffxvr_lock_release_status(char* buf, int n) {
+    if (buf != nullptr && n > 0) {
+        const LrStats& t = g_lr_total;
+        snprintf(buf, static_cast<size_t>(n), "%s%s | this session: %u releases at xrWaitFrame, %u contended re-acquires (max %.1f ms) | now: %s | profiler %s",
+                 g_ril_ok ? "lock signature ok" : g_ril_why, g_lr_disabled ? " | DISABLED for the session (reason at the end)" : "", t.n_wait + g_lr_st.n_wait, t.contended + g_lr_st.contended,
+                 g_lr_st.reacq_max > t.reacq_max ? g_lr_st.reacq_max : t.reacq_max, pf_phase_live() ? (g_pf_phase == 1 ? "battle entry" : "way back") : "no battle load",
+                 g_pf_thread == nullptr ? "off" : g_pf_mode == 0 ? "idle (diag_load_prof=0)" : "on");
+        if (g_lr_disabled) { const size_t l = strlen(buf); snprintf(buf + l, static_cast<size_t>(n) - l, " (%s)", g_lr_disabled_why); }
+    }
+    return static_cast<int>(g_lr_mode);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {

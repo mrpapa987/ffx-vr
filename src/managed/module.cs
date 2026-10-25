@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 14;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 17;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -482,6 +482,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_game_callers = (delegate* unmanaged[Cdecl]<uint*, int, int>)req("ffxvr_game_callers"); _fn_va_stats = (delegate* unmanaged[Cdecl]<uint*, void>)req("ffxvr_va_stats");
             _fn_va_watch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_va_watch"); _fn_va_report = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_va_report");
             _fn_va_regions = (delegate* unmanaged[Cdecl]<byte*, int, byte*, uint*, int>)req("ffxvr_va_regions");
+            _fn_bt_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_bt_set"); _fn_bt_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_bt_status");   // ABI 15: battle transition
+            _fn_prof_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_set"); _fn_prof_mark = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_mark"); _fn_prof_phase = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_phase");   // ABI 17: load lock build
+            _fn_prof_report = (delegate* unmanaged[Cdecl]<int, byte*, byte*, void>)req("ffxvr_prof_report"); _fn_lock_release_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_lock_release_set"); _fn_lock_release_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lock_release_status");
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -530,6 +533,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_bb_resized = null;
         _fn_cursor_game = null; _fn_cursor_skip = null; _fn_cursor_look = null; _fn_markers_kinds = null; _fn_cursor_atlas_dump = null;
         _fn_game_callers = null; _fn_va_stats = null; _fn_haptics_set = null; _fn_va_watch = null; _fn_va_report = null; _fn_va_regions = null;
+        _fn_bt_set = null; _fn_bt_status = null;
+        _fn_prof_set = null; _fn_prof_mark = null; _fn_prof_phase = null; _fn_prof_report = null; _fn_lock_release_set = null; _fn_lock_release_status = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -949,7 +954,14 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "turn_blink":        pb(k, v, ref _turn_blink); break;
                 case "move_remap":        pb(k, v, ref _move_remap); break;
                 case "move_invert":       pb(k, v, ref _move_invert); break;
-                case "fp_actor":          { string fa = v.Trim(); if (fa.Length > 0 && fa.Length <= 15) _fp_actor = fa; else _ini_bad.Add($"{k}='{v}'"); } break;
+                case "fp_actor": {   // FP-1: a comma list of model names, best first; the old single default "c101" becomes the new list
+                    string fa = v.Trim();
+                    bool ok = fa.Length > 0 && fa.Length <= 63; int nn = 0;
+                    if (ok) foreach (string t in fa.Split(',')) { string n = t.Trim(); if (n.Length == 0 || n.Length > 15) continue; nn++; }   // FP-R3: empty and over-long tokens skipped, as fp_names() does
+                    if (!ok || nn == 0) _ini_bad.Add($"{k}='{v}'");
+                    else if (fa == "c101") { _logger.Info($"settings: fp_actor=c101 (the old default) read as '{k_fp_actor_default}'"); _fp_actor = k_fp_actor_default; }
+                    else _fp_actor = fa;
+                } break;
                 case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
@@ -985,6 +997,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "hd_cluster_cache":  pb(k, v, ref _hd_cluster_cache); break;      // keep the HD map textures across random battles in one zone (applies at once)
                 case "diag_cluster_bytes": pb(k, v, ref _diag_cluster_bytes); break;   // HC-2: the game pool's alloc / free hooks, for the bytes per HD cluster (hooks at the next launch; default 0: the header read stands in)
                 case "diag_va_log":       pb(k, v, ref _diag_va_log); break;           // HC-6: the ntdll reservation patch (hooks at the next launch; default 0: the region diff is patch-free)
+                case "battle_transition": bt_parse_mode(k, v); break;                  // the glass break at a battle start: 2 frozen world, 1 head-locked, 0 old (applies at once)
+                case "diag_transition":   pb(k, v, ref _diag_transition); break;       // the per-frame bt: lines in a battle transition window
+                case "diag_load_prof":    lp_parse_prof(k, v); break;                  // load lock build: the load profiler 0/1/2 (the probes hook at the next launch; the sampler at once)
+                case "load_lock_release": pe(k, v, ref _load_lock_release, 0, 1); break;   // load lock build: 0 off, 1 around xrWaitFrame (a hand edit applies at once; LL-2: never saved, 0 at every launch)
                 case "cursor_source":     pw(k, v, ref _cursor_game_cfg, "game", "legacy"); break;   // cursor stage C2
                 case "marker_lift":       pf(k, v, ref _marker_lift, -5f, 20f); break;              // C2-10
                 case "cursor_look":       pw(k, v, ref _cursor_look_game, "game", "mod"); break;    // cursor stage C3
@@ -1039,6 +1055,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (gone) { _settings_ok = true; _ini_len_seen = -1; _logger.Info($"settings: no {_ini_path} yet; defaults"); return; }   // _ini_last "": the defaults are written once
             if (last != null) { _settings_ok = false; _logger.Info($"settings: could not read {_ini_path} ({last.Message}); keeping defaults in memory and not saving until it can be read (retried every second)"); return; }
             int keys = settings_parse(raw.Split('\n'));
+            _load_lock_release = 0;   // LL-2: every launch starts with the lock release off, whatever the file says
             settings_apply_launch();
             _ini_mtime_seen = mt; _ini_len_seen = len;
             settings_first_read_done(raw, keys);
@@ -1077,6 +1094,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 _ini_mtime_seen = mt; _ini_len_seen = len;
                 if (!_settings_ok && _ini_disk.Length == 0) {   // B8-6: the start-up read had failed; this is that read, late
                     int all = settings_parse(on_disk.Split('\n'));
+                    _load_lock_release = 0;   // LL-2: this is the launch read, late
                     settings_first_read_done(on_disk, all);
                     _settings_ok = true; _overlay_at_start_loaded = _overlay_at_start; _ini_pending = null;
                     _logger.Info($"settings: ffxvr.ini read at last ({all} keys); launch options (autostart, start view) apply from the next start{bad_suffix()}");
@@ -1271,6 +1289,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hd_cluster_cache={(_hd_cluster_cache ? 1 : 0)}\n" +
             $"diag_cluster_bytes={(_diag_cluster_bytes ? 1 : 0)}\n" +
             $"diag_va_log={(_diag_va_log ? 1 : 0)}\n" +
+            $"battle_transition={_battle_transition.ToString(ci)}\n" +
+            $"diag_transition={(_diag_transition ? 1 : 0)}\n" +
+            $"diag_load_prof={_diag_load_prof.ToString(ci)}\n" +
+            "load_lock_release=0\n" +   // LL-2: a test toggle, never persisted (settings_load forces 0 at launch)
             $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
             $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
             $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
@@ -1413,6 +1435,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
         ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
         if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
+        bt_ui();
+        lp_ui();   // load lock build: load_lock_release
         ImGui.Checkbox("keep characters drawn (no distance or frustum cull of characters)", ref _cull_dist);
         if (_fn_cull_dist_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_dist_get() != 0 ? "patched" : (_cull_dist_rc != 0 ? $"not applied (rc {_cull_dist_rc}, see diag log)" : "off")); }
         ImGui.Checkbox("keep all geometry drawn (no frustum cull of the scene; costs GPU time)", ref _cull_scene);
@@ -1709,8 +1733,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
-            ImGui.InputText("player model name", ref _fp_actor, 16); ImGui.SameLine();
-            ImGui.TextDisabled(_fp_actor_idx >= 0 ? $"actor {_fp_actor_idx}" : "not found (using actor 0)");
+            ImGui.InputText("player model names (comma list, best first)", ref _fp_actor, 64); ImGui.SameLine();
+            ImGui.TextDisabled(_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? _fp_how : $"actor {_fp_actor_idx}");
             ImGui.TreePop();
         }
 
@@ -1754,8 +1778,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.Checkbox("load diagnostics (diag_load; hooks at the next launch): one \"load: battle N\" line per battle start and per way back in ffxvr_diag.log", ref _diag_load);
             ImGui.Checkbox("cluster bytes (diag_cluster_bytes; hooks at the next launch): the game pool's allocations inside each HD cluster load, for its resident size. Off: the Phyre header size stands in. Measurement only (hot path)", ref _diag_cluster_bytes);
             ImGui.Checkbox("ntdll reservation log (diag_va_log; hooks at the next launch): name the caller of every low-2 GB reservation. Off: a patch-free region diff at each map free", ref _diag_va_log);
+            bt_debug_ui();
+            lp_debug_ui();
             hc_ui();
-            ImGui.TextDisabled($"hooks seen working 0x{seen_mask:X} (0x1FF the core nine; 0x200 open, 0x400 read, 0x800 GPU create, 0x1000 / 0x2000 pool alloc / free)");
+            ImGui.TextDisabled($"hooks seen working 0x{seen_mask:X} (0x1FF the core nine; 0x200 open, 0x400 read, 0x800 post fixups, 0x1000 / 0x2000 pool alloc / free, 0x4000 / 0x8000 texture section / create)");
             ImGui.TreePop();
         }
 
@@ -1821,6 +1847,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _pick_poll_until = _now + 3.0; _pick_poll_frames = 3; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
         }
         if (Convert.ToBoolean(ImGui.GetIO().WantTextInput) || !_native_ready) return;   // Convert: builds whether Hexa exposes bool or byte
+        bt_user_keys();   // a view hotkey ends an open battle transition window
         if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
         if (ImGui.IsKeyPressed(ImGuiKey.End)) toggle_first_person();
         if (ImGui.IsKeyPressed(ImGuiKey.Insert)) _btl_cycle_req++;   // battle: the eyes to the next party member (consumed by push_player this frame)
@@ -1852,6 +1879,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _gest_move_x = mv[0]; _gest_move_y = mv[1]; _gest_move_z = mv[2]; _gest_scale_mul = mul; _gest_active = act;
         if ((toggles & 0xFF) != 0) toggle_first_person();
         if (((toggles >> 8) & 0xFF) != 0) _btl_cycle_req++;
+        if (toggles != 0 || act != 0) _bt_user_ev = true;   // a gesture chord or a world grab ends an open battle transition window
     }
 
     /// <summary>Every setting to the native side, exactly once per frame, whether the window is open or not. The window
@@ -1883,6 +1911,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_msaa_set != null) _fn_msaa_set(_msaa);
         if (_fn_vrpad_set != null) _fn_vrpad_set(_vrpad ? 1 : 0);
         if (_fn_haptics_set != null) _haptics_status = _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);
+        bt_push();
+        lp_push();   // load lock build: diag_load_prof, load_lock_release
         if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || save_screen_state() != 0) ? 1 : 0, _imgui_min_draws);
         if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
         if (_fp_head_parts != _head_mask_src) { _head_mask_src = _fp_head_parts; _head_mask = parse_mask(_fp_head_parts); }   // R22: parsed only when the text changes
@@ -2058,9 +2088,23 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (sb != null) _logger.Info(sb.ToString());
     }
 
-    /// <summary>The player: the enabled field actor whose model name matches (Tidus is c101); index 0
-    /// is not reliable. Falls back to actor 0. Render space negates X and Y.</summary>
-    private string _fp_actor = "c101"; private int _fp_actor_idx = -1;
+    /// <summary>The player: the enabled field actor whose model name is in the fp_actor list, best first (Tidus is
+    /// c001 for most of the game, c101 in the opening); index 0 is not reliable (in Luca it is an object, f001).
+    /// Falls back to the party model with the lowest id, then actor 0 (FP-1). Render space negates X and Y.</summary>
+    private const string k_fp_actor_default = "c001,c101";
+    private string _fp_actor = k_fp_actor_default; private int _fp_actor_idx = -1;
+    private string _fp_how = "", _fp_how_logged = ""; private int _fp_scan_tick, _fp_chr_id = -1;
+    private string _fp_names_src = ""; private string[] _fp_names_arr = System.Array.Empty<string>();
+    /// <summary>FP-1: fp_actor split at commas (names of 1-15 characters; others dropped), cached until the text changes.</summary>
+    private string[] fp_names() {
+        string s = _fp_actor;
+        if (!ReferenceEquals(s, _fp_names_src) && s != _fp_names_src) {
+            var l = new System.Collections.Generic.List<string>();
+            foreach (string t in s.Split(',')) { string n = t.Trim(); if (n.Length >= 1 && n.Length <= 15 && !l.Contains(n)) l.Add(n); }
+            _fp_names_arr = l.ToArray(); _fp_names_src = s;
+        }
+        return _fp_names_arr;
+    }
     /// <summary>An actor slot that is really in use. Before the field is up the table is uninitialised memory
     /// (0xCDCDCDCD fill), so only a plain 1 counts as enabled and the name pointer must look like one.</summary>
     private static bool live(in Actor a) => a.chr_enabled == 1 && (nint)a.chr_name > 0x10000 && (nint)a.chr_name < 0x7FFF0000;
@@ -2197,14 +2241,45 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
         }
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
-        if (pick >= 0) { }
-        else if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && name_is(cur.chr_name, _fp_actor)) pick = _fp_actor_idx;
+        if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; }
         else {
-            for (int i = 0; i < 48 && pick < 0; i++) {
-                if (!read(actors + i, out Actor a)) break;
-                if (live(a) && name_is(a.chr_name, _fp_actor)) pick = i;
+            // FP-1: the field player. fp_actor is a list of model names, best first (Tidus is c001 for most of the game,
+            // c101 in the opening). Every live actor gets a score, lower is better: a listed name = its rank; a party
+            // model (chr_id 1..0xFFF, the "c" models) = 1000 + chr_id, so Tidus beats a follower; actor 0 = 100000 (the
+            // last resort); anything else (NPCs, objects) is no candidate. In Luca actor 0 is an object (f001), which
+            // the old "actor 0" fallback followed. The current actor is kept while it is live, is the same actor (its
+            // chr_id: a slot is reused across a map change, FP-R2) and scores 0; otherwise the table is rescanned at
+            // once if it died or changed, else every 30 frames; ties keep the current actor.
+            string[] names = fp_names();
+            int score_of(in Actor a, int i) {
+                for (int r = 0; r < names.Length; r++) if (name_is(a.chr_name, names[r])) return r;
+                int cid = (int)a.chr_id;
+                if (cid > 0 && cid < 0x1000) return 1000 + cid;
+                return i == 0 ? 100000 : -1;
             }
-            if (pick < 0 && read(actors, out Actor a0) && live(a0)) pick = 0;
+            int cur_score = -1;
+            if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx);
+            _fp_scan_tick++;
+            if (cur_score == 0 || (cur_score > 0 && cur_score < 100000 && (_fp_scan_tick % 30) != 0)) pick = _fp_actor_idx;   // the actor-0 last resort rescans every frame (FP-R3)
+            else {
+                int best = int.MaxValue, best_i = -1;
+                if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor
+                for (int i = 0; i < 48; i++) {
+                    if (!read(actors + i, out Actor a)) break;
+                    if (!live(a) || i == best_i) continue;
+                    int s = score_of(a, i);
+                    if (s >= 0 && s < best) { best = s; best_i = i; }
+                }
+                pick = best_i;
+                if (pick >= 0 && (pick != _fp_actor_idx || cur_score < 0) && read(actors + pick, out Actor pa2)) {
+                    string how = best < 1000 ? "model " + names[best] : best < 100000 ? "no listed model on this map: the party model with the lowest id" : "nothing matched: actor 0";
+                    _fp_chr_id = (int)pa2.chr_id;
+                    _fp_how = $"actor {pick} '{actor_name(pa2.chr_name)}' ({how})";
+                    string mp = map_name();
+                    if (_fp_how + mp != _fp_how_logged) { _fp_how_logged = _fp_how + mp; _logger.Info($"first person: following {_fp_how} on map {mp}"); }
+                }
+            }
+            if (pick < 0) { _fp_how = ""; _fp_chr_id = -1; }
         }
         _fp_actor_idx = pick;
         System.Threading.Volatile.Write(ref _d7_follow_actor, pick >= 0 ? (nint)(actors + pick) : 0);   // build 7: the actor the main-thread snapshot reads

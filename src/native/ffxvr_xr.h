@@ -12,6 +12,8 @@ struct XrHost {
     const wchar_t*       dir;                               // where openxr_loader.dll lives (next to our DLL)
     void (*diag)(const char* fmt, ...);                     // append a line to ffxvr_diag.log
     bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha);   // stretch copy; alpha forced to 1 unless kept
+    int  (*wait_begin)();                                   // load lock build: right before xrWaitFrame (may give up the game's render lock); null = none
+    void (*wait_end)(int token);                            // right after xrWaitFrame returns, on every path, with wait_begin's result (takes the lock back)
 };
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space
@@ -68,7 +70,17 @@ void        xr_counters(unsigned* held_frames, unsigned* wait_timeouts);   // fr
 bool        xr_take_stuck();   // R8-3: true once after a B5-2 stop (a stuck swapchain): xr_tick counts it as a failed start, so the restart backs off
 void        xr_eye_size(unsigned* w, unsigned* h);          // the eye swapchains' size: the headset's recommended width at 16:9 (0 x 0 while no session)
 void xr_timing(double* wait_ms, double* end_ms);
+const char* xr_stage();                                    // the render thread's current stage name (a string literal; the load profiler reads it)
 bool        xr_take_space_change();                        // true once after the runtime recentred its reference space (the headset's own recentre gesture)           // last frame: xrWaitFrame / xrEndFrame durations                                    // one line for the overlay
+
+/// Battle transition (research battle-transition.md 4.2, option B). Called before xr_frame: xr_pin(true) takes the
+/// poses the frame about to be submitted was rendered with (the views located at the previous xr_frame) and the field of
+/// view `used`; while pinned, every projection layer goes out with those poses and that field of view, so frames rendered
+/// from a frozen head pose stay world-locked where they were. False (nothing pinned) without a running session or located
+/// views. A runtime space change or a stop drops the pin (xr_pinned then says false).
+bool        xr_pin(bool on, const XrFovTan used[2]);
+bool        xr_pinned();
+void        xr_hold_uncapped(bool on);                     // the held base layer may be re-sent past the 30-frame cap (the transition window only)
 
 /// Per frame, from the Present hook. `eye1`/`eye2` are the finished images
 /// of the frame just rendered (eye2 may be null: mono); `used` the field of

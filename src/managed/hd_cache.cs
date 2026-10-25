@@ -134,6 +134,7 @@ public sealed unsafe partial class FFXVRModule {
         t_hc_win = 1; t_hc_miss = false; t_hc_open = t_hc_read = t_hc_readb = t_hc_alloc = t_hc_alloc_load = 0; t_hc_slot = -1; t_hc_c = 0;
         t_hc_res_open = FhUtil.get_at<uint>(0x153CD44);   // HC-T-1: live, on the loading thread (a game global, always mapped)
         t_hc_hdr_off = 0; t_hc_hdr_got = 0; t_hc_hdr_mark = t_hc_hdr_ib = t_hc_hdr_vb = t_hc_hdr_tex = 0;
+        t_pr_in_plat = 0; t_pr_pre_w = t_pr_texc_w = 0;   // load lock build: the probes' per-window parts
     }
     /// <summary>The window ends: at the cluster's GPU create (bytes through it) or at the next load (bytes of the load only).
     /// Two sizes per held cluster: the GAME-POOL bytes it pins (the pool hooks' net bytes, only with diag_cluster_bytes; else
@@ -178,7 +179,7 @@ public sealed unsafe partial class FFXVRModule {
     private void hc_after_load(dl_pcl o, nint self, nint path, nint r, long dt) {
         bool miss = _ld_open_q && (seen_mask & 512) != 0 ? t_hc_miss : dt * 10000 >= System.Diagnostics.Stopwatch.Frequency;   // without the open hook: the 0.1 ms rule
         t_hc_was_miss = miss; t_hc_alloc_load = t_hc_alloc;
-        if (miss) { lt_add(LT.pcl_miss_n, 1); lt_add(LT.pcl_miss_t, dt); lt_add(LT.open_t, t_hc_open); lt_add(LT.read_t, t_hc_read); lt_add(LT.read_b, t_hc_readb); }
+        if (miss) { lt_add(LT.pcl_miss_n, 1); lt_add(LT.pcl_miss_t, dt); lt_add(LT.open_t, t_hc_open); lt_add(LT.read_t, t_hc_read); lt_add(LT.read_b, t_hc_readb); lp_after_miss(dt); }
         t_hc_c = r; t_hc_win = r != 0 ? 2 : 0;
         if (r == 0) return;
         int s = hc_find(r);
