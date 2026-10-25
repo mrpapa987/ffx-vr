@@ -539,7 +539,7 @@ PFN_XInputSetState g_xis_orig = nullptr; bool g_xis_hooked = false; uint32_t g_x
 struct XisRec { uint32_t frame, pad; uint16_t l, r; };
 XisRec g_xis_log[32] = {}; volatile LONG g_xis_w = 0; LONG g_xis_r = 0, g_xis_until = 20; uint16_t g_xis_last[4][2] = {};
 uint32_t g_bb_desc_logged = 0;                             // backbuffer desc lines (6.7), at most 10
-float g_motion_cols[12] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4)
+float g_motion_cols[20] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4); 12-16: the smooth anchor (used, age, step used, step +0x0C, stamp step)
 volatile LONG g_present_ms = 0;                            // GetTickCount at the last begin_frame: the watchdog's input
 volatile LONG g_stall_open = 0; LONG g_stall_from_ms = 0; uint32_t g_stalls = 0;   // a stall logged and not yet ended; stalls logged
 DWORD g_main_tid = 0; uint32_t g_main_other = 0;           // the game's main thread (first caller of ffxvr_main_note); joins seen elsewhere
@@ -587,6 +587,7 @@ int      g_fp_body_mode = 0; uint32_t g_fp_head_mask = 0; int g_fp_solo = -1;
 // stored position: the match radius grows with the last step and shrinks
 // back a few frames after the actor stops (when NPCs are close, you stand).
 float    g_fp_step = 0.f; int g_fp_still_frames = 0;
+float    g_fp_step_hide = 0.f, g_fp_d_prev = 0.f;   // SM-2: the body-hide margin's step: the sum of the last two per-call distances (30 Hz: tick + 0; smooth anchor: half + half)
 uint32_t g_fp_part_idx = 0, g_fp_parts_last = 0;
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
@@ -2751,7 +2752,7 @@ static void write_backdrop_camera(const uint8_t* orig, uint8_t* p, UINT size, UI
 /// (record: "BONE", u32 size, u32 frame, u32 view base, f32 world[3], bytes).
 static void bones_capture(const uint8_t* p, UINT size, UINT base, const float* world) {
     const float dx = world[0] - g_fp_pos[0], dy = world[1] - g_fp_pos[1], dz = world[2] - g_fp_pos[2];
-    const float r = g_fp_hide_radius + 1.5f * g_fp_step;
+    const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
     if (dx*dx + dy*dy + dz*dz >= r * r) return;
     if (g_bones_frame == 0) g_bones_frame = g_frames;
     if (g_frames != g_bones_frame) { g_bones_left = 0; return; }
@@ -3039,7 +3040,7 @@ static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8
 static int bones_record(const uint8_t* p, UINT size, const float* world, uint8_t* eye1, EyeImage* e) {
     uint8_t* eye2 = e ? e->eye2.data() : nullptr;
     const float dx = world[0] - g_fp_pos[0], dy = world[1] - g_fp_pos[1], dz = world[2] - g_fp_pos[2];
-    const float r = g_fp_hide_radius + 1.5f * g_fp_step;
+    const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
     if (dx*dx + dy*dy + dz*dz >= r * r) return 0;
     const int rec = g_bone_rec++;
     if (rec >= k_pal_max_recs) return 0;
@@ -3846,7 +3847,7 @@ extern "C" __declspec(dllexport) int ffxvr_main_note() {
 /// snapshot logic position xyz (render space), exec byte, frames since the snapshot, snapshot valid.
 extern "C" __declspec(dllexport) void ffxvr_motion_cols(const float* v, int n) {
     if (v == nullptr || n <= 0) { g_motion_cols_fresh = false; return; }
-    for (int i = 0; i < 12; ++i) g_motion_cols[i] = i < n ? v[i] : 0.f;
+    for (int i = 0; i < 20; ++i) g_motion_cols[i] = i < n ? v[i] : 0.f;
     g_motion_cols_fresh = true;
 }
 
@@ -4294,7 +4295,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     const bool fp_hiding = g_fp_mode == 1 && g_fp_hide_body;
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
-        const float r = g_fp_hide_radius + 1.5f * g_fp_step;
+        const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
         if (dx*dx + dy*dy + dz*dz < r * r) {   // one of the player's own parts
             const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && texture_of(g_cur_rtv[0]) == g_scene_tex;
             const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;   // VR hands: the body is shown, head parts hidden
@@ -6040,20 +6041,22 @@ static void motion_log_tick() {
     }
     float hy = 0.f;
     { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d); hy = atan2f(-d[0], -d[2]); }
-    char ex[240] = "";   // build 7 (6.4): managed's main-thread post-join snapshot of the followed actor, render space
+    char ex[360] = "";   // build 7 (6.4): managed's main-thread post-join snapshot of the followed actor, render space; then the smooth anchor
     if (g_motion_cols_fresh) {
         const float* m = g_motion_cols;
-        snprintf(ex, sizeof(ex), " | snap drawn (%.2f %.2f %.2f) present drawn (%.2f %.2f %.2f) snap logic (%.2f %.2f %.2f) exec %d snap age %d%s",
-                 m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], (int)m[9], (int)m[10], m[11] != 0.f ? "" : " (no snapshot)");
+        snprintf(ex, sizeof(ex), " | snap drawn (%.2f %.2f %.2f) present drawn (%.2f %.2f %.2f) snap logic (%.2f %.2f %.2f) exec %d snap age %d%s | smooth anchor %s (age %d, stamp step %d) step used %.2f step logic %.2f",
+                 m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], (int)m[9], (int)m[10], m[11] != 0.f ? "" : " (no snapshot)", m[12] != 0.f ? "USED" : "off", (int)m[13], (int)m[16], m[14], m[15]);
         g_motion_cols_fresh = false;
     }
     diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f%s", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy, ex);
 }
 
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {
+    float d_hide = 0.f;   // SM-2: this call's distance (0 for a warp or no position)
     if (valid && g_fp_have_pos) {
         const float dx = x - g_fp_pos[0], dy = y - g_fp_pos[1], dz = z - g_fp_pos[2];
         const float d = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (d < 50.f) d_hide = d;
         if (d > 0.01f && d < 50.f) {                                                 // a logic step (a warp is not a step)
             g_fp_step = d; g_fp_still_frames = 0;
             const float h = sqrtf(dx*dx + dz*dz);
@@ -6061,6 +6064,7 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
         }
         else if (++g_fp_still_frames > 6) g_fp_step = 0.f;                          // stood still for a few frames
     }
+    g_fp_step_hide = d_hide + g_fp_d_prev; g_fp_d_prev = d_hide;
     g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {

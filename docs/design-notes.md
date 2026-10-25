@@ -1998,3 +1998,48 @@ These are the fixes from the C3 review. Where they differ from the section above
 - **The self point** uses the midpoint of the two eye positions.
 - **C2-7 stacking** uses the game triangle's 2 × scale height in the game look.
 - **Comment fixes:** the BC1 alpha test in the log, and the wording of who "the actor we look out of" is.
+
+## Smooth follow anchor (branch `cursors`)
+
+The owner's top priority after C3 is smoothness. His perf lines show steady 16.7 ms frames and 11-13 ms of GPU, and he still sees ghosting when moving with the sticks.
+
+**Cause** (SYNTHESIS 4.1, exe-engine 1.3, exe-verify 8):
+- The eye anchor came from the followed actor's +0x0C, the 30 Hz logic position, read at Present.
+- FFX-60fps draws the world, and the body, from the root matrix +0x1D0, interpolated at 60 Hz. Its translation is +0x200 = +0x0C + chr_offset +0x6C, lerped between ticks, and restored at the next invocation's pre().
+- So the eye stepped every other frame while the world glided, which ghosts under Virtual Desktop's frame smoothing.
+- +0x1D0 cannot be read at Present: the main thread may already be in the next invocation, before or after pre(), or the job may be writing it.
+
+**Fix: snapshot on the main thread, use it at Present.**
+- **Snapshot.** Build 7's job-join post-hook (FhUtil 0x644B30) now records the snapshot whenever `smooth_anchor` is on, not only with `diag_build7`. The first join after the frame counter moves is Sg_MainLoop's post-join call. The record, written through the existing D7Join seqlock, holds:
+  - the followed actor's +0x0C, +0x6C and +0x200;
+  - its head sub-position, chosen by push_player's own rule;
+  - the attached (+0x19C) and override-matrix (+0x10C) flags;
+  - the actor pointer and the game frame stamp.
+- **Use (push_player, render thread).**
+  - With d = drawn − (logic + chr_offset), the anchor becomes logic + d (= drawn − chr_offset, so the anchor keeps its old meaning) and the head becomes head + d. Both move by the interpolation FFX-60fps applied to the body.
+  - The snapshot is used only when it is fresh (0..2 game frames old) and of the actor being followed, and the actor is neither attached nor driven by a script matrix. Otherwise the anchor is +0x0C exactly as before.
+  - Native is unchanged. The 50-unit warp rule, the head smoothing and the third-person and diorama anchor filters all see the smoothed positions. First person, third person and the diorama all go through ffxvr_player_set.
+  - The battle-centre override for the diorama (combatant centroid, heavily filtered) still uses +0x0C.
+- **Toggle.** `smooth_anchor=1` is the default, with a checkbox and a status line in First person / follow. With `diag_build7=0` at launch the hook does not exist, so the anchor stays on +0x0C and the status says so.
+- **Motion log (Numpad 5).** push_player now pushes the managed columns every frame (same export): build 7's 12 floats (drawn, present drawn, logic, exec, age, valid), plus "smooth anchor USED/off (age N) step used X step logic Y", the per-Present step of the anchor used and of +0x0C.
+  - Expected while walking: the step used is about the same every frame, while the logic step alternates between about 2× and 0.
+  - The line's "actor" column is the anchor native received.
+
+**Yaw.** No part of the first-person heading follows 30 Hz data: it is the latched heading plus stick turns plus the headset.
+- Third-person follow and the view reset use ffxvr_player_set's move direction. That direction now comes from the smoothed positions, at 60 Hz instead of every other frame.
+- `fp_head_anchor=2`'s forward offset follows the head lean, which is already filtered exponentially (fp_head_smooth).
+- `g_fp_step` (the hide radius margin, "moving" for third-person follow) is now the per-frame step, about half the old per-tick one, so the hide margin shrinks with it. The body is now where the eye anchor is.
+
+**ABI.** No export change (still 8 on the branch).
+
+### Review fixes, smooth follow anchor
+
+- **Plausibility check.** A snapshot whose interpolation offset d is longer than 16 units is refused, and the anchor uses +0x0C. An actor placed after Ch_CalcMain has a correct +0x0C but a stale +0x1D0 until the next tick. The overlay counts the refusals.
+- **Body-hide margin.** The three body-hide checks use `g_fp_step_hide`, the sum of the last two per-call distances (warps count as 0). That keeps the old margin in both modes: at 30 Hz it is tick + 0, with the smooth anchor half + half. `g_fp_step` is unchanged for third-person follow and the hand calibration.
+- **Pairing column.** The Motion log adds "stamp step": the stamp difference between the snapshots used at consecutive Presents. 1 on every line means each Present got the next invocation; 0 or 2 means a repeated or skipped snapshot (a pairing slip).
+- **Head.** A used snapshot without a head sends no head; it never sends a Present-time head with the snapshot's position.
+- **Status.**
+  - With no followed actor, the status reads "no followed actor".
+  - The status strings are literals, with the age shown separately.
+  - The managed Motion-log columns now pair with the same line's "actor" column.
+- **Smoothing-off hint.** After about 60 moving logic frames in a row with d = 0 while the snapshot is used, the status adds "the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?".

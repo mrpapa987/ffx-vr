@@ -924,6 +924,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     case "hands_px_left":     int.TryParse(v, out _hands_px_left); break;
                     case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
                     case "diag_build7":       _diag7 = v != "0"; break;   // build 7 diagnostics (hooks at the next launch; logging at once)
+                    case "smooth_anchor":     _smooth_anchor = v.Trim() != "0"; break;   // the first / third person / diorama anchor from the drawn (interpolated) root
                     case "cursor_source":     _cursor_game_cfg = !v.Trim().Equals("legacy", StringComparison.OrdinalIgnoreCase); break;   // game (default) / legacy (cursor stage C2)
                     case "marker_lift":       if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float mlift) && float.IsFinite(mlift)) _marker_lift = Math.Clamp(mlift, -5f, 20f); break;   // C2-10
                     case "cursor_look":       _cursor_look_game = !v.Trim().Equals("mod", StringComparison.OrdinalIgnoreCase); break;   // game (default) / mod (cursor stage C3)
@@ -1057,6 +1058,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
+            $"smooth_anchor={(_smooth_anchor ? 1 : 0)}\n" +
             $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
             $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
             $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
@@ -1354,6 +1356,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
             ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
             ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
+            ImGui.Checkbox("smooth follow anchor: the eyes follow the drawn (60 fps) body, not the 30 Hz logic position", ref _smooth_anchor); ImGui.SameLine();
+            ImGui.TextDisabled($"{_sa_status} (snapshot {(_sa_age >= 999 ? "none" : $"{_sa_age} frames old")}{(_sa_rejects > 0 ? $", {_sa_rejects} refused as implausible" : "")}){(_sa_flat > 60 ? " - the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?" : "")}");
             if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle markers brings the old behaviour back (unticking the sprite-signature checkbox does not).");
             if (_c2_active) ImGui.BeginDisabled(true);
             ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
@@ -1968,7 +1972,6 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fp_actor_idx = pick;
         System.Threading.Volatile.Write(ref _d7_follow_actor, pick >= 0 ? (nint)(actors + pick) : 0);   // build 7: the actor the main-thread snapshot reads
         if (pick >= 0 && read(actors + pick, out Actor p)) {
-            _fn_player_set(-p.chr_pos_vec.X, -p.chr_pos_vec.Y, p.chr_pos_vec.Z, 1);
             // The head: the highest sub-position that is not at the origin. Actor
             // space has Y pointing down (render space negates it), so the head is
             // the one with the LOWEST actor-space Y.
@@ -1976,9 +1979,13 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             for (int k = 0; k < 26; k++) { Vector4 sp = p.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = sp; have = true; } }
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
             if (have && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
-            if (_fn_player_head_set != null) _fn_player_head_set(-head.X, -head.Y, head.Z, have ? 1 : 0);
+            // Smooth follow anchor: the post-join snapshot's drawn (interpolated) root when fresh, else +0x0C as before
+            Vector3 pos3 = new Vector3(p.chr_pos_vec.X, p.chr_pos_vec.Y, p.chr_pos_vec.Z), head3 = new Vector3(head.X, head.Y, head.Z);
+            sa_apply((nint)(actors + pick), ref pos3, ref head3, ref have);
+            _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
+            if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, have ? 1 : 0);
         }
-        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); }
+        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }
     /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,
@@ -2144,7 +2151,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_native_ready) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
         if (_native_ready) draw_eye2_preview();   // its own top-level window, never nested
 
-        if (_native_ready) diag7_present();   // build 7 (log only): before begin_frame, so the Motion log gets this frame's columns
+        if (_native_ready) diag7_present();   // build 7 (log only). The Motion log's managed columns come from push_player (after begin_frame) and print at the next begin_frame, paired with that line's "actor" (the same push_player)
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.

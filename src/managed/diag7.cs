@@ -46,7 +46,7 @@ public sealed unsafe partial class FFXVRModule {
     private struct D7Anchor { public int id, idx, fallback, flags, chr10, sx, sy; public Vector3 opt, tl, td; public float heading; public nint actor; }   // flags: 1 attached, 2 override matrix, 4 index outside 0..25
     private struct D7TgtHdr { public uint stamp, mask, cmd, gate, autob, alive, stub_states; public int n, skipped, stubs, bstate; }
     private struct D7Turn   { public uint stamp, apex, bas; public int chr, chr_glob, ok, skipped; public float theta; public Vector3 game_a; public D7Anchor a; }   // game_a: the game's own A (0xF3FA68), read after the original; skipped: C2 skipped the original, so game_a is stale
-    private struct D7Join   { public uint stamp; public int exec, valid; public Vector3 pos, off, td; }
+    private struct D7Join   { public uint stamp; public int exec, valid, head_ok, flags; public Vector3 pos, off, td, head; public nint actor; }   // smooth anchor: head (game space, push_player's rule), flags 1 attached (+0x19C), 2 override matrix (+0x10C)
     private readonly D7TgtHdr[] _d7h = new D7TgtHdr[2]; private readonly D7Anchor[] _d7t = new D7Anchor[2 * 28]; private int _d7_seq;
     private readonly D7Turn[]   _d7u = new D7Turn[2];   private int _d7u_seq;
     private readonly D7Join[]   _d7j = new D7Join[2];   private int _d7j_seq;
@@ -87,7 +87,7 @@ public sealed unsafe partial class FFXVRModule {
         _d7_last_ok = false; string a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!)); _h7_tgt_ok = _d7_last_ok;
         _d7_last_ok = false; string b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!)); _h7_turn_ok = _d7_last_ok;
         string d = one("backbuffer resize 0x199210", _a7_rsz, () => new FhCallHandle<d7_resize>(new FhCallLocation((void*)_a7_rsz)).hook(this, _h7_rsz!));
-        string c = one("job join 0x644B30", _a7_join, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_join)).hook(this, _h7_join!));
+        _d7_last_ok = false; string c = one("job join 0x644B30", _a7_join, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_join)).hook(this, _h7_join!)); _h7_join_ok = _d7_last_ok;   // the smooth anchor needs it
         _d7_status = $"hooks: {a}, {b}, {d}, {c}. \"queued\" is not \"installed\": Fahrenheit applies them after init (a MinHook failure is in core.log; a success is logged only at Debug level). The proof is each hook's \"called for the first time\" line in ffxvr_diag.log (the target and turn pointers only in a battle)";
     }
 
@@ -149,7 +149,7 @@ public sealed unsafe partial class FFXVRModule {
     private void h7_join() {
         d7_void o = System.Threading.Volatile.Read(ref _o7_join) ?? d7_resolve_main(ref _o7_join, _a7_join, _h7_join!);
         o();
-        if (_diag7) { try { d7_join_record(); } catch { _d7_main_faults++; } }
+        if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
     }
     private void h7_rsz(nint self, int w, int h) {
         d7_resize o = System.Threading.Volatile.Read(ref _o7_rsz) ?? d7_resolve_main(ref _o7_rsz, _a7_rsz, _h7_rsz!);
@@ -232,11 +232,20 @@ public sealed unsafe partial class FFXVRModule {
         _d7_join_last_stamp = stamp; _d7_join_post_total++;
         int s = (_d7j_seq + 1) & 1;
         ref D7Join j = ref _d7j[s];
-        j.stamp = stamp; j.exec = FhUtil.get_at<byte>(0x8496D4); j.valid = 0;   // exec byte: VA 0xC496D4 (FFX-60fps sigs.cpp; read at 0x82D7F4)
-        nint act = System.Threading.Volatile.Read(ref _d7_follow_actor);
+        j.stamp = stamp; j.exec = FhUtil.get_at<byte>(0x8496D4); j.valid = 0; j.head_ok = 0; j.flags = 0;   // exec byte: VA 0xC496D4 (FFX-60fps sigs.cpp; read at 0x82D7F4)
+        nint act = System.Threading.Volatile.Read(ref _d7_follow_actor); j.actor = act;
         if (act != 0) {
-            byte* b = stackalloc byte[0x20C];
-            if (_fn_safe_read((void*)act, b, 0x20C) != 0) { j.pos = *(Vector3*)(b + 0x0C); j.off = *(Vector3*)(b + 0x6C); j.td = *(Vector3*)(b + 0x200); j.valid = 1; }
+            byte* b = stackalloc byte[0x6C4];   // through optpos[25] (+0x524 + 26 * 16)
+            if (_fn_safe_read((void*)act, b, 0x6C4) != 0) {
+                j.pos = *(Vector3*)(b + 0x0C); j.off = *(Vector3*)(b + 0x6C); j.td = *(Vector3*)(b + 0x200); j.valid = 1;
+                if (*(uint*)(b + 0x19C) != 0) j.flags |= 1;   // attached: the root comes from the parent's bone
+                if (*(uint*)(b + 0x10C) != 0) j.flags |= 2;   // an override matrix replaces the root
+                // the head as push_player picks it: the highest sub-position (lowest y, game y down) not at the origin; folded with
+                // the actor position if it ever looks relative
+                float hy = float.MaxValue;
+                for (int k = 0; k < 26; k++) { Vector4 sp = *(Vector4*)(b + 0x524 + 16 * k); if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; j.head = new Vector3(sp.X, sp.Y, sp.Z); j.head_ok = 1; } }
+                if (j.head_ok != 0 && MathF.Abs(j.head.X - j.pos.X) + MathF.Abs(j.head.Z - j.pos.Z) > 100f) j.head += j.pos;
+            }
         }
         System.Threading.Volatile.Write(ref _d7j_seq, _d7j_seq + 1);
     }
@@ -386,16 +395,7 @@ public sealed unsafe partial class FFXVRModule {
             if (act_u && _r7u.ok != 0 && d7_project(cam, _r7u.game_a, out float tx, out float ty)) dl.AddCircleFilled(px(tx, ty), 5f, 0xFFFFFF00u);   // cyan: the turn triangle's anchor A, the game's own (0xF3FA68)
         }
 
-        // 6.4: the Motion log's extra columns (render space): post-join drawn root, Present-time drawn root, post-join logic position
-        if (_fn_motion_cols != null) {
-            float* mc = stackalloc float[12];
-            nint act = _d7_follow_actor;
-            Vector3 ptd = default; bool pok = act != 0 && read((byte*)act + 0x200, out ptd);
-            Vector3 jd = d7_render(_r7j.td), pd = d7_render(ptd), jp = d7_render(_r7j.pos);
-            mc[0] = jd.X; mc[1] = jd.Y; mc[2] = jd.Z; mc[3] = pok ? pd.X : 0f; mc[4] = pok ? pd.Y : 0f; mc[5] = pok ? pd.Z : 0f;
-            mc[6] = jp.X; mc[7] = jp.Y; mc[8] = jp.Z; mc[9] = _r7j.exec; mc[10] = Math.Min(lag_j, 999); mc[11] = _r7j_seq != 0 && _r7j.valid != 0 ? 1f : 0f;
-            _fn_motion_cols(mc, 12);
-        }
+        // 6.4: the Motion log's extra columns are pushed by push_player now (sa_motion_cols, with the smooth anchor's columns).
 
         // 6.8: the game re-acquiring its backbuffer (the backbuffer: line that follows is the native identification)
         int rc = System.Threading.Volatile.Read(ref _d7_rsz_calls);
