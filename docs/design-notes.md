@@ -2180,7 +2180,7 @@ Research: battle-load.md 2.1, battle-data-load.md (with its section 7 correction
   - Two summary lines per battle in ffxvr_diag.log, "load: battle N (...)" and "load: battle N way back". They give the phases, the HD cluster loads (count, ms, hits < 0.1 ms), the model and motion loads, the blocking waits with their callers, the chr cache entries in use, the game pool's reserved/committed counters (FhUtil 0x153CD44/48), and the address space (free and largest block, overall and below 2 GB).
   - **Wait callers** come from a new native stack walk (`ffxvr_game_callers`: the first return addresses inside FFX.exe, as Ghidra VAs). The wait has about 25 call sites, including the chr wrapper 0x82A5E0.
   - **Address space** comes from a VirtualQuery walk (`ffxvr_va_stats`) once per battle start and end.
-- **`battle_cache_models=0`** (default; applies at once). The decision is taken only at the flush call inside the map free (0x909F93), never at another time. The flush is skipped when all of these hold, otherwise the game's flush runs:
+- **`battle_cache_models=0`** (default; applies at once; **retired in the HD cluster cache build**: the key is read and ignored). The decision is taken only at the flush call inside the map free (0x909F93), never at another time. The flush is skipped when all of these hold, otherwise the game's flush runs:
   1. the map load is a random battle's own load (battle_state **9** at the call: the state-8 code writes 9 before it calls the map load; kind 1, map = Btl.battlefield & 0x3FF), or the first map load after that battle's teardown is the very field map that was current at its start;
   2. at most 60 (way in: the battle then adds its own models) / 80 (way back) of the 100 cache entries are in use;
   3. the largest free block below 2 GB is at least 256 MB (the last battle start or end measurement; not measured means no skip).
@@ -2222,3 +2222,87 @@ Research: vr-opportunities.md item 2.
 - **LD-10:** the stack walk keeps its frame pointer (`#pragma optimize("y", off)`) and captures 24 frames.
 - **LD-11 / LD-12 / LD-13:** a comment fix, unused fields removed, and `ld_resolve` runs once with a try per hook.
 - **LD-9** (the VirtualQuery walk on the render thread, twice per battle) is left as is for this diagnostic build.
+
+## HD cluster cache (phase 1) (branch `hdcache`)
+
+Research: hd-cluster-cache-spec.md (its section 9, the verifier's answers, overrides), battle-load.md, exe-verify-round2 C4. Code: `hd_cache.cs` (the cache), `load_diag.cs` (the hooks it rides on), native `ffxvr_va_watch` / `ffxvr_va_report`.
+
+- **Mechanism.** The ClusterManager (`[0xCCCA4C]`) caches HD clusters by path hash with a refcount. Holding one extra reference per eligible texture cluster makes the game's own release (`0x671300` → `0x69BE90` at a map free) leave the cluster alive, so the next load of that path is a hit (refcount + 1, no open, read, parse or GPU create).
+- **Acquire** (loading thread, inside our loadPCluster detour, right after the game's own call returned):
+  - The path filter: ends with `.dds.phyre` and contains `/map/`, `/btlmap/`, `/chr/` or `/magic/`, ASCII case-insensitive. Never `/menu/` (force-unloaded by `0x69B310`), `/shaders/` (never freed anyway) or `/event/`. Phase 2 (scenes, `.dae.phyre` models) is not in this build.
+  - The acquire calls the same chain once more with the same path. That is a hit by construction: the entry is in the tree and the caller holds it.
+  - A thread-local flag passes that call, and anything re-entering during it, straight through our detour.
+  - At most one held reference per cluster: a re-hit only refreshes its stamp, and a CAS flag lets only one acquire run at a time (a second thread skips rather than waits).
+  - No allocation, lock or log on that thread. The 400 slots are preallocated arrays (state, pointer, bytes, stamp, path) published with Volatile / Interlocked.
+- **Release** (main thread only, in our map free post-hook, right after `0x909EA0` returned):
+  1. What `0x671300` does before its own releases: submit the context's partly recorded list (`[[0x8CB9D8]+0xD0]->vtbl[2]`, called only if it points into FFX.exe), then the full render flush `0x5BC3F0`. If the context cannot be read, nothing is released at that map free.
+  2. Per slot, an identity check: `fiosUnifyFilename(path)` (what loadPCluster hashed), then `getPClusterByName` at its hooked entry must return our pointer. If it does not, the slot is forgotten and counted.
+  3. `releasePCluster` **by pointer** (`0x69BDB0`). It is refcount-aware and frees only if the game holds no reference. Never by name (it hashes its raw argument), never the force unload.
+- **Classification** (decided at the map load request `0x909A20`, applied at its nested map free):
+  - **ENTRY**: the battle's own map load (battle_state 9, kind 0x13 / 0x1A, map = battlefield & 0x3FF) of a random encounter from the field map we hold (LD-3's kind). Keep everything, admit.
+  - **Script battle entry**: keep everything, admit `/magic/` only. Its battle map is usually unique, and on its return the field textures we hold still give a fast way back (spec 3.1, last bullet).
+  - **EXIT**: `0x909A20` at battle_state 0 (MAPREG, its only other caller) loading the field map we hold. Keep everything, admit.
+  - **ZONE**, anything else: MAPREG to another map, any other `0x909A20`, and every map free outside `0x909A20` (`0x9093B0` / `0x909680` / `0x909E60`: area changes, save loads, the title, events, a soft reset). Release everything, then admit the next field's loads, which also sets the held zone.
+  - The spec's MsBattleExe (`0x381020`) and MAPREG task (`0x461650`) hooks are not used. `0x381020` is a QOL-RETRY site of FFX-60fps, so the kind comes from the existing wait-detour logic. The battle_state 0 rule identifies MAPREG.
+- **Budget** (at each map free):
+  - held ≤ min(64 MB, (reserved − committed + held) / 2) of the game pool; over it, the oldest stamp goes first.
+  - No admission while the largest free block below 2 GB is < 160 MB.
+  - Release all when it is < 136 MB, or when committed + 32 MB > reserved (a pool growth is near).
+  - At most 400 held; the manager has 1024 entry slots.
+  - "held" uses each cluster's measured bytes. An unmeasured one (held on a hit, or without the pool hooks) counts at the measured average, or 1 MB.
+- **"Hits saved".** At each map free the manager's 1024-entry pool (`+0x1C`, used flags at `+0x601C`) is copied once with a guarded read. A held cluster whose entry has refcount 1 is held only by us. The next hit on it counts as saved. The HDC: line shows those clusters and their MB, which is the cache's real extra memory.
+- **`hd_cluster_cache=0`** (default for the first A/B; applies at once). Off: nothing is admitted, and whatever is held is released at the next map free. The diagnostics run either way.
+- **Segments** (spec section 4; per thread, one window per outermost loadPCluster, through that cluster's GPU create):
+  - **Hooks:** the PStreamReaderFile ctor `0x5766D0` (an open inside the window means a miss), `PStreamFile::read` `0x608090` (ms and bytes), and `PCluster` platform init `0x441620` (the GPU create: real only when +0x44 bit 1 was clear; it closes the window).
+  - **`diag_cluster_bytes=1`** (hooks at the next launch): the pool allocator `0x6FB910` / free `0x6FB8B0`, net bytes inside the window (block = `*(raw − 0xC) − 0x10`). Off: the bytes read stand in.
+  - Outside a window these detours only read a thread-local int.
+  - The five new targets were checked against the disassembly: standard prologues, no branch into the patched bytes, no FFX-60fps signature over them, none hooked by Fahrenheit. They are queued after the core nine, with the pool pair last.
+  - **The "load:" lines:** "HD clusters N loads (H hits …; E cacheable paths) T ms; the M misses X ms = open + read (MB) + parse; GPU create G ms (n); the misses kept B MB of the game pool | HD cache on/off: S hits saved (…), held K (MB)".
+  - **One "HDC:" line per map free:** case, held / measured / largest / held only by the cache, released and why, cap, admission, manager entries in use, largest free block below 2 GB, pool counters.
+- **Low-2 GB reservation log** (spec 3.4; native; with `diag_load`):
+  - **Hook:** a 5-byte patch of `ntdll!NtAllocateVirtualMemory`. Its `mov eax, imm32` is replaced by one atomic 8-byte compare-exchange. Anything else there (another hook) and nothing is patched. The patch is never removed.
+  - **What it records:** every MEM_RESERVE ≥ 1 MB below 2 GB by this process, as base, size, thread and 12 return addresses, into a lock-free ring. No allocation, lock or module lookup on that path.
+  - **The report** (`ffxvr_va_report`) runs on the render thread at each battle start and end and at a zone change. It lists the new reservations with their caller: the first frame outside ntdll, kernelbase, kernel32 and the CRT, as module+offset, plus the frame after it. Then the ones still reserved, summed by caller since launch. Then the low 2 GB in use by region type (private / mapped / image) with the change since the last report.
+  - Mapped views (D3DKMT locks, file mappings) do not pass through NtAllocateVirtualMemory: the census covers those.
+- **Retired:** `battle_cache_models` (the chr-flush skip): its UI and behaviour are removed, the ini key is read and ignored, and the "would skip" columns are gone. The chr flush hook stays, for timing.
+- **ABI 13:** + `ffxvr_va_watch`, `ffxvr_va_report`.
+
+### Review fixes (HD cluster cache)
+
+- **HC-1 (leak):** on a release name-check mismatch, the pointer is looked up in the entry-pool copy taken just before the releases; if present with refcount >= 1 it is released by pointer anyway (counted "by pointer, name check failed"). A pointer truly gone is "forgotten" and admission is disabled for the session. The first mismatch logs the raw path, its fios form, what getByName returned and the pool refcount.
+- **HC-2:** `diag_cluster_bytes` now defaults to 0. The resident size comes from the Phyre cluster header read in the read hook (marker 0x50485952, `m_totalDataSize` +0x38 + `m_maxTextureBufferSize` +0x50), so no hot-path allocator hook is needed. The global pool hooks stay opt-in for a cross-check.
+- **HC-3:** the game pool's reserved size is remembered at each map free; if it grew while the cache held anything, everything is released and admission is disabled for the session (logged).
+- **HC-4:** the DXGI video-memory readout (CurrentUsage / Budget) is in the HDC: line; admission closes above 85 % of the budget; `k_hc_max` is 260.
+- **HC-5:** the kick + render flush and the releases run only on the main thread; otherwise the release is put off to the next main-thread map free.
+- **HC-6:** the ntdll `NtAllocateVirtualMemory` patch is behind `diag_va_log` (default 0). The default is a patch-free VirtualQuery region diff on the main thread at each map free (`ffxvr_va_regions`): new or grown bases >= 1 MB below 2 GB, with a hint (module for image, mapped file name for mapped, heap signature for private), plus the low-2 GB totals by type and the VRAM use.
+- **HC-7:** about a dozen sample loadPCluster paths are logged across the session with their verdict and fios form (every 64th, plus the first rejected `.dds.phyre`). The "GCM" heuristic is gone. `/btlmap/` is removed from the filter (it does not exist; battle maps are under `/map/`).
+- **HC-8 / HC-10 / HC-11 / HC-12 / HC-13 / HC-14:** the ring-lap read fix; the trampoline is set execute-only and freed on refusal, and the status prints on each report; the "hooks seen" line builds its expected mask from what was queued; the read counter uses bytes actually read; "cacheable, not yet held"; a put-off release freezes admission until a flush succeeds.
+- **ABI 14:** + `ffxvr_va_regions` (on top of 13's `ffxvr_va_watch`, `ffxvr_va_report`). `battle_cache_models` stays retired; `diag_va_log` is the new ini key.
+
+### Re-review fixes (HD cluster cache)
+
+- **HC-R-1:** the region diff's heap-signature probe reads base+8 through `ffxvr_safe_read` (range_readable rejects uncommitted, PAGE_GUARD and PAGE_NOACCESS pages); no reliance on SEH.
+- **HC-R-2 / HC-R-4:** the region diff counts every non-free region per allocation base (reserved and committed reported separately) and diffs on reserved bytes; one row per base (consecutive in the walk), the diff is a merge of two sorted tables, and a full table is marked.
+- **HC-R-3:** the module-name cache (`va_mod_of`) is appended under an SRW lock; it is used by the render-thread ntdll report and the main-thread region diff, never by the ntdll hook (which only stores return addresses).
+- **HC-R-5:** the main thread id is captured once, at the map load request 0x909A20 (never from the wait-all); the render thread id at Present. Releases and the flush never run on the render thread.
+- **HC-R-9:** a pool growth while holding no longer ends the session at once: the first releases everything and brakes admission until the next zone change ("HDC: BRAKE"); after the zone change admission re-arms ("brake released"); a second growth while holding disables the cache for the session. The overlay shows on / BRAKED / DISABLED.
+- **Nits:** the vram readout is taken at the start of each map free (HC-R-6); the header test uses the bytes actually read (HC-R-7); the orphan figure is labelled "before the releases" (HC-R-8). No export change: ABI stays 14.
+
+### Retune from session 1 (HD cluster cache)
+
+Session 1 (4cfb5a7, kl/klyt0000, 9 battles): stable, no mismatch, no brake, but the cache was idle. The largest free block below 2 GB sat at 135-138 MB against a 160 MB admission gate, and the cap was 1-3 MB because it was half the game pool's slack (~250 of 256 MB committed). A texture cluster leaves almost nothing in the pool after its load (0-6 MB for ~82 misses); its data lives in VRAM (3.4-4.4 of 11.3 GB). The 135 MB hole is the game's own transient 128 MB pool growth block, reserved during each battle load (kernelbase+0x13D130, loader thread) and freed afterwards: reserved alternates 256 / 384 MB at map frees.
+
+- **Two budgets.** The game-pool bytes the held set pins (the pool hooks' net bytes with `diag_cluster_bytes`, else 64 KB per cluster), capped at min(8 MB, half the pool's free part). The VRAM bytes (Phyre header texture + vertex + index sizes, else the file bytes read), capped at min(1 GB, 25 % of the budget), with no admission above 75 % use. The old mixed 64 MB cap and the "committed + 32 MB > reserved" drop rule are gone.
+- **Low-2 GB gate.** Admission needs a free block of 129 MB (the game's 128 MB growth + 1 MB), or the transient block is up (reserved above the session's base), when the game already has its room. Drop all only when the transient block is down and the largest block is < 129 MB. The HDC: line shows the largest block now and with nothing held.
+- **Brake.** Only a reserved size above the high-water mark seen while the cache held nothing, or a reserved size still above the base once the way back has settled (the render thread's settled check, applied at the next map free), counts as a growth the cache may have caused. The first releases all and pauses admission until the next zone change; the second disables the cache for the session. The cache-off battles at the start of a session teach the mark the normal transient 384 MB.
+- **Measurement fixes.** The HDC: line now reports the held set before the releases (session 1's "0 measured" was the post-release count after a release-all). The header fields are captured by stream offset across the window's reads, not only from a first read of >= 0x54 bytes. The "load:" lines print "header sizes for H of M misses".
+- No export change (ABI 14).
+
+### Retune review fixes (HD cluster cache)
+
+- **HC-T-1:** no admission while the pool's transient growth block is up. A cluster is admitted only if the reserved counter equals the session base both when its load window opens and at the acquire (both read on the loading thread); the `transient_up` exception to the low-2 GB gate is gone. Skips are counted ("skipped: the pool's transient block was up").
+- **HC-T-3:** a growth is reserved > base + 128 MB (the one known transient block), so a launch with `hd_cluster_cache=1` saved does not brake at its first entry. The empty-cache high-water mark is kept for the log only.
+- **HC-T-2:** the settled test runs and logs on every way back ("HDC: settled after the way back …"), cache on or off, including the 60 s timeout. It arms after a cache-off way back settles at the base; once armed, a failing way back while holding closes admission at once and the next map free releases and brakes. HC-T-4 with it: an empty way back that settles above the base re-bases.
+- **HC-T-5:** each held cluster counts max(measured, 64 KB) of game pool.
+- **HC-T-6:** the header VRAM size is rejected (file bytes stand in) when a field exceeds 512 MB or the sum exceeds 4x the file bytes read; counted as "out of bounds".
+- **HC-T-7 / HC-T-8:** a brake applied at a zone change ends there; the pool cap is computed with the transient block down and held over block-up frees, and eviction starts only past cap + 1/8.

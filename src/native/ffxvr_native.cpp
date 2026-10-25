@@ -3913,7 +3913,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 12;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set
+constexpr int FFXVR_ABI = 14;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -3963,6 +3963,297 @@ extern "C" __declspec(dllexport) void ffxvr_va_stats(unsigned* out4) {
     }
     out4[0] = static_cast<unsigned>(total >> 20); out4[1] = static_cast<unsigned>(largest >> 20);
     out4[2] = static_cast<unsigned>(low_largest >> 20); out4[3] = static_cast<unsigned>(low_total >> 20);
+}
+
+// ---------------------------------------------------------------------------
+// HD cluster cache build (research hd-cluster-cache-spec.md 3.4): who takes the low 2 GB? Every address-space reservation
+// of 1 MB or more below 2 GB, with its caller, from a 5-byte patch of ntdll!NtAllocateVirtualMemory: the one path that
+// VirtualAlloc(Ex), the CLR's GC, the heap's large blocks and the game pool's growth all go through. The hook only copies a
+// record into a lock-free ring (no allocation, no lock, no logging, no module lookup: it runs inside every allocator of the
+// process, on any thread); ffxvr_va_report (render thread) names the modules and writes the lines. Mapped views (D3DKMT
+// locks, file mappings, image loads) do not go through it; the report's census of the low 2 GB by region type covers those.
+// The patch is one atomic 8-byte compare-exchange over the stub's `mov eax, imm32` (the WoW64 / x86 syscall stub's first
+// instruction); anything else there (another hook) and nothing is patched. It is never removed (the DLL stays loaded).
+typedef LONG (NTAPI* PFN_NtAllocateVirtualMemory)(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
+// Opt-in (ini diag_va_log, default 0, HC-6). The default, patch-free view is ffxvr_va_regions below.
+static PFN_NtAllocateVirtualMemory g_va_tramp = nullptr;   // the stub's first 5 bytes + jmp back
+static volatile LONG g_va_on = 0;                           // record (ffxvr_va_watch)
+static int g_va_state = 0; static const char* g_va_why = "not asked";   // 1 patched, -1 refused (g_va_why)
+struct VaRec { volatile LONG seq; uint32_t base, size, tid; uint32_t ret[12]; };
+static VaRec g_va_ring[512];
+static volatile LONG g_va_w = 0; static LONG g_va_r = 0; static uint32_t g_va_lost = 0, g_va_total = 0;
+struct VaLive { uint32_t base, size; int mod; };     // render thread only (ffxvr_va_report)
+static VaLive g_va_live[2048]; static int g_va_live_n = 0; static uint32_t g_va_live_dropped = 0;
+struct VaMod { uintptr_t base, end; char name[40]; };
+static VaMod g_va_mods[64]; static int g_va_mods_n = 0;
+static uint32_t g_va_vram_mb = 0, g_va_vram_budget_mb = 0;   // mirrored from the perf heartbeat (defined later), for ffxvr_va_regions (HC-4)
+
+#pragma optimize("y", off)   // keep the frame pointer: the stack walk starts from this frame
+static LONG NTAPI va_ntavm_hook(HANDLE proc, PVOID* base, ULONG_PTR zero_bits, PSIZE_T size, ULONG type, ULONG prot) {
+    const LONG st = g_va_tramp(proc, base, zero_bits, size, type, prot);
+    if (st >= 0 && (type & MEM_RESERVE) != 0 && g_va_on != 0 && proc == reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)) && base != nullptr && size != nullptr) {
+        const uintptr_t b = reinterpret_cast<uintptr_t>(*base); const SIZE_T s = *size;   // the caller's out values, written by the call that just succeeded
+        if (s >= (1u << 20) && b < 0x80000000u) {
+            const LONG i = InterlockedIncrement(&g_va_w) - 1;
+            VaRec& r = g_va_ring[i & 511];
+            InterlockedExchange(&r.seq, 0);   // being written
+            r.base = static_cast<uint32_t>(b); r.size = static_cast<uint32_t>(s); r.tid = GetCurrentThreadId();
+            void* fr[12] = {};
+            const USHORT n = RtlCaptureStackBackTrace(0, 12, fr, nullptr);   // frame-pointer walk, bounded by the TEB's stack limits
+            for (int k = 0; k < 12; ++k) r.ret[k] = k < n ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(fr[k])) : 0u;
+            InterlockedExchange(&r.seq, i + 1);
+        }
+    }
+    return st;
+}
+#pragma optimize("", on)
+
+static const char* va_hook_install() {
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    uint8_t* f = nt ? reinterpret_cast<uint8_t*>(GetProcAddress(nt, "NtAllocateVirtualMemory")) : nullptr;
+    if (f == nullptr) return "ntdll!NtAllocateVirtualMemory not found";
+    if (f[0] != 0xB8) return "its first instruction is not mov eax, imm32 (another hook may be there): not patched";
+    const uintptr_t q = reinterpret_cast<uintptr_t>(f) & ~static_cast<uintptr_t>(7); const unsigned off = static_cast<unsigned>(reinterpret_cast<uintptr_t>(f) - q);
+    if (off > 3) return "the first instruction straddles an 8-byte boundary (no atomic patch): not patched";
+    uint8_t* t = static_cast<uint8_t*>(VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (t == nullptr) return "no memory for the trampoline: not patched";
+    memcpy(t, f, 5); t[5] = 0xE9;   // mov eax, imm32 (position independent); jmp stub+5
+    const int32_t back = static_cast<int32_t>(reinterpret_cast<intptr_t>(f + 5) - reinterpret_cast<intptr_t>(t + 10)); memcpy(t + 6, &back, 4);
+    DWORD tp = 0; VirtualProtect(t, 16, PAGE_EXECUTE_READ, &tp);   // HC-10: executable, no longer writable
+    FlushInstructionCache(GetCurrentProcess(), t, 16);
+    g_va_tramp = reinterpret_cast<PFN_NtAllocateVirtualMemory>(t);
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(q), 16, PAGE_EXECUTE_READWRITE, &old)) { g_va_tramp = nullptr; VirtualFree(t, 0, MEM_RELEASE); return "VirtualProtect failed: not patched"; }
+    const LONG64 cur = *reinterpret_cast<volatile LONG64*>(q);
+    uint8_t nb[8]; memcpy(nb, &cur, 8);
+    if (nb[off] != 0xB8 || memcmp(nb + off, t, 5) != 0) { DWORD tmp; VirtualProtect(reinterpret_cast<void*>(q), 16, old, &tmp); g_va_tramp = nullptr; VirtualFree(t, 0, MEM_RELEASE); return "the stub changed while patching: not patched"; }
+    nb[off] = 0xE9;
+    const int32_t rel = static_cast<int32_t>(reinterpret_cast<intptr_t>(&va_ntavm_hook) - reinterpret_cast<intptr_t>(f + 5)); memcpy(nb + off + 1, &rel, 4);
+    LONG64 nv; memcpy(&nv, nb, 8);
+    const bool ok = InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(q), nv, cur) == cur;   // one atomic store: no thread can fetch half a jump
+    DWORD tmp; VirtualProtect(reinterpret_cast<void*>(q), 16, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(q), 16);
+    if (!ok) { g_va_tramp = nullptr; VirtualFree(t, 0, MEM_RELEASE); }   // nothing jumps to it: the stub is unchanged
+    return ok ? nullptr : "the stub changed while patching: not patched";
+}
+
+/// HD cluster cache build: the low-2 GB reservation log on (1) or off (0). The first on patches ntdll (module init, before
+/// the game's loads: nothing is logged here, g_dir may not be set yet; the first ffxvr_va_report says what happened).
+/// Returns 1 while the patch is in.
+extern "C" __declspec(dllexport) int ffxvr_va_watch(int on) {
+    if (on != 0 && g_va_state == 0) { const char* why = va_hook_install(); g_va_state = why == nullptr ? 1 : -1; g_va_why = why == nullptr ? "patched" : why; }
+    InterlockedExchange(&g_va_on, (on != 0 && g_va_state == 1) ? 1 : 0);
+    return g_va_state == 1 ? 1 : 0;
+}
+
+/// The module that holds `a` (cached by range), or "(no module)" for JIT or other generated code. Called from the render
+/// thread (ffxvr_va_report) and the main thread (va_regions), never from the ntdll hook: HC-R-3, the cache is appended under
+/// an SRW lock; entries are never removed, so a returned name stays valid.
+static SRWLOCK g_va_mods_lock = SRWLOCK_INIT;
+static const char* va_mod_of_locked(uintptr_t a, uintptr_t* mod_base);
+static const char* va_mod_of(uintptr_t a, uintptr_t* mod_base) {
+    AcquireSRWLockExclusive(&g_va_mods_lock);
+    const char* r = va_mod_of_locked(a, mod_base);
+    ReleaseSRWLockExclusive(&g_va_mods_lock);
+    return r;
+}
+static const char* va_mod_of_locked(uintptr_t a, uintptr_t* mod_base) {
+    *mod_base = 0;
+    for (int i = 0; i < g_va_mods_n; ++i) if (a >= g_va_mods[i].base && a < g_va_mods[i].end) { *mod_base = g_va_mods[i].base; return g_va_mods[i].name; }
+    HMODULE m = nullptr;
+    if (a == 0 || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(a), &m) || m == nullptr) return "(no module)";
+    MODULEINFO mi = {};
+    if (!GetModuleInformation(GetCurrentProcess(), m, &mi, sizeof(mi))) return "(no module)";
+    if (g_va_mods_n >= 64) { *mod_base = reinterpret_cast<uintptr_t>(m); return "(module)"; }
+    VaMod& e = g_va_mods[g_va_mods_n];
+    e.base = reinterpret_cast<uintptr_t>(mi.lpBaseOfDll); e.end = e.base + mi.SizeOfImage;
+    wchar_t w[MAX_PATH] = {}; GetModuleFileNameW(m, w, MAX_PATH);
+    const wchar_t* bn = wcsrchr(w, L'\\'); bn = bn ? bn + 1 : w;
+    int k = 0; for (; bn[k] != 0 && k < 39; ++k) { const wchar_t c = bn[k]; e.name[k] = (c >= 32 && c < 127) ? static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c) : '?'; }
+    e.name[k] = 0;
+    *mod_base = e.base; ++g_va_mods_n;
+    return e.name;
+}
+/// Appends to a line buffer, truncating at its end.
+static void va_add(char* buf, int cap, int& len, const char* fmt, ...) {
+    if (len >= cap - 1) return;
+    va_list ap; va_start(ap, fmt);
+    const int r = _vsnprintf_s(buf + len, static_cast<size_t>(cap - len), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    len = r < 0 ? cap - 1 : len + r;
+}
+static bool va_system_mod(const char* n) {
+    return strcmp(n, "ntdll.dll") == 0 || strcmp(n, "kernelbase.dll") == 0 || strcmp(n, "kernel32.dll") == 0 || strcmp(n, "ucrtbase.dll") == 0 || strcmp(n, "msvcrt.dll") == 0 || strcmp(n, "vcruntime140.dll") == 0;
+}
+
+/// HD cluster cache build (render thread; the managed side calls it at each battle start and end and at a zone change, so a
+/// few lines per battle): the large reservations below 2 GB since the last report with their callers (the first frame
+/// outside ntdll / kernelbase / kernel32 / the CRT; "<" the frame after it), the ones still reserved summed by that caller
+/// since launch, and the low 2 GB in use by region type (private / mapped / image) with the change since the last report.
+extern "C" __declspec(dllexport) void ffxvr_va_report(const char* tag) {
+    if (tag == nullptr) tag = "";
+    if (g_va_state == 0) return;   // diag_va_log=0: never asked, nothing to report (the region diff covers the default)
+    char line[3600]; int len = 0;
+#define VA_ADD(...) va_add(line, static_cast<int>(sizeof(line)), len, __VA_ARGS__)
+    if (g_va_state == 1) {
+        // 1. drain the ring
+        const LONG w = g_va_w;
+        if (w - g_va_r > 512) { g_va_lost += static_cast<uint32_t>(w - g_va_r - 512); g_va_r = w - 512; }
+        int listed = 0, more = 0; unsigned long long sum = 0, more_sum = 0; int n_new = 0;
+        VA_ADD("va: %s: ntdll reservation log (diag_va_log) on; reservations >= 1 MB below 2 GB since the last report:", tag);
+        for (; g_va_r < w; ++g_va_r) {
+            VaRec& r = g_va_ring[g_va_r & 511];
+            const LONG s0 = r.seq;
+            if (s0 != g_va_r + 1) {
+                if (s0 == 0 || static_cast<LONG>(s0 - (g_va_r + 1)) < 0) break;   // being written, or an older lap's record not yet replaced (HC-8): the next report
+                ++g_va_lost; continue;                                              // a newer lap overwrote it
+            }
+            struct { uint32_t base, size, tid; uint32_t ret[12]; } c;
+            c.base = r.base; c.size = r.size; c.tid = r.tid; memcpy(c.ret, r.ret, sizeof(c.ret));
+            MemoryBarrier();
+            if (r.seq != s0) { ++g_va_lost; continue; }   // a writer came round to this slot meanwhile
+            ++n_new; ++g_va_total; sum += c.size;
+            // the caller: the first frame outside the system DLLs (frame 0 is the hook itself)
+            int pick = -1; uintptr_t mb = 0; const char* mn = "(no frames)";
+            for (int k = 1; k < 12 && c.ret[k] != 0; ++k) { uintptr_t b2; const char* n2 = va_mod_of(c.ret[k], &b2); if (!va_system_mod(n2)) { pick = k; mn = n2; mb = b2; break; } }
+            if (pick < 0) { for (int k = 11; k >= 1; --k) if (c.ret[k] != 0) { pick = k; mn = va_mod_of(c.ret[k], &mb); break; } }
+            int mod = -1;
+            AcquireSRWLockShared(&g_va_mods_lock);
+            for (int i = 0; i < g_va_mods_n; ++i) if (g_va_mods[i].base == mb && mb != 0) { mod = i; break; }
+            ReleaseSRWLockShared(&g_va_mods_lock);
+            // the live table: a reservation at a base already listed replaces it (that one was released)
+            int li = -1; for (int i = 0; i < g_va_live_n; ++i) if (g_va_live[i].base == c.base) { li = i; break; }
+            if (li < 0) { if (g_va_live_n < 2048) li = g_va_live_n++; else { ++g_va_live_dropped; li = -1; } }
+            if (li >= 0) { g_va_live[li].base = c.base; g_va_live[li].size = c.size; g_va_live[li].mod = mod; }
+            if (listed < 10) {
+                ++listed;
+                VA_ADD(" 0x%08X %u MB %s", c.base, c.size >> 20, mn);
+                if (pick >= 1 && mb != 0) VA_ADD("+0x%X", static_cast<unsigned>(c.ret[pick] - mb));
+                if (pick >= 1 && pick + 1 < 12 && c.ret[pick + 1] != 0) { uintptr_t b3; const char* n3 = va_mod_of(c.ret[pick + 1], &b3); VA_ADD(" (< %s+0x%X)", n3, static_cast<unsigned>(c.ret[pick + 1] - b3)); }
+                VA_ADD(" tid %u,", c.tid);
+            }
+            else { ++more; more_sum += c.size; }
+        }
+        if (n_new == 0) VA_ADD(" none,");
+        else VA_ADD(" total %d, %llu MB", n_new, sum >> 20);
+        if (more > 0) VA_ADD(" (+%d more, %llu MB)", more, more_sum >> 20);
+        if (g_va_lost > 0) VA_ADD("; lost %u (ring overrun)", g_va_lost);
+        diag("%s", line); len = 0;
+        // 2. still reserved, by caller
+        unsigned long long by[65] = {}; int cnt[65] = {};
+        for (int i = 0; i < g_va_live_n; ) {
+            MEMORY_BASIC_INFORMATION mbi = {};
+            const bool alive = VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(g_va_live[i].base)), &mbi, sizeof(mbi)) != 0 && mbi.State != MEM_FREE
+                               && reinterpret_cast<uintptr_t>(mbi.AllocationBase) == g_va_live[i].base;
+            if (!alive) { g_va_live[i] = g_va_live[--g_va_live_n]; continue; }
+            const int m = g_va_live[i].mod >= 0 && g_va_live[i].mod < 64 ? g_va_live[i].mod : 64;
+            by[m] += g_va_live[i].size; ++cnt[m]; ++i;
+        }
+        VA_ADD("va: %s: still reserved (recorded since launch: %u reservations), by caller:", tag, g_va_total);
+        for (int shown = 0; shown < 8; ++shown) {
+            int best = -1; for (int m = 0; m <= 64; ++m) if (cnt[m] > 0 && (best < 0 || by[m] > by[best])) best = m;
+            if (best < 0) break;
+            AcquireSRWLockShared(&g_va_mods_lock);
+            VA_ADD(" %s %llu MB (%d),", best < 64 && best < g_va_mods_n ? g_va_mods[best].name : "(no module, or other)", by[best] >> 20, cnt[best]);
+            ReleaseSRWLockShared(&g_va_mods_lock);
+            cnt[best] = 0;
+        }
+        if (g_va_live_dropped > 0) VA_ADD(" (%u not tracked: table full)", g_va_live_dropped);
+    }
+    else VA_ADD("va: %s: ntdll reservation log (diag_va_log) OFF: %s", tag, g_va_why);
+    diag("%s", line);
+#undef VA_ADD
+}
+
+// ---------------------------------------------------------------------------
+// HD cluster cache build, HC-6 default: a patch-free view of the low 2 GB. VirtualQuery visits the regions in address order,
+// so the regions of one allocation base are consecutive: each base gets one row with its reserved (every non-free region,
+// HC-R-2) and committed bytes below 2 GB, and its type. Each report merges the sorted table with the last one (HC-R-4) and
+// names the new or grown bases of >= 1 MB reserved, with a hint (module for MEM_IMAGE, mapped file for MEM_MAPPED, a heap
+// signature for MEM_PRIVATE). The main thread calls it at each map free, so no render-thread walk and no ntdll patch.
+struct VaReg { uintptr_t base; uint32_t res, com; DWORD type; };   // bytes below 2 GB at this allocation base: reserved (non-free) and committed
+static VaReg g_vr_tab[4096]; static int g_vr_n = 0; static bool g_vr_have = false;
+static VaReg g_vr_cur[4096];   // main thread only (ffxvr_va_regions)
+static const char* vr_private_hint(uintptr_t base) {
+    // HC-R-1: range_readable rejects uncommitted, PAGE_GUARD and PAGE_NOACCESS pages; no fault, no reliance on SEH
+    uint32_t sig = 0;   // NT heap: Segment.SegmentSignature; segment heap at +8 too
+    if (ffxvr_safe_read(reinterpret_cast<const void*>(base + 8), &sig, 4) == 0) return "VirtualAlloc / GC / driver (no readable header)";
+    if (sig == 0xFFEEFFEE) return "NT heap segment";
+    if (sig == 0xDDEEDDEE) return "segment heap";
+    return "VirtualAlloc / GC / driver";
+}
+/// HD cluster cache build (main thread, at each map free): the low-2 GB region diff since the last call, written to the
+/// supplied line buffer (the caller logs it). Returns the number of chars. tag names the point.
+static int va_regions(char* line, int cap, const char* tag) {
+    int len = 0;
+    #define VR_ADD(...) va_add(line, cap, len, __VA_ARGS__)
+    // 1. the current table, one row per allocation base (consecutive in a walk)
+    VaReg* cur = g_vr_cur; int cn = 0; bool full = false;
+    MEMORY_BASIC_INFORMATION mbi; uintptr_t p = 0x10000;
+    for (int guard = 0; p < 0x80000000u && guard < 200000; ++guard) {
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(p), &mbi, sizeof(mbi)) == 0) break;
+        const uintptr_t rb = reinterpret_cast<uintptr_t>(mbi.BaseAddress), rs = mbi.RegionSize;
+        if (rs == 0 || rb + rs <= p) break;
+        if (mbi.State != MEM_FREE) {
+            const uintptr_t ab = reinterpret_cast<uintptr_t>(mbi.AllocationBase ? mbi.AllocationBase : mbi.BaseAddress);
+            const uint32_t lo = static_cast<uint32_t>((rb + rs <= 0x80000000u) ? rs : (0x80000000u - rb));
+            if (cn == 0 || cur[cn - 1].base != ab) {
+                if (cn < 4096) { cur[cn].base = ab; cur[cn].res = cur[cn].com = 0; cur[cn].type = mbi.Type; ++cn; } else full = true;
+            }
+            if (!full || (cn > 0 && cur[cn - 1].base == ab)) { cur[cn - 1].res += lo; if (mbi.State == MEM_COMMIT) cur[cn - 1].com += lo; }
+        }
+        p = rb + rs;
+    }
+    // 2. totals by type, reserved and committed
+    unsigned long long tr[3] = {}, tc[3] = {};
+    for (int i = 0; i < cn; ++i) { const int t = cur[i].type == MEM_IMAGE ? 2 : cur[i].type == MEM_MAPPED ? 1 : 0; tr[t] += cur[i].res; tc[t] += cur[i].com; }
+    VR_ADD("va: %s: low 2 GB reserved (committed) private %llu (%llu) / mapped %llu (%llu) / image %llu (%llu) MB", tag,
+           tr[0] >> 20, tc[0] >> 20, tr[1] >> 20, tc[1] >> 20, tr[2] >> 20, tc[2] >> 20);
+    if (g_vr_have) {
+        unsigned long long pr[3] = {};
+        for (int i = 0; i < g_vr_n; ++i) { const int t = g_vr_tab[i].type == MEM_IMAGE ? 2 : g_vr_tab[i].type == MEM_MAPPED ? 1 : 0; pr[t] += g_vr_tab[i].res; }
+        VR_ADD(" (reserved %+lld / %+lld / %+lld)", (long long)(tr[0] >> 20) - (long long)(pr[0] >> 20), (long long)(tr[1] >> 20) - (long long)(pr[1] >> 20), (long long)(tr[2] >> 20) - (long long)(pr[2] >> 20));
+        VR_ADD(" | new or grown >= 1 MB reserved:");
+        int shown = 0, more = 0; unsigned long long more_mb = 0;
+        int j = 0;   // merge: both tables are sorted by base
+        for (int i = 0; i < cn; ++i) {
+            while (j < g_vr_n && g_vr_tab[j].base < cur[i].base) ++j;
+            const bool had = j < g_vr_n && g_vr_tab[j].base == cur[i].base;
+            const unsigned long long was = had ? g_vr_tab[j].res : 0, now = cur[i].res;
+            if (now < was + (1u << 20)) continue;   // unchanged, shrank, or grew < 1 MB
+            if (shown >= 10) { ++more; more_mb += (now - was); continue; }
+            ++shown;
+            VR_ADD(" 0x%08X %+lld MB (%llu, %u committed)", (unsigned)cur[i].base, (long long)(now >> 20) - (long long)(was >> 20), now >> 20, cur[i].com >> 20);
+            if (cur[i].type == MEM_IMAGE) { uintptr_t mb; VR_ADD(" image %s", va_mod_of(cur[i].base, &mb)); }
+            else if (cur[i].type == MEM_MAPPED) {
+                wchar_t w[MAX_PATH] = {}; char nm[64] = "pagefile-backed (section / D3DKMT / shared)";
+                if (GetMappedFileNameW(GetCurrentProcess(), reinterpret_cast<LPVOID>(cur[i].base), w, MAX_PATH) > 0) {
+                    const wchar_t* bn = wcsrchr(w, L'\\'); bn = bn ? bn + 1 : w;
+                    int k = 0; for (; bn[k] && k < 63; ++k) { const wchar_t c = bn[k]; nm[k] = (c >= 32 && c < 127) ? (char)c : '?'; } nm[k] = 0;
+                }
+                VR_ADD(" mapped %s", nm);
+            }
+            else VR_ADD(" private %s", vr_private_hint(cur[i].base));
+            VR_ADD(",");
+        }
+        if (shown == 0) VR_ADD(" none,");
+        if (more > 0) VR_ADD(" (+%d more, %llu MB),", more, more_mb >> 20);
+    }
+    else VR_ADD(" | (first report: no diff yet)");
+    if (full) VR_ADD(" | TABLE FULL (4096 bases): the rest uncounted");
+    VR_ADD(" | vram %u / %u MB", g_va_vram_mb, g_va_vram_budget_mb);   // HC-4
+    // 3. keep the current table for the next diff
+    memcpy(g_vr_tab, cur, sizeof(VaReg) * cn); g_vr_n = cn; g_vr_have = true;
+    #undef VR_ADD
+    return len;
+}
+/// HD cluster cache build: the region diff into a managed-supplied buffer (main thread), plus the current VRAM use / budget
+/// in out2 (MB). Returns the string length. The managed side logs the line through diag.
+extern "C" __declspec(dllexport) int ffxvr_va_regions(char* buf, int cap, const char* tag, unsigned* out2) {
+    if (out2 != nullptr) { out2[0] = g_va_vram_mb; out2[1] = g_va_vram_budget_mb; }
+    if (buf == nullptr || cap <= 1) return 0;
+    buf[0] = 0;
+    return va_regions(buf, cap, tag != nullptr ? tag : "");
 }
 
 /// Build 7 diagnostics (log only): bit 0 on (ini diag_build7; called once at module init, before ffxvr_init, so the
@@ -4217,7 +4508,7 @@ static void perf_tick() {
     }
     if (g_adapter3) {
         DXGI_QUERY_VIDEO_MEMORY_INFO vi = {};
-        if (SUCCEEDED(g_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vi))) { g_perf.vram_mb = vi.CurrentUsage >> 20; g_perf.vram_budget_mb = vi.Budget >> 20; }
+        if (SUCCEEDED(g_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vi))) { g_perf.vram_mb = vi.CurrentUsage >> 20; g_perf.vram_budget_mb = vi.Budget >> 20; g_va_vram_mb = (uint32_t)g_perf.vram_mb; g_va_vram_budget_mb = (uint32_t)g_perf.vram_budget_mb; }
     }
     const ULONGLONG t = GetTickCount64();
     const bool slow = g_perf.frame_ms > 40.0;
@@ -6348,6 +6639,7 @@ extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() {
     if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
+    InterlockedExchange(&g_va_on, 0);   // the reservation log: nothing recorded during exit (the patch stays: the DLL is never unloaded)
     if (g_xr_want) { xr_stop(); leave_xr_state(); }
 }
 /// The overlay's low-resolution line: 1 and the text while the headset is on and the game renders below its per-eye size.

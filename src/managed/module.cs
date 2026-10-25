@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 12;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 14;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -480,6 +480,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_cursor_game = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_cursor_game"); _fn_cursor_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cursor_skip");
             _fn_haptics_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_haptics_set");
             _fn_game_callers = (delegate* unmanaged[Cdecl]<uint*, int, int>)req("ffxvr_game_callers"); _fn_va_stats = (delegate* unmanaged[Cdecl]<uint*, void>)req("ffxvr_va_stats");
+            _fn_va_watch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_va_watch"); _fn_va_report = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_va_report");
+            _fn_va_regions = (delegate* unmanaged[Cdecl]<byte*, int, byte*, uint*, int>)req("ffxvr_va_regions");
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -527,7 +529,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
         _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_bb_resized = null;
         _fn_cursor_game = null; _fn_cursor_skip = null; _fn_cursor_look = null; _fn_markers_kinds = null; _fn_cursor_atlas_dump = null;
-        _fn_game_callers = null; _fn_va_stats = null; _fn_haptics_set = null;
+        _fn_game_callers = null; _fn_va_stats = null; _fn_haptics_set = null; _fn_va_watch = null; _fn_va_report = null; _fn_va_regions = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -979,7 +981,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "diag_build7":       pb(k, v, ref _diag7); break;   // build 7 diagnostics (hooks at the next launch; logging at once)
                 case "smooth_anchor":     pb(k, v, ref _smooth_anchor); break;   // the first / third person / diorama anchor from the drawn (interpolated) root
                 case "diag_load":         pb(k, v, ref _diag_load); break;             // battle load diagnostics (hooks at the next launch)
-                case "battle_cache_models": pb(k, v, ref _battle_cache_models); break; // option 1: keep chr models across random battles in one zone
+                case "battle_cache_models": break;                                     // retired (the HD cluster cache build): read and ignored, dropped at the next save
+                case "hd_cluster_cache":  pb(k, v, ref _hd_cluster_cache); break;      // keep the HD map textures across random battles in one zone (applies at once)
+                case "diag_cluster_bytes": pb(k, v, ref _diag_cluster_bytes); break;   // HC-2: the game pool's alloc / free hooks, for the bytes per HD cluster (hooks at the next launch; default 0: the header read stands in)
+                case "diag_va_log":       pb(k, v, ref _diag_va_log); break;           // HC-6: the ntdll reservation patch (hooks at the next launch; default 0: the region diff is patch-free)
                 case "cursor_source":     pw(k, v, ref _cursor_game_cfg, "game", "legacy"); break;   // cursor stage C2
                 case "marker_lift":       pf(k, v, ref _marker_lift, -5f, 20f); break;              // C2-10
                 case "cursor_look":       pw(k, v, ref _cursor_look_game, "game", "mod"); break;    // cursor stage C3
@@ -1263,7 +1268,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
             $"smooth_anchor={(_smooth_anchor ? 1 : 0)}\n" +
             $"diag_load={(_diag_load ? 1 : 0)}\n" +
-            $"battle_cache_models={(_battle_cache_models ? 1 : 0)}\n" +
+            $"hd_cluster_cache={(_hd_cluster_cache ? 1 : 0)}\n" +
+            $"diag_cluster_bytes={(_diag_cluster_bytes ? 1 : 0)}\n" +
+            $"diag_va_log={(_diag_va_log ? 1 : 0)}\n" +
             $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
             $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
             $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
@@ -1742,13 +1749,13 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.TreePop();
         }
 
-        if (ImGui.TreeNode("Battle loading (diagnostics, model cache option)")) {
+        if (ImGui.TreeNode("Battle loading (diagnostics, HD cluster cache)")) {
             ImGui.TextWrapped($"load diagnostics: {_ld_status}");
             ImGui.Checkbox("load diagnostics (diag_load; hooks at the next launch): one \"load: battle N\" line per battle start and per way back in ffxvr_diag.log", ref _diag_load);
-            if (!_ld_hooked) ImGui.BeginDisabled(true);
-            ImGui.Checkbox("battle_cache_models: keep character models across random battles in one zone (experimental)", ref _battle_cache_models);
-            if (!_ld_hooked) ImGui.EndDisabled();
-            ImGui.TextDisabled($"skips the model-cache flush on a random battle's own map load (at most {k_ld_max_in} of 100 cache entries in use) and on the way back to the same field map (at most {k_ld_max_out}), while the largest free block below 2 GB is at least {k_ld_min_low_mb} MB; flushes skipped so far: {lt(LT.skip_n)}; hooks seen working 0x{seen_mask:X} of 0x1FF");
+            ImGui.Checkbox("cluster bytes (diag_cluster_bytes; hooks at the next launch): the game pool's allocations inside each HD cluster load, for its resident size. Off: the Phyre header size stands in. Measurement only (hot path)", ref _diag_cluster_bytes);
+            ImGui.Checkbox("ntdll reservation log (diag_va_log; hooks at the next launch): name the caller of every low-2 GB reservation. Off: a patch-free region diff at each map free", ref _diag_va_log);
+            hc_ui();
+            ImGui.TextDisabled($"hooks seen working 0x{seen_mask:X} (0x1FF the core nine; 0x200 open, 0x400 read, 0x800 GPU create, 0x1000 / 0x2000 pool alloc / free)");
             ImGui.TreePop();
         }
 
