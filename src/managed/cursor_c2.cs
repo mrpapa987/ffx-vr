@@ -96,18 +96,32 @@ public sealed unsafe partial class FFXVRModule {
         bool live_u = _r7u_seq != 0 && _r7u.ok != 0 && c2_live(_r7u.stamp, frame, _c2_since_u);
         if (live_u && _r7u.chr != _c2_turn_chr) { _c2_turn_chr = _r7u.chr; _c2_turn_frame = _r7u.stamp; }   // a new turn: target snapshots before it are the last turn's
         bool live_t = _r7_seq != 0 && c2_live(_r7h.stamp, frame, _c2_since_t) && (_c2_turn_chr < 0 || (int)(_r7h.stamp - _c2_turn_frame) >= 0);
+        c3_look(true);   // C3-2: native's atlas state now, before the markers are built (and the search on: in battle, game source, markers on)
+        // C3-1: while battle.dds is not held, a short wait (at most k_c3_wait Presents of a live target, headset on) with no target
+        // marker: the CTB panel's copy of the pointer normally lets native find it at the first targeting frame. Then our red triangle.
+        bool wait = _markers_on && _xr_on && _cursor_look_game && !_c3_atlas_ok && live_t && _c3_wait_frames < k_c3_wait;
+        if (wait) _c3_wait_frames++;
         if (!_markers_on) return;
+        bool hand = _cursor_look_game && _c3_atlas_ok;   // the game's hand from battle.dds; else our red triangle
+        bool self_t = live_u && c3_is_self(_r7u.a);       // first person: the turn is ours
         Vector3 ua = live_u ? c2_anchor(_r7u.a) : default; ua.Y -= 2.3f;   // the game's triangle: A = optpos[1] - 2, apex A - 0.3 (0x897860's table)
-        if (live_t)
+        if (live_t && !wait)
             for (int i = 0; i < _r7h.n && _mk_n < 32; i++) {
-                Vector3 a = c2_anchor(_r7t[i]); a.Y -= _marker_lift;   // game y points down
-                // C2-7: the acting member targeted (self, all allies): stack the red marker above the turn marker (each is 5 * scale
-                // tall, tip down; the turn marker is drawn last and would cover it)
-                if (live_u && _r7t[i].id == _r7u.a.id) a.Y = MathF.Min(a.Y, ua.Y - (2f * 2.5f * _marker_scale + 0.5f));
-                _mk_pos[_mk_n * 3] = -a.X; _mk_pos[_mk_n * 3 + 1] = -a.Y; _mk_pos[_mk_n * 3 + 2] = a.Z; _mk_col[_mk_n] = k_c2_target_col; _mk_n++; _markers_drawn++;
+                bool self = c3_is_self(_r7t[i]);
+                if (self && _fp_self_marker == 1) continue;                          // fp_self_marker=hide
+                int kind = self && _fp_self_marker == 0 ? k_mk_self : 0;            // low: native puts it at chest height ahead of us
+                Vector3 a = c2_anchor(_r7t[i]);
+                if (hand) kind |= _r7t[i].id < 0x14 ? k_mk_hand_party : k_mk_hand_monster;   // 0x89C870: chr < 0x14 type 4 (party), else 5 (monster); the hand sits beside the anchor itself
+                else {
+                    a.Y -= _marker_lift;   // game y points down
+                    // C2-7: the acting member targeted (self, all allies): stack the red marker above the turn marker (ours is 5 * scale
+                    // tall, the game's triangle 2 * scale (C3-14); tip down; the turn marker is drawn last and would cover it)
+                    if (live_u && _r7t[i].id == _r7u.a.id) a.Y = MathF.Min(a.Y, ua.Y - ((_cursor_look_game ? 2f : 2f * 2.5f) * _marker_scale + 0.5f));
+                }
+                _mk_pos[_mk_n * 3] = -a.X; _mk_pos[_mk_n * 3 + 1] = -a.Y; _mk_pos[_mk_n * 3 + 2] = a.Z; _mk_col[_mk_n] = k_c2_target_col; _mk_kind[_mk_n] = kind; _mk_n++; _markers_drawn++;
             }
-        if (live_u && _mk_n < 32) {
-            _mk_pos[_mk_n * 3] = -ua.X; _mk_pos[_mk_n * 3 + 1] = -ua.Y; _mk_pos[_mk_n * 3 + 2] = ua.Z; _mk_col[_mk_n] = k_c2_turn_col; _mk_n++; _markers_drawn++;
+        if (live_u && _mk_n < 32 && !(self_t && _fp_self_marker != 2)) {   // first person (low, hide): no turn marker in our face
+            _mk_pos[_mk_n * 3] = -ua.X; _mk_pos[_mk_n * 3 + 1] = -ua.Y; _mk_pos[_mk_n * 3 + 2] = ua.Z; _mk_col[_mk_n] = k_c2_turn_col; _mk_kind[_mk_n] = _cursor_look_game ? k_mk_game_turn : 0; _mk_n++; _markers_drawn++;
         }
     }
 

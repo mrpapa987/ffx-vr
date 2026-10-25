@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 7;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 8;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -472,6 +472,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_diag7_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_diag7_set"); _fn_diag_line = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_diag_line");
             _fn_main_note = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_main_note"); _fn_motion_cols = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_motion_cols");
             _fn_cursor_game = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_cursor_game"); _fn_cursor_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cursor_skip");
+            _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
             if (missing.Count > 0 || abi != k_abi) {
@@ -516,7 +517,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
         _fn_on_ps_srvs = null; _fn_on_clear_twin = null; _fn_set_backbuffer = null; _fn_on_copy = null; _fn_override_set = null; _fn_override_applied = null;
         _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
-        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_cursor_game = null; _fn_cursor_skip = null;
+        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_cursor_game = null; _fn_cursor_skip = null; _fn_cursor_look = null; _fn_markers_kinds = null; _fn_cursor_atlas_dump = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -925,6 +926,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     case "diag_build7":       _diag7 = v != "0"; break;   // build 7 diagnostics (hooks at the next launch; logging at once)
                     case "cursor_source":     _cursor_game_cfg = !v.Trim().Equals("legacy", StringComparison.OrdinalIgnoreCase); break;   // game (default) / legacy (cursor stage C2)
                     case "marker_lift":       if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float mlift) && float.IsFinite(mlift)) _marker_lift = Math.Clamp(mlift, -5f, 20f); break;   // C2-10
+                    case "cursor_look":       _cursor_look_game = !v.Trim().Equals("mod", StringComparison.OrdinalIgnoreCase); break;   // game (default) / mod (cursor stage C3)
+                    case "cursor_hand_size":  if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float hsz) && float.IsFinite(hsz)) _cursor_hand_size = Math.Clamp(hsz, 0.3f, 3f); break;
+                    case "fp_self_marker":    { string fs = v.Trim().ToLowerInvariant(); _fp_self_marker = fs == "hide" ? 1 : fs == "normal" ? 2 : 0; } break;   // low (default) / hide / normal
                 }
             }
             if (_headset_autostart) {
@@ -1053,7 +1057,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
-            $"marker_lift={_marker_lift.ToString("F1", ci)}\n";
+            $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
+            $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
+            $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
+            $"fp_self_marker={(_fp_self_marker == 1 ? "hide" : _fp_self_marker == 2 ? "normal" : "low")}\n";
         if (text == _ini_last) return;
         if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
         try {
@@ -1535,6 +1542,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (_c2_active) ImGui.SliderFloat("pointer lift above the game's anchor", ref _marker_lift, -5f, 20f);
             else ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f);
             ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
+            ImGui.Checkbox("the game's look (the hand from battle.dds, the game's spinning triangle; needs the game cursor source)", ref _cursor_look_game);
+            if (_cursor_look_game) {
+                ImGui.SameLine(); ImGui.TextDisabled(_c3_atlas_ok ? "battle.dds: found" : "battle.dds: not found yet (it is found at the first target menu of a battle; red triangles until then)");
+                ImGui.SliderFloat("hand size", ref _cursor_hand_size, 0.3f, 3f);
+                ImGui.Checkbox("sample the atlas the other way up (only if the hand shows the wrong art)", ref _c3_vflip_inv); ImGui.SameLine();
+                if (_fn_cursor_atlas_dump != null && ImGui.SmallButton("dump the battle atlas")) _fn_cursor_atlas_dump();
+                ImGui.SameLine(); ImGui.TextDisabled("-> battle_atlas.dds next to the mod, details in ffxvr_diag.log");
+            }
+            ImGui.Text("first person, on the actor we look out of:"); ImGui.SameLine();
+            ImGui.RadioButton("low (no turn marker; a self-target small at chest height)##fps", ref _fp_self_marker, 0); ImGui.SameLine();
+            ImGui.RadioButton("hide##fps", ref _fp_self_marker, 1); ImGui.SameLine(); ImGui.RadioButton("normal##fps", ref _fp_self_marker, 2);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
             ImGui.TreePop();
         }
@@ -1996,13 +2014,14 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private void push_markers() {
         if (_fn_markers_set == null) return;
         fixed (float* p = _mk_pos) fixed (uint* c = _mk_col) _fn_markers_set(p, c, _mk_n);
+        c3_push();   // C3: the kinds (after the set, which resets them)
         if (_fn_cursor_game != null) _fn_cursor_game(_c2_active && _markers_on ? 1 : 0);   // only then may native skip the game's cursors (in the headset)
         if (_fn_markers_3d != null) _fn_markers_3d(_markers_3d ? 1 : 0);
     }
 
     private void draw_markers() {
-        _markers_drawn = 0; _mk_n = 0;
-        try { c2_decide(); if (_c2_active) c2_markers(); else draw_markers_inner(); }   // cursor stage C2: the game's snapshots, else the legacy memory path
+        _markers_drawn = 0; _mk_n = 0; Array.Clear(_mk_kind);   // kind 0 (our triangle) unless the game source says otherwise
+        try { c2_decide(); if (_c2_active) c2_markers(); else { c3_look(false); draw_markers_inner(); } }   // cursor stage C2: the game's snapshots, else the legacy memory path
         finally { push_markers(); }
     }
 

@@ -1929,3 +1929,72 @@ These are the fixes from the C2 review. Where they differ from the section above
 - **Accepted deviations from SYNTHESIS stage C2,** for C3/C4:
   - no `marker_anchor_smooth`, no `marker_anchor=game|top`, and no explicit kind tag. The owner's data (correction ≈ 0 in battle, every element index 1, colours unchanged) makes them unnecessary.
   - `hide_cursor` stays on with the user's entries, instead of being pushed 0, so picks keep working.
+
+## Cursor stage C3 + first-person markers (branch `cursors`)
+
+The owner asked for the game's own cursor look in the headset ("they look better"), and for the yellow turn marker to stop sitting in his face in first person.
+
+### The game's look
+
+`cursor_look=game` is the default; `mod` gives our red / yellow triangles. It works only with the game cursor source; the legacy source always draws our triangles.
+- **The turn pointer** is the game's own triangle, as 0x892590 builds it:
+  - world-space vertices `A + (sin θ·r, dy, cos θ·r)`, with (r, dy) = (0, −0.3), (−1, −2.3), (+1, −2.3) in game units and y down. It is not screen-facing: it spins about the vertical axis by θ (`[0x133FA7C]`).
+  - The apex is drawn in `[0x133FA88]` and the base in `[0x133F7D4]`, with the gradient between them. Both are RGBA bytes where 0x80 = full; alpha 0 is read as opaque.
+  - θ and both colours come from the turn snapshot, so θ steps at the game's 30 Hz like the game's own.
+  - It is the game's exact size at "pointer size" 1.
+- **The target hand** is a quad from battle.dds:
+  - party targets (chr < 0x14, type 4): texels (566,523)-(634,568), placed x −100..−32, y −22..+23 UI px from the anchor, so it sits left of the anchor and points right;
+  - monsters: (566,463)-(634,508), mirrored, placed x 0..68, so it sits right of the anchor;
+  - this is 0x8C0670's placement. The anchor is the game's own (optpos[Chr+0xDF9]), not lifted.
+  - World size is 14 game UI px per unit. The turn triangle's 2 units show as 24-34 px in the default battle view (the old hide-list signature), so the hand is 4.9 × 3.2 units. "Hand size" scales it.
+  - It faces the head: both eyes use eye 1's right and up axes, so there is no stereo shear. It is sampled trilinear, with the art untinted.
+- **Finding battle.dds.** Native looks at UI-pass draws while the game look is on and the atlas is not yet held.
+  - The bound texture must be a square power-of-two of 1024 or more. That allows an HD pack, since the UVs are normalised.
+  - The draw's slot-3 UV stream (exe-verify 6) must hold a quad whose box equals a rect the exe draws from battle.dds: one of the two target-pointer rects (0x8C0670's constants) or one of the ten damage digits (0x8FB840: (444 + 49·(d%5), 254 + 65·(d/5)), 49 × 65).
+  - Each rect is accepted as written or with v flipped. The match records which, and we then sample exactly as the game's stream does (the exe writes (u, 1 − v)).
+  - The search reads at most 24 draws × 12 quads per frame. The stream is learned on first sight and readable from its next Map.
+- **Getting the first sight.** In the headset the game's hand is skipped, and digits only come with damage.
+  - So while the atlas is not held, the target detour lets the game draw its hand for at most 60 Presents per session. We draw no target marker over it during that time.
+  - The search normally catches it within a few frames, so the game's hand shows on the panel for a moment at the first target menu.
+  - On the monitor, the pointer is drawn anyway.
+  - After the 60 Presents, the hand falls back to our red triangle until a damage number lets the search find the atlas.
+- **Lifetime.**
+  - The SRV is kept with our own reference, so it can never be freed under us.
+  - It is released only when a probe finds that the game holds no reference any more and no UI draw has bound it for 600 frames. The search then starts again.
+- **Checks.**
+  - On a find, a one-time staging readback of mip 0 counts the blocks (BC1/BC3) or pixels (RGBA8) with visible alpha in both hand rects, both ways up. It goes to ffxvr_diag.log together with the atlas description and how it was found.
+  - "Dump the battle atlas" writes battle_atlas.dds through dump_dds.
+  - The heartbeat has a "cursor stage C3:" line.
+  - A debug checkbox samples the atlas the other way up, in case the first look shows the wrong art.
+
+### First person
+
+`fp_self_marker=low` is the default; the others are `hide` and `normal`. These rules apply in first person (fp_mode 1) with the headset on, to the actor first person looks out of (`_d7_follow_actor`; battle follow puts it on the acting member):
+- **The turn marker** on that actor is not drawn (`low`, `hide`).
+- **A target marker** on that actor (a self-target):
+  - with `low`, it is drawn at a fixed spot in front of us: 0.5 m ahead along the view's horizontal forward and 0.35 m below the eyes. Native computes the spot from eye 1's view, so both eyes agree. It is small: the triangle at half size, or the hand at 0.6 size turned a quarter clockwise, pointing down at the player;
+  - with `hide`, it is not drawn.
+- `normal` keeps the old behaviour. Third person and the diorama are unchanged.
+
+### ABI and ini
+
+- **ABI 8 on this branch:** + `ffxvr_cursor_look`, `ffxvr_markers_kinds`, `ffxvr_cursor_atlas_dump`. Master's build 9 is also ABI 8, so this needs renumbering at the merge (to 10 with C2's renumber).
+- **Marker kinds:** markers_set resets them, so the legacy path keeps our triangles.
+- **New ini keys:** `cursor_look`, `cursor_hand_size`, `fp_self_marker`.
+
+### Review fixes, cursor stage C3
+
+These are the fixes from the C3 review. Where they differ from the section above, they replace it.
+- **The game's hand is always skipped in the headset.** The discovery let-through is gone.
+  - battle.dds is found from the CTB panel's own copy of the pointer. 0x8A0590 draws the same 0x903EE0(400, …) rect for every targeted row (0x8A0A30..0x8A0B5C) and is called from 0x89B360 directly, so our detour never skips it. The find therefore normally comes at the first targeting frame.
+  - Until then there is a short wait (at most 6 Presents of a live target per session, headset on) with no target marker, then our red triangle.
+  - The find line logs the matched quad's UI size (68x45 for the hand, smaller for the CTB copy).
+- **Native's atlas state is asked before the markers are built** (`c3_look`), so the first frame after a find already shows the hand.
+- **The search runs only in battle,** with the game source and the markers on.
+- **No release.** Once the held atlas has not been bound for 600 frames (stale), the search runs again and a new find swaps it: AddRef the new one, then Release the old one, so the art is never missing. A hand kind without an atlas draws nothing; it is never a triangle at the unlifted anchor.
+- **The readback check runs once per session,** at the first find. It is one staging copy of both hand rects, both ways up (x 566..634, rows 456..568), mapped with DO_NOT_WAIT on later frames, so there is no stall.
+- **The atlas sampler stops at mip 2,** so neighbouring sprites do not bleed into the hand at a distance.
+- **The hand is pulled toward the head** by a tenth of the distance (at most 30 units), along the line of sight. An anchor inside a body no longer puts the hand behind the surface it is drawn over.
+- **The self point** uses the midpoint of the two eye positions.
+- **C2-7 stacking** uses the game triangle's 2 × scale height in the game look.
+- **Comment fixes:** the BC1 alpha test in the log, and the wording of who "the actor we look out of" is.

@@ -838,6 +838,20 @@ uint32_t g_ui_frames_with_pass = 0, g_ui_frames_3d = 0, g_ui_resolves_frame = 0,
 // from managed (cursor_source=game, hooks live, markers on); g_c2_skip is decided once per frame at begin_frame on the render
 // thread and published with an interlocked store; the detours read it on the game's main thread (ffxvr_cursor_skip).
 bool g_c2_on = false; volatile LONG g_c2_skip = 0; uint32_t g_c2_skip_frames = 0; uint32_t g_c2_nopass = 0; const uint32_t k_c2_nopass = 2;   // C2-8: 3D frames in a row without the UI pass before the skip lets go
+// Cursor stage C3: the game's look. g_c3_look (managed, cursor_look=game) turns on the search for battle.dds among the UI
+// pass's textures: a square power-of-two atlas of 1024 or more whose slot-3 UVs (the CPU's UV stream, exe-verify 6) hold
+// exactly a rect the exe draws from battle.dds: the target pointer (0x8C0670's constants) or a damage digit (0x8FB840).
+// The CTB panel draws the same pointer rect for every targeted row (0x8A0A30..0x8A0B5C, called from 0x89B360, never skipped),
+// so the find comes at the first targeting frame even in the headset. g_c3_look is 1 only in battle with the game source and
+// the markers on (C3-5). The SRV is kept with a reference of our own (it can never be freed under us); it is never released
+// on its own: once no UI draw has bound it for 600 frames (stale), the search runs again and a new find swaps it (C3-3).
+// g_c3_vflip: the stream held 1 - v (the exe writes (u, 1-v)), so we sample the same way the game's shader does. The turn
+// triangle's parameters come from the turn snapshot each frame.
+int g_c3_look = 0, g_c3_flags = 0; float g_c3_hand = 1.f, g_c3_theta = 0.f; uint32_t g_c3_apex = 0, g_c3_base = 0;
+ID3D11ShaderResourceView* g_c3_srv = nullptr; ID3D11Texture2D* g_c3_tex = nullptr; int g_c3_vflip = 1; const char* g_c3_how = ""; float g_c3_qw = 0.f, g_c3_qh = 0.f;
+bool g_c3_verify = false, g_c3_dump = false; uint32_t g_c3_seen_frame = 0, g_c3_scan_frame = ~0u, g_c3_found_n = 0, g_c3_logged_n = 0, g_c3_swaps = 0; int g_c3_scans_frame = 0;
+ID3D11Texture2D* g_c3_stage = nullptr; UINT g_c3_stage_aw = 0, g_c3_stage_ah = 0, g_c3_stage_x = 0, g_c3_stage_y = 0, g_c3_stage_w = 0, g_c3_stage_h = 0; int g_c3_stage_fk = 0, g_c3_stage_tries = 0;   // C3-4: the one readback (atlas size, the copy's origin and size), polled
+const uint32_t k_c3_stale = 600;
 ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
 bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
@@ -2319,6 +2333,150 @@ static unsigned ui_sprite_xy(float* xy, unsigned max_v) {
     return nv;
 }
 
+// Cursor stage C3: this draw's slot-3 UVs (the atlas UV stream, float2, stride 8), quad by quad, read like ui_sprite_xy reads
+// slot 0 (the mapped pointer of the UI ring, a guarded read). The stream is learned on first sight and readable from its next Map.
+static unsigned c3_read_uv(float* uv, unsigned max_v) {
+    ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(3, 1, &vb, &stride, &voff);
+    if (!vb) return 0;
+    const uint8_t* src = nullptr; unsigned nv = 0;
+    unsigned first_v = 0; const bool fv_ok = ui_first_v(&first_v);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ui_vbs_learn(vb);
+        auto it = g_vb_last_map.find(vb);
+        if (fv_ok && it != g_vb_last_map.end() && it->second.p && stride >= 8 && vb_live(it->second)) {
+            nv = (g_draw_n / 6) * 4; if (nv > max_v) nv = max_v;
+            if ((uint64_t)voff + ((uint64_t)first_v + nv) * stride <= it->second.size) src = static_cast<const uint8_t*>(it->second.p) + voff + (size_t)first_v * stride; else nv = 0;
+        }
+    }
+    vb->Release();
+    if (!src) return 0;
+    for (unsigned k = 0; k + 4 <= nv; k += 4) { if (!guarded_read_xy(src + k * stride, stride, uv + k * 2)) return k; }
+    return nv & ~3u;
+}
+// A quad's UV box against one battle.dds rect given in the exe's own space (a0..a1 x b0..b1, normalised): as written, or with
+// v flipped (the CPU stream holds 1 - v). Tolerance: under a third of a 1024 texel (the exe's constants are exact multiples).
+static bool c3_rect_is(float u0, float v0, float u1, float v1, float a0, float b0, float a1, float b1, int* flip) {
+    const float e = 0.3f / 1024.f;
+    if (fabsf(u0 - a0) > e || fabsf(u1 - a1) > e) return false;
+    if (fabsf(v0 - b0) <= e && fabsf(v1 - b1) <= e) { *flip = 0; return true; }
+    if (fabsf(v0 - (1.f - b1)) <= e && fabsf(v1 - (1.f - b0)) <= e) { *flip = 1; return true; }
+    return false;
+}
+static const char* c3_match(float u0, float v0, float u1, float v1, int* flip) {
+    const float k = 1.f / 1024.f;
+    if (c3_rect_is(u0, v0, u1, v1, 566 * k, 523 * k, 634 * k, 568 * k, flip)) return "party target pointer";      // 0x8C0670 type 4
+    if (c3_rect_is(u0, v0, u1, v1, 566 * k, 463 * k, 634 * k, 508 * k, flip)) return "monster target pointer";    // type 5 (drawn mirrored)
+    for (int d = 0; d < 10; ++d) {   // 0x8FB840: u = (444 + 49 (d%5)) / 1024, v = (254 + 65 (d/5)) / 1024, 49 x 65
+        const float a0 = (444 + 49 * (d % 5)) * k, b0 = (254 + 65 * (d / 5)) * k;
+        if (c3_rect_is(u0, v0, u1, v1, a0, b0, a0 + 49 * k, b0 + 65 * k, flip)) return "damage digit";
+    }
+    return nullptr;
+}
+// Called for UI-pass draws while the game look is wanted and the atlas is not held: is SRV0 battle.dds?
+static void c3_atlas_scan() {
+    ID3D11ShaderResourceView* srv = g_cur_ps_srv[0]; ID3D11Texture2D* t = texture_of(srv);
+    if (!t) return;
+    D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
+    if (d.Width != d.Height || d.Width < 1024 || (d.Width & (d.Width - 1)) != 0) return;   // a square power-of-two atlas: 1024 (larger with an HD pack)
+    if (g_c3_scan_frame != g_frames) { g_c3_scan_frame = g_frames; g_c3_scans_frame = 0; }
+    if (++g_c3_scans_frame > 24) return;   // bounded reads per frame (write-combined memory)
+    float uv[2 * 4 * 12]; const unsigned nv = c3_read_uv(uv, 4 * 12);
+    for (unsigned q = 0; q < nv / 4; ++q) {
+        float u0, v0, u1, v1; quad_rect(uv, q, &u0, &v0, &u1, &v1);
+        int flip = 1; const char* what = c3_match(u0, v0, u1, v1, &flip);
+        if (!what) continue;
+        g_c3_seen_frame = g_frames;
+        if (t == g_c3_tex) return;   // the held one after all
+        { const float* xy = nullptr; const unsigned nxy = ui_quads_cached(&xy); g_c3_qw = g_c3_qh = 0.f; if (q < nxy / 4) { float x0, y0, x1, y1; quad_rect(xy, q, &x0, &y0, &x1, &y1); g_c3_qw = x1 - x0; g_c3_qh = y1 - y0; } }   // its UI size: the CTB mini-hand or the hand itself
+        srv->AddRef(); ID3D11ShaderResourceView* old = g_c3_srv;   // a stale one is swapped only now, so the art is never missing
+        g_c3_srv = srv; g_c3_tex = t; g_c3_vflip = flip; g_c3_how = what;
+        if (old) { old->Release(); g_c3_swaps++; }
+        if (g_c3_found_n++ == 0) g_c3_verify = true;   // C3-4: the readback check on the first find of the session only
+        return;
+    }
+}
+// C3-4: the readback check. 0 not checked, 1 BC1, 3 BC3, 4 8-bit RGBA.
+static int c3_fmt_kind(DXGI_FORMAT f) {
+    if (f == DXGI_FORMAT_BC3_UNORM || f == DXGI_FORMAT_BC3_UNORM_SRGB) return 3;
+    if (f == DXGI_FORMAT_BC1_UNORM || f == DXGI_FORMAT_BC1_UNORM_SRGB) return 1;
+    if (f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB) return 4;
+    return 0;
+}
+// Blocks (BC) or pixels (RGBA8) with visible alpha in a rect (texels of a 1024 atlas, rows as stored) of the mapped staging
+// copy (the g_c3_stage_* origin and size). The BC3 test reads the two alpha endpoints (a heuristic, fine for a log line).
+static int c3_count(const D3D11_MAPPED_SUBRESOURCE& ms, float tx0, float ty0, float tx1, float ty1, int* total) {
+    *total = 0; int seen = 0; const int fk = g_c3_stage_fk;
+    const float sx = g_c3_stage_aw / 1024.f, sy = g_c3_stage_ah / 1024.f; const UINT blk = fk == 4 ? 1 : 4, bpb = fk == 4 ? 4 : (fk == 3 ? 16 : 8);
+    const UINT x0 = (UINT)(tx0 * sx) / blk, x1 = ((UINT)ceilf(tx1 * sx) + blk - 1) / blk, y0 = (UINT)(ty0 * sy) / blk, y1 = ((UINT)ceilf(ty1 * sy) + blk - 1) / blk;
+    const UINT bx0 = g_c3_stage_x / blk, by0 = g_c3_stage_y / blk, bw = g_c3_stage_w / blk, bh = g_c3_stage_h / blk;
+    for (UINT y = y0; y < y1; ++y) for (UINT x = x0; x < x1; ++x) {
+        if (x < bx0 || y < by0 || x - bx0 >= bw || y - by0 >= bh) continue;   // outside the copy
+        const uint8_t* b = static_cast<const uint8_t*>(ms.pData) + (y - by0) * ms.RowPitch + (x - bx0) * bpb;
+        bool vis;
+        if (fk == 4) vis = b[3] > 32;
+        else if (fk == 3) vis = b[0] > 32 || b[1] > 32;
+        else { const uint16_t c0 = (uint16_t)(b[0] | b[1] << 8), c1 = (uint16_t)(b[2] | b[3] << 8); vis = c0 > c1 || (b[4] & b[5] & b[6] & b[7]) != 0xFF; }   // BC1: opaque mode, or not every texel on the transparent index (C3-8)
+        if (vis) seen++; (*total)++;
+    }
+    return seen;
+}
+/// Once per frame at begin_frame (render thread, no lock held): the find line, the one readback check after the session's first
+/// find (one staging copy of both hand rects both ways up, mapped without waiting on later frames), and the dump the overlay asked for.
+static void c3_frame() {
+    if (!g_device || !g_ctx) return;
+    if (g_c3_srv && g_c3_logged_n != g_c3_found_n) {
+        g_c3_logged_n = g_c3_found_n;
+        D3D11_TEXTURE2D_DESC d = {}; g_c3_tex->GetDesc(&d);
+        diag("cursor atlas: battle.dds %s by a %s quad of %.0fx%.0f UI px (68x45: the hand, smaller: the CTB panel's copy) | srv %p tex %p %ux%u fmt %u mips %u array %u | the stream held %s, so v is sampled %s",
+             g_c3_found_n > 1 ? "found again (swapped)" : "found", g_c3_how, g_c3_qw, g_c3_qh, static_cast<void*>(g_c3_srv), static_cast<void*>(g_c3_tex), d.Width, d.Height, (unsigned)d.Format, d.MipLevels, d.ArraySize, g_c3_vflip ? "1 - v" : "v", g_c3_vflip ? "flipped" : "as written");
+    }
+    if (g_c3_srv && g_c3_verify && !g_c3_stage) {
+        g_c3_verify = false;
+        D3D11_TEXTURE2D_DESC d = {}; g_c3_tex->GetDesc(&d);
+        const int fk = c3_fmt_kind(d.Format);
+        if (fk == 0) diag("cursor atlas: alpha check skipped (format %u)", (unsigned)d.Format);
+        else {
+            // both hand rects, both ways up: x 566..634, rows 456..568 of a 1024 atlas (463..568 as written, 456..561 flipped), block aligned
+            const float sx = d.Width / 1024.f, sy = d.Height / 1024.f; const UINT al = fk == 4 ? 1u : 4u;
+            UINT x0 = (UINT)(566 * sx) / al * al, x1 = ((UINT)ceilf(634 * sx) + al - 1) / al * al, y0 = (UINT)(456 * sy) / al * al, y1 = ((UINT)ceilf(568 * sy) + al - 1) / al * al;
+            if (x1 > d.Width) x1 = d.Width; if (y1 > d.Height) y1 = d.Height;
+            D3D11_TEXTURE2D_DESC sd = {}; sd.Width = x1 - x0; sd.Height = y1 - y0; sd.MipLevels = 1; sd.ArraySize = 1; sd.Format = d.Format; sd.SampleDesc.Count = 1;
+            sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ID3D11Texture2D* st = nullptr;
+            if (x1 > x0 && y1 > y0 && SUCCEEDED(g_device->CreateTexture2D(&sd, nullptr, &st)) && st) {
+                D3D11_BOX box = { x0, y0, 0, x1, y1, 1 };
+                { InEye2 guard; g_ctx->CopySubresourceRegion(st, 0, 0, 0, 0, g_c3_tex, 0, &box); }
+                g_c3_stage = st; g_c3_stage_aw = d.Width; g_c3_stage_ah = d.Height; g_c3_stage_x = x0; g_c3_stage_y = y0; g_c3_stage_w = sd.Width; g_c3_stage_h = sd.Height; g_c3_stage_fk = fk; g_c3_stage_tries = 0;
+            }
+        }
+    }
+    else if (g_c3_stage) {
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        const HRESULT hr = g_orig_map(g_ctx, g_c3_stage, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING && ++g_c3_stage_tries < 120) { /* next frame */ }
+        else {
+            if (SUCCEEDED(hr)) {
+                // party rows 523..568 and monster rows 463..508 as written; 1024 - y when flipped (456..501, 516..561)
+                const bool f = g_c3_vflip != 0; int tp, tm, tpo, tmo;
+                const int cp  = f ? c3_count(ms, 566, 456, 634, 501, &tp)  : c3_count(ms, 566, 523, 634, 568, &tp);    // as sampled
+                const int cm  = f ? c3_count(ms, 566, 516, 634, 561, &tm)  : c3_count(ms, 566, 463, 634, 508, &tm);
+                const int cpo = f ? c3_count(ms, 566, 523, 634, 568, &tpo) : c3_count(ms, 566, 456, 634, 501, &tpo);  // the other way up
+                const int cmo = f ? c3_count(ms, 566, 463, 634, 508, &tmo) : c3_count(ms, 566, 516, 634, 561, &tmo);
+                g_orig_unmap(g_ctx, g_c3_stage, 0);
+                diag("cursor atlas: visible alpha (blocks or pixels): party rect %d/%d, monster rect %d/%d as sampled; %d/%d, %d/%d the other way up (%d frames to read back)", cp, tp, cm, tm, cpo, tpo, cmo, tmo, g_c3_stage_tries);
+            }
+            else diag("cursor atlas: alpha check gave up (hr 0x%08X after %d frames)", (unsigned)hr, g_c3_stage_tries);
+            g_c3_stage->Release(); g_c3_stage = nullptr;
+        }
+    }
+    if (g_c3_dump) {
+        g_c3_dump = false;
+        if (g_c3_srv) dump_dds(g_c3_tex, L"battle_atlas.dds");
+        else diag("cursor atlas: dump asked for, but battle.dds has not been found yet (it is found at the first target menu of a battle, with the game look on)");
+    }
+}
+
 // The pick: called for every UI draw of the armed frame.
 static void ui_pick_check(unsigned draw_idx) {
     float xy[2 * 48]; const unsigned nv = ui_sprite_xy(xy, 48);
@@ -3290,6 +3448,7 @@ void heartbeat(bool force) {
     fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d; XInputSetState calls %u (non-zero %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0, g_xis_calls, g_xis_nonzero, g_xis_hooked ? 1 : 0);
     fprintf(f, "  build 7 diagnostics: %s; main thread %lu (joins seen on other threads %u); loading stalls logged %u\n", g_diag7 ? "on" : "off", g_main_tid, g_main_other, g_stalls);
     fprintf(f, "  cursor stage C2: game source %s, skipping the game's cursors now %ld (frames skipped %u)\n", g_c2_on ? "on" : "off", (long)g_c2_skip, g_c2_skip_frames);
+    fprintf(f, "  cursor stage C3: search %s, battle.dds %s (found %u times, swapped %u; by a %s quad, v %s)\n", g_c3_look ? "on (battle, game look)" : "off", g_c3_srv ? (g_frames - g_c3_seen_frame > k_c3_stale ? "held, stale" : "held") : "not found", g_c3_found_n, g_c3_swaps, g_c3_srv ? g_c3_how : "-", g_c3_vflip ? "flipped" : "as written");
     fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
     { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held without an eye image %u, swapchain wait timeouts %u\n", held, waits); }
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
@@ -3652,7 +3811,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 7;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7 (branch cursors): + ffxvr_cursor_game, ffxvr_cursor_skip
+constexpr int FFXVR_ABI = 8;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7 (branch cursors): + ffxvr_cursor_game, ffxvr_cursor_skip; 8 (branch cursors, C3): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (master's build 9 is also 8: renumber at the merge)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Build 7 diagnostics (log only): bit 0 on (ini diag_build7; called once at module init, before ffxvr_init, so the
@@ -3897,6 +4056,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     }
     if (g_slowmo_ms > 0) Sleep((DWORD)g_slowmo_ms);
     if (g_atlas_dump_armed && g_atlas_dumped_n > 0) g_atlas_dump_armed = false;   // one frame with UI draws is enough
+    c3_frame();                     // cursor stage C3: the atlas check and log line after a find, the atlas dump, the atlas liveness
     g_ui_flat_pass = false; g_ui_flat_resolved = false; g_flat_scene_tex = nullptr; g_flat_scene_draws = 0; g_flat_draws_per_target.clear();
     bool dump_now = false;
     {
@@ -4183,6 +4343,11 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                     dump_dds(at, name);
                 }
             }
+        }
+        if (g_c3_look && g_draw_kind == 1 && g_draw_n >= 6 && g_draw_n % 6 == 0) {   // cursor stage C3 (in battle only): is this battle.dds?
+            const bool stale = g_c3_srv && g_frames - g_c3_seen_frame > k_c3_stale;
+            if (g_c3_srv && g_c3_seen_frame != g_frames && texture_of(g_cur_ps_srv[0]) == g_c3_tex) g_c3_seen_frame = g_frames;   // the held one is still in use
+            else if (!g_c3_srv || stale) c3_atlas_scan();   // none yet, or stale: a new find swaps it
         }
         if (g_ui_hide_w != 0 || g_ui_hide_notex || g_ui_hide_cursor || g_hide_pointers) {
             ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]);
@@ -5311,19 +5476,21 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
 // combatant at the right depth (the game's cursors are placed through its
 // own camera and land in the wrong place on the UI panel).
 
-struct Marker { float x, y, z; uint32_t color; int kind; };   // kind 0 target, 1 turn
+struct Marker { float x, y, z; uint32_t color; int kind; };   // kind (low 4 bits): 0 target, 1 turn (our triangle); C3: 2 / 3 the game's hand for a party / monster target, 4 the game's turn triangle; | 16: first-person self marker
 float g_marker_scale = 1.f;
 Marker g_markers[32]; int g_marker_n = 0;
+// t.z = 1: textured (C3: the hand from battle.dds), 0: the vertex colour alone (the texture is still sampled, no branch).
 static const char k_marker_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 VP; };\n"
-    "struct VI { float3 p : POSITION; float4 c : COLOR; };\n"
-    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
-    "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); o.p.z = 0.5 * o.p.w; o.c = i.c; return o; }\n"
-    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+    "Texture2D T : register(t0); SamplerState S : register(s0);\n"
+    "struct VI { float3 p : POSITION; float4 c : COLOR; float3 t : TEXCOORD; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; float3 t : TEXCOORD; };\n"
+    "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); o.p.z = 0.5 * o.p.w; o.c = i.c; o.t = i.t; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c * lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), i.t.z); }\n";
 ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3D11InputLayout* g_mk_il = nullptr;
-ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr;
+ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr; ID3D11SamplerState* g_mk_smp = nullptr;
 bool g_mk_tried = false;
-struct MkVertex { float p[3]; float c[4]; };
+struct MkVertex { float p[3]; float c[4]; float t[3]; };
 static const int k_mk_max_verts = 32 * 48;
 
 static bool marker_pass_init() {
@@ -5341,10 +5508,11 @@ static bool marker_pass_init() {
     if (err) err->Release();
     g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_mk_vs);
     g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_mk_ps);
-    D3D11_INPUT_ELEMENT_DESC ie[2] = {
+    D3D11_INPUT_ELEMENT_DESC ie[3] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
-    g_device->CreateInputLayout(ie, 2, vsb->GetBufferPointer(), vsb->GetBufferSize(), &g_mk_il);
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+    g_device->CreateInputLayout(ie, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &g_mk_il);
     vsb->Release(); psb->Release();
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = sizeof(MkVertex) * k_mk_max_verts; bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -5358,7 +5526,10 @@ static bool marker_pass_init() {
     bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     g_device->CreateBlendState(&bl, &g_mk_blend);
-    const bool ok = g_mk_vs && g_mk_ps && g_mk_il && g_mk_vb && g_mk_cb;
+    D3D11_SAMPLER_DESC sm = {};   // C3: the atlas, trilinear over mips 0-2 (cleaner at a distance without bleeding)
+    sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sm.MaxLOD = 2.f; sm.ComparisonFunc = D3D11_COMPARISON_NEVER;   // C3-7: past mip 2 the neighbouring sprites bleed into the 68x45 rect
+    g_device->CreateSamplerState(&sm, &g_mk_smp);
+    const bool ok = g_mk_vs && g_mk_ps && g_mk_il && g_mk_vb && g_mk_cb && g_mk_smp;
     diag("marker pass: %s", ok ? "ready" : "FAILED");
     return ok;
 }
@@ -5454,7 +5625,67 @@ static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h
     return used;
 }
 
-static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f) {
+// C3: one marker's geometry. bb = the billboard frame shared by both eyes (right, up: the head's axes), the first-person
+// self-marker tip and the head centre (render space). Appends 6 vertices (a triangle, both windings) or 12 (the hand's quad), or
+// none for a hand while battle.dds is not held (its tip is the unlifted anchor, inside the body: C3-3).
+static const float k_c3_px_per_unit = 14.f;   // the game's UI px per world unit at a battle anchor in its default view: the turn triangle's 2 units show as 24-34 px
+static void c3_emit(MkVertex* verts, int& nv, const Marker& m, const float bb[12]) {
+    const float* right = bb; const float* up = bb + 3;
+    const int kind = m.kind & 15; const bool self = (m.kind & 16) != 0;
+    float tip[3] = { m.x, m.y, m.z }; if (self) { tip[0] = bb[6]; tip[1] = bb[7]; tip[2] = bb[8]; }
+    auto put = [&](const float p[3], const float c[4], float u, float v, float tex) { MkVertex x = { { p[0], p[1], p[2] }, { c[0], c[1], c[2], c[3] }, { u, v, tex } }; verts[nv++] = x; };
+    if (kind == 4 && !self) {   // the game's turn triangle (0x892590): world-space, spun about the vertical by theta; apex colour [0x133FA88], base [0x133F7D4]
+        // game: V_k = A + (sin(theta) r_k, dy_k, cos(theta) r_k), (r,dy) = (0,-0.3) (-1,-2.3) (+1,-2.3), y down; tip = the apex A - 0.3,
+        // so a base vertex is the apex + (sin r, -2, cos r) in game space = (-sin r, +2, cos r) in render space
+        auto col = [](uint32_t c, float* o) { for (int k = 0; k < 3; ++k) { const float x = ((c >> (8 * k)) & 255) / 128.f; o[k] = x > 1.f ? 1.f : x; }
+                                              const uint32_t a = c >> 24; o[3] = a == 0 ? 1.f : (a / 128.f > 1.f ? 1.f : a / 128.f); };   // RGBA bytes, 0x80 = full; alpha 0 read as opaque
+        float ca[4], cb[4]; col(g_c3_apex, ca); col(g_c3_base, cb);
+        const float sc = g_marker_scale, sn = sinf(g_c3_theta), cs = cosf(g_c3_theta);
+        const float b1[3] = { tip[0] + sn * sc, tip[1] + 2.f * sc, tip[2] - cs * sc };   // r = -1
+        const float b2[3] = { tip[0] - sn * sc, tip[1] + 2.f * sc, tip[2] + cs * sc };   // r = +1
+        put(tip, ca, 0, 0, 0); put(b1, cb, 0, 0, 0); put(b2, cb, 0, 0, 0);
+        put(tip, ca, 0, 0, 0); put(b2, cb, 0, 0, 0); put(b1, cb, 0, 0, 0);
+        return;
+    }
+    if ((kind == 2 || kind == 3) && !g_c3_srv) return;
+    if (kind == 2 || kind == 3) {   // the game's hand (0x8C0670): battle.dds 68x45, beside the anchor as the game places it
+        // UI px around the anchor (x right, y down): party x -100..-32, monster 0..68 (art mirrored); y -22..+23. Here x right, y up, in units.
+        const bool party = kind == 2; const float s = g_c3_hand / k_c3_px_per_unit * (self ? 0.6f : 1.f);
+        float x0 = party ? -100.f : 0.f, x1 = party ? -32.f : 68.f; const float y0 = -23.f, y1 = 22.f;
+        if (self && party) { x0 += 32.f; x1 += 32.f; }   // self: the fingertip side of the quad at the point
+        const float k = 1.f / 1024.f; const bool flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
+        const float uL = (party ? 566.f : 634.f) * k, uR = (party ? 634.f : 566.f) * k;
+        const float vt = (party ? 523.f : 463.f) * k, vb = (party ? 568.f : 508.f) * k;   // the exe's top / bottom v
+        const float vT = flip ? 1.f - vt : vt, vB = flip ? 1.f - vb : vb;
+        if (!self) {   // C3-13: pulled toward the head by a tenth of the distance (at most 30 units): an anchor inside the body would put the hand behind
+                       // the surface it is drawn over (no depth test); along the line of sight, so it stays where the game puts it on screen
+            const float dx = bb[9] - tip[0], dy = bb[10] - tip[1], dz = bb[11] - tip[2], dl = sqrtf(dx * dx + dy * dy + dz * dz);
+            if (dl > 1e-3f) { const float pull = (0.1f * dl < 30.f ? 0.1f * dl : 30.f) / dl; tip[0] += dx * pull; tip[1] += dy * pull; tip[2] += dz * pull; }
+        }
+        float P[4][3]; const float lx[4] = { x0, x1, x0, x1 }, ly[4] = { y1, y1, y0, y0 };   // TL TR BL BR
+        for (int i = 0; i < 4; ++i) {
+            // self: turned a quarter clockwise, the hand pointing down at the player (local x -> -up, local y -> right)
+            const float ax = self ? ly[i] * s : lx[i] * s, ay = self ? -lx[i] * s : ly[i] * s;
+            for (int c = 0; c < 3; ++c) P[i][c] = tip[c] + right[c] * ax + up[c] * ay;
+        }
+        const float wc[4] = { 1.f, 1.f, 1.f, 1.f };   // the art as it is (the game's 0x80 vertex colour is 1.0)
+        put(P[0], wc, uL, vT, 1); put(P[1], wc, uR, vT, 1); put(P[2], wc, uL, vB, 1);
+        put(P[2], wc, uL, vB, 1); put(P[1], wc, uR, vT, 1); put(P[3], wc, uR, vB, 1);
+        put(P[0], wc, uL, vT, 1); put(P[2], wc, uL, vB, 1); put(P[1], wc, uR, vT, 1);
+        put(P[2], wc, uL, vB, 1); put(P[3], wc, uR, vB, 1); put(P[1], wc, uR, vT, 1);
+        return;
+    }
+    // Our marker as it has been: a downward-pointing triangle, tip at the point, base above it (kinds 0, 1, and the hand
+    // never sent while battle.dds is not held). Self: half size.
+    const float sz = 2.5f * g_marker_scale * (self ? 0.5f : 1.f);
+    const float c[4] = { ((m.color >> 0) & 255) / 255.f, ((m.color >> 8) & 255) / 255.f, ((m.color >> 16) & 255) / 255.f, ((m.color >> 24) & 255) / 255.f };
+    float a[3], b[3];
+    for (int k = 0; k < 3; ++k) { a[k] = tip[k] + up[k] * sz * 2.f - right[k] * sz; b[k] = tip[k] + up[k] * sz * 2.f + right[k] * sz; }
+    put(a, c, 0, 0, 0); put(b, c, 0, 0, 0); put(tip, c, 0, 0, 0);
+    put(a, c, 0, 0, 0); put(tip, c, 0, 0, 0); put(b, c, 0, 0, 0);      // both windings: no culling surprises
+}
+
+static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12]) {
     if (g_marker_n == 0 || dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
@@ -5463,26 +5694,12 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     P[10] = -1.f; P[14] = -1.f;
     float VP[16]; mul4(P, V, VP);
     const uint32_t with_sprite = draw_ptr_sprites_eye(dst, w, h, VP);   // the game's own pointer art, where it has been captured
-    // Camera axes in world space (rows of the view's rotation) for billboarding.
-    const float right[3] = { V[0], V[1], V[2] }, up[3] = { V[4], V[5], V[6] };
-    const float t = (float)((double)GetTickCount64() * 0.001);
-    MkVertex verts[k_mk_max_verts]; int nv = 0;
-    // The marker as it has been: a downward-pointing triangle, tip at the point, base above it.
-    const float sz = 2.5f * g_marker_scale;
-    (void)t;
-    for (int i = 0; i < g_marker_n && nv + 6 <= k_mk_max_verts; ++i) {
+    static MkVertex verts[k_mk_max_verts]; int nv = 0;   // render thread only (static: 40 B x 1536 off the stack)
+    for (int i = 0; i < g_marker_n && nv + 12 <= k_mk_max_verts; ++i) {
         if (with_sprite & (1u << i)) continue;
-        const Marker& m = g_markers[i];
-        const float c[4] = { ((m.color >> 0) & 255) / 255.f, ((m.color >> 8) & 255) / 255.f, ((m.color >> 16) & 255) / 255.f, ((m.color >> 24) & 255) / 255.f };
-        float tip[3] = { m.x, m.y, m.z };
-        float a[3], b[3];
-        for (int k = 0; k < 3; ++k) { a[k] = tip[k] + up[k] * sz * 2.f - right[k] * sz; b[k] = tip[k] + up[k] * sz * 2.f + right[k] * sz; }
-        MkVertex v0 = { { a[0], a[1], a[2] }, { c[0], c[1], c[2], c[3] } };
-        MkVertex v1 = { { b[0], b[1], b[2] }, { c[0], c[1], c[2], c[3] } };
-        MkVertex v2 = { { tip[0], tip[1], tip[2] }, { c[0], c[1], c[2], c[3] } };
-        verts[nv++] = v0; verts[nv++] = v1; verts[nv++] = v2;
-        verts[nv++] = v0; verts[nv++] = v2; verts[nv++] = v1;      // both windings: no culling surprises
+        c3_emit(verts, nv, g_markers[i], bb);
     }
+    if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, VP, 64); g_orig_unmap(g_ctx, g_mk_cb, 0); }
@@ -5499,6 +5716,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     ID3D11BlendState* o_bs = nullptr; float o_bf[4]; UINT o_mask; g_ctx->OMGetBlendState(&o_bs, o_bf, &o_mask);
     ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
     ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
+    ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
 
     InEye2 guard;
     ID3D11RenderTargetView* rt[1] = { dst };
@@ -5510,6 +5728,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     UINT stride = sizeof(MkVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_mk_vb, &stride, &off);
     g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    { ID3D11ShaderResourceView* sv = g_c3_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp); }   // C3: battle.dds (null when not held: no textured vertices then)
     g_ctx->Draw(static_cast<UINT>(nv), 0);
 
     g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv);
@@ -5519,10 +5738,11 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
     g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
     g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
+    g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
     for (auto* v : o_rtv) if (v) v->Release();
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
-    if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release(); if (o_rs) o_rs->Release();
+    if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release(); if (o_rs) o_rs->Release(); if (o_srv) o_srv->Release(); if (o_smp) o_smp->Release();
 }
 
 /// Markers for this frame, in render space. Called from the managed side each frame.
@@ -5531,6 +5751,16 @@ extern "C" __declspec(dllexport) void ffxvr_markers_set(const float* xyz, const 
     for (int i = 0; i < n; ++i) { g_markers[i].x = xyz[i*3]; g_markers[i].y = xyz[i*3+1]; g_markers[i].z = xyz[i*3+2]; g_markers[i].color = colors[i] & 0x00FFFFFFu | 0xFF000000u; g_markers[i].kind = (colors[i] >> 24) == 0xFE ? 1 : 0; }
     g_marker_n = n;   // alpha 0xFE in the colour tags the turn pointer
 }
+/// C3: per-marker kinds for the markers just set (see Marker); markers_set resets them, so a caller that never sends kinds gets our triangles.
+extern "C" __declspec(dllexport) void ffxvr_markers_kinds(const int* kinds, int n) { if (!kinds) return; for (int i = 0; i < n && i < g_marker_n; ++i) g_markers[i].kind = kinds[i]; }
+/// C3: the look (0 ours, 1 the game's: also searches for battle.dds), the hand size, the turn triangle's theta and colours (from the
+/// turn snapshot), flags (1: sample the atlas the other way up). Returns 1 while battle.dds is held.
+extern "C" __declspec(dllexport) int ffxvr_cursor_look(int look, float hand, float theta, unsigned apex, unsigned base, int flags) {
+    g_c3_look = look; g_c3_hand = !(hand >= 0.2f) ? 0.2f : hand > 5.f ? 5.f : hand; g_c3_theta = std::isfinite(theta) ? theta : 0.f; g_c3_apex = apex; g_c3_base = base; g_c3_flags = flags;
+    return g_c3_srv ? 1 : 0;
+}
+/// C3: writes the held battle.dds as battle_atlas.dds next to the mod at the next frame (or logs that it is not found yet).
+extern "C" __declspec(dllexport) void ffxvr_cursor_atlas_dump() { g_c3_dump = true; }
 extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_scale = s < 0.2f ? 0.2f : s > 5.f ? 5.f : s; }
 
 /// Draws the markers into both eye images, each with its own view and FOV.
@@ -5542,9 +5772,22 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
     g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn, false);   // read-only (the markers are drawn at Present)
     g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn, false);
     g_eye_shift = 0.f;
+    // C3: one billboard frame for both eyes, from eye 1's view: right, up (rows of its rotation); the first-person self marker's
+    // tip: 0.5 m ahead along the view's horizontal forward, 0.35 m below the eyes (chest height); the head centre (the midpoint
+    // of the two eye positions, C3-12). Render space is y up.
+    float bb[12] = { V1[0], V1[1], V1[2], V1[4], V1[5], V1[6], 0, 0, 0, 0, 0, 0 };
+    {
+        float C[3]; for (int j = 0; j < 3; ++j) C[j] = -0.5f * (V1[j] * V1[3] + V1[4 + j] * V1[7] + V1[8 + j] * V1[11] + V2[j] * V2[3] + V2[4 + j] * V2[7] + V2[8 + j] * V2[11]);   // eye positions -R^T t, averaged
+        bb[9] = C[0]; bb[10] = C[1]; bb[11] = C[2];
+        float fx = -V1[8], fz = -V1[10], fl = sqrtf(fx * fx + fz * fz);                     // forward = -(third row): the view looks down -z
+        if (fl < 1e-3f) { fx = V1[4]; fz = V1[6]; fl = sqrtf(fx * fx + fz * fz); }          // looking straight down: the view's up points ahead
+        if (fl < 1e-6f) { fx = 0.f; fz = -1.f; fl = 1.f; }
+        const float m = g_xr_scale;
+        bb[6] = C[0] + fx / fl * 0.5f * m; bb[7] = C[1] - 0.35f * m; bb[8] = C[2] + fz / fl * 0.5f * m;
+    }
     D3D11_TEXTURE2D_DESC d;
-    if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0]); }
-    if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1]); }
+    if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb); }
+    if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb); }
 }
 
 /// source 0: eye 2's final image (backbuffer twin); 1: the scene target's twin.

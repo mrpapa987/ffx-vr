@@ -43,7 +43,7 @@ public sealed unsafe partial class FFXVRModule {
     private int _d7_inserting, _d7_resolving; private bool _d7_resolved_rt;
 
     // -- snapshots (written on the main thread, read at Present) -----------------------------------------------------
-    private struct D7Anchor { public int id, idx, fallback, flags, chr10, sx, sy; public Vector3 opt, tl, td; public float heading; }   // flags: 1 attached, 2 override matrix, 4 index outside 0..25
+    private struct D7Anchor { public int id, idx, fallback, flags, chr10, sx, sy; public Vector3 opt, tl, td; public float heading; public nint actor; }   // flags: 1 attached, 2 override matrix, 4 index outside 0..25
     private struct D7TgtHdr { public uint stamp, mask, cmd, gate, autob, alive, stub_states; public int n, skipped, stubs, bstate; }
     private struct D7Turn   { public uint stamp, apex, bas; public int chr, chr_glob, ok, skipped; public float theta; public Vector3 game_a; public D7Anchor a; }   // game_a: the game's own A (0xF3FA68), read after the original; skipped: C2 skipped the original, so game_a is stale
     private struct D7Join   { public uint stamp; public int exec, valid; public Vector3 pos, off, td; }
@@ -180,7 +180,7 @@ public sealed unsafe partial class FFXVRModule {
         else { t.fallback = 2; t.opt = *(Vector3*)(a + 0x200); }
         t.tl = *(Vector3*)(a + 0x0C) + *(Vector3*)(a + 0x6C);   // logic root: chr_pos_vec + chr_offset_vec (what 0x832760 builds +0x1D0 from)
         t.td = *(Vector3*)(a + 0x200);                          // drawn root: translation of the +0x1D0 matrix
-        t.heading = *(float*)(a + 0x158);
+        t.heading = *(float*)(a + 0x158); t.actor = actor;   // C3: compared with the actor first person looks out of
         if (*(uint*)(a + 0x19C) != 0) t.flags |= 1;
         if (*(uint*)(a + 0x10C) != 0) t.flags |= 2;
         return true;
