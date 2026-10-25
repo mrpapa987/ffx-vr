@@ -32,6 +32,7 @@ public sealed unsafe partial class FFXVRModule {
     [UnmanagedFunctionPointer(CallingConvention.ThisCall)] private delegate void d7_resize(nint self, int w, int h);
     private d7_void?   _h7_tgt,  _o7_tgt,  _h7_join, _o7_join;
     private d7_turn?   _h7_turn, _o7_turn;
+    private bool _h7_tgt_ok, _h7_turn_ok, _d7_last_ok;   // C2-5: the cursor hooks were queued (not refused, unresolved or failed)
     private d7_resize? _h7_rsz,  _o7_rsz;
     private nint _a7_tgt, _a7_turn, _a7_join, _a7_rsz;   // absolute addresses, resolved once at init (no FhCallLocation module lookup later)
     // B7-1: the originals are resolved through Fahrenheit's chain table, which is not locked for readers. Our render thread
@@ -44,7 +45,7 @@ public sealed unsafe partial class FFXVRModule {
     // -- snapshots (written on the main thread, read at Present) -----------------------------------------------------
     private struct D7Anchor { public int id, idx, fallback, flags, chr10, sx, sy; public Vector3 opt, tl, td; public float heading; }   // flags: 1 attached, 2 override matrix, 4 index outside 0..25
     private struct D7TgtHdr { public uint stamp, mask, cmd, gate, autob, alive, stub_states; public int n, skipped, stubs, bstate; }
-    private struct D7Turn   { public uint stamp, apex, bas; public int chr, chr_glob, ok; public float theta; public Vector3 game_a; public D7Anchor a; }   // game_a: the game's own A (0xF3FA68), read after the original
+    private struct D7Turn   { public uint stamp, apex, bas; public int chr, chr_glob, ok, skipped; public float theta; public Vector3 game_a; public D7Anchor a; }   // game_a: the game's own A (0xF3FA68), read after the original; skipped: C2 skipped the original, so game_a is stale
     private struct D7Join   { public uint stamp; public int exec, valid; public Vector3 pos, off, td; }
     private readonly D7TgtHdr[] _d7h = new D7TgtHdr[2]; private readonly D7Anchor[] _d7t = new D7Anchor[2 * 28]; private int _d7_seq;
     private readonly D7Turn[]   _d7u = new D7Turn[2];   private int _d7u_seq;
@@ -78,13 +79,13 @@ public sealed unsafe partial class FFXVRModule {
         new FhCallLocation("FFX.exe", k7_join).try_resolve(out _a7_join); new FhCallLocation("FFX.exe", k7_rsz).try_resolve(out _a7_rsz);
         string one(string name, nint addr, Func<bool> f) {
             if (addr == 0) { _logger.Error($"build 7 diagnostics: hook {name}: FFX.exe not found"); return name + " NOT RESOLVED"; }
-            try { bool ok = f(); _logger.Info($"build 7 diagnostics: hook {name} {(ok ? "queued" : "REFUSED")}"); return name + (ok ? " queued" : " REFUSED"); }
+            try { bool ok = f(); if (ok) _d7_last_ok = true; _logger.Info($"build 7 diagnostics: hook {name} {(ok ? "queued" : "REFUSED")}"); return name + (ok ? " queued" : " REFUSED"); }
             catch (Exception e) { _logger.Error($"build 7 diagnostics: hook {name}: {e}"); return name + " FAILED (" + e.GetType().Name + ")"; }
         }
         // The join is queued last: Fahrenheit applies queued hooks in order, and the join is the one the main thread calls from
         // the first frame on, so once it is live no other insertion of ours is left in commit().
-        string a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!));
-        string b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!));
+        _d7_last_ok = false; string a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!)); _h7_tgt_ok = _d7_last_ok;
+        _d7_last_ok = false; string b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!)); _h7_turn_ok = _d7_last_ok;
         string d = one("backbuffer resize 0x199210", _a7_rsz, () => new FhCallHandle<d7_resize>(new FhCallLocation((void*)_a7_rsz)).hook(this, _h7_rsz!));
         string c = one("job join 0x644B30", _a7_join, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_join)).hook(this, _h7_join!));
         _d7_status = $"hooks: {a}, {b}, {d}, {c}. \"queued\" is not \"installed\": Fahrenheit applies them after init (a MinHook failure is in core.log; a success is logged only at Debug level). The proof is each hook's \"called for the first time\" line in ffxvr_diag.log (the target and turn pointers only in a battle)";
@@ -127,15 +128,23 @@ public sealed unsafe partial class FFXVRModule {
     private void diag7_insert_end() { System.Threading.Volatile.Write(ref _d7_inserting, 0); }
 
     // -- the detours (main thread). The original always runs, first; recording faults are counted, never thrown. ------
+    // Cursor stage C2: the two cursor detours skip the game's draw while native says the headset shows our markers
+    // (ffxvr_cursor_skip: decided at the frame boundary, published interlocked; latched per game frame by c2_skip_now, so
+    // both detours of one game frame agree). Both functions only draw (exe-verify), so
+    // skipping loses nothing else. The snapshot is recorded either way; it is what our markers are built from.
     private void h7_tgt() {
         d7_void o = System.Threading.Volatile.Read(ref _o7_tgt) ?? d7_resolve_main(ref _o7_tgt, _a7_tgt, _h7_tgt!);
-        o();
-        if (_diag7) { try { d7_tgt_record(); } catch { _d7_main_faults++; } }
+        bool skip = c2_skip_now();
+        if (!skip) o();
+        _d7_tgt_calls_total++;   // C2-6: counted whatever the recording state (the dead-hook checks read it)
+        if (_diag7 || _cursor_game_cfg) { try { d7_tgt_record(); } catch { _d7_main_faults++; } }
     }
     private void h7_turn(int chr) {
         d7_turn o = System.Threading.Volatile.Read(ref _o7_turn) ?? d7_resolve_main(ref _o7_turn, _a7_turn, _h7_turn!);
-        o(chr);
-        if (_diag7) { try { d7_turn_record(chr); } catch { _d7_main_faults++; } }
+        bool skip = c2_skip_now();
+        if (!skip) o(chr);
+        _d7_turn_calls_total++;   // C2-6
+        if (_diag7 || _cursor_game_cfg) { try { d7_turn_record(chr, skip); } catch { _d7_main_faults++; } }
     }
     private void h7_join() {
         d7_void o = System.Threading.Volatile.Read(ref _o7_join) ?? d7_resolve_main(ref _o7_join, _a7_join, _h7_join!);
@@ -178,7 +187,6 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     private void d7_tgt_record() {
-        _d7_tgt_calls_total++;
         if (FhUtil.get_at<uint>(0xF3D6E0) == 1) { _d7_tgt_calls_auto++; return; }   // auto-battle: the original returned at once and drew nothing
         uint stamp = FhUtil.get_at<uint>(0x1FCBBF0);   // the game frame counter (not yet incremented for this invocation)
         if (stamp == _d7_tgt_last_stamp) { if (++_d7_tgt_calls_frame > _d7_tgt_calls_max) _d7_tgt_calls_max = _d7_tgt_calls_frame; return; }   // once per frame
@@ -204,14 +212,14 @@ public sealed unsafe partial class FFXVRModule {
         System.Threading.Volatile.Write(ref _d7_seq, _d7_seq + 1);
     }
 
-    private void d7_turn_record(int chr) {
-        _d7_turn_calls_total++;
+    private void d7_turn_record(int chr, bool skipped) {
         int s = (_d7u_seq + 1) & 1;
         ref D7Turn u = ref _d7u[s];
         u.stamp = FhUtil.get_at<uint>(0x1FCBBF0); u.chr = chr; u.chr_glob = FhUtil.get_at<short>(0x1FCC088);
         u.theta = FhUtil.get_at<float>(0xF3FA7C); u.apex = FhUtil.get_at<uint>(0xF3FA88); u.bas = FhUtil.get_at<uint>(0xF3F7D4);
         u.ok = d7_anchor(FhUtil.get_at<nint>(0xD334D4), chr, 1, ref u.a) ? 1 : 0;   // 0x7950B0: optpos[1] of the chr's actor, then y -= 2
-        u.game_a = FhUtil.get_at<Vector3>(0xF3FA68);   // what 0x7950B0 just wrote for this draw (stale if the chr has no actor)
+        u.game_a = FhUtil.get_at<Vector3>(0xF3FA68);   // what 0x7950B0 just wrote for this draw (stale if the chr has no actor, or if C2 skipped the draw)
+        u.skipped = skipped ? 1 : 0;
         System.Threading.Volatile.Write(ref _d7u_seq, _d7u_seq + 1);
     }
 
@@ -358,7 +366,7 @@ public sealed unsafe partial class FFXVRModule {
                 sb.Append(I($" | turn: chr {_r7u.chr} (0x1FCC088 = {_r7u.chr_glob}{(_r7u.chr != _r7u.chr_glob ? " MISMATCH" : "")}) stamp {_r7u.stamp} lag {lag_u} theta {_r7u.theta:F3} apex 0x{_r7u.apex:X8} base 0x{_r7u.bas:X8}"));
                 if (_r7u.ok != 0) {
                     Vector3 ga = _r7u.game_a;
-                    sb.Append(I($" ours A ({A.X:F2} {A.Y:F2} {A.Z:F2}) game A ({ga.X:F2} {ga.Y:F2} {ga.Z:F2}) ours-game {(A - ga).Length():F3} fb {a.fallback} corr {(a.td - a.tl).Length():F3} att {a.flags & 1} ovr {(a.flags >> 1) & 1}"));
+                    sb.Append(I($" ours A ({A.X:F2} {A.Y:F2} {A.Z:F2}) game A ({ga.X:F2} {ga.Y:F2} {ga.Z:F2}){(_r7u.skipped != 0 ? " (game draw skipped by C2: stale)" : "")} ours-game {(A - ga).Length():F3} fb {a.fallback} corr {(a.td - a.tl).Length():F3} att {a.flags & 1} ovr {(a.flags >> 1) & 1}"));
                     if (cam_ok && d7_project(cam, A, out float ux, out float uy)) sb.Append(I($" ours ({ux:F1} {uy:F1})"));
                 }
                 else sb.Append(" (no actor)");

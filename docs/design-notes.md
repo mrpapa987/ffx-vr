@@ -1875,3 +1875,57 @@ Review fixes:
 - diag() retries a contended open off the render thread.
 - The pan-scan map test compares raw bytes, and map changes bypass the line cap.
 - The follow actor is cleared when there is no actor table.
+
+## Cursor stage C2 (branch `cursors`, from build 7)
+
+This is SYNTHESIS stage C2 (sections 2.4-2.7 and 3). It is based on the owner's build-7 data:
+- target anchors match within 1 px;
+- the turn anchor matches the game's own exactly;
+- the snapshot lags a steady 1 game frame;
+- the 30 Hz correction is 0 in battle;
+- every cursor element is index 1.
+
+What changes:
+- **Our markers come from the game's own cursor draws** (`cursor_source=game`, the default). The two build-7 detours record a snapshot every time the game draws its target hand or turn triangle. The game only calls those functions under its own gates (a party member choosing a command, the UI alive, the battle state, not auto-battle), and the target detour mirrors the auto-battle early return.
+  - **Target markers** (red, as before): every highlighted candidate in the game's mask, at `optpos[Chr+0xDF9]` with the correction kept (≈0), lifted 2 units (the game's own turn-pointer lift; slider "pointer lift above the game's anchor").
+  - **Turn marker** (as before): at the game's triangle apex, `optpos[1]` − 2.3 (A − 0.3).
+  - **Expiry:** a snapshot counts for 3 Presents. When the game stops drawing a cursor (confirm, enemy turn, auto-battle), our marker goes within a few frames.
+- **In the headset, the game's cursors are skipped at the source.**
+  - Native decides once per frame at begin_frame and publishes the result interlocked; the detours ask `ffxvr_cursor_skip()` on the main thread.
+  - The condition: game source live, headset on, the session up, markers in 3D, the last frame had the UI pass, and neither the virtual screen nor the stereo screen showing.
+  - On the monitor, or on screen frames, the originals run as before.
+  - Both functions only draw (exe-verify), so skipping them loses nothing else.
+- **With the game source:**
+  - The hide list is pushed without its two default cursor entries, and the pointer rule is off. The code stays, for the legacy source and for stage C4.
+  - The flat ImGui triangles are not drawn.
+- **The markers_game_art experiment is retired:** it is always pushed off, its toggle is gone, and the ini key is kept but ignored. It drew the captured sprite with wrong UVs ("rotated ~90°"). Stage C3 brings the game's look back from battle.dds.
+- **Fallback to legacy:** with `diag_build7=0` at launch the hooks don't exist, so the game source falls back to legacy and the Battle markers status says why. The same happens if the hooks were queued but the turn detour is never called while the game's turn-pointer gates are open for 3 s.
+- **ABI 7 on this branch:** `ffxvr_cursor_game`, `ffxvr_cursor_skip`. Master's build 9 is ABI 8, so this needs renumbering at merge.
+
+### Review fixes, cursor stage C2
+
+These are the fixes from the C2 review. Where they differ from the section above, they replace it.
+- **Expiry by game frames.** A snapshot counts while its stamp is 0-2 game frames behind the frame counter (the measured lag is a steady 1). A negative lag does not count.
+  - It must also not be older than the frame the game source and markers were last (re)enabled, the current battle's first frame, or (for targets) the first frame of the current turn (the turn snapshot's chr changing).
+  - Toggles and source flips therefore never flash an old snapshot.
+  - A main-thread hitch stops the counter, so the markers stay rather than blink. A Present backstop (180 Presents, ~2 s at 90 Hz) only matters if the counter stops while nothing else changes.
+- **Dead-hook detection, per hook, cumulative.**
+  - The turn hook counts as dead after 60 Presents in all with its gates open and no call.
+  - The target hook counts as dead after 60 Presents with a target-stub window open (state ≥ 3) and no call.
+  - The counts do not reset when the gates close, and the call counters are now kept in the detours, whatever the recording state.
+  - Both hooks must have been queued (`one()` said "queued").
+  - **One hook missing or dead puts both cursors on legacy.** Mixing sources would leave the missing cursor unmarked, or marked twice, and unhidden. One consistent source is the safer choice. The status names the hook.
+- **The acting member as target.** The red marker is stacked above the turn marker (5 × scale + 0.5 units higher), so both are visible.
+- **The skip predicate is sticky.**
+  - It requires the UI panel on (`g_ui_enabled`) and no screen frame.
+  - A 3D frame without the UI pass lets go only after 2 such frames in a row. This closes the first-frame windows at headset start and after a virtual- or stereo-screen frame.
+  - The detours latch the skip per game frame, so the target and turn detours of one frame agree.
+  - **Not closed:** the main thread builds a frame about one ahead of the decision. A mode switch can therefore show one frame with the game's cursor and no hiding, or one with no cursor. It is rare in battle (the first command input comes long after the intro) and harmless.
+- **Overlay.** With the game source:
+  - the pointer-rule checkbox is greyed and says it is off;
+  - the hide-list rows show the hits of their own pushed slot, and the two default rows read "(off: game cursor source)";
+  - a note says the game's cursors are skipped at the source, and that only the legacy checkbox brings them back.
+- **Settings.** `marker_lift` is saved (−5..20, default 2).
+- **Accepted deviations from SYNTHESIS stage C2,** for C3/C4:
+  - no `marker_anchor_smooth`, no `marker_anchor=game|top`, and no explicit kind tag. The owner's data (correction ≈ 0 in battle, every element index 1, colours unchanged) makes them unnecessary.
+  - `hide_cursor` stays on with the user's entries, instead of being pushed 0, so picks keep working.

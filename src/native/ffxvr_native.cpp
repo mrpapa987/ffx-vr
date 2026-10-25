@@ -834,6 +834,10 @@ ID3D11Texture2D* g_eye2_final = nullptr; ID3D11RenderTargetView* g_eye2_final_rt
 uint32_t g_ui_pass_frame = 0;                   // frame in which a UI pass completed
 uint32_t g_ui_draws_frame = 0, g_ui_draws_report = 0;
 uint32_t g_ui_frames_with_pass = 0, g_ui_frames_3d = 0, g_ui_resolves_frame = 0, g_ui_depth_clears_frame = 0; bool g_ui_last_frame_had_pass = false;   // 10 s tallies for the ui: diag line
+// Cursor stage C2: the game's two battle cursors are skipped while our 3D markers are what the headset shows. g_c2_on comes
+// from managed (cursor_source=game, hooks live, markers on); g_c2_skip is decided once per frame at begin_frame on the render
+// thread and published with an interlocked store; the detours read it on the game's main thread (ffxvr_cursor_skip).
+bool g_c2_on = false; volatile LONG g_c2_skip = 0; uint32_t g_c2_skip_frames = 0; uint32_t g_c2_nopass = 0; const uint32_t k_c2_nopass = 2;   // C2-8: 3D frames in a row without the UI pass before the skip lets go
 ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
 bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
@@ -3285,6 +3289,7 @@ void heartbeat(bool force) {
     else fprintf(f, "\n  latched slot-0 buffer: not latched (diagnostics disarmed), reads %u\n", g_cam_reads);
     fprintf(f, "  xinput: the game's XInputGetState calls %u (with a pad %u), hooked %d; XInputSetState calls %u (non-zero %u), hooked %d\n", g_xi_hook_calls_all, g_xi_hook_calls, g_xi_hooked ? 1 : 0, g_xis_calls, g_xis_nonzero, g_xis_hooked ? 1 : 0);
     fprintf(f, "  build 7 diagnostics: %s; main thread %lu (joins seen on other threads %u); loading stalls logged %u\n", g_diag7 ? "on" : "off", g_main_tid, g_main_other, g_stalls);
+    fprintf(f, "  cursor stage C2: game source %s, skipping the game's cursors now %ld (frames skipped %u)\n", g_c2_on ? "on" : "off", (long)g_c2_skip, g_c2_skip_frames);
     fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
     { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held without an eye image %u, swapchain wait timeouts %u\n", held, waits); }
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
@@ -3647,7 +3652,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 6;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols
+constexpr int FFXVR_ABI = 7;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7 (branch cursors): + ffxvr_cursor_game, ffxvr_cursor_skip
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Build 7 diagnostics (log only): bit 0 on (ini diag_build7; called once at module init, before ffxvr_init, so the
@@ -3662,6 +3667,12 @@ extern "C" __declspec(dllexport) void ffxvr_diag7_set(int flags) {
         diag("build 7 diagnostics on: stall watchdog %s", g_wd_thread ? "started" : "FAILED to start");
     }
 }
+/// Cursor stage C2 (render thread, every frame): the game source is live (cursor_source=game, the cursor hooks installed,
+/// markers on). Only then may begin_frame decide to skip the game's cursors.
+extern "C" __declspec(dllexport) void ffxvr_cursor_game(int on) { g_c2_on = on != 0; }
+/// Cursor stage C2 (the game's main thread, from the cursor detours): 1 = skip the game's cursor draw this frame. One aligned
+/// interlocked-published value, decided at the last frame boundary: never torn, at most one frame old.
+extern "C" __declspec(dllexport) int ffxvr_cursor_skip() { return static_cast<int>(InterlockedCompareExchange(&g_c2_skip, 0, 0)); }
 /// One line from the managed side into ffxvr_diag.log (render thread only; the caller throttles).
 extern "C" __declspec(dllexport) void ffxvr_diag_line(const char* s) { if (s != nullptr) diag("%s", s); }
 /// Called by managed's job-join hook (the game's main thread): the first caller is taken as the main thread, for the
@@ -3918,6 +3929,14 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     twin_srv_trim();                // R12: oversized twin SRV caches are trimmed here, where none of our views is mid-bind
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     xr_tick();                      // submit the frame just finished, locate the head for the next one
+    {   // cursor stage C2: skip the game's cursors only while the headset shows our markers (a 3D frame with the UI pass, markers in 3D)
+        // C2-8: sticky on the UI pass. A 3D frame without the pass un-skips only after k_c2_nopass of them in a row, so the first 3D
+        // frame after headset start or after a screen frame (no pass yet) is skipped too; if the pass never comes the cursors return.
+        const bool base = g_c2_on && g_xr_want && xr_active() && g_markers_3d && g_ui_enabled && !g_ovr_suspend && !g_xr_screen_now && !g_screen3d_now;
+        if (!base || g_ui_last_frame_had_pass) g_c2_nopass = 0; else if (g_c2_nopass < 1000) g_c2_nopass++;
+        const bool skip = base && g_c2_nopass <= k_c2_nopass;
+        InterlockedExchange(&g_c2_skip, skip ? 1 : 0); if (skip) g_c2_skip_frames++;
+    }
     ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
     perf_tick();
     g_overlay_phase = true;

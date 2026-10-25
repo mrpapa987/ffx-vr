@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 6;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 7;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -471,6 +471,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_world_positions");
             _fn_diag7_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_diag7_set"); _fn_diag_line = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_diag_line");
             _fn_main_note = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_main_note"); _fn_motion_cols = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_motion_cols");
+            _fn_cursor_game = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_cursor_game"); _fn_cursor_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cursor_skip");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
             if (missing.Count > 0 || abi != k_abi) {
@@ -515,7 +516,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
         _fn_on_ps_srvs = null; _fn_on_clear_twin = null; _fn_set_backbuffer = null; _fn_on_copy = null; _fn_override_set = null; _fn_override_applied = null;
         _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
-        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null;
+        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_cursor_game = null; _fn_cursor_skip = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -922,6 +923,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     case "hands_px_left":     int.TryParse(v, out _hands_px_left); break;
                     case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
                     case "diag_build7":       _diag7 = v != "0"; break;   // build 7 diagnostics (hooks at the next launch; logging at once)
+                    case "cursor_source":     _cursor_game_cfg = !v.Trim().Equals("legacy", StringComparison.OrdinalIgnoreCase); break;   // game (default) / legacy (cursor stage C2)
+                    case "marker_lift":       if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float mlift) && float.IsFinite(mlift)) _marker_lift = Math.Clamp(mlift, -5f, 20f); break;   // C2-10
                 }
             }
             if (_headset_autostart) {
@@ -1048,7 +1051,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_cal={_hands_cal_ini}\n" +
             $"hands_px_left={_hands_px_left}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
-            $"diag_build7={(_diag7 ? 1 : 0)}\n";
+            $"diag_build7={(_diag7 ? 1 : 0)}\n" +
+            $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
+            $"marker_lift={_marker_lift.ToString("F1", ci)}\n";
         if (text == _ini_last) return;
         if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
         try {
@@ -1342,13 +1347,19 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
             ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
             ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
+            if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle markers brings the old behaviour back (unticking the sprite-signature checkbox does not).");
+            if (_c2_active) ImGui.BeginDisabled(true);
             ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
-            ImGui.TextDisabled($"hidden last frame: {_pointer_stats & 0xFFFF}, characters projected: {_pointer_stats >> 16}");
+            if (_c2_active) { ImGui.EndDisabled(); ImGui.TextDisabled("(off: game cursor source)"); }
+            else ImGui.TextDisabled($"hidden last frame: {_pointer_stats & 0xFFFF}, characters projected: {_pointer_stats >> 16}");
             ImGui.Checkbox("hide the game's battle cursors by sprite signature, headset only (the list is filled by picking, below)", ref _hide_cursor); ImGui.SameLine();
             ImGui.TextDisabled($"candidates {_rect_stats >> 16}, rect unknown {_rect_stats & 0xFFFF}");
             for (int i = 0; i < _hide_list.Count; i++) {
                 float[] e = _hide_list[i];
-                ImGui.Text($"  {(e[0] == 0 ? "textureless" : $"{e[0]:F0}x{e[1]:F0} atlas")} quad {e[2]:F0}-{e[3]:F0} x {e[4]:F0}-{e[5]:F0} units   hidden last frame: {(i < 16 ? _hide_hits[i] : 0)}"); ImGui.SameLine();
+                int slot = -1; for (int k = 0; k < _hide_push_n; k++) if (_hide_push_src[k] == i) slot = k;   // C2-1: the pushed slot of this row (the game source drops the two defaults)
+                string hits = slot >= 0 ? $"hidden last frame: {_hide_hits[slot]}" : _c2_active && c2_is_default(e) ? "(off: game cursor source)" : "(not pushed: native takes 16)";
+                string row = $"  {(e[0] == 0 ? "textureless" : $"{e[0]:F0}x{e[1]:F0} atlas")} quad {e[2]:F0}-{e[3]:F0} x {e[4]:F0}-{e[5]:F0} units   {hits}";
+                if (slot >= 0) ImGui.Text(row); else ImGui.TextDisabled(row); ImGui.SameLine();
                 if (ImGui.SmallButton($"remove##hl{i}")) { _hide_list.RemoveAt(i); _hide_list_dirty = true; break; }
             }
             if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
@@ -1519,8 +1530,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
-            ImGui.Checkbox("experimental: the game's own cursor art at the markers (untested: until 24 Oct 2026 the sprites were released before they could be drawn)", ref _markers_game_art); ImGui.SameLine(); ImGui.TextDisabled($"sprites drawn last frame: {_markers_game_art_n}");
-            ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f); ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
+            ImGui.TextWrapped($"cursor source: {_c2_status}");
+            bool legacy_src = !_cursor_game_cfg; if (ImGui.Checkbox("legacy cursor source (the markers from battle-window memory, cursor hiding by shape)", ref legacy_src)) _cursor_game_cfg = !legacy_src;
+            if (_c2_active) ImGui.SliderFloat("pointer lift above the game's anchor", ref _marker_lift, -5f, 20f);
+            else ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f);
+            ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
             ImGui.TreePop();
         }
@@ -1962,17 +1976,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
         if (_fn_ui_hidden_draws != null) _ui_hidden_n = _fn_ui_hidden_draws();
         if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
-        if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on ? 1 : 0);
+        if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on && !_c2_active ? 1 : 0);   // C2: the game's cursors are skipped at the source
         if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
         if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
         // stereo screen (pushed with the window hidden too; the screen's size and mode go with it)
         if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
         if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
-        if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(_markers_game_art ? 1 : 0);
+        if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(0);   // C2: the captured-sprite experiment is retired (wrong UVs); markers_game_art in the ini is kept but ignored. Stage C3 brings the game's look back from battle.dds
         if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
         if (_hide_list_dirty && _fn_ui_hide_list != null) {
-            _hide_list_dirty = false; float* buf = stackalloc float[16 * 6]; int cnt = Math.Min(_hide_list.Count, 16);
-            for (int i = 0; i < cnt; i++) for (int k = 0; k < 6; k++) buf[i * 6 + k] = _hide_list[i][k];
+            _hide_list_dirty = false; float* buf = stackalloc float[16 * 6];
+            int cnt = c2_hide_list(buf);   // C2: without the two default cursor entries while the game source is in use
             _fn_ui_hide_list(buf, cnt);
         }
         if (_fn_ui_hide_hits != null) { fixed (uint* hp = _hide_hits) _fn_ui_hide_hits(hp, 16); }
@@ -1982,12 +1996,14 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private void push_markers() {
         if (_fn_markers_set == null) return;
         fixed (float* p = _mk_pos) fixed (uint* c = _mk_col) _fn_markers_set(p, c, _mk_n);
+        if (_fn_cursor_game != null) _fn_cursor_game(_c2_active && _markers_on ? 1 : 0);   // only then may native skip the game's cursors (in the headset)
         if (_fn_markers_3d != null) _fn_markers_3d(_markers_3d ? 1 : 0);
     }
 
     private void draw_markers() {
         _markers_drawn = 0; _mk_n = 0;
-        try { draw_markers_inner(); } finally { push_markers(); }
+        try { c2_decide(); if (_c2_active) c2_markers(); else draw_markers_inner(); }   // cursor stage C2: the game's snapshots, else the legacy memory path
+        finally { push_markers(); }
     }
 
     // The game's own field roster (exe-analysis.md section 15): three chr ids at
