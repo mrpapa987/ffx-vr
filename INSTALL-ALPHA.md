@@ -27,7 +27,7 @@ over Virtual Desktop (VDXR)**. Anything else is untested.
 | Tool | Why | Install (winget IDs as of Oct 2026; or use the official installers) |
 |---|---|---|
 | Git | Downloading the source | `winget install Git.Git` |
-| PowerShell 7 | Running the scripts | `winget install Microsoft.PowerShell` |
+| PowerShell 7 (optional) | Not needed: every command below uses Windows PowerShell (`powershell`), which comes with Windows | `winget install Microsoft.PowerShell` |
 | Visual Studio **Build Tools 2026** | Building the C++ part and Fahrenheit | `winget install Microsoft.VisualStudio.BuildTools`, then in the Visual Studio Installer tick **Desktop development with C++**, **.NET desktop build tools** and the **vcpkg** component |
 | vcpkg integration | Fahrenheit's native build | After the Build Tools install, run once in a *Developer* prompt: `vcpkg integrate install` |
 | .NET 10 SDK | Building the mod | `winget install Microsoft.DotNet.SDK.10` |
@@ -91,10 +91,12 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-fahrenheit-full.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\install-fahrenheit.ps1
 ```
 
-- The first script clones Fahrenheit into `_ext\fahrenheit` and builds it. It can end with
-  **exit code 1 even when it worked** (a known quirk about debugging DLLs); what counts is the
-  summary at the end listing `fhstage0.exe`, `fhstage1.dll`, `minhook.x32.dll` and
-  `nethost.dll`. `-Latest` builds Fahrenheit's newest code instead, which is untested with this mod.
+- The first script clones Fahrenheit into `_ext\fahrenheit` and builds it. It ends with
+  **RESULT: OK** or **RESULT: FAILED** (exit code 1), below a list of the four loader files
+  (`fhstage0.exe`, `fhstage1.dll`, `minhook.x32.dll`, `nethost.dll`). MSBuild itself may report
+  exit code 1 because it can't copy two debugging DLLs (`dbghelp.dll`, `symsrv.dll`) when the
+  Debugging Tools for Windows aren't installed; the script recognises exactly that and says so.
+  `-Latest` builds Fahrenheit's newest code instead, which is untested with this mod.
 - The second script copies the result into `<game>\fahrenheit\`. It never touches your
   Fahrenheit config, saves or mods.
 
@@ -121,7 +123,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-mod.ps1
 
 This downloads the OpenXR loader from NuGet, builds both halves of the mod, copies them to
 `<game>\fahrenheit\mods\ffxvr\` and adds `ffxvr` to Fahrenheit's load order. Run it again
-after every `git pull`. Your settings (`ffxvr.ini`) are kept.
+after every `git pull`. Your settings (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game
+closed (deleted while the game runs, it is written again at your next settings change). You can edit
+`ffxvr.ini` while the game runs: it is read back within a second, and a bad value is ignored and listed in core.log.
 
 ---
 
@@ -131,7 +135,7 @@ after every `git pull`. Your settings (`ffxvr.ini`) are kept.
 |---|---|
 | **VR render resolution**: 2560×1440 instead of 4K; much lighter on the GPU. (Anti-aliasing is handled by the mod: 4× by default, in the overlay's View section) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` restores yours) |
 | **Re-Remastered texture pack**: download it yourself from [Nexus](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244). Do **not** install its External File Loader; Fahrenheit serves the files instead | `.\tools\install-texture-pack.ps1 -Archive "<path to the .7z>"` (`-Compress` halves the disk use, `-Uninstall` removes it) |
-| **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in; `.\tools\export-save-to-steam.ps1` copies one back |
+| **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
 
 Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 

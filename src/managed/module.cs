@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 8;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 12;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -140,16 +140,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private string _bone_labels_path => Path.Combine(Path.GetDirectoryName(_ini_path) ?? ".", "bone_labels.txt");
     private void bone_labels_load() {
         try { if (!File.Exists(_bone_labels_path)) return;
-            foreach (string l in File.ReadAllLines(_bone_labels_path)) { var t = l.Split('\t'); if (t.Length >= 3 && int.TryParse(t[0], out int r) && int.TryParse(t[1], out int s)) _bone_labels[(r, s)] = t[2]; } }
+            foreach (string l in File.ReadAllLines(_bone_labels_path)) { var t = l.Split('\t'); if (t.Length >= 3 && int.TryParse(t[0], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int r) && int.TryParse(t[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int s)) _bone_labels[(r, s)] = t[2]; } }
         catch { }
     }
     private void bone_labels_save() {
-        try { var lines = new List<string>(); foreach (var kv in _bone_labels) lines.Add($"{kv.Key.Item1}\t{kv.Key.Item2}\t{kv.Value}"); lines.Sort(); File.WriteAllLines(_bone_labels_path, lines); }
+        try { var lines = new List<string>(); foreach (var kv in _bone_labels) lines.Add(kv.Key.Item1.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t" + kv.Key.Item2.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\t" + kv.Value); lines.Sort(); File.WriteAllLines(_bone_labels_path, lines); }
         catch { }
     }
     private bool _fp_hide_body = true; private float _scale_before_fp = 94f;
     private int _fp_body_mode = 0; private string _fp_head_parts = "0,1,2,3,9"; private int _fp_solo = -1;   // 0 = whole body hidden (default). Tidus (c101): parts 0-3 hair, 9 face/head, kept for later   // 0 hide all, 1 hide head parts only, 2 show all
     private delegate* unmanaged[Cdecl]<int, uint, int, void> _fn_fp_body_set;
+    private string? _head_mask_src; private uint _head_mask;   // R22: parse_mask(_fp_head_parts), cached
     private delegate* unmanaged[Cdecl]<uint> _fn_fp_parts;
     private static uint parse_mask(string list) {
         uint m = 0;
@@ -185,6 +186,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int> _fn_vrpad_status;
     private delegate* unmanaged[Cdecl]<int, float, float, void> _fn_haptic;
     private bool _vrpad = true;
+    private bool _haptics = true; private float _haptics_gain = 0.8f; private int _haptics_status;   // rumble to haptics (ini haptics, haptics_gain)
+    private delegate* unmanaged[Cdecl]<int, float, int> _fn_haptics_set;
     private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_imgui_layer_set; private delegate* unmanaged[Cdecl]<uint> _fn_imgui_draws; private bool _imgui_layer = true; private int _imgui_min_draws = 12;
     /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal): 0 closed, 1 opening, 2 open.</summary>
     private static byte save_screen_state() { try { return FhUtil.get_at<byte>(0x8CB994); } catch { return 0; } }
@@ -224,7 +227,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private delegate* unmanaged[Cdecl]<void> _fn_frame_arm;
     private delegate* unmanaged[Cdecl]<uint, uint, int, void> _fn_ui_hide; private delegate* unmanaged[Cdecl]<uint> _fn_ui_hidden_draws; private delegate* unmanaged[Cdecl]<int, void> _fn_ui_hide_cursor; private delegate* unmanaged[Cdecl]<uint> _fn_ui_rect_stats; private uint _rect_stats = 0;
     private delegate* unmanaged[Cdecl]<float, float, void> _fn_ui_pick; private delegate* unmanaged[Cdecl]<nint> _fn_ui_pick_result; private delegate* unmanaged[Cdecl]<int, void> _fn_slowmo;
-    private string _pick_text = ""; private int _pick_n = 0; private int _slowmo_ms = 150; private bool _slowmo_on = false;
+    private string _pick_text = ""; private int _pick_n = 0; private double _pick_poll_until = -1; private int _pick_poll_frames = 0; private int _slowmo_ms = 150; private bool _slowmo_on = false;
     private delegate* unmanaged[Cdecl]<float, float, int, void> _fn_ui_hover; private delegate* unmanaged[Cdecl]<float*, int, int> _fn_ui_hover_rects;
     private int _hover_mode = 0;   // 0 off, 1 outline the quads under the mouse, 2 outline every UI quad (F11 cycles)
     private delegate* unmanaged[Cdecl]<uint, int, void> _fn_dump_cb; private int _dump_cb_size = 1456;
@@ -319,7 +322,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _logger.Info("FFX VR module initialized.");
         settings_load();
         load_native(mod_context);
+        if (_fn_haptics_set != null) _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);   // before ffxvr_init, which installs the XInputSetState hook only if haptics or build 7 are on
         diag7_init();   // build 7 (log only): game-function hooks must be queued here, at init (diag7.cs)
+        ld_init();      // load diagnostics (load_diag.cs): queued after build 7's hooks (the job join included), so a failure here cannot take them with it (LD-7)
         return true;
     }
 
@@ -471,7 +476,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_world_positions  = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_world_positions");
             _fn_diag7_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_diag7_set"); _fn_diag_line = (delegate* unmanaged[Cdecl]<byte*, void>)req("ffxvr_diag_line");
             _fn_main_note = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_main_note"); _fn_motion_cols = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_motion_cols");
+            _fn_bb_resized = (delegate* unmanaged[Cdecl]<int, int, int, void>)req("ffxvr_bb_resized");
             _fn_cursor_game = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_cursor_game"); _fn_cursor_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cursor_skip");
+            _fn_haptics_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_haptics_set");
+            _fn_game_callers = (delegate* unmanaged[Cdecl]<uint*, int, int>)req("ffxvr_game_callers"); _fn_va_stats = (delegate* unmanaged[Cdecl]<uint*, void>)req("ffxvr_va_stats");
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -517,7 +525,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_msaa_status = null; _fn_patch_set = null; _fn_patch_count = null; _fn_patch_name = null; _fn_backdrop_draws = null; _fn_measure = null;
         _fn_on_ps_srvs = null; _fn_on_clear_twin = null; _fn_set_backbuffer = null; _fn_on_copy = null; _fn_override_set = null; _fn_override_applied = null;
         _fn_override_mask = null; _fn_safe_read = null; _fn_project = null; _fn_world_positions = null;
-        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_cursor_game = null; _fn_cursor_skip = null; _fn_cursor_look = null; _fn_markers_kinds = null; _fn_cursor_atlas_dump = null;
+        _fn_diag7_set = null; _fn_diag_line = null; _fn_main_note = null; _fn_motion_cols = null; _fn_bb_resized = null;
+        _fn_cursor_game = null; _fn_cursor_skip = null; _fn_cursor_look = null; _fn_markers_kinds = null; _fn_cursor_atlas_dump = null;
+        _fn_game_callers = null; _fn_va_stats = null; _fn_haptics_set = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -733,6 +743,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     }
 
     private void h_exitprocess(uint code) {
+        settings_flush();   // R21: an unsaved change (or one still being debounced) reaches the file; a hand edit still wins
         try { if (_fn_shutdown != null) _fn_shutdown(); } catch { }
         _o_exitprocess ??= new FhCallHandle<d_ExitProcess>(new FhCallLocation((void*)_a_exitprocess)).chain_from(_h_exitprocess!).fnptr;
         _o_exitprocess!(code);
@@ -814,195 +825,387 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _hide_list.Clear(); _hide_list.AddRange(list.Count > 0 ? list : hide_list_defaults()); _hide_list_dirty = true;
     }
 
+    // Settings lifecycle (build 8, G1-final R21/R27-R33): settings_load (init: read with retries, validated parse, launch
+    // effects), settings_reload_check (every 1 s of _now: a hand edit), settings_save_tick (every 0.5 s: write once the text
+    // has been stable for 1 s), settings_write (temp file + flush + move, never over a hand edit), settings_flush (exit).
+    private static readonly System.Globalization.CultureInfo CI = System.Globalization.CultureInfo.InvariantCulture;
     private bool _settings_ok = false;   // a load succeeded (or there was no file): saving is allowed
+    private double _now;                 // ImGui.GetTime(), once per frame: the clock of every settings timer (R33)
+    private readonly object _ini_lock = new();   // settings_write runs on the render thread (save tick) and on ExitProcess's thread (flush)
+    private DateTime _ini_mtime_seen = DateTime.MinValue; private long _ini_len_seen = -1;   // the file as we last read or wrote it (-1: absent)
+    private string? _ini_pending; private double _ini_pending_at, _ini_next_snap, _ini_retry_at, _ini_next_check;
+    private int _ini_fail_n, _ini_read_fail_n, _ini_reload_fault_n, _ini_bak_fail_n, _ini_loaded_keys; private volatile bool _ini_exiting; private bool _ini_backed_up; private string _ini_note = "";
+    private readonly List<string> _ini_bad = new();   // the last parse's ignored values, for its one log line
+    private readonly List<string> _ini_clamped = new();   // ... and the values pulled into range (B8-13)
+    private string _ini_disk = "";   // the file's text as we last read or wrote it: a reload applies only the keys the hand edit changed
+    private static Dictionary<string, string> ini_kv(string text) {
+        var d = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string raw in text.Split('\n')) { string line = raw.Trim(); int eq = line.IndexOf('='); if (line.Length == 0 || line[0] == '#' || eq < 0) continue; d[line[..eq].Trim()] = line[(eq + 1)..].Trim(); }
+        return d;
+    }
+
+    // -- validated parsing (R27, R32): a bad value keeps the current one and is listed; numbers are invariant culture,
+    // clamped; U+2212 (the minus sign some regional formats write) reads as '-'.
+    private static string num(string v) => v.Replace('\u2212', '-').Trim();
+    private void pf(string k, string v, ref float f, float lo, float hi) {
+        if (float.TryParse(num(v), System.Globalization.NumberStyles.Float, CI, out float t) && float.IsFinite(t)) { f = Math.Clamp(t, lo, hi); if (f != t) _ini_clamped.Add($"{k}={v}->{f.ToString(CI)}"); }
+        else _ini_bad.Add($"{k}='{v}'");
+    }
+    private void pi(string k, string v, ref int i, int lo, int hi) {
+        if (int.TryParse(num(v), System.Globalization.NumberStyles.Integer, CI, out int t)) { i = Math.Clamp(t, lo, hi); if (i != t) _ini_clamped.Add($"{k}={v}->{i.ToString(CI)}"); }
+        else _ini_bad.Add($"{k}='{v}'");
+    }
+    private void pe(string k, string v, ref int i, params int[] ok) { if (int.TryParse(num(v), System.Globalization.NumberStyles.Integer, CI, out int t) && Array.IndexOf(ok, t) >= 0) i = t; else _ini_bad.Add($"{k}='{v}'"); }
+    private static bool try_bool(string v, out bool b) {
+        switch (v.Trim().ToLowerInvariant()) {
+            case "1": case "true": case "yes": case "on": b = true; return true;
+            case "0": case "false": case "no": case "off": b = false; return true;
+            default: b = false; return false;
+        }
+    }
+    private void pb(string k, string v, ref bool b) { if (try_bool(v, out bool t)) b = t; else _ini_bad.Add($"{k}='{v}'"); }
+    /// <summary>A two-word setting (cursor_source=game|legacy, cursor_look=game|mod): b = the first word.</summary>
+    private void pw(string k, string v, ref bool b, string yes, string no) {
+        string t = v.Trim();
+        if (t.Equals(yes, StringComparison.OrdinalIgnoreCase)) b = true; else if (t.Equals(no, StringComparison.OrdinalIgnoreCase)) b = false; else _ini_bad.Add($"{k}='{v}'");
+    }
+    private string bad_suffix() => (_ini_bad.Count > 0 ? "; ignored bad values (kept the previous value): " + string.Join(", ", _ini_bad) : "")
+                                 + (_ini_clamped.Count > 0 ? "; clamped to the allowed range: " + string.Join(", ", _ini_clamped) : "");
+
+    /// <summary>The settings in the file, validated (R27). No launch effects (R28): world_scale goes to the scale of the
+    /// non-life-size views, whatever the current view. Returns the number of known keys read.</summary>
+    private int settings_parse(string[] lines) {
+        _ini_bad.Clear(); _ini_clamped.Clear(); int known = 0; float ws = float.NaN;
+        foreach (string raw in lines) {
+            string line = raw.Trim();
+            int eq = line.IndexOf('=');
+            if (line.Length == 0 || line[0] == '#' || eq < 0) continue;
+            string k = line[..eq].Trim(), v = line[(eq + 1)..].Trim();
+            known++;
+            switch (k) {
+                case "headset_autostart": pb(k, v, ref _headset_autostart); break;
+                case "start_view":        pe(k, v, ref _start_view, 0, 1, 2, 3); break;
+                case "overlay_at_start":  pb(k, v, ref _overlay_at_start); break;
+                case "world_scale":       { float t = float.NaN; pf(k, v, ref t, 10f, 300f); if (!float.IsNaN(t)) ws = t; } break;
+                case "head_position":     pb(k, v, ref _xr_translate); break;
+                case "seat":              pb(k, v, ref _xr_seat); break;
+                case "headset_fov":       pb(k, v, ref _xr_fov); break;
+                case "screen_mode":       pe(k, v, ref _xr_screen_mode, 0, 1, 2); break;
+                case "stereo_screen_blitz": pb(k, v, ref _s3_blitz); break;
+                case "stereo_screen_all": pb(k, v, ref _s3_all); break;
+                case "stereo_screen_depth": pf(k, v, ref _s3_depth, 0f, 4f); break;
+                case "stereo_screen_plane": pf(k, v, ref _s3_plane, 10f, 5000f); break;
+                case "stereo_screen_auto": pb(k, v, ref _s3_auto); break;
+                case "stereo_screen_max_pop": pf(k, v, ref _s3_max_pop, 0f, 6f); break;
+                case "backdrop_mode":     pe(k, v, ref _backdrop_mode, 0, 1); break;
+                case "cull_dist":         pb(k, v, ref _cull_dist); break;
+                case "cull_scene":        pb(k, v, ref _cull_scene); break;
+                case "msaa":              pe(k, v, ref _msaa, 0, 2, 4); break;
+                case "vrpad":             pb(k, v, ref _vrpad); break;
+                case "haptics":           pb(k, v, ref _haptics); break;                  // the game's rumble on the Quest controllers
+                case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
+                case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
+                case "gestures":          pb(k, v, ref _gestures); break;
+                case "gest_tilt":         pf(k, v, ref _gest_tilt, -2f, 2f); break;
+                case "fp_body_mode":      pe(k, v, ref _fp_body_mode, 0, 1, 2); break;
+                case "battle_anchor":     pb(k, v, ref _battle_anchor); break;
+                case "ui_hide":           pi(k, v, ref _ui_hide, 0, 5); break;
+                case "hide_cursor":       pb(k, v, ref _hide_cursor); break;
+                case "hide_pointers":     pb(k, v, ref _hide_pointers); break;
+                case "blitz_overlay":     pb(k, v, ref _blitz_overlay); break;
+                case "markers_game_art":  pb(k, v, ref _markers_game_art); break;
+                case "marker_scale":      pf(k, v, ref _marker_scale, 0.2f, 5f); break;
+                case "hide_list":         hide_list_parse(v); break;
+                case "battle_follow":     pb(k, v, ref _battle_follow); break;
+                case "battle_view":       pi(k, v, ref _battle_view, -1, 3); break;
+                case "diorama_floor":     pf(k, v, ref _diorama_floor, 0f, 40f); break;
+                case "fp_head_anchor": {  // 0/1/2; an old bool-style value still means 2 (on) or 0 (off)
+                    if (int.TryParse(num(v), System.Globalization.NumberStyles.Integer, CI, out int fha)) { if (fha >= 0 && fha <= 2) _fp_head_anchor = fha; else _ini_bad.Add($"{k}='{v}'"); }
+                    else if (try_bool(v, out bool fhb)) _fp_head_anchor = fhb ? 2 : 0;
+                    else _ini_bad.Add($"{k}='{v}'");
+                } break;
+                case "fp_head_up":        pf(k, v, ref _fp_head_up, -5f, 10f); break;
+                case "fp_head_smooth":    pf(k, v, ref _fp_head_smooth, 0.05f, 1f); break;
+                case "fp_head_fwd":       pf(k, v, ref _fp_head_fwd, 0f, 6f); break;
+                case "fp_head_parts":     _fp_head_parts = v; break;
+                case "screen_width":      pf(k, v, ref _xr_screen_width, 1f, 8f); break;
+                case "screen_distance":   pf(k, v, ref _xr_screen_dist, 1f, 6f); break;
+                case "overlay_open":      pb(k, v, ref _window_open); break;
+                case "eye2_preview":      pb(k, v, ref _eye2_preview); break;
+                case "ui_panel":          pb(k, v, ref _ui_on); break;
+                case "ui_distance":       pf(k, v, ref _ui_dist, 0.5f, 4f); break;
+                case "ui_width":          pf(k, v, ref _ui_width, 0.5f, 4f); break;
+                case "pitch_follow":      pf(k, v, ref _xr_pitch_follow, 0f, 1f); break;
+                case "seat_height":       pf(k, v, ref _ovr_up, -5000f, 5000f); break;
+                case "seat_forward":      pf(k, v, ref _ovr_forward, -5000f, 5000f); break;
+                case "cut_recentre":      pb(k, v, ref _cut_recentre); break;
+                case "cut_blink":         pb(k, v, ref _cut_blink); break;
+                case "turn_stick":        pb(k, v, ref _turn_stick); break;
+                case "turn_mode":         pi(k, v, ref _turn_mode, 0, 1); break;
+                case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
+                case "turn_rate":         pf(k, v, ref _turn_rate, 10f, 360f); break;
+                case "turn_blink":        pb(k, v, ref _turn_blink); break;
+                case "move_remap":        pb(k, v, ref _move_remap); break;
+                case "move_invert":       pb(k, v, ref _move_invert); break;
+                case "fp_actor":          { string fa = v.Trim(); if (fa.Length > 0 && fa.Length <= 15) _fp_actor = fa; else _ini_bad.Add($"{k}='{v}'"); } break;
+                case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
+                case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
+                case "follow_pans":       pb(k, v, ref _follow_pans); break;
+                case "follow_rate":       pf(k, v, ref _follow_rate, 1f, 360f); break;
+                case "fp_eye_height":     pf(k, v, ref _fp_eye_h, 0f, 40f); break;
+                case "follow_distance":   pf(k, v, ref _fp_follow_dist, 10f, 300f); break;
+                case "follow_height":     pf(k, v, ref _fp_follow_h, 0f, 150f); break;
+                case "tp_distance":       pf(k, v, ref _tp_dist, 4f, 120f); break;
+                case "tp_height":         pf(k, v, ref _tp_h, 0f, 60f); break;
+                case "tp_pitch":          pf(k, v, ref _tp_pitch, -60f, 30f); break;
+                case "tp_follow_rate":    pf(k, v, ref _tp_follow_rate, 0f, 180f); break;
+                case "anchor_smooth_ms":  pf(k, v, ref _anchor_smooth_ms, 0f, 500f); break;
+                case "battle_anchor_smooth_ms": pf(k, v, ref _battle_anchor_smooth_ms, 0f, 3000f); break;
+                case "hands_dev":         pb(k, v, ref _hands_dev); break;
+                case "hands":             pb(k, v, ref _hands_on); break;
+                case "hands_head":        pb(k, v, ref _hands_head); break;
+                case "hands_show":        pi(k, v, ref _hands_show, 0, 3); break;
+                case "hands_yaw":         pf(k, v, ref _hands_yaw, -180f, 180f); break;
+                case "hands_pitch":       pf(k, v, ref _hands_pitch, -180f, 180f); break;
+                case "hands_roll":        pf(k, v, ref _hands_roll, -180f, 180f); break;
+                case "hands_off_right":   pf(k, v, ref _hands_off_r, -0.5f, 0.5f); break;
+                case "hands_off_up":      pf(k, v, ref _hands_off_u, -0.5f, 0.5f); break;
+                case "hands_off_back":    pf(k, v, ref _hands_off_b, -0.5f, 0.5f); break;
+                case "hands_swap":        pb(k, v, ref _hands_swap); break;
+                case "hands_mirror":      pb(k, v, ref _hands_mirror); break;
+                case "hands_cal":         _hands_cal_ini = v; break;
+                case "hands_px_left":     pi(k, v, ref _hands_px_left, -1, 1); break;
+                case "hands_stretch":     pf(k, v, ref _hands_stretch, 1f, 2f); break;
+                case "diag_build7":       pb(k, v, ref _diag7); break;   // build 7 diagnostics (hooks at the next launch; logging at once)
+                case "smooth_anchor":     pb(k, v, ref _smooth_anchor); break;   // the first / third person / diorama anchor from the drawn (interpolated) root
+                case "diag_load":         pb(k, v, ref _diag_load); break;             // battle load diagnostics (hooks at the next launch)
+                case "battle_cache_models": pb(k, v, ref _battle_cache_models); break; // option 1: keep chr models across random battles in one zone
+                case "cursor_source":     pw(k, v, ref _cursor_game_cfg, "game", "legacy"); break;   // cursor stage C2
+                case "marker_lift":       pf(k, v, ref _marker_lift, -5f, 20f); break;              // C2-10
+                case "cursor_look":       pw(k, v, ref _cursor_look_game, "game", "mod"); break;    // cursor stage C3
+                case "cursor_hand_size":  pf(k, v, ref _cursor_hand_size, 0.3f, 3f); break;
+                case "fp_self_marker": {  // low (default) / hide / normal
+                    string fs = v.Trim().ToLowerInvariant();
+                    if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
+                } break;
+                default:                  known--; break;
+            }
+        }
+        if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
+        return known;
+    }
+
+    /// <summary>The launch-only effects of the file (R28): init only, after the first parse.</summary>
+    private void settings_apply_launch() {
+        if (!_headset_autostart) return;
+        _xr_want = true;
+        if (_start_view >= 0 && _start_view <= 3 && _start_view != _fp_mode) { apply_mode_scale(_fp_mode, _start_view); _fp_mode = _start_view; }
+        _window_open = _overlay_at_start;   // straight into the headset: no overlay until F8
+    }
+
+    /// <summary>The startup file has been read (at init, or late by the reload when the init read failed): remember it, and
+    /// check for a truncated file. A truncated one (fewer than 10 known keys, with a .bak present) is not canonicalised at
+    /// launch (B8-1): it stays short until a real change, so the note repeats next session, and the .bak is kept once as
+    /// ffxvr.ini.bak-keep, which nothing overwrites or loads.</summary>
+    private void settings_first_read_done(string raw, int keys) {
+        _ini_loaded_keys = keys; _ini_last = raw; _ini_disk = raw;   // no spurious first reload; the first write still canonicalises the file
+        string bak = _ini_path + ".bak", keep = _ini_path + ".bak-keep";
+        if (keys >= 10 || !File.Exists(bak)) return;
+        _ini_last = ini_text();
+        bool kept = File.Exists(keep);
+        if (!kept) { try { File.Copy(bak, keep, false); File.SetAttributes(keep, File.GetAttributes(keep) & ~FileAttributes.ReadOnly); kept = true; } catch (Exception e) { _logger.Warning($"settings: could not copy ffxvr.ini.bak to ffxvr.ini.bak-keep ({e.Message})"); } }
+        _ini_note = $"ffxvr.ini looks truncated ({keys} keys); your previous settings are in ffxvr.ini.bak{(kept ? " (also kept as ffxvr.ini.bak-keep)" : "")}";
+        _logger.Warning("settings: " + _ini_note + ". Nothing is loaded from it automatically, and the short file is left as it is until a setting changes");
+    }
+
+    /// <summary>Init: the path, the bone labels, the startup read (retried: the previous game process may still hold the
+    /// file; the only place that sleeps), the parse and the launch effects.</summary>
     private void settings_load() {
         try {
             string dir = Path.GetDirectoryName(typeof(FFXVRModule).Assembly.Location) ?? ".";
             _ini_path = Path.Combine(dir, "ffxvr.ini");
             bone_labels_load();
-            if (!File.Exists(_ini_path)) { _settings_ok = true; _logger.Info($"settings: no {_ini_path} yet; defaults"); return; }
-            // The file can be briefly locked (an editor, a sync tool, the previous game process on its way out):
-            // retry rather than fall through to defaults, and never overwrite it with defaults on a failed read.
-            string[] lines_in = Array.Empty<string>(); Exception? last = null;
-            for (int attempt = 0; attempt < 10; attempt++) {
-                try { lines_in = File.ReadAllLines(_ini_path); last = null; break; }
-                catch (IOException e) { last = e; System.Threading.Thread.Sleep(100); }
+            string raw = ""; Exception? last = null; DateTime mt = DateTime.MinValue; long len = -1; bool gone = !File.Exists(_ini_path);
+            for (int attempt = 0; attempt < 10 && !gone; attempt++) {
+                try { var fi = new FileInfo(_ini_path); mt = fi.LastWriteTimeUtc; len = fi.Length; raw = File.ReadAllText(_ini_path); last = null; break; }   // stat first: a change in between is reloaded later
+                catch (FileNotFoundException) { gone = true; }   // deleted meanwhile: the "no file yet" case (B8-6e)
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) { last = e; System.Threading.Thread.Sleep(100); }
             }
-            if (last != null) { _settings_ok = false; _logger.Info($"settings: could not read {_ini_path} ({last.Message}); keeping defaults in memory and NOT saving this session"); return; }
-            foreach (string raw in lines_in) {
-                string line = raw.Trim();
-                int eq = line.IndexOf('=');
-                if (line.Length == 0 || line[0] == '#' || eq < 0) continue;
-                string k = line[..eq].Trim(), v = line[(eq + 1)..].Trim();
-                var ci = System.Globalization.CultureInfo.InvariantCulture;
-                switch (k) {
-                    case "headset_autostart": _headset_autostart = v == "1"; break;
-                    case "start_view":        int.TryParse(v, out _start_view); break;
-                    case "overlay_at_start":  _overlay_at_start = v != "0"; break;
-                    case "world_scale":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_scale); break;
-                    case "head_position":     _xr_translate = v == "1"; break;
-                    case "seat":              _xr_seat = v == "1"; break;
-                    case "headset_fov":       _xr_fov = v == "1"; break;
-                    case "screen_mode":       int.TryParse(v, out _xr_screen_mode); break;
-                    case "stereo_screen_blitz": _s3_blitz = v != "0"; break;
-                    case "stereo_screen_all": _s3_all = v != "0"; break;
-                    case "stereo_screen_depth": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_depth); break;
-                    case "stereo_screen_plane": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_plane); break;
-                    case "stereo_screen_auto": _s3_auto = v != "0"; break;
-                    case "stereo_screen_max_pop": float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _s3_max_pop); break;
-                    case "backdrop_mode":     int.TryParse(v, out _backdrop_mode); break;
-                    case "cull_dist":         _cull_dist = v != "0"; break;
-                    case "cull_scene":        _cull_scene = v != "0"; break;
-                    case "msaa":              int.TryParse(v, out _msaa); break;
-                    case "vrpad":             _vrpad = v != "0"; break;
-                    case "imgui_layer":       _imgui_layer = v != "0"; break;
-                    case "gestures":          _gestures = v != "0"; break;
-                    case "gest_tilt":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _gest_tilt); break;
-                    case "fp_body_mode":      int.TryParse(v, out _fp_body_mode); break;
-                    case "battle_anchor":     _battle_anchor = v != "0"; break;
-                    case "ui_hide":           int.TryParse(v, out _ui_hide); break;
-                    case "hide_cursor":       _hide_cursor = v != "0"; break;
-                    case "hide_pointers":     _hide_pointers = v != "0"; break;
-                    case "blitz_overlay":     _blitz_overlay = v != "0"; break;
-                    case "markers_game_art":  _markers_game_art = v != "0"; break;
-                    case "marker_scale":      float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _marker_scale); break;
-                    case "hide_list":         hide_list_parse(v); break;
-                    case "battle_follow":     _battle_follow = v != "0"; break;
-                    case "battle_view":       int.TryParse(v, out _battle_view); break;
-                    case "diorama_floor":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _diorama_floor); break;
-                    case "fp_head_anchor":    if (!int.TryParse(v, out _fp_head_anchor)) _fp_head_anchor = v != "0" ? 2 : 0; break;
-                    case "fp_head_up":        float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_up); break;
-                    case "fp_head_smooth":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_smooth); break;
-                    case "fp_head_fwd":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_head_fwd); break;
-                    case "fp_head_parts":     _fp_head_parts = v; break;
-                    case "screen_width":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_width); break;
-                    case "screen_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_screen_dist); break;
-                    case "overlay_open":      _window_open = v != "0"; break;
-                    case "eye2_preview":      _eye2_preview = v == "1"; break;
-                    case "ui_panel":          _ui_on = v != "0"; break;
-                    case "ui_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_dist); break;
-                    case "ui_width":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ui_width); break;
-                    case "pitch_follow":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _xr_pitch_follow); break;
-                    case "seat_height":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_up); break;
-                    case "seat_forward":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _ovr_forward); break;
-                    case "cut_recentre":      _cut_recentre = v != "0"; break;
-                    case "cut_blink":         _cut_blink = v == "1"; break;
-                    case "turn_stick":        _turn_stick = v != "0"; break;
-                    case "turn_mode":         int.TryParse(v, out _turn_mode); break;
-                    case "turn_snap":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_snap); break;
-                    case "turn_rate":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _turn_rate); break;
-                    case "turn_blink":        _turn_blink = v != "0"; break;
-                    case "move_remap":        _move_remap = v != "0"; break;
-                    case "move_invert":       _move_invert = v == "1"; break;
-                    case "fp_actor":          _fp_actor = v.Trim(); break;
-                    case "noimg_mode":        int.TryParse(v, out _noimg_mode); break;
-                    case "hist_mode":         int.TryParse(v, out _hist_mode); break;
-                    case "follow_pans":       _follow_pans = v == "1"; break;
-                    case "follow_rate":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _follow_rate); break;
-                    case "fp_eye_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_eye_h); break;
-                    case "follow_distance":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_dist); break;
-                    case "follow_height":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _fp_follow_h); break;
-                    case "tp_distance":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_dist); break;
-                    case "tp_height":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_h); break;
-                    case "tp_pitch":          float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_pitch); break;
-                    case "tp_follow_rate":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _tp_follow_rate); break;
-                    case "anchor_smooth_ms":  if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float asm) && float.IsFinite(asm)) _anchor_smooth_ms = Math.Clamp(asm, 0f, 500f); break;
-                    case "battle_anchor_smooth_ms": if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float bsm) && float.IsFinite(bsm)) _battle_anchor_smooth_ms = Math.Clamp(bsm, 0f, 3000f); break;
-                    case "hands_dev":         _hands_dev = v == "1"; break;
-                    case "hands":             _hands_on = v == "1"; break;
-                    case "hands_head":        _hands_head = v != "0"; break;
-                    case "hands_show":        int.TryParse(v, out _hands_show); break;
-                    case "hands_yaw":         float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_yaw); break;
-                    case "hands_pitch":       float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_pitch); break;
-                    case "hands_roll":        float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_roll); break;
-                    case "hands_off_right":   float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_r); break;
-                    case "hands_off_up":      float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_u); break;
-                    case "hands_off_back":    float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_off_b); break;
-                    case "hands_swap":        _hands_swap = v == "1"; break;
-                    case "hands_mirror":      _hands_mirror = v == "1"; break;
-                    case "hands_cal":         _hands_cal_ini = v; break;
-                    case "hands_px_left":     int.TryParse(v, out _hands_px_left); break;
-                    case "hands_stretch":     float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out _hands_stretch); break;
-                    case "diag_build7":       _diag7 = v != "0"; break;   // build 7 diagnostics (hooks at the next launch; logging at once)
-                    case "smooth_anchor":     _smooth_anchor = v.Trim() != "0"; break;   // the first / third person / diorama anchor from the drawn (interpolated) root
-                    case "cursor_source":     _cursor_game_cfg = !v.Trim().Equals("legacy", StringComparison.OrdinalIgnoreCase); break;   // game (default) / legacy (cursor stage C2)
-                    case "marker_lift":       if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float mlift) && float.IsFinite(mlift)) _marker_lift = Math.Clamp(mlift, -5f, 20f); break;   // C2-10
-                    case "cursor_look":       _cursor_look_game = !v.Trim().Equals("mod", StringComparison.OrdinalIgnoreCase); break;   // game (default) / mod (cursor stage C3)
-                    case "cursor_hand_size":  if (float.TryParse(v, System.Globalization.NumberStyles.Float, ci, out float hsz) && float.IsFinite(hsz)) _cursor_hand_size = Math.Clamp(hsz, 0.3f, 3f); break;
-                    case "fp_self_marker":    { string fs = v.Trim().ToLowerInvariant(); _fp_self_marker = fs == "hide" ? 1 : fs == "normal" ? 2 : 0; } break;   // low (default) / hide / normal
-                }
-            }
-            if (_headset_autostart) {
-                _xr_want = true;
-                if (_start_view >= 0 && _start_view <= 3 && _start_view != _fp_mode) { apply_mode_scale(_fp_mode, _start_view); _fp_mode = _start_view; }
-                _window_open = _overlay_at_start;   // straight into the headset: no overlay until F8
-            }
-            _logger.Info($"settings: loaded {_ini_path}: headset_autostart={_headset_autostart} start_view={_start_view} overlay_at_start={_overlay_at_start} overlay_open={_window_open} eye2_preview={_eye2_preview}");
+            if (gone) { _settings_ok = true; _ini_len_seen = -1; _logger.Info($"settings: no {_ini_path} yet; defaults"); return; }   // _ini_last "": the defaults are written once
+            if (last != null) { _settings_ok = false; _logger.Info($"settings: could not read {_ini_path} ({last.Message}); keeping defaults in memory and not saving until it can be read (retried every second)"); return; }
+            int keys = settings_parse(raw.Split('\n'));
+            settings_apply_launch();
+            _ini_mtime_seen = mt; _ini_len_seen = len;
+            settings_first_read_done(raw, keys);
+            _logger.Info($"settings: loaded {_ini_path} ({keys} keys): headset_autostart={_headset_autostart} start_view={_start_view} overlay_at_start={_overlay_at_start} overlay_open={_window_open} eye2_preview={_eye2_preview}{bad_suffix()}");
             _overlay_at_start_loaded = _overlay_at_start; _settings_ok = true;
         }
         catch (Exception e) { _settings_ok = false; _logger.Info($"settings: load failed ({e.GetType().Name}: {e.Message}); not saving this session"); }
     }
 
-    /// <summary>An edit of the ini while the game runs (by hand, or by a tool) is picked up instead of being
-    /// overwritten: every second the file is compared with what was last written, and reloaded if it differs.
-    /// Keys that only apply at launch (start_view, overlay_at_start) just update their stored values.</summary>
-    private DateTime _ini_mtime_seen = DateTime.MinValue; private int _ini_check = 0;
-    private void settings_reload_if_edited() {
-        if (_ini_path.Length == 0 || ++_ini_check < 60) return;
-        _ini_check = 0;
-        try {
-            DateTime mt = File.GetLastWriteTimeUtc(_ini_path);
-            if (mt == _ini_mtime_seen) return;
-            _ini_mtime_seen = mt;
-            string on_disk = File.ReadAllText(_ini_path);
-            if (on_disk == _ini_last) return;
-            bool autostart = _headset_autostart; bool xr_want = _xr_want; bool win = _window_open; int mode = _fp_mode; bool ok_before = _settings_ok;
-            settings_load(); _settings_ok = _settings_ok || ok_before;
-            _headset_autostart = autostart || _headset_autostart; _xr_want = xr_want; _window_open = win; _fp_mode = mode;   // launch-only effects are not re-applied mid-session
-            _ini_last = on_disk;
-            _logger.Info("settings: ffxvr.ini was edited on disk; reloaded");
+    /// <summary>R31/R33: every second of _now, a hand edit of the ini is read back. Seen (mtime, length) are only marked
+    /// after a successful read, so a locked file is retried; no sleep; file values win (no launch effects, R28); the
+    /// overlay's open state stays per session; the file stays as typed until a setting really changes (unless a value had
+    /// to be ignored or clamped: then the corrected text is written, B8-4). A deleted ini is not recreated here: it is
+    /// written again at the next settings change. Under _ini_lock (B8-5): the exit flush cannot write between the
+    /// "seen" marking and the parse.</summary>
+    private void settings_reload_check() {
+        if (_ini_path.Length == 0 || _now < _ini_next_check || _ini_exiting) return;
+        _ini_next_check = _now + 1.0;
+        lock (_ini_lock) {
+            try {
+                var fi = new FileInfo(_ini_path);
+                if (!fi.Exists) {
+                    if (_ini_len_seen != -1) { _ini_len_seen = -1; _ini_mtime_seen = DateTime.MinValue; _ini_last = ini_text(); _ini_disk = ""; _ini_pending = null; _logger.Info("settings: ffxvr.ini was deleted; it is written again at the next settings change"); }
+                    if (!_settings_ok && _ini_disk.Length == 0) { _settings_ok = true; _logger.Info("settings: ffxvr.ini is gone (the start-up read had failed); defaults, saved at the next settings change"); }   // B8-6e
+                    return;
+                }
+                DateTime mt = fi.LastWriteTimeUtc; long len = fi.Length;
+                if (mt == _ini_mtime_seen && len == _ini_len_seen) return;
+                string on_disk;
+                try { on_disk = File.ReadAllText(_ini_path); }
+                catch (Exception e) when (e is IOException || e is UnauthorizedAccessException) {   // R29: logged once, retried quietly every second
+                    if (_ini_read_fail_n++ == 0) _logger.Info($"settings: could not read ffxvr.ini ({e.Message}); retrying every second");
+                    return;
+                }
+                if (_ini_read_fail_n > 0) { _logger.Info($"settings: ffxvr.ini can be read again (after {_ini_read_fail_n} tries)"); _ini_read_fail_n = 0; }
+                _ini_mtime_seen = mt; _ini_len_seen = len;
+                if (!_settings_ok && _ini_disk.Length == 0) {   // B8-6: the start-up read had failed; this is that read, late
+                    int all = settings_parse(on_disk.Split('\n'));
+                    settings_first_read_done(on_disk, all);
+                    _settings_ok = true; _overlay_at_start_loaded = _overlay_at_start; _ini_pending = null;
+                    _logger.Info($"settings: ffxvr.ini read at last ({all} keys); launch options (autostart, start view) apply from the next start{bad_suffix()}");
+                    return;
+                }
+                string disk_before = _ini_disk; _ini_disk = on_disk;   // B8-8: kept current on every successful read
+                if (on_disk == _ini_last) return;
+                // Only the keys the edit changed (vs the file as we last read or wrote it) are applied: with nothing unsaved that is the
+                // same as parsing the whole file, and an overlay change not yet written (a slider moved < 1.5 s before the edit) is
+                // kept and then written together with the edit. A key changed both ways takes the file's value.
+                var prev = ini_kv(disk_before); var changed = new List<string>();
+                foreach (var kv in ini_kv(on_disk)) if (!prev.TryGetValue(kv.Key, out string? pv) || pv != kv.Value) changed.Add(kv.Key + "=" + kv.Value);
+                bool unsaved = ini_text() != _ini_last;
+                bool win = _window_open;
+                int keys = settings_parse(changed.ToArray());
+                _window_open = win;
+                _ini_pending = null; _settings_ok = true; _overlay_at_start_loaded = _overlay_at_start;
+                bool corrected = _ini_bad.Count > 0 || _ini_clamped.Count > 0;
+                if (!unsaved && !corrected) _ini_last = ini_text();   // the file stays as typed until a setting really changes (else: the merge / the correction is written)
+                if (keys == 0 && !corrected) _logger.Info("settings: ffxvr.ini re-read; no setting changed");
+                else _logger.Info($"settings: ffxvr.ini was edited on disk; reloaded ({keys} changed key{(keys == 1 ? "" : "s")}){(unsaved ? "; an unsaved overlay change is kept and written with it" : "")}{(corrected ? "; the corrected text is written back" : "")}{bad_suffix()}");
+            }
+            catch (Exception e) { if (_ini_reload_fault_n++ == 0) _logger.Info($"settings: reload failed ({e.GetType().Name}: {e.Message}); retrying every second"); }   // B8-7: its own counter
         }
-        catch { }
     }
-    private void settings_save_if_changed() {
-        if (_ini_path.Length == 0 || !_settings_ok) return;
-        var ci = System.Globalization.CultureInfo.InvariantCulture;
-        string text =
+
+    /// <summary>R21: every 0.5 s a snapshot of the settings text; written once it has been the same for 1 s (a slider drag
+    /// writes once, after the release), and not before a failed write's 5 s retry time.</summary>
+    private void settings_save_tick() {
+        if (_ini_path.Length == 0 || !_settings_ok || _now < _ini_next_snap || _ini_exiting) return;
+        _ini_next_snap = _now + 0.5;
+        string text = ini_text();
+        if (text == _ini_last) { _ini_pending = null; return; }
+        if (text != _ini_pending) { _ini_pending = text; _ini_pending_at = _now; return; }   // still changing
+        if (_now - _ini_pending_at < 1.0 || _now < _ini_retry_at) return;
+        settings_write(text, false);
+    }
+    /// <summary>R21: the exit flush (first thing in the ExitProcess detour): anything not yet written. A hand edit still wins.
+    /// From here on no other save runs (B8-5: a render-thread write queued behind this one would put an older text back).</summary>
+    private void settings_flush() {
+        _ini_exiting = true;
+        try { if (_settings_ok && _ini_path.Length > 0) { string t = ini_text(); if (t != _ini_last) settings_write(t, true); } }
+        catch (Exception e) { try { _logger.Info($"settings: exit flush skipped ({e.GetType().Name}: {e.Message})"); } catch { } }   // B8-11
+    }
+
+    /// <summary>R21/R29/R30: under _ini_lock (the exit flush can run on another thread). Never over a hand edit: if the
+    /// file changed since our last read or write (mtime, length, and then its content, B8-3) it is left alone and reloaded
+    /// next frame. Temp file, flushed to disk, then moved over the ini (atomic on one volume). The .bak is made once a
+    /// session, only from a startup file that parsed fully (10+ keys), in its own try, through its own temp file, with any
+    /// read-only flag cleared (B8-2, B8-10). Failures are logged once and retried every 5 s.</summary>
+    private bool settings_write(string text, bool from_exit) {
+        lock (_ini_lock) {
+            if (_ini_exiting && !from_exit) return false;   // B8-5
+            string tmp = _ini_path + ".tmp";
+            try {
+                var fi = new FileInfo(_ini_path);
+                if (fi.Exists && (fi.LastWriteTimeUtc != _ini_mtime_seen || fi.Length != _ini_len_seen)) { _ini_next_check = 0; return false; }   // hand edit: it wins
+                if (fi.Exists && fi.IsReadOnly) throw new UnauthorizedAccessException("ffxvr.ini is read-only");   // B8-9: fail before the temp file and the fsync
+                if (fi.Exists && File.ReadAllText(_ini_path) != _ini_disk) { _ini_next_check = 0; return false; }   // B8-3: same stamp and length, other content
+                if (!_ini_backed_up) {
+                    _ini_backed_up = true;   // either way: a bad .bak never blocks saving
+                    if (fi.Exists && _ini_loaded_keys >= 10) {
+                        string bak = _ini_path + ".bak", btmp = bak + ".tmp";
+                        try {
+                            File.Copy(_ini_path, btmp, true);
+                            File.SetAttributes(btmp, File.GetAttributes(btmp) & ~FileAttributes.ReadOnly);   // File.Copy carries ReadOnly over
+                            if (File.Exists(bak)) File.SetAttributes(bak, File.GetAttributes(bak) & ~FileAttributes.ReadOnly);
+                            File.Move(btmp, bak, true);
+                        }
+                        catch (Exception e) {
+                            if (_ini_bak_fail_n++ == 0) _logger.Warning($"settings: could not refresh ffxvr.ini.bak ({e.GetType().Name}: {e.Message}); saving goes on");
+                            try { File.Delete(btmp); } catch { }
+                        }
+                    }
+                }
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var sw = new StreamWriter(fs, new System.Text.UTF8Encoding(false))) { sw.Write(text); sw.Flush(); fs.Flush(true); }
+                File.Move(tmp, _ini_path, true);
+                var nf = new FileInfo(_ini_path); _ini_mtime_seen = nf.LastWriteTimeUtc; _ini_len_seen = nf.Length;
+                _ini_last = text; _ini_disk = text; _ini_pending = null;
+                if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
+                if (_ini_fail_n > 0) { _logger.Info($"settings: saving works again (after {_ini_fail_n} failed tries)"); _ini_fail_n = 0; }
+                return true;
+            }
+            catch (Exception e) {
+                if (_ini_fail_n++ == 0) _logger.Warning($"settings: could not save {_ini_path} ({e.GetType().Name}: {e.Message}); retrying every 5 s");
+                _ini_retry_at = _now + 5.0;
+                try { File.Delete(tmp); } catch { }
+                return false;
+            }
+        }
+    }
+
+    /// <summary>The ini as the overlay would write it (canonical; every number in the invariant culture, R32).</summary>
+    private string ini_text() {
+        var ci = CI;
+        return
             "# FFX VR settings. Edited by the overlay; hand edits are fine.\n" +
             $"headset_autostart={(_headset_autostart ? 1 : 0)}\n" +
-            $"start_view={_start_view}\n" +
+            $"start_view={_start_view.ToString(ci)}\n" +
             $"overlay_at_start={(_overlay_at_start ? 1 : 0)}\n" +
             $"world_scale={(life_size(_fp_mode) ? _scale_before_fp : _xr_scale).ToString("F1", ci)}\n" +   // the seat / diorama scale; first and third person are always true scale
             $"head_position={(_xr_translate ? 1 : 0)}\n" +
             $"seat={(_xr_seat ? 1 : 0)}\n" +
             $"headset_fov={(_xr_fov ? 1 : 0)}\n" +
-            $"screen_mode={_xr_screen_mode}\n" +
+            $"screen_mode={_xr_screen_mode.ToString(ci)}\n" +
             $"stereo_screen_blitz={(_s3_blitz ? 1 : 0)}\n" +
             $"stereo_screen_all={(_s3_all ? 1 : 0)}\n" +
             $"stereo_screen_depth={_s3_depth.ToString("F2", ci)}\n" +
             $"stereo_screen_plane={_s3_plane.ToString("F0", ci)}\n" +
             $"stereo_screen_auto={(_s3_auto ? 1 : 0)}\n" +
             $"stereo_screen_max_pop={_s3_max_pop.ToString("F1", ci)}\n" +
-            $"backdrop_mode={_backdrop_mode}\n" +
+            $"backdrop_mode={_backdrop_mode.ToString(ci)}\n" +
             $"cull_dist={(_cull_dist ? 1 : 0)}\n" +
             $"cull_scene={(_cull_scene ? 1 : 0)}\n" +
-            $"msaa={_msaa}\n" +
+            $"msaa={_msaa.ToString(ci)}\n" +
             $"vrpad={(_vrpad ? 1 : 0)}\n" +
+            $"haptics={(_haptics ? 1 : 0)}\n" +
+            $"haptics_gain={_haptics_gain.ToString("0.##", ci)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
             $"gestures={(_gestures ? 1 : 0)}\n" +
             $"gest_tilt={_gest_tilt.ToString("F2", ci)}\n" +
-            $"fp_body_mode={_fp_body_mode}\n" +
-            $"fp_head_anchor={_fp_head_anchor}\n" +
+            $"fp_body_mode={_fp_body_mode.ToString(ci)}\n" +
+            $"fp_head_anchor={_fp_head_anchor.ToString(ci)}\n" +
             $"battle_anchor={(_battle_anchor ? 1 : 0)}\n" +
-            $"ui_hide={_ui_hide}\n" +
+            $"ui_hide={_ui_hide.ToString(ci)}\n" +
             $"hide_cursor={(_hide_cursor ? 1 : 0)}\n" +
             $"hide_pointers={(_hide_pointers ? 1 : 0)}\n" +
             $"blitz_overlay={(_blitz_overlay ? 1 : 0)}\n" +
             $"markers_game_art={(_markers_game_art ? 1 : 0)}\n" +
-            $"marker_scale={_marker_scale.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}\n" +
+            $"marker_scale={_marker_scale.ToString("0.##", ci)}\n" +
             $"hide_list={hide_list_str()}\n" +
             $"battle_follow={(_battle_follow ? 1 : 0)}\n" +
-            $"battle_view={_battle_view}\n" +
+            $"battle_view={_battle_view.ToString(ci)}\n" +
             $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
             $"fp_head_up={_fp_head_up.ToString("F2", ci)}\n" +
             $"fp_head_smooth={_fp_head_smooth.ToString("F2", ci)}\n" +
@@ -1021,15 +1224,15 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
             $"turn_stick={(_turn_stick ? 1 : 0)}\n" +
-            $"turn_mode={_turn_mode}\n" +
+            $"turn_mode={_turn_mode.ToString(ci)}\n" +
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
             $"turn_rate={_turn_rate.ToString("F0", ci)}\n" +
             $"turn_blink={(_turn_blink ? 1 : 0)}\n" +
             $"move_remap={(_move_remap ? 1 : 0)}\n" +
             $"move_invert={(_move_invert ? 1 : 0)}\n" +
             $"fp_actor={_fp_actor}\n" +
-            $"noimg_mode={_noimg_mode}\n" +
-            $"hist_mode={_hist_mode}\n" +
+            $"noimg_mode={_noimg_mode.ToString(ci)}\n" +
+            $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
             $"fp_eye_height={_fp_eye_h.ToString("F0", ci)}\n" +
@@ -1044,7 +1247,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_dev={(_hands_dev ? 1 : 0)}\n" +
             $"hands={(_hands_on ? 1 : 0)}\n" +
             $"hands_head={(_hands_head ? 1 : 0)}\n" +
-            $"hands_show={_hands_show}\n" +
+            $"hands_show={_hands_show.ToString(ci)}\n" +
             $"hands_yaw={_hands_yaw.ToString("F0", ci)}\n" +
             $"hands_pitch={_hands_pitch.ToString("F0", ci)}\n" +
             $"hands_roll={_hands_roll.ToString("F0", ci)}\n" +
@@ -1054,22 +1257,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_swap={(_hands_swap ? 1 : 0)}\n" +
             $"hands_mirror={(_hands_mirror ? 1 : 0)}\n" +
             $"hands_cal={_hands_cal_ini}\n" +
-            $"hands_px_left={_hands_px_left}\n" +
+            $"hands_px_left={_hands_px_left.ToString(ci)}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
             $"smooth_anchor={(_smooth_anchor ? 1 : 0)}\n" +
+            $"diag_load={(_diag_load ? 1 : 0)}\n" +
+            $"battle_cache_models={(_battle_cache_models ? 1 : 0)}\n" +
             $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
             $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
             $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
             $"fp_self_marker={(_fp_self_marker == 1 ? "hide" : _fp_self_marker == 2 ? "normal" : "low")}\n";
-        if (text == _ini_last) return;
-        if (_overlay_at_start != _overlay_at_start_loaded) { _logger.Info($"settings: overlay_at_start changed to {_overlay_at_start} (window open {_window_open}, frame {_frames})"); _overlay_at_start_loaded = _overlay_at_start; }
-        try {
-            if (_ini_last.Length == 0 && File.Exists(_ini_path)) File.Copy(_ini_path, _ini_path + ".bak", true);   // the first write of a session keeps the previous file
-            File.WriteAllText(_ini_path, text); _ini_last = text; _ini_mtime_seen = File.GetLastWriteTimeUtc(_ini_path);
-        }
-        catch (Exception e) { _logger.Warning($"settings: {e.Message}"); }
     }
 
     // -- main window --------------------------------------------------------------
@@ -1126,6 +1324,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
                 if (_fn_haptic != null) { if (ImGui.SmallButton("buzz left")) _fn_haptic(0, 0.5f, 0.1f); ImGui.SameLine(); if (ImGui.SmallButton("buzz right")) _fn_haptic(1, 0.5f, 0.1f); }
             }
+        }
+        ImGui.Checkbox("rumble on the controllers (the game's vibration; the in-game Vibration option still decides)", ref _haptics); ImGui.SameLine();
+        ImGui.SetNextItemWidth(160f); ImGui.SliderFloat("strength##hap", ref _haptics_gain, 0f, 1f);
+        {
+            int hs = _haptics_status, src = (hs >> 16) & 0xF;
+            ImGui.TextDisabled($"  rumble: {(((hs >> 20) & 1) != 0 ? "hooked" : "XInputSetState not hooked")}, source {(src == 1 ? "the game's XInputSetState" : src == 2 ? "the game's pad block" : src == 3 ? "in-game Vibration off" : "none (headset off or not focused, haptics off, or a pad in use with the VR pad off)")}, motors left {hs & 0xFF} right {(hs >> 8) & 0xFF} (of 254)");
         }
         ImGui.Checkbox("grips grab the world in the seat view (one hand pans; two hands pan, turn, tilt and zoom)", ref _gestures);
         ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("tilt (wrist roll) gain", ref _gest_tilt, -2f, 2f, "%.1f");
@@ -1375,7 +1579,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
             ImGui.Checkbox("blitzball: put the scoreboard and radar on the UI panel (they are drawn into the scene with no camera: double vision)", ref _blitz_overlay); ImGui.SameLine();
-            ImGui.TextDisabled(map_base(_map_last).StartsWith("bltz") ? $"routed last frame: {_blitz_overlay_n}" : "not in blitzball");
+            ImGui.TextDisabled(_in_blitz ? $"routed last frame: {_blitz_overlay_n}" : "not in blitzball");
             ImGui.Text("cursor experiment - hide 2D draws:"); ImGui.SameLine();
             ImGui.RadioButton("off##uh", ref _ui_hide, 0); ImGui.SameLine(); ImGui.RadioButton("1024x1024 atlas, in battle##uh", ref _ui_hide, 3); ImGui.SameLine();
             ImGui.RadioButton("1024x1024 atlas, always##uh", ref _ui_hide, 1); ImGui.SameLine(); ImGui.RadioButton("+ textureless draws##uh", ref _ui_hide, 2); ImGui.SameLine();
@@ -1538,6 +1742,16 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.TreePop();
         }
 
+        if (ImGui.TreeNode("Battle loading (diagnostics, model cache option)")) {
+            ImGui.TextWrapped($"load diagnostics: {_ld_status}");
+            ImGui.Checkbox("load diagnostics (diag_load; hooks at the next launch): one \"load: battle N\" line per battle start and per way back in ffxvr_diag.log", ref _diag_load);
+            if (!_ld_hooked) ImGui.BeginDisabled(true);
+            ImGui.Checkbox("battle_cache_models: keep character models across random battles in one zone (experimental)", ref _battle_cache_models);
+            if (!_ld_hooked) ImGui.EndDisabled();
+            ImGui.TextDisabled($"skips the model-cache flush on a random battle's own map load (at most {k_ld_max_in} of 100 cache entries in use) and on the way back to the same field map (at most {k_ld_max_out}), while the largest free block below 2 GB is at least {k_ld_min_low_mb} MB; flushes skipped so far: {lt(LT.skip_n)}; hooks seen working 0x{seen_mask:X} of 0x1FF");
+            ImGui.TreePop();
+        }
+
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
@@ -1597,7 +1811,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
         if (_native_ready && ImGui.IsKeyPressed(ImGuiKey.F9) && _fn_ui_pick != null) {
             Vector2 m = ImGui.GetMousePos(), ds = ImGui.GetIO().DisplaySize;
-            if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
+            if (ds.X > 0 && ds.Y > 0) { _fn_ui_pick(m.X / ds.X, m.Y / ds.Y); _pick_n++; _pick_poll_until = _now + 3.0; _pick_poll_frames = 3; _logger.Info($"pick at ({m.X:F0},{m.Y:F0}) of {ds.X:F0}x{ds.Y:F0}"); }
         }
         if (Convert.ToBoolean(ImGui.GetIO().WantTextInput) || !_native_ready) return;   // Convert: builds whether Hexa exposes bool or byte
         if (ImGui.IsKeyPressed(ImGuiKey.Home) && _fn_xr_recenter != null) _fn_xr_recenter();
@@ -1661,9 +1875,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
         if (_fn_msaa_set != null) _fn_msaa_set(_msaa);
         if (_fn_vrpad_set != null) _fn_vrpad_set(_vrpad ? 1 : 0);
+        if (_fn_haptics_set != null) _haptics_status = _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);
         if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || save_screen_state() != 0) ? 1 : 0, _imgui_min_draws);
         if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
-        if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, parse_mask(_fp_head_parts), _fp_solo);
+        if (_fp_head_parts != _head_mask_src) { _head_mask_src = _fp_head_parts; _head_mask = parse_mask(_fp_head_parts); }   // R22: parsed only when the text changes
+        if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, _head_mask, _fp_solo);
         if (_fn_cull_scene_set != null && _fn_cull_scene_get != null && (_fn_cull_scene_get() != 0) != _cull_scene) {
             _cull_scene_rc = _fn_cull_scene_set(_cull_scene ? 1 : 0);
             if (_cull_scene_rc != 0) _cull_scene = _fn_cull_scene_get() != 0;
@@ -1718,6 +1934,16 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         return ok;
     }
 
+    /// <summary>R22: does the actor name at p equal `want`? One 16-byte guarded read (byte by byte only if that fails: the
+    /// name can end a region), no allocation. actor_name stays for logs and the UI.</summary>
+    private bool name_is(char* p, string want) {
+        if (p == null || want.Length == 0 || want.Length > 15 || _fn_safe_read == null) return false;
+        byte* b = stackalloc byte[16];
+        if (_fn_safe_read(p, b, 16) == 0)
+            for (int i = 0; i < 16; i++) { if (_fn_safe_read((byte*)p + i, b + i, 1) == 0) return false; if (b[i] == 0) break; }
+        for (int i = 0; i < want.Length; i++) if (b[i] != want[i]) return false;   // a NUL before the end mismatches here
+        return b[want.Length] == 0;
+    }
     private string actor_name(char* p) {
         if (p == null) return "";
         var sb = new System.Text.StringBuilder();
@@ -1738,7 +1964,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     }
     // The name carries a folder prefix ("bl/bltz0000", "te/test20"): match on the part after the slash.
     private static string map_base(string m) { int k = m.LastIndexOf('/'); return k >= 0 ? m[(k + 1)..] : m; }
-    private static bool in_blitz() => map_base(map_name()).StartsWith("bltz");
+    private static bool in_blitz() => map_base(map_name()).StartsWith("bltz", StringComparison.Ordinal);
+    private bool _in_blitz;   // R22: set where _map_last changes (blitz_auto_log), ordinal
 
     // Blitzball: twice a second while on a bltz map, every live actor's logical position (actor table) next to
     // where it is actually drawn (the nearest skinned-root translation in the ground plane), to learn how the
@@ -1748,8 +1975,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private void blitz_auto_log() {
         double now = ImGui.GetTime(); if (now - _blitz_last_log < 0.5) return; _blitz_last_log = now;
         string map = map_name();
-        if (map != _map_last) { _logger.Info($"map: {(_map_last.Length > 0 ? _map_last : "?")} -> {map} (event_id {(Globals.event_id != null ? *Globals.event_id : -1)})"); _map_last = map; }
-        if (!map_base(map).StartsWith("bltz") || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;
+        if (map != _map_last) { _logger.Info($"map: {(_map_last.Length > 0 ? _map_last : "?")} -> {map} (event_id {(Globals.event_id != null ? *Globals.event_id : -1)})"); _map_last = map; _in_blitz = map_base(map).StartsWith("bltz", StringComparison.Ordinal); }
+        if (!_in_blitz || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;
         Actor* actors = Globals.actors; if (actors == null) return;
         float* wp = stackalloc float[128 * 3]; int nwp = _fn_world_positions(wp, 128);
         var sb = new System.Text.StringBuilder($"blitz {map}:");
@@ -1941,6 +2168,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                         float dx = wa.chr_pos_vec.X - _btl_pending_pos.X, dz = wa.chr_pos_vec.Z - _btl_pending_pos.Z;
                         _btl_pending_still = dx * dx + dz * dz < 0.3f * 0.3f ? _btl_pending_still + 1 : 0;
                         _btl_pending_pos = wa.chr_pos_vec;
+                        // 15 render frames is about a quarter second at 60 fps. At 60 fps render / 30 Hz logic every other frame shows no
+                        // movement, so the still count only grows once the actor stops on logic steps too: that is why 0.3 per sample
+                        // works at 30 and at 60 fps. Frames, not time, on purpose: FFX logic is frame-locked (R33, won't fix).
                         if (_btl_pending_frames > 30 && _btl_pending_still > 15) ready = true;   // ran in, then stood still a quarter second
                     }
                     if (++_btl_pending_frames > 300) ready = true;
@@ -1961,11 +2191,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
         if (pick >= 0) { }
-        else if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && actor_name(cur.chr_name) == _fp_actor) pick = _fp_actor_idx;
+        else if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && name_is(cur.chr_name, _fp_actor)) pick = _fp_actor_idx;
         else {
             for (int i = 0; i < 48 && pick < 0; i++) {
                 if (!read(actors + i, out Actor a)) break;
-                if (live(a) && actor_name(a.chr_name) == _fp_actor) pick = i;
+                if (live(a) && name_is(a.chr_name, _fp_actor)) pick = i;
             }
             if (pick < 0 && read(actors, out Actor a0) && live(a0)) pick = 0;
         }
@@ -2003,9 +2233,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_ui_hide_cursor != null) _fn_ui_hide_cursor(_hide_cursor && in_battle && _xr_on ? 1 : 0);   // headset only: on the monitor the game's cursor is right where it should be
         if (_fn_ui_hide_pointers != null) _fn_ui_hide_pointers(_hide_pointers && in_battle && _xr_on && !_c2_active ? 1 : 0);   // C2: the game's cursors are skipped at the source
         if (_fn_ui_pointer_stats != null) _pointer_stats = _fn_ui_pointer_stats();
-        if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && map_base(_map_last).StartsWith("bltz") ? 1 : 0);
+        if (_fn_blitz_overlay != null) _blitz_overlay_n = _fn_blitz_overlay(_blitz_overlay && _in_blitz ? 1 : 0);
         // stereo screen (pushed with the window hidden too; the screen's size and mode go with it)
-        if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && map_base(_map_last).StartsWith("bltz"))) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
+        if (_fn_screen3d != null) _fn_screen3d((_s3_all || (_s3_blitz && _in_blitz)) ? 1 : 0, _s3_depth, _s3_plane, _s3_auto ? 1 : 0, _s3_max_pop * 0.01f);
         if (_fn_xr_screen_set != null) _fn_xr_screen_set(_xr_screen_mode, _xr_screen_width, _xr_screen_dist);
         if (_fn_markers_game_art != null) _markers_game_art_n = _fn_markers_game_art(0);   // C2: the captured-sprite experiment is retired (wrong UVs); markers_game_art in the ini is kept but ignored. Stage C3 brings the game's look back from battle.dds
         if (_fn_markers_scale != null) _fn_markers_scale(_marker_scale);
@@ -2143,14 +2373,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     private void render_imgui_inner() {
         _frames++;
+        _now = ImGui.GetTime();   // R33: one clock per frame for the settings timers and the pick poll
 
         diag7_resolve();   // build 7 (B7-1): the game-function detours' originals, before try_install_hooks adds our late hooks
+        ld_resolve();      // load diagnostics: the same, for their detours
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready) actors_auto_log();
         if (_native_ready) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
         if (_native_ready) draw_eye2_preview();   // its own top-level window, never nested
 
+        if (_native_ready) ld_present();     // load diagnostics: battle phases, the summary lines
         if (_native_ready) diag7_present();   // build 7 (log only). The Motion log's managed columns come from push_player (after begin_frame) and print at the next begin_frame, paired with that line's "actor" (the same push_player)
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
@@ -2161,7 +2394,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_native_ready) {
             draw_hover_highlight();
             if (_fn_slowmo != null) _fn_slowmo(_slowmo_on ? _slowmo_ms : 0);
-            if (_fn_ui_pick_result != null) { try { string r = Marshal.PtrToStringAnsi(_fn_ui_pick_result()) ?? ""; if (r.Length > 0) _pick_text = r; } catch { } }
+            if (_fn_ui_pick_result != null && (_now < _pick_poll_until || _pick_poll_frames > 0)) {   // R22: only for 3 s (and 3 more frames, for slow motion) after an F9
+                if (_now >= _pick_poll_until) _pick_poll_frames--;
+                try { string r = Marshal.PtrToStringAnsi(_fn_ui_pick_result()) ?? ""; if (r.Length > 0) _pick_text = r; } catch { }
+            }
             poll_gestures();
         }
         if (_window_open) {   // widgets, status and one-shot buttons only; a fault in there must not stop push_all
@@ -2169,8 +2405,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             catch (Exception e) { if (e.Message != _ui_fault_last) { _ui_fault_last = e.Message; _logger.Error($"overlay fault: {e}"); } }
         }
         if (_native_ready) push_all();      // every setting, once per frame, open or closed
-        settings_reload_if_edited();
-        settings_save_if_changed();
+        settings_reload_check();   // R31/R33: a hand edit, every second of _now
+        settings_save_tick();      // R21: debounced save
     }
 
     /// <summary>The F8 window. Without a working native helper it shows why (and the hint), never an empty frame.</summary>
@@ -2180,6 +2416,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (ImGui.Begin("FFX VR", ref _window_open)) {
                 if (!_native_ready) {
                     ImGui.TextWrapped($"Native helper: {_native_status}");
+                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(_ini_note); ImGui.PopStyleColor(1); }   // R30 / B8-12
                     if (_native_mismatch) ImGui.TextWrapped("The VR mod is not running. Reinstall the mod, so that ffxvr.dll and ffxvr_native.dll come from the same build; core.log has the details.");
                     else if (_native_failed) ImGui.TextWrapped("The VR mod is not running: it could not hook the game's renderer. core.log and ffxvr_native.log have the details.");
                     else ImGui.TextDisabled("starting: waiting for the game's renderer");
@@ -2191,6 +2428,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                         ImGui.TextWrapped($"Draw detours: {_detour_status}. Stereo, cursor hiding and the UI panel may not work; core.log has the details.");
                         ImGui.PopStyleColor(1);
                     }
+                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(_ini_note); ImGui.PopStyleColor(1); }   // R30, for the session
                     draw_main();
                     draw_debug();
                 }

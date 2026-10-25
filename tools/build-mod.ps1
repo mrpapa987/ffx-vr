@@ -41,10 +41,20 @@ function Log($s) {
 
 Log "FFX VR mod build - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Log ('=' * 70)
+if (-not $NoDeploy -and (Get-FfxvrGameProcess).Count -gt 0) {
+    Log 'NOTE: the game is running. The build will run, but deploying will stop until it is closed.'
+}
 
 # ---------------------------------------------------------------- preflight
+# Without dotnet, '& dotnet' below only fails its own statement and $LASTEXITCODE keeps msbuild's 0,
+# so an old ffxvr.dll would be deployed as if it were new.
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    Log ''
+    Log 'ERROR: dotnet (the .NET 10 SDK) is not on PATH. Install it: winget install Microsoft.DotNet.SDK.10'
+    exit 1
+}
 $pkgDir = Join-Path $proj '_ext\fahrenheit\artifacts\pkg\rel'
-if (-not (Test-Path (Join-Path $pkgDir 'Fahrenheit.Sdk.1.0.0-alpha12.nupkg'))) {
+if (-not (Test-Path -LiteralPath (Join-Path $pkgDir 'Fahrenheit.Sdk.1.0.0-alpha12.nupkg'))) {
     Log ''
     Log "ERROR: Fahrenheit SDK package not found in $pkgDir"
     Log '  Run tools\build-fahrenheit-full.ps1 first.'
@@ -141,7 +151,7 @@ Log ("[native] " + (Get-Item $natDll).Length + " bytes")
 # ---------------------------------------------------------------- managed half
 Log ''
 Log '[managed] building ffxvr.dll'
-Push-Location $srcMgd
+Push-Location -LiteralPath $srcMgd
 try {
     & dotnet build -c Release 2>&1 | ForEach-Object { Log "  $_" }
     $mgdCode = $LASTEXITCODE
@@ -158,9 +168,11 @@ if ($mgdCode -ne 0) {
     exit 1
 }
 
-$dll = Get-ChildItem $srcMgd -Recurse -File -Filter "$modId.dll" -ErrorAction SilentlyContinue |
-       Where-Object { $_.FullName -match '\\(bin|artifacts)\\' } |
-       Sort-Object @{ e = { Test-Path (Join-Path $_.DirectoryName "$modId.manifest.json") } }, LastWriteTime -Descending |
+# Never a Debug build (one from Visual Studio can be newer than this Release build). The test runs
+# on the path below src\managed, so a clone under e.g. C:\debug\ still works.
+$dll = Get-ChildItem -LiteralPath $srcMgd -Recurse -File -Filter "$modId.dll" -ErrorAction SilentlyContinue |
+       Where-Object { $r = $_.FullName.Substring($srcMgd.Length); $r -match '\\(bin|artifacts)\\' -and $r -notmatch '\\(debug|dbg)(_[^\\]*)?\\' } |
+       Sort-Object @{ e = { Test-Path -LiteralPath (Join-Path $_.DirectoryName "$modId.manifest.json") } }, LastWriteTime -Descending |
        Select-Object -First 1
 
 if (-not $dll) {
@@ -182,6 +194,12 @@ if ($NoDeploy) {
 }
 
 # ---------------------------------------------------------------- deploy
+if ((Get-FfxvrGameProcess).Count -gt 0) {
+    Log ''
+    Log 'ERROR: the game is running; nothing deployed. Close it and run build-mod again.'
+    Log "Log: $log"
+    Assert-FfxvrGameClosed 'the mod''s DLLs'
+}
 $dest = Join-Path $modsDir $modId
 Log ''
 Log "[deploy] -> $dest"
@@ -189,23 +207,33 @@ Log "[deploy] -> $dest"
 # ui_atlas_*.dds, ffxvr_bones_*.bin) and logs live next to the DLLs. Only the build output is deleted
 # and replaced. The managed output has no subfolders (owner checked, 24 Oct 2026), so the delete is not recursive: a hand-made
 # subfolder (an old\ copy for A/B tests) survives. ffxvr.manifest.json is overwritten by the copy.
+# Any delete or copy error stops the deploy and says so (a locked DLL used to leave a half-new
+# folder behind with exit code 0).
 $buildOut = @('*.dll', '*.pdb', '*.deps.json', '*.runtimeconfig.json')
-if (Test-Path -LiteralPath $dest) {
-    Get-ChildItem -LiteralPath $dest -File | Where-Object {
-        $n = $_.Name; [bool]($buildOut | Where-Object { $n -like $_ })
-    } | Remove-Item -Force -ErrorAction SilentlyContinue
+try {
+    if (Test-Path -LiteralPath $dest) {
+        Get-ChildItem -LiteralPath $dest -File | Where-Object {
+            $n = $_.Name; [bool]($buildOut | Where-Object { $n -like $_ })
+        } | Remove-Item -Force -ErrorAction Stop
+    }
+    New-Item -ItemType Directory -Force -Path $dest -ErrorAction Stop | Out-Null
+    Get-ChildItem -LiteralPath $outDir | Copy-Item -Destination $dest -Recurse -Force -ErrorAction Stop
+    Copy-Item -LiteralPath $natDll          -Destination $dest -Force -ErrorAction Stop
+    Copy-Item -LiteralPath $oxrDll.FullName -Destination $dest -Force -ErrorAction Stop
+} catch {
+    Log ''
+    Log "ERROR: deploy failed: $($_.Exception.Message)"
+    Log '  The mod folder may be incomplete. Close whatever holds it (the game, an Explorer preview,'
+    Log '  an antivirus scan) and run build-mod again.'
+    Log "Log: $log"
+    exit 1
 }
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
 
-Copy-Item (Join-Path $outDir '*') -Destination $dest -Recurse -Force
-Copy-Item $natDll                 -Destination $dest -Force
-Copy-Item $oxrDll.FullName        -Destination $dest -Force
-
-Get-ChildItem $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
+Get-ChildItem -LiteralPath $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
 $kept = @(Get-ChildItem -LiteralPath $dest -Recurse -File | Where-Object { $n = $_.Name; -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' })
 Log ("[deploy] kept {0} settings/capture/log files ({1:N1} MB)" -f $kept.Count, (($kept | Measure-Object Length -Sum).Sum / 1MB))
 
-if (-not (Test-Path (Join-Path $dest "$modId.manifest.json"))) {
+if (-not (Test-Path -LiteralPath (Join-Path $dest "$modId.manifest.json"))) {
     Log ''
     Log 'WARNING: no manifest.json deployed. Fahrenheit needs one to load the mod.'
 }
@@ -213,19 +241,19 @@ if (-not (Test-Path (Join-Path $dest "$modId.manifest.json"))) {
 # ---------------------------------------------------------------- loadorder
 $loadorder = Join-Path $modsDir 'loadorder'
 $lines = @()
-if (Test-Path $loadorder) {
-    $lines = @(Get-Content $loadorder | Where-Object { $_.Trim() -ne '' })
+if (Test-Path -LiteralPath $loadorder) {
+    $lines = @(Get-Content -LiteralPath $loadorder | Where-Object { $_.Trim() -ne '' })
 }
 if ($lines -notcontains $modId) {
     $lines += $modId
-    Set-Content -Path $loadorder -Value $lines -Encoding ascii
+    Set-Content -LiteralPath $loadorder -Value $lines -Encoding ascii
     Log ''
     Log "[loadorder] added '$modId'"
 } else {
     Log ''
     Log "[loadorder] '$modId' already listed"
 }
-Log ('  contents: ' + ((Get-Content $loadorder) -join ', '))
+Log ('  contents: ' + ((Get-Content -LiteralPath $loadorder) -join ', '))
 
 Log ''
 Log ('=' * 70)

@@ -8,7 +8,7 @@
 #   -Uninstall   remove the mod's files and its load-order line (ffxvr.ini is kept)
 #   -Force       install even though Fahrenheit was not found
 #
-# Run with (from the folder you extracted the zip to):
+# Run with (from the ffx-vr-<version> folder, the one with README.md and tools\ in it):
 #   powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1
 
 param([switch]$Uninstall, [switch]$Force)
@@ -28,20 +28,18 @@ $files = @('ffxvr.dll', 'ffxvr.deps.json', 'ffxvr.runtimeconfig.json', 'ffxvr.ma
 Write-Host "Game folder: $game"
 Write-Host ''
 
-if (Get-Process -Name FFX -ErrorAction SilentlyContinue) {
-    Write-Host 'The game is running. Close it first (its DLLs are in use).'
-    exit 1
-}
+Assert-FfxvrGameClosed 'the mod''s DLLs'
 
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
+    Assert-FfxvrWritable $mods
     foreach ($f in $files) {
         $p = Join-Path $dest $f
-        if (Test-Path $p) { Remove-Item $p -Force; Write-Host "  removed $f" }
+        if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; Write-Host "  removed $f" }
     }
-    if (Test-Path $lo) {
-        $lines = @(Get-Content $lo | Where-Object { $_.Trim() -ne '' -and $_.Trim() -ne $modId })
-        Set-Content -Path $lo -Value $lines -Encoding ascii
+    if (Test-Path -LiteralPath $lo) {
+        $lines = @(Get-Content -LiteralPath $lo | Where-Object { $_.Trim() -ne '' -and $_.Trim() -ne $modId })
+        Set-Content -LiteralPath $lo -Value $lines -Encoding ascii
         Write-Host "  removed '$modId' from mods\loadorder"
     }
     Write-Host ''
@@ -53,7 +51,7 @@ if ($Uninstall) {
 $problems = 0
 Write-Host '[checks]'
 
-$fhOk = (Test-Path (Join-Path $fh 'bin\fhstage0.exe')) -and (Test-Path (Join-Path $fh 'bin\fhstage1.dll'))
+$fhOk = (Test-Path -LiteralPath (Join-Path $fh 'bin\fhstage0.exe')) -and (Test-Path -LiteralPath (Join-Path $fh 'bin\fhstage1.dll'))
 if ($fhOk) {
     Write-Host '  Fahrenheit         : found'
 } else {
@@ -63,7 +61,7 @@ if ($fhOk) {
 }
 
 $net86 = Join-Path ${env:ProgramFiles(x86)} 'dotnet\shared\Microsoft.NETCore.App'
-$rt = @(Get-ChildItem $net86 -Directory -Filter '10.*' -ErrorAction SilentlyContinue)
+$rt = @(Get-ChildItem -LiteralPath $net86 -Directory -Filter '10.*' -ErrorAction SilentlyContinue)
 if ($rt.Count -gt 0) {
     Write-Host ('  .NET 10 x86 runtime: ' + (($rt | ForEach-Object { $_.Name }) -join ', '))
 } else {
@@ -83,8 +81,9 @@ if (-not $rt32) {
     Write-Host '                       Not VDXR. Only Virtual Desktop (VDXR) has been tested; choose it in the Streamer.'
 }
 
-if (Test-Path (Join-Path $game 'dbghelp.dll')) {
-    Write-Host '  FFX-60fps          : looks installed (dbghelp.dll next to FFX.exe)'
+# fps60_ffx.dll, not dbghelp.dll: another mod (or Fahrenheit's own fix-up) may also use that name.
+if (Test-Path -LiteralPath (Join-Path $game 'fps60_ffx.dll')) {
+    Write-Host '  FFX-60fps          : looks installed (fps60_ffx.dll next to FFX.exe)'
 } else {
     Write-Host '  FFX-60fps          : not installed (recommended; see README.md)'
 }
@@ -97,26 +96,27 @@ if (-not $fhOk -and -not $Force) {
 
 # ---------------------------------------------------------------- copy
 foreach ($f in $files) {
-    if (-not (Test-Path (Join-Path $src $f))) {
+    if (-not (Test-Path -LiteralPath (Join-Path $src $f))) {
         Write-Host "ERROR: $f is missing from $src. Extract the whole zip again."
         exit 1
     }
 }
+Assert-FfxvrWritable $mods
 Write-Host "[install] -> $dest"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 foreach ($f in $files) {
-    Copy-Item (Join-Path $src $f) -Destination $dest -Force
+    Copy-Item -LiteralPath (Join-Path $src $f) -Destination $dest -Force
     $p = Join-Path $dest $f
-    Unblock-File -Path $p -ErrorAction SilentlyContinue   # drop the "downloaded from the internet" mark
-    Write-Host ('  {0}  ({1} bytes)' -f $f, (Get-Item $p).Length)
+    Unblock-File -LiteralPath $p -ErrorAction SilentlyContinue   # drop the "downloaded from the internet" mark
+    Write-Host ('  {0}  ({1} bytes)' -f $f, (Get-Item -LiteralPath $p).Length)
 }
 
 # ---------------------------------------------------------------- loadorder
 $lines = @()
-if (Test-Path $lo) { $lines = @(Get-Content $lo | Where-Object { $_.Trim() -ne '' }) }
+if (Test-Path -LiteralPath $lo) { $lines = @(Get-Content -LiteralPath $lo | Where-Object { $_.Trim() -ne '' }) }
 if ($lines -notcontains $modId) {
     $lines += $modId
-    Set-Content -Path $lo -Value $lines -Encoding ascii
+    Set-Content -LiteralPath $lo -Value $lines -Encoding ascii
     Write-Host "  added '$modId' to mods\loadorder"
 } else {
     Write-Host "  '$modId' already in mods\loadorder"

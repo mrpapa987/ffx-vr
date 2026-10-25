@@ -38,6 +38,16 @@ $OutDir = [IO.Path]::GetFullPath($(if ([IO.Path]::IsPathRooted($OutDir)) { $OutD
 
 function Fail($msg) { Write-Host ''; Write-Host "ERROR: $msg"; Write-Host 'No package made.'; exit 1 }
 
+# Git is optional here. Run it with errors relaxed: in Windows PowerShell 5.1 a redirected stderr
+# line (even 2>$null) is an error record, and under ErrorActionPreference Stop the first one
+# ("not a git repository", "dubious ownership") would end the script. $null when git fails.
+function Invoke-GitQuiet {
+    $ErrorActionPreference = 'Continue'
+    $out = & git @args 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $out
+}
+
 # ---------------------------------------------------------------- build
 if (-not $SkipBuild) {
     Write-Host '[build] tools\build-mod.ps1 -NoDeploy'
@@ -51,11 +61,18 @@ if (-not $SkipBuild) {
 $natDll = Join-Path $proj 'src\native\bin\Win32\Release\ffxvr_native.dll'
 if (-not (Test-Path $natDll)) { Fail "ffxvr_native.dll not found at $natDll. Build first." }
 
-$manifest = Get-ChildItem (Join-Path $proj 'src\managed') -Recurse -File -Filter "$modId.manifest.json" -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\(bin|artifacts)\\' } |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $manifest) { Fail "no $modId.manifest.json under src\managed. Build first." }
-$mgdDir = $manifest.DirectoryName
+# The managed output: the newest ffxvr.dll with a manifest beside it, never a Debug build (one
+# from Visual Studio can be newer). The Debug test runs on the path below src\managed.
+$srcMgd = Join-Path $proj 'src\managed'
+$mgd = @(Get-ChildItem -LiteralPath $srcMgd -Recurse -File -Filter "$modId.dll" -ErrorAction SilentlyContinue |
+         Where-Object { $r = $_.FullName.Substring($srcMgd.Length)
+                        $r -match '\\(bin|artifacts)\\' -and $r -notmatch '\\(debug|dbg)(_[^\\]*)?\\' -and
+                        (Test-Path -LiteralPath (Join-Path $_.DirectoryName "$modId.manifest.json")) } |
+         Sort-Object LastWriteTime -Descending)
+if ($mgd.Count -eq 0) { Fail "no Release $modId.dll with a manifest under src\managed. Build first." }
+$mgdDir = $mgd[0].DirectoryName
+Write-Host "Mod files from: $mgdDir"
+if ($mgd.Count -gt 1) { Write-Host ('  (also found, older: ' + (($mgd | Select-Object -Skip 1 | ForEach-Object { $_.DirectoryName }) -join '; ') + ')') }
 $mgdFiles = @("$modId.dll", "$modId.deps.json", "$modId.runtimeconfig.json", "$modId.manifest.json")
 foreach ($f in $mgdFiles) {
     if (-not (Test-Path (Join-Path $mgdDir $f))) { Fail "$f missing from $mgdDir" }
@@ -84,10 +101,10 @@ if (-not $csVer) { $csVer = '0.0.0' }
 
 $commit = 'unknown'; $short = 'nogit'; $dirty = $false
 if (Get-Command git -ErrorAction SilentlyContinue) {
-    $c = & git -C $proj rev-parse HEAD 2>$null
-    if ($LASTEXITCODE -eq 0 -and $c) {
-        $commit = $c.Trim(); $short = $commit.Substring(0, 7)
-        $dirty = [bool](& git -C $proj status --porcelain --untracked-files=no 2>$null)
+    $c = Invoke-GitQuiet -C $proj rev-parse HEAD
+    if ($c) {
+        $commit = "$c".Trim(); $short = $commit.Substring(0, 7)
+        $dirty = [bool](Invoke-GitQuiet -C $proj status --porcelain --untracked-files=no)
     }
 }
 if ($Version) { $label = $Version } else { $label = "$csVer-$short" }
@@ -104,7 +121,7 @@ $m = Select-String -Path (Join-Path $PSScriptRoot 'build-fahrenheit-full.ps1') -
 if ($m) { $fhCommit = $m.Matches[0].Groups[1].Value }
 $fhDir = Join-Path $proj '_ext\fahrenheit'
 if ((Test-Path (Join-Path $fhDir '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
-    $built = (& git -C $fhDir rev-parse HEAD 2>$null)
+    $built = Invoke-GitQuiet -C $fhDir rev-parse HEAD
     if ($built -and $fhCommit -ne 'unknown' -and $built.Trim() -ne $fhCommit) {
         Write-Host "WARNING: _ext\fahrenheit is at $($built.Trim().Substring(0,7)), not the pinned $($fhCommit.Substring(0,7))."
         Write-Host '         The mod was built against that SDK; the README will still name the pinned commit.'

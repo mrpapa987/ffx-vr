@@ -20,6 +20,7 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<byte*, void> _fn_diag_line;
     private delegate* unmanaged[Cdecl]<int> _fn_main_note;
     private delegate* unmanaged[Cdecl]<float*, int, void> _fn_motion_cols;
+    private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_bb_resized;   // build 9 (R11b): the 0x599210 hook tells native a backbuffer re-acquire begins (0) / is done (1)
 
     // -- the game functions (FhUtil offsets: the exe is DYNAMIC_BASE) --------------------------------------------------
     private const int k7_tgt  = 0x49C870;   // target pointer draw: cdecl void(), called from the target window's draw stub (0x4A84C0)
@@ -153,7 +154,12 @@ public sealed unsafe partial class FFXVRModule {
     }
     private void h7_rsz(nint self, int w, int h) {
         d7_resize o = System.Threading.Volatile.Read(ref _o7_rsz) ?? d7_resolve_main(ref _o7_rsz, _a7_rsz, _h7_rsz!);
+        // Build 9 (R11b): a hard invalidation signal next to native's destruction sentinel, whatever diag_build7's logging state
+        // (interlocked stores only): "begins" before the call, "done" after it; native acts on completed re-acquires only (B9-2).
+        // With diag_build7=0 at launch this hook does not exist and the sentinel alone does the job.
+        var bbr = _fn_bb_resized; if (bbr != null) bbr(w, h, 0);
         o(self, w, h);
+        if (bbr != null) bbr(w, h, 1);
         if (_diag7) {
             _d7_rsz_w = w; _d7_rsz_h = h; _d7_rsz_frame = FhUtil.get_at<uint>(0x1FCBBF0); _d7_rsz_main = _d7_join_mtid != 0 && Environment.CurrentManagedThreadId == _d7_join_mtid;
             System.Threading.Volatile.Write(ref _d7_rsz_calls, _d7_rsz_calls + 1);

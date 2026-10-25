@@ -1,6 +1,9 @@
 # paths.ps1 - where things are, for every script in tools\. Dot-sourced:
 #     . (Join-Path $PSScriptRoot 'paths.ps1')
 #
+# Definitions only: nothing in this file may do work when it is dot-sourced, apart from loading
+# tools\paths.local.ps1. It ships in the player zip and must run in Windows PowerShell 5.1.
+#
 # $FfxvrRepo   this repository (the folder above tools\), wherever it was cloned
 # Get-FfxvrGame  the game's install folder, found in this order:
 #   1. the environment variable FFXVR_GAME_DIR
@@ -8,15 +11,25 @@
 #          $FfxvrGameOverride = 'D:\SteamLibrary\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'
 #   3. Steam: its install folder from the registry, plus every library in libraryfolders.vdf
 # A folder only counts if FFX.exe is in it. Nothing here points at any one person's PC.
+#
+# Paths are tested with -LiteralPath ('[' and ']' are wildcards to -Path, e.g. 'D:\Games [SSD]'),
+# and built with [IO.Path]::Combine where a drive may be missing (Join-Path throws "Cannot find
+# drive" for a Steam library on an unplugged disk).
 
 $FfxvrRepo         = Split-Path -Parent $PSScriptRoot
 $FfxvrGameName     = 'FINAL FANTASY FFX&FFX-2 HD Remaster'
 $FfxvrGameOverride = $null
 $ffxvrLocal = Join-Path $PSScriptRoot 'paths.local.ps1'
-if (Test-Path $ffxvrLocal) { . $ffxvrLocal }
+if (Test-Path -LiteralPath $ffxvrLocal) { . $ffxvrLocal }
+
+# Every program that runs from the game folder, and so loads its dbghelp.dll (FFX-60fps's proxy)
+# or rewrites GameSetting.ini. The default game check needs only FFX and Fahrenheit's stage 0.
+$FfxvrRootExes = @('FFX', 'FFX-2', 'FFX&X-2_LAUNCHER', 'FFX&X-2_Will', 'fhstage0')
+$FfxvrUtf8     = New-Object Text.UTF8Encoding $false
 
 function Test-FfxvrGame([string]$dir) {
-    return ($dir -and (Test-Path (Join-Path $dir 'FFX.exe')))
+    if (-not $dir) { return $false }
+    try { return (Test-Path -LiteralPath ([IO.Path]::Combine($dir, 'FFX.exe'))) } catch { return $false }
 }
 
 function Find-FfxvrGame {
@@ -26,14 +39,18 @@ function Find-FfxvrGame {
     if (-not $steam) { return $null }
     $steam = $steam -replace '/', '\'
     $libs = @($steam)
-    $vdf = Join-Path $steam 'steamapps\libraryfolders.vdf'
-    if (Test-Path $vdf) {
-        foreach ($m in (Select-String -Path $vdf -Pattern '"path"\s+"(.+?)"' -AllMatches)) {
-            foreach ($g in $m.Matches) { $libs += ($g.Groups[1].Value -replace '\\\\', '\') }
-        }
+    $vdf = $null
+    try { $vdf = [IO.Path]::Combine($steam, 'steamapps', 'libraryfolders.vdf') } catch { }
+    if ($vdf -and (Test-Path -LiteralPath $vdf)) {
+        # The file is UTF-8 (5.1's Select-String reads it as ANSI); backslashes are escaped as \\
+        try {
+            foreach ($g in [regex]::Matches([IO.File]::ReadAllText($vdf, [Text.Encoding]::UTF8), '"path"\s+"(.+?)"')) {
+                $libs += ($g.Groups[1].Value -replace '\\\\', '\')
+            }
+        } catch { }
     }
     foreach ($lib in ($libs | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique)) {
-        $dir = Join-Path $lib (Join-Path 'steamapps\common' $FfxvrGameName)
+        try { $dir = [IO.Path]::Combine($lib, 'steamapps', 'common', $FfxvrGameName) } catch { continue }
         if (Test-FfxvrGame $dir) { return $dir }
     }
     return $null
@@ -50,4 +67,80 @@ function Get-FfxvrGame {
     Write-Host "  - or create tools\paths.local.ps1 with the line"
     Write-Host "        `$FfxvrGameOverride = 'D:\SteamLibrary\steamapps\common\$FfxvrGameName'"
     exit 1
+}
+
+# One log line, on screen and appended to $Path as UTF-8 without BOM (Tee-Object in 5.1 writes
+# UTF-16). $Path must be absolute: AppendAllText ignores the PowerShell location. A failed log
+# write never stops the script.
+function Write-FfxvrLog([string]$Path, $Text) {
+    $s = "$Text"
+    Write-Host $s
+    if ($Path) { try { [IO.File]::AppendAllText($Path, $s + "`r`n", $FfxvrUtf8) } catch { } }
+}
+
+# Running game processes (files in the game folder are locked while they run).
+function Get-FfxvrGameProcess([string[]]$Names = @('FFX', 'fhstage0')) {
+    @(Get-Process -Name $Names -ErrorAction SilentlyContinue)
+}
+
+# Stop with a clear message while the game runs. $What names the files that would be in use.
+function Assert-FfxvrGameClosed([string]$What = 'its files', [string[]]$Names = @('FFX', 'fhstage0')) {
+    $p = Get-FfxvrGameProcess $Names
+    if ($p.Count -eq 0) { return }
+    $n = @($p | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+    Write-Host ''
+    Write-Host ('The game is running (' + (($n | ForEach-Object { "$_.exe" }) -join ', ') + "). Close it first: $What would be in use. Nothing was changed.")
+    if ($n -contains 'fhstage0' -and $n -notcontains 'FFX') { Write-Host '  If the game already closed, end fhstage0.exe in Task Manager.' }
+    exit 1
+}
+
+# Stop with a clear message when this user can't write to $Dir (or, if it doesn't exist yet, to
+# its nearest existing parent).
+function Assert-FfxvrWritable([string]$Dir) {
+    while ($Dir -and -not (Test-Path -LiteralPath $Dir)) { $Dir = Split-Path $Dir }
+    if (-not $Dir) { return }
+    $probe = [IO.Path]::Combine($Dir, ".ffxvr-write-test-$PID")
+    try { [IO.File]::WriteAllText($probe, '') }
+    catch [UnauthorizedAccessException] {
+        Write-Host ''
+        Write-Host "Windows denied write access to: $Dir"
+        Write-Host 'Do not run as administrator (Fahrenheit refuses to start elevated, and the mod writes its'
+        Write-Host 'settings there while you play). Check that folder''s permissions, or move the game to a'
+        Write-Host 'Steam library on another drive (Steam: the game > Properties > Installed Files > Move install folder).'
+        exit 1
+    }
+    catch {
+        $m = if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+        Write-Host ''
+        Write-Host "Can't write to ${Dir}: $m"
+        exit 1
+    }
+    try { [IO.File]::Delete($probe) } catch { }      # an AV scan holding the new file is not a write problem
+}
+
+# Newest ffx_* save in a Steam account folder (MinValue when none). Sort-Object, not
+# Measure-Object -Maximum, which only takes numbers in 5.1.
+function Get-FfxvrNewestSave([string]$AccountDir) {
+    $n = Get-ChildItem -LiteralPath ([IO.Path]::Combine($AccountDir, 'FINAL FANTASY X')) -File -Filter 'ffx_*' -ErrorAction SilentlyContinue |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($n) { return $n.LastWriteTime } else { return [datetime]::MinValue }
+}
+
+# The Steam save folder (...\FINAL FANTASY X): directly in the game's Documents folder, or in a
+# numbered Steam-account folder. With several accounts, says which one is used and how to choose.
+function Get-FfxvrSteamSaveDir([string]$Account = '') {
+    $root = [IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'), 'SQUARE ENIX', 'FINAL FANTASY X&X-2 HD Remaster')
+    $direct = [IO.Path]::Combine($root, 'FINAL FANTASY X')
+    if (-not $Account -and (Test-Path -LiteralPath $direct)) { return $direct }
+    $accts = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+               Where-Object { Test-Path -LiteralPath ([IO.Path]::Combine($_.FullName, 'FINAL FANTASY X')) } |
+               Sort-Object { Get-FfxvrNewestSave $_.FullName } -Descending)
+    if ($Account) { $accts = @($accts | Where-Object { $_.Name -eq $Account }) }
+    if ($accts.Count -eq 0) { return $null }
+    if ($accts.Count -gt 1) {
+        Write-Host 'Several Steam accounts have FFX saves (newest save):'
+        foreach ($a in $accts) { Write-Host ('  {0}  {1:yyyy-MM-dd HH:mm}' -f $a.Name, (Get-FfxvrNewestSave $a.FullName)) }
+        Write-Host "Using $($accts[0].Name). Pass -SteamId <number> to choose."
+    }
+    return [IO.Path]::Combine($accts[0].FullName, 'FINAL FANTASY X')
 }

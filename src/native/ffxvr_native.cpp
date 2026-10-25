@@ -393,11 +393,76 @@ struct Twin {
     UINT w, h; DXGI_FORMAT fmt; UINT samples, mips, bind;                 // the game texture's description the twin was made for
     uint32_t last_used;                                                   // g_frames at the last lookup
     uint32_t fail_frame, retry_after;                                     // a failed twin (tex null): when it failed, and when to try again (frames)
+    bool is_bb;                                                           // made for the backbuffer (B9-3: released when that backbuffer is gone)
 };
 std::map<ID3D11Texture2D*, Twin> g_twins;
-ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image
+ID3D11Texture2D* g_backbuffer = nullptr;    // the swapchain texture, whose twin is eye 2's final image. R11b: nulled by the
+                                            // destruction sentinel (bb_attach) the moment the texture dies, so a non-null value is alive
 bool g_backbuffer_seen_this_frame = false;
-ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, tracked from the detour
+// R11b: the backbuffer's size and format, cached where it is alive (identification, each bind, the per-tick GetDesc), so no
+// path has to dereference it to know its shape. The format is 28 (R8G8B8A8_UNORM, not sRGB; build 7 6.7): no colour path changes.
+UINT g_bb_w = 0, g_bb_h = 0; DXGI_FORMAT g_bb_fmt = DXGI_FORMAT_UNKNOWN;
+ID3D11Texture2D* volatile g_bb_dead = nullptr;                                 // the last destroyed backbuffer (for the log only)
+volatile LONG g_bb_died = 0; LONG g_bb_died_seen = 0, g_bb_died_at_rsz = 0;   // sentinel firings; as last handled / at the last re-acquire
+uint32_t g_bb_sweep_frame = 0;                                                // B9-3: backbuffer twins not of the current backbuffer go at this frame (0: none due)
+// The game's 0x599210 (build 7 hook), two phases (B9-2): begun before the call, done after it. Identification records the begun
+// count, so a buffer identified inside the call carries the new number; only a completed re-acquire is acted on.
+volatile LONG g_bb_rsz_begin_n = 0, g_bb_rsz_done_n = 0; LONG g_bb_rsz_seen = 0, g_bb_ident_gen = 0; volatile LONG g_bb_resize_w = 0, g_bb_resize_h = 0; uint32_t g_bb_hook_drops = 0;
+bool g_bb_attach_fail_logged = false;
+ID3D11ShaderResourceView* g_cur_ps_srv[16] = {};   // PS shader resources, tracked from the detour (R11: a key for comparisons only; never dereferenced)
+UINT g_ps_srv_hi = 1;                              // R11a: max(start + i + 1) over the game's non-null PS SRV binds: how many slots eye 2 saves
+// R11b: the backbuffer's destruction sentinel. An IUnknown stored on the texture with SetPrivateDataInterface: the texture
+// holds the only reference and releases it when it is destroyed (ResizeBuffers, the swapchain's release), on whatever thread
+// does that. The research (SYNTHESIS 5.1) puts it on the game's MAIN thread, inside 0x599210, after a full render-thread
+// flush, so the render thread is idle then; the sentinel still only does interlocked stores. It holds NO reference on the texture.
+static const GUID kBbSentinel = { 0x5b1f3c2a, 0x7d4e, 0x4a61, { 0x9c, 0x2b, 0x13, 0x8e, 0x57, 0xf0, 0xa4, 0x6d } };
+struct BbSentinel final : IUnknown {
+    volatile LONG refs = 0; ID3D11Texture2D* tex;
+    explicit BbSentinel(ID3D11Texture2D* t) : tex(t) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override {
+        if (p == nullptr) return E_POINTER;
+        if (r == __uuidof(IUnknown)) { *p = static_cast<IUnknown*>(this); AddRef(); return S_OK; }
+        *p = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs)); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG n = InterlockedDecrement(&refs);
+        if (n == 0) {   // the texture is being destroyed
+            InterlockedCompareExchangePointer(reinterpret_cast<PVOID volatile*>(&g_backbuffer), (PVOID)nullptr, tex);   // only if it is still the one we use
+            InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(&g_bb_dead), tex);                          // for the log; the twin sweep follows g_bb_died
+            InterlockedIncrement(&g_bb_died);
+            delete this;
+        }
+        return static_cast<ULONG>(n);
+    }
+};
+/// At identification, before g_backbuffer = t: one sentinel per texture (replacing one would fire the old one).
+static void bb_attach(ID3D11Texture2D* t) {
+    IUnknown* have = nullptr; UINT sz = sizeof(have);
+    if (SUCCEEDED(t->GetPrivateData(kBbSentinel, &sz, &have)) && have) { have->Release(); return; }
+    BbSentinel* sn = new BbSentinel(t);
+    const HRESULT hr = t->SetPrivateDataInterface(kBbSentinel, sn);
+    if (FAILED(hr)) {   // then only build 7's 0x599210 hook can drop this pointer; with diag_build7=0 a destroyed backbuffer may stay dangling (build 8's behaviour)
+        delete sn;
+        if (!g_bb_attach_fail_logged) { g_bb_attach_fail_logged = true; diag("bb sentinel attach FAILED hr=0x%08X on %p: the backbuffer is only invalidated by the 0x599210 hook", static_cast<unsigned>(hr), static_cast<void*>(t)); }
+    }
+}
+/// R11c / R42: a pass's saved targets back (up to 8, from OMGetRenderTargets(8)) with the UAVs kept, unlike OMSetRenderTargets.
+/// Callers run under InEye2 (the call passes the managed OMSetRenderTargetsAndUnorderedAccessViews detour).
+static void om_restore_keep(ID3D11RenderTargetView* const* rtv8, ID3D11DepthStencilView* dsv) {
+    UINT n = 0; for (UINT i = 0; i < 8; ++i) if (rtv8[i]) n = i + 1;
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(n, rtv8, dsv, n, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+}
+/// R11c: the texture of the PS shader resource REALLY bound at `slot` (asked from the context, not the tracked raw pointer,
+/// which may name a view the game has released since). No reference is kept: a key, like texture_of.
+static ID3D11Texture2D* ps_tex(UINT slot) {
+    if (g_ctx == nullptr || slot >= 16) return nullptr;
+    ID3D11ShaderResourceView* v = nullptr; g_ctx->PSGetShaderResources(slot, 1, &v);
+    if (v == nullptr) return nullptr;
+    ID3D11Texture2D* t = texture_of(v);
+    v->Release();
+    return t;
+}
 uint32_t g_twin_count = 0;
 // backbuffer diagnostics
 uint32_t g_bb_draws_seen = 0, g_bb_draws_overlay = 0, g_bb_begin = 0, g_bb_twin_null = 0, g_bb_copies = 0;
@@ -431,6 +496,10 @@ std::map<ID3D11Texture2D*, uint32_t> g_red_done_frame;
 ID3D11RenderTargetView* g_cur_rtv[4] = {};
 UINT                    g_cur_rtv_n  = 0;
 ID3D11DepthStencilView* g_cur_dsv    = nullptr;
+// R11c: RTV0's texture and shape, taken at bind time (the view is alive then), so on_draw compares and sizes without
+// dereferencing a tracked raw view that the game may have released since.
+ID3D11Texture2D* g_cur_rtv0_tex = nullptr; UINT g_cur_rtv0_w = 0, g_cur_rtv0_h = 0, g_cur_rtv0_samples = 0;
+uint32_t g_e2_track_mismatch = 0, g_e2_srv_mismatch = 0, g_e2_rtv_over4 = 0;   // R11a evidence: tracked vs real bindings; binds of more than 4 targets
 
 // World positions of skinned objects this frame (translation column of the
 // world matrix at +640 in the 1872 B+ family), for comparing against the
@@ -538,6 +607,14 @@ PFN_XInputSetState g_xis_orig = nullptr; bool g_xis_hooked = false; uint32_t g_x
 // Motor changes, written by the game's thread (single writer), logged at begin_frame: 20 per arm (battle start re-arms).
 struct XisRec { uint32_t frame, pad; uint16_t l, r; };
 XisRec g_xis_log[32] = {}; volatile LONG g_xis_w = 0; LONG g_xis_r = 0, g_xis_until = 20; uint16_t g_xis_last[4][2] = {};
+// Rumble -> Quest haptics (research vr-opportunities.md 2): the game's pad-0 motor values from its XInputSetState calls (any
+// thread; aligned interlocked stores), turned into controller haptics on the render thread in xr_tick (haptics_tick).
+bool g_haptics = true; float g_haptics_gain = 0.8f;
+volatile LONG g_rumble_l = 0, g_rumble_r = 0; volatile LONG g_rumble_tick = 0;   // raw wLeftMotorSpeed / wRightMotorSpeed; GetTickCount of the last call (0: none yet)
+struct HapHand { bool active; float a_last; ULONGLONG renew_at; };
+HapHand g_hap[2] = {}; uint8_t g_hap_b[2] = {}; int g_hap_src = 0;
+bool g_xis_install_failed = false;   // HP-1: an install attempt failed (logged once; retried only when haptics are switched on again)
+bool g_hap_first_logged = false;     // HP-4: the first nonzero raw rumble of the session was logged   // the decoded bytes and their source (0 none, 1 XInputSetState, 2 the game's pad block, 3 vibration off) for the overlay
 uint32_t g_bb_desc_logged = 0;                             // backbuffer desc lines (6.7), at most 10
 float g_motion_cols[20] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4); 12-16: the smooth anchor (used, age, step used, step +0x0C, stamp step)
 volatile LONG g_present_ms = 0;                            // GetTickCount at the last begin_frame: the watchdog's input
@@ -1181,6 +1258,10 @@ static void install_xinput_hook() {
 /// The game's rumble (6.11): every call passes straight through; motor changes per pad are kept for begin_frame to log.
 static DWORD WINAPI xi_set_state_hook(DWORD pad, XINPUT_VIBRATION* v) {
     g_xis_calls++;
+    if (pad == 0 && v != nullptr) {   // rumble to haptics: the game's pad-0 motors (the VR pad's slot); the call still goes to the real XInput below
+        InterlockedExchange(&g_rumble_l, (LONG)v->wLeftMotorSpeed); InterlockedExchange(&g_rumble_r, (LONG)v->wRightMotorSpeed);
+        const LONG t = (LONG)GetTickCount(); InterlockedExchange(&g_rumble_tick, t ? t : 1);
+    }
     if (g_diag7 && v != nullptr && pad < 4) {
         const uint16_t l = v->wLeftMotorSpeed, r = v->wRightMotorSpeed;
         if (l | r) g_xis_nonzero++;
@@ -1192,13 +1273,14 @@ static DWORD WINAPI xi_set_state_hook(DWORD pad, XINPUT_VIBRATION* v) {
     }
     return g_xis_orig ? g_xis_orig(pad, v) : ERROR_DEVICE_NOT_CONNECTED;
 }
-/// The game's XInputSetState import -> xi_set_state_hook (the XInputGetState pattern above). Build 7 only.
+/// The game's XInputSetState import -> xi_set_state_hook (the XInputGetState pattern above). Build 7's log, and the rumble to
+/// haptics (installed when either is on; also later, from ffxvr_haptics_set, if haptics are switched on mid-session).
 static void install_xinput_set_hook() {
-    if (g_xis_hooked || !g_diag7) return;
+    if (g_xis_hooked || !(g_diag7 || g_haptics)) return;
     const BYTE* base = (const BYTE*)GetModuleHandleA(nullptr);
     const IMAGE_NT_HEADERS* nt = (const IMAGE_NT_HEADERS*)(base + ((const IMAGE_DOS_HEADER*)base)->e_lfanew);
     const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) { diag("xinput set hook: no import table"); return; }
+    if (!dir.VirtualAddress) { if (!g_xis_install_failed) diag("xinput set hook: no import table"); g_xis_install_failed = true; return; }
     for (const IMAGE_IMPORT_DESCRIPTOR* imp = (const IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); imp->Name; ++imp) {
         const char* dll = (const char*)(base + imp->Name);
         if (_strnicmp(dll, "xinput", 6) != 0) continue;
@@ -1208,16 +1290,17 @@ static void install_xinput_set_hook() {
             if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG) continue;
             if (strcmp(((const IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData))->Name, "XInputSetState") != 0) continue;
             DWORD old = 0;
-            if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) { diag("xinput set hook: VirtualProtect failed"); return; }
+            if (!VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE, &old)) { if (!g_xis_install_failed) diag("xinput set hook: VirtualProtect failed"); g_xis_install_failed = true; return; }
             g_xis_orig = (PFN_XInputSetState)iat->u1.Function;
             iat->u1.Function = (DWORD_PTR)&xi_set_state_hook;
             VirtualProtect(&iat->u1.Function, sizeof(void*), old, &old);
             g_xis_hooked = true;
-            diag("xinput set hook: %s!XInputSetState hooked (orig %p) - build 7, log only", dll, (void*)g_xis_orig);
+            diag("xinput set hook: %s!XInputSetState hooked (orig %p) - build 7 log %s, haptics %s; every call goes on to XInput", dll, (void*)g_xis_orig, g_diag7 ? "on" : "off", g_haptics ? "on" : "off");
             return;
         }
     }
-    diag("xinput set hook: XInputSetState import not found (the game may not rumble through its import)");
+    if (!g_xis_install_failed) diag("xinput set hook: XInputSetState import not found (the game may not rumble through its import); the haptics use the game's pad block");
+    g_xis_install_failed = true;
 }
 
 /// A read of our own process that fails instead of faulting (no SEH: Fahrenheit's stage 0 is a debugger).
@@ -2057,12 +2140,17 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     // a swapchain buffer is the only render target the game uses that has no
     // shader-resource binding (every texture the game renders to has one).
     // Timing-based identification broke whenever the overlay drew nothing.
+    g_cur_rtv0_tex = nullptr; g_cur_rtv0_w = g_cur_rtv0_h = g_cur_rtv0_samples = 0;
+    if (n > 4 && n != 0xFFFFFFFFu) g_e2_rtv_over4++;
     if (n > 0 && rtvs && rtvs[0]) {
         ID3D11Texture2D* t = texture_of(static_cast<ID3D11View*>(rtvs[0]));
+        D3D11_TEXTURE2D_DESC d = {}; if (t) t->GetDesc(&d);   // the view is being bound: alive
+        g_cur_rtv0_tex = t; g_cur_rtv0_w = d.Width; g_cur_rtv0_h = d.Height; g_cur_rtv0_samples = d.SampleDesc.Count;   // R11c
         if (t && t != g_backbuffer) {
-            D3D11_TEXTURE2D_DESC d; t->GetDesc(&d);
             if ((d.BindFlags & D3D11_BIND_SHADER_RESOURCE) == 0 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && d.Width >= 640 && d.SampleDesc.Count == 1) {
+                bb_attach(t);   // R11b: before it becomes g_backbuffer (may run on the game's main thread, inside its 0x599210)
                 g_backbuffer = t; g_backbuffer_seen_this_frame = true;
+                g_bb_w = d.Width; g_bb_h = d.Height; g_bb_fmt = d.Format; g_bb_ident_gen = g_bb_rsz_begin_n;
                 if (g_diag7 && g_bb_desc_logged < 10) {   // build 7 (6.7): the prediction is format 28 (R8G8B8A8_UNORM; 29 would be _SRGB)
                     g_bb_desc_logged++;
                     const DWORD tid = GetCurrentThreadId();
@@ -2072,7 +2160,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
                 }
             }
         }
-        else if (t == g_backbuffer) g_backbuffer_seen_this_frame = true;
+        else if (t && t == g_backbuffer) { g_backbuffer_seen_this_frame = true; g_bb_w = d.Width; g_bb_h = d.Height; g_bb_fmt = d.Format; }
     }
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
@@ -2293,7 +2381,7 @@ static void ui_hover_collect() {
     }
     const float* xy = nullptr; const unsigned nv = ui_quads_cached(&xy); if (nv == 0) return;
     const float px = g_hover_nx * 1920.f - 960.f, py = g_hover_ny * 1080.f - 540.f;
-    ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
+    ID3D11Texture2D* t = ps_tex(0); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
     if (!t || td.Width == 1024 || td.Width == 8192) ui_backgrounds_note(xy, nv);
     const bool pointer_kind = !t || (td.Width == 1024 && td.Height == 1024);
     for (unsigned q = 0; q < nv / 4 && g_hover_n < 512; ++q) {
@@ -2375,8 +2463,18 @@ static const char* c3_match(float u0, float v0, float u1, float v1, int* flip) {
     return nullptr;
 }
 // Called for UI-pass draws while the game look is wanted and the atlas is not held: is SRV0 battle.dds?
+static void c3_atlas_scan_srv(ID3D11ShaderResourceView* srv, ID3D11Texture2D* t, bool& keep);   // below
 static void c3_atlas_scan() {
-    ID3D11ShaderResourceView* srv = g_cur_ps_srv[0]; ID3D11Texture2D* t = texture_of(srv);
+    // R11 (merge): the SRV REALLY bound at slot 0, asked from the context (AddRef'd by the Get), never the tracked raw pointer,
+    // which may name a view the game has released since. Kept as our reference on a find, released otherwise.
+    ID3D11ShaderResourceView* srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv) return;
+    ID3D11Texture2D* t = texture_of(srv);
+    bool keep = false;
+    c3_atlas_scan_srv(srv, t, keep);
+    if (!keep) srv->Release();
+}
+static void c3_atlas_scan_srv(ID3D11ShaderResourceView* srv, ID3D11Texture2D* t, bool& keep) {
     if (!t) return;
     D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
     if (d.Width != d.Height || d.Width < 1024 || (d.Width & (d.Width - 1)) != 0) return;   // a square power-of-two atlas: 1024 (larger with an HD pack)
@@ -2390,7 +2488,7 @@ static void c3_atlas_scan() {
         g_c3_seen_frame = g_frames;
         if (t == g_c3_tex) return;   // the held one after all
         { const float* xy = nullptr; const unsigned nxy = ui_quads_cached(&xy); g_c3_qw = g_c3_qh = 0.f; if (q < nxy / 4) { float x0, y0, x1, y1; quad_rect(xy, q, &x0, &y0, &x1, &y1); g_c3_qw = x1 - x0; g_c3_qh = y1 - y0; } }   // its UI size: the CTB mini-hand or the hand itself
-        srv->AddRef(); ID3D11ShaderResourceView* old = g_c3_srv;   // a stale one is swapped only now, so the art is never missing
+        keep = true; ID3D11ShaderResourceView* old = g_c3_srv;   // the Get's reference becomes ours; a stale one is swapped only now, so the art is never missing
         g_c3_srv = srv; g_c3_tex = t; g_c3_vflip = flip; g_c3_how = what;
         if (old) { old->Release(); g_c3_swaps++; }
         if (g_c3_found_n++ == 0) g_c3_verify = true;   // C3-4: the readback check on the first find of the session only
@@ -2483,7 +2581,7 @@ static void ui_pick_check(unsigned draw_idx) {
     float xy[2 * 48]; const unsigned nv = ui_sprite_xy(xy, 48);
     const float px = g_pick_nx * 1920.f - 960.f, py = g_pick_ny * 1080.f - 540.f;
     if (nv == 0) return;
-    ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
+    ID3D11Texture2D* t = ps_tex(0); D3D11_TEXTURE2D_DESC td = {}; if (t) t->GetDesc(&td);
     // each quad of the draw on its own (sprites are batched): the hit is the quad under the point
     const unsigned nq = nv / 4; float x0 = 0, x1 = 0, y0 = 0, y1 = 0; int hit_q = -1; float best_d = 1e9f;
     for (unsigned q = 0; q < nq; ++q) {
@@ -3451,7 +3549,7 @@ void heartbeat(bool force) {
     fprintf(f, "  cursor stage C2: game source %s, skipping the game's cursors now %ld (frames skipped %u)\n", g_c2_on ? "on" : "off", (long)g_c2_skip, g_c2_skip_frames);
     fprintf(f, "  cursor stage C3: search %s, battle.dds %s (found %u times, swapped %u; by a %s quad, v %s)\n", g_c3_look ? "on (battle, game look)" : "off", g_c3_srv ? (g_frames - g_c3_seen_frame > k_c3_stale ? "held, stale" : "held") : "not found", g_c3_found_n, g_c3_swaps, g_c3_srv ? g_c3_how : "-", g_c3_vflip ? "flipped" : "as written");
     fprintf(f, "  ui vertex streams: purged on address reuse %u, mapping unreadable %u, oldest mapping read %u frames\n", g_vb_purged, g_vb_unreadable, g_rect_age_max);
-    { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held without an eye image %u, swapchain wait timeouts %u\n", held, waits); }
+    { unsigned held = 0, waits = 0; xr_counters(&held, &waits); fprintf(f, "  xr: frames held (no eye image, a wait timeout or no views; R8b) %u, swapchain wait timeouts %u\n", held, waits); }
     fprintf(f, "  view matrix changed in %u frames so far\n", g_cam_changes);
     if (!diag_armed()) fprintf(f, "  changed since previous frame: not measured (open the overlay's Debug header)");
     else if (g_diff_count < 0) fprintf(f, "  changed since previous frame: n/a (frames not consecutive)");
@@ -3494,6 +3592,9 @@ void heartbeat(bool force) {
             g_e2_no_stereo, g_e2_no_image, g_e2_cb_mismatch, g_e2_no_dsv, g_e2_small, g_e2_ok, g_e2_begin_fail, g_e2_no_depth_twin, g_twin_srvs_dropped);
     fprintf(f, "         backbuffer: draws seen %u (of which in overlay phase %u), eye2 begins %u (twin null %u), copies into it %u, overlay phase now %d\n",
             g_bb_draws_seen, g_bb_draws_overlay, g_bb_begin, g_bb_twin_null, g_bb_copies, g_overlay_phase ? 1 : 0);
+    fprintf(f, "         R11: backbuffer %p %ux%u fmt %u; sentinel fired %ld, 0x599210 re-acquires %ld (hook drops %u); tracked vs real: rtv0 %u, srv %u; binds of >4 targets %u; PS slots saved %u\n",
+            static_cast<void*>(g_backbuffer), g_bb_w, g_bb_h, static_cast<unsigned>(g_bb_fmt), (long)g_bb_died, (long)g_bb_rsz_done_n, g_bb_hook_drops,
+            g_e2_track_mismatch, g_e2_srv_mismatch, g_e2_rtv_over4, g_ps_srv_hi);
     fprintf(f, "\n  dumps written: %d\n", g_dump_index);
     fprintf(f, "\nIf every counter is zero, the vtable patch did not reach the\n");
     fprintf(f, "game's device context and the hooking approach must change.\n");
@@ -3812,8 +3913,57 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 8;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7 (branch cursors): + ffxvr_cursor_game, ffxvr_cursor_skip; 8 (branch cursors, C3): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (master's build 9 is also 8: renumber at the merge)
+constexpr int FFXVR_ABI = 12;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
+
+/// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
+/// VAs (image base 0x400000), at most `max`. Called from managed's detour of the game's loader wait-all (main thread): the
+/// first one is the game function that called the wait (its return address). A frame-pointer walk (RtlCaptureStackBackTrace)
+/// through the managed detour and Fahrenheit's thunk: if that chain breaks, fewer (or no) addresses come back.
+#pragma optimize("y", off)   // LD-10: keep this function's own frame pointer, so the walk starts on an intact EBP chain
+extern "C" __declspec(dllexport) int ffxvr_game_callers(unsigned* out, int max) {
+    if (out == nullptr || max <= 0) return 0;
+    static uintptr_t base = 0, size = 0;
+    if (base == 0) {
+        const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+        const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + dos->e_lfanew);
+        size = nt->OptionalHeader.SizeOfImage; base = b;
+    }
+    void* fr[24] = {};
+    const USHORT n = RtlCaptureStackBackTrace(1, 24, fr, nullptr);   // the managed detour and Fahrenheit's thunk take a few frames; the game's caller follows
+    int k = 0;
+    for (USHORT i = 0; i < n && k < max; ++i) {
+        const uintptr_t a = reinterpret_cast<uintptr_t>(fr[i]);
+        if (a >= base && a < base + size) out[k++] = static_cast<unsigned>(a - base + 0x400000);
+    }
+    return k;
+}
+#pragma optimize("", on)
+/// Load diagnostics: the address space in MB: [0] total free, [1] largest free block, [2] largest free block below 2 GB,
+/// [3] free below 2 GB (Fahrenheit grows the game pool bottom-up below 2 GB: kept models compete for that part). A
+/// VirtualQuery walk; the render thread calls it once per battle start and end.
+extern "C" __declspec(dllexport) void ffxvr_va_stats(unsigned* out4) {
+    if (out4 == nullptr) return;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    uintptr_t p = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress); const uintptr_t end = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    unsigned long long total = 0, largest = 0, low_total = 0, low_largest = 0;
+    const uintptr_t two_gb = 0x80000000u;
+    MEMORY_BASIC_INFORMATION mbi;
+    for (int guard = 0; p < end && guard < 200000; ++guard) {
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(p), &mbi, sizeof(mbi)) == 0) break;
+        const uintptr_t rb = reinterpret_cast<uintptr_t>(mbi.BaseAddress), rs = mbi.RegionSize;
+        if (rs == 0) break;
+        if (mbi.State == MEM_FREE) {
+            total += rs; if (rs > largest) largest = rs;
+            if (rb < two_gb) { const unsigned long long lo = (rb + rs <= two_gb) ? rs : (two_gb - rb); low_total += lo; if (lo > low_largest) low_largest = lo; }
+        }
+        if (rb + rs <= p) break;   // no progress (wrap)
+        p = rb + rs;
+    }
+    out4[0] = static_cast<unsigned>(total >> 20); out4[1] = static_cast<unsigned>(largest >> 20);
+    out4[2] = static_cast<unsigned>(low_largest >> 20); out4[3] = static_cast<unsigned>(low_total >> 20);
+}
 
 /// Build 7 diagnostics (log only): bit 0 on (ini diag_build7; called once at module init, before ffxvr_init, so the
 /// XInputSetState hook and the stall watchdog follow it), bit 1 re-arms the per-battle rumble log (battle start).
@@ -3833,6 +3983,15 @@ extern "C" __declspec(dllexport) void ffxvr_cursor_game(int on) { g_c2_on = on !
 /// Cursor stage C2 (the game's main thread, from the cursor detours): 1 = skip the game's cursor draw this frame. One aligned
 /// interlocked-published value, decided at the last frame boundary: never torn, at most one frame old.
 extern "C" __declspec(dllexport) int ffxvr_cursor_skip() { return static_cast<int>(InterlockedCompareExchange(&g_c2_skip, 0, 0)); }
+/// R11b: build 7's hook on the game's 0x599210 (backbuffer re-acquire), on the game's main thread: phase 0 right BEFORE the
+/// original (the render thread may still be finishing a frame: the flush happens inside the original), phase 1 right AFTER it
+/// (the render thread was flushed, ResizeBuffers ran, the sentinel fired if it was going to). Interlocked stores only;
+/// begin_frame acts on completed re-acquires only (B9-2).
+extern "C" __declspec(dllexport) void ffxvr_bb_resized(int w, int h, int phase) {
+    if (phase == 0) { InterlockedIncrement(&g_bb_rsz_begin_n); return; }
+    InterlockedExchange(&g_bb_resize_w, w); InterlockedExchange(&g_bb_resize_h, h);
+    InterlockedIncrement(&g_bb_rsz_done_n);
+}
 /// One line from the managed side into ffxvr_diag.log (render thread only; the caller throttles).
 extern "C" __declspec(dllexport) void ffxvr_diag_line(const char* s) { if (s != nullptr) diag("%s", s); }
 /// Called by managed's job-join hook (the game's main thread): the first caller is taken as the main thread, for the
@@ -3874,7 +4033,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     if (vt == nullptr || IsBadReadPtr(vt, sizeof(void*) * 64)) return -3;
     g_vt = vt;
     install_xinput_hook();
-    install_xinput_set_hook();   // build 7 (log only; nothing unless ffxvr_diag7_set turned it on)
+    install_xinput_set_hook();   // build 7's log and the rumble to haptics (only if either is on)
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
@@ -3923,6 +4082,41 @@ static void xr_tick();
 /// records that stopped being updated.
 static void twin_release(Twin& t);
 static void twin_srv_trim();   // R12, defined with twin_srv
+/// R11b, begin_frame step 7 (after twin_srv_trim): the backbuffer's two invalidation signals, consumed on the render thread.
+/// 1. A COMPLETED 0x599210 (build 7's hook, phase 1): a backbuffer identified before that call began belongs to the old
+///    swapchain buffers and is dropped, in case the sentinel did not fire. Without the hook (diag_build7=0) the sentinel alone.
+/// 2. Any sentinel firing or completed re-acquire starts a 2-frame timer (ImGui has then rendered every draw list that could
+///    hold the eye-2 preview's SRV); then every twin made for a backbuffer that is not the current one is released, and the
+///    current one's twin too if its size or format no longer matches (address reuse, B9-5). No queue of dead pointers (B9-3).
+static void bb_dead_twin_release() {
+    const LONG done = g_bb_rsz_done_n, died = g_bb_died;
+    if (done != g_bb_rsz_seen) {
+        g_bb_rsz_seen = done;
+        const LONG fired = died - g_bb_died_at_rsz; g_bb_died_at_rsz = died;
+        if (g_backbuffer && g_bb_ident_gen < done) {   // identified before the re-acquire that completed (B9R-1: not the live begin count)
+            ID3D11Texture2D* old = static_cast<ID3D11Texture2D*>(InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(&g_backbuffer), (PVOID)nullptr));
+            if (old) g_bb_hook_drops++;
+            diag("backbuffer re-acquired by the game (0x599210, %ldx%ld): sentinel firings since the last re-acquire %ld; the old backbuffer %p was still current: dropped by the hook (re-identified at the next bind)",
+                 (long)g_bb_resize_w, (long)g_bb_resize_h, (long)fired, static_cast<void*>(old));
+        }
+        else diag("backbuffer re-acquired by the game (0x599210, %ldx%ld): sentinel firings since the last re-acquire %ld; backbuffer now %p (%ux%u fmt %u)",
+                  (long)g_bb_resize_w, (long)g_bb_resize_h, (long)fired, static_cast<void*>(g_backbuffer), g_bb_w, g_bb_h, static_cast<unsigned>(g_bb_fmt));
+        if (g_bb_sweep_frame == 0) g_bb_sweep_frame = g_frames + 2;
+    }
+    if (died != g_bb_died_seen) { g_bb_died_seen = died; if (g_bb_sweep_frame == 0) g_bb_sweep_frame = g_frames + 2; }
+    if (g_bb_sweep_frame == 0 || g_frames < g_bb_sweep_frame) return;
+    g_bb_sweep_frame = 0;
+    unsigned released = 0, resized = 0;
+    for (auto it = g_twins.begin(); it != g_twins.end();) {
+        Twin& tw = it->second;
+        const bool current = it->first == g_backbuffer;
+        const bool stale = current && (tw.w != g_bb_w || tw.h != g_bb_h || tw.fmt != g_bb_fmt);   // B9-5: same address, another buffer
+        if (tw.is_bb && (!current || stale)) { twin_release(tw); it = g_twins.erase(it); released++; if (stale) resized++; }
+        else ++it;
+    }
+    diag("backbuffer twin sweep: sentinel firings %ld, completed re-acquires %ld; last dead backbuffer %p; backbuffer twins released %u (of which the current address with a stale size %u); backbuffer now %p (%ux%u fmt %u); resize hook drops %u",
+         (long)died, (long)done, static_cast<void*>(g_bb_dead), released, resized, static_cast<void*>(g_backbuffer), g_bb_w, g_bb_h, static_cast<unsigned>(g_bb_fmt), g_bb_hook_drops);
+}
 static void sweep_caches() {
     if (g_frames % 300 != 0) return;
     for (auto it = g_twins.begin(); it != g_twins.end();) {
@@ -4088,6 +4282,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     read_camera();
     sweep_caches();
     twin_srv_trim();                // R12: oversized twin SRV caches are trimmed here, where none of our views is mid-bind
+    bb_dead_twin_release();         // R11b: the backbuffer's sentinel / 0x599210 signals; a dead backbuffer's twin 2 frames on
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     xr_tick();                      // submit the frame just finished, locate the head for the next one
     {   // cursor stage C2: skip the game's cursors only while the headset shows our markers (a 3D frame with the UI pass, markers in 3D)
@@ -4207,8 +4402,8 @@ static void ui_census_geometry() {
             auto iit = (g_draw_kind == 1 && ib) ? g_vbufs.find(ib) : g_vbufs.end();
             // textured sprites: the first six vertices (one quad); textureless draws: up to 24 distinct
             // vertices, continued on extra lines - the cursor is textureless and may be many triangles
-            bool notex = texture_of(g_cur_ps_srv[0]) == nullptr;
-            if (!notex) { D3D11_TEXTURE2D_DESC td = {}; texture_of(g_cur_ps_srv[0])->GetDesc(&td); if (td.Width == 1024 && td.Height == 1024) notex = true; }   // the cursor atlas: full vertex list too
+            ID3D11Texture2D* t0 = ps_tex(0); bool notex = t0 == nullptr;
+            if (!notex) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); if (td.Width == 1024 && td.Height == 1024) notex = true; }   // the cursor atlas: full vertex list too
             const unsigned nv = g_draw_n < (notex ? 72u : 6u) ? g_draw_n : (notex ? 72u : 6u);
             unsigned printed = 0; float lastv[4] = { 1e30f, 1e30f, 1e30f, 1e30f };
             l += snprintf(line + l, sizeof(line) - l, " verts:");
@@ -4297,7 +4492,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
         const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
         if (dx*dx + dy*dy + dz*dz < r * r) {   // one of the player's own parts
-            const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && texture_of(g_cur_rtv[0]) == g_scene_tex;
+            const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && g_cur_rtv0_tex == g_scene_tex;
             const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;   // VR hands: the body is shown, head parts hidden
             if (fp_hiding && bm == 0 && g_fp_solo < 0) { g_fp_hidden_draws++; return -1; }       // the whole body, in every pass
             if (g_hands_on && g_hands_show >= 2 && fp_hiding && g_fp_solo < 0 && !g_eye2_cur->pal_hands) { g_fp_hidden_draws++; return -1; }   // floating hands: parts without hand bones are not drawn at all
@@ -4309,7 +4504,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     if (g_blitz_overlay && g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && g_eye2_cur == nullptr
-        && g_cur_rtv_n > 0 && g_ctx && texture_of(g_cur_rtv[0]) == g_scene_live_tex) {
+        && g_cur_rtv_n > 0 && g_ctx && g_cur_rtv0_tex == g_scene_live_tex) {
         ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
         bool blend = false; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
         ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
@@ -4321,20 +4516,20 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             else { ui_pass_begin(); if (g_ui_state == UI_PASS) g_ui_early = true; }
         }
     }
-    g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_scene_live_tex);
+    g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_scene_live_tex);
     if (g_ui_draw_now && g_ui_early) g_ui_early_draws++;
     if (!g_stereo && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
-        ID3D11Texture2D* gt = texture_of(g_cur_rtv[0]);
+        ID3D11Texture2D* gt = g_cur_rtv0_tex;
         if (gt) { const uint32_t c = ++g_flat_draws_per_target[gt]; if (c > g_flat_scene_draws) { g_flat_scene_draws = c; g_flat_scene_tex = gt; } }
     }
-    g_ui_flat_draw_now = (!g_ui_draw_now && g_ui_flat_pass && !g_xr_want && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == (g_stereo ? g_scene_live_tex : g_flat_scene_tex));
+    g_ui_flat_draw_now = (!g_ui_draw_now && g_ui_flat_pass && !g_xr_want && g_cur_rtv_n > 0 && g_cur_rtv0_tex == (g_stereo ? g_scene_live_tex : g_flat_scene_tex));
     if (g_ui_draw_now || g_ui_flat_draw_now) {
         // Experiment: skip UI draws whose slot-0 texture has a given size (the battle cursor sprite is
         // suspected to come from the 1024x1024 atlas; see design-notes "cursor census").
         if (g_pick_armed) ui_pick_check(g_ui_draws_frame);
         ui_hover_collect();
         if (g_atlas_dump_armed) {
-            ID3D11Texture2D* at = texture_of(g_cur_ps_srv[0]);
+            ID3D11Texture2D* at = ps_tex(0);
             if (at) {
                 D3D11_TEXTURE2D_DESC ad = {}; at->GetDesc(&ad);
                 bool seen = false; for (int i = 0; i < g_atlas_dumped_n; ++i) if (g_atlas_dumped[i] == at) seen = true;
@@ -4347,11 +4542,11 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
         if (g_c3_look && g_draw_kind == 1 && g_draw_n >= 6 && g_draw_n % 6 == 0) {   // cursor stage C3 (in battle only): is this battle.dds?
             const bool stale = g_c3_srv && g_frames - g_c3_seen_frame > k_c3_stale;
-            if (g_c3_srv && g_c3_seen_frame != g_frames && texture_of(g_cur_ps_srv[0]) == g_c3_tex) g_c3_seen_frame = g_frames;   // the held one is still in use
+            if (g_c3_srv && g_c3_seen_frame != g_frames && ps_tex(0) == g_c3_tex) g_c3_seen_frame = g_frames;   // the held one is still in use (R11: the real binding)
             else if (!g_c3_srv || stale) c3_atlas_scan();   // none yet, or stale: a new find swaps it
         }
         if (g_ui_hide_w != 0 || g_ui_hide_notex || g_ui_hide_cursor || g_hide_pointers) {
-            ID3D11Texture2D* t = texture_of(g_cur_ps_srv[0]);
+            ID3D11Texture2D* t = ps_tex(0);
             bool hide = false;
             if (t) { D3D11_TEXTURE2D_DESC d = {}; if (g_ui_hide_w != 0) { t->GetDesc(&d); if (d.Width == g_ui_hide_w && d.Height == g_ui_hide_h) hide = true; } }
             // R39: one shared read of the batch (up to k_ui_max_q quads); a quad goes into qmask when it is on the hide list or the
@@ -4436,7 +4631,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             char line[400]; size_t l = 0;
             l += snprintf(line + l, sizeof(line) - l, "      ui draw %u (frame draw %d):", g_ui_draws_frame, idx);
             for (int i = 0; i < 4; ++i) {
-                ID3D11Texture2D* t = texture_of(g_cur_ps_srv[i]); if (!t) continue;
+                ID3D11Texture2D* t = ps_tex(static_cast<UINT>(i)); if (!t) continue;
                 D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
                 l += snprintf(line + l, sizeof(line) - l, " s%d:%p %ux%u f%u", i, static_cast<void*>(t), d.Width, d.Height, static_cast<unsigned>(d.Format));
             }
@@ -4466,10 +4661,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         if (g_ui_flat_draw_now) return 0;   // flat mode: drawn where the game puts it
         return 1;   // into the UI texture (eye2_begin handles it)
     }
-    g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer);
+    g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_backbuffer);
     if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
     bool eye2 = g_stereo && (g_cur_rtv_n > 0 || g_cur_dsv != nullptr);
-    if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer) {
+    if (g_stereo && g_backbuffer && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_backbuffer) {
         g_bb_draws_seen++;
         if (g_overlay_phase) g_bb_draws_overlay++;
     }
@@ -4477,13 +4672,13 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     // full-resolution target that was not cleared, with blending on.
     int ret_flags = 0;
     if (g_stereo && !g_overlay_phase && g_cur_rtv_n == 1 && g_cur_dsv == nullptr && g_ctx) {
-        ID3D11Texture2D* ht = texture_of(g_cur_rtv[0]);
+        ID3D11Texture2D* ht = g_cur_rtv0_tex;   // R11c: the bind-time cache, no dereference of the tracked view
         bool first = true;
         for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == ht) { first = false; break; }
         if (first && ht && g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = ht;
-        D3D11_TEXTURE2D_DESC hd = {}; if (ht) ht->GetDesc(&hd);
+        D3D11_TEXTURE2D_DESC hd = {}; hd.Width = g_cur_rtv0_w; hd.Height = g_cur_rtv0_h; hd.SampleDesc.Count = g_cur_rtv0_samples;
         bool screen_shaped = false;                          // the backbuffer's aspect: shadow atlases (square) stay out
-        if (ht && g_backbuffer) { D3D11_TEXTURE2D_DESC bb; g_backbuffer->GetDesc(&bb); const double r = (double)hd.Width * bb.Height, l = (double)hd.Height * bb.Width; screen_shaped = fabs(r - l) < 0.05 * r; }
+        if (ht && g_backbuffer && g_bb_w && g_bb_h) { const double r = (double)hd.Width * g_bb_h, l = (double)hd.Height * g_bb_w; screen_shaped = fabs(r - l) < 0.05 * r; }   // R11b: the cached size
         if (first && ht && ht != g_backbuffer && hd.SampleDesc.Count == 1 && hd.Width >= 1280 && screen_shaped) {
             bool cleared = false;
             for (int i = 0; i < g_cleared_frame_n; ++i) if (g_cleared_frame[i] == ht) { cleared = true; break; }
@@ -4504,7 +4699,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     else if (g_cur_rtv_n > 0 && g_cur_rtv[0]) {            // keep the "already drawn into" list complete for the other passes too
-        ID3D11Texture2D* ht = texture_of(g_cur_rtv[0]);
+        ID3D11Texture2D* ht = g_cur_rtv0_tex;
         bool first = true;
         for (int i = 0; i < g_targets_frame_n; ++i) if (g_targets_frame[i] == ht) { first = false; break; }
         if (first && ht && g_targets_frame_n < 64) g_targets_frame[g_targets_frame_n++] = ht;
@@ -4513,8 +4708,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     // Scene-pass draw (multisampled target): the bisect tool and, for draws
     // without a camera image, the experiment switch; census lines for both.
     if (g_stereo && !g_overlay_phase && g_cur_rtv_n > 0 && g_cur_dsv != nullptr) {
-        ID3D11Texture2D* tt = texture_of(g_cur_rtv[0]);
-        D3D11_TEXTURE2D_DESC td = {}; if (tt) tt->GetDesc(&td);
+        ID3D11Texture2D* tt = g_cur_rtv0_tex;
+        D3D11_TEXTURE2D_DESC td = {}; td.SampleDesc.Count = g_cur_rtv0_samples;
         if (tt && td.SampleDesc.Count > 1) {
             const int sidx = (int)g_scene_draw_idx++;
             if (g_eye2_cur == nullptr) g_noimg_draws++;
@@ -4530,7 +4725,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
                 ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
                 int zwrite = -1; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = (dd.DepthEnable && dd.DepthWriteMask) ? 1 : 0; ds->Release(); }
-                char s0[48] = ""; { ID3D11Texture2D* t0 = texture_of(g_cur_ps_srv[0]); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); snprintf(s0, sizeof(s0), " s0 %p %ux%u", static_cast<void*>(t0), td.Width, td.Height); } }
+                char s0[48] = ""; { ID3D11Texture2D* t0 = ps_tex(0); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); snprintf(s0, sizeof(s0), " s0 %p %ux%u", static_cast<void*>(t0), td.Width, td.Height); } }
                 FrameEv e;
                 snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p%s n=%u",
                          sidx, idx, g_eye2_cur == nullptr ? "NO IMAGE" : (g_eye2_cur->kind == 1 ? "camera" : "product"),
@@ -4539,7 +4734,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 std::lock_guard<std::mutex> lock(g_mutex);
                 if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_scene_census_lines++; }
             }
-            if (g_pick_armed) { ID3D11Texture2D* t0 = texture_of(g_cur_ps_srv[0]); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); if (td.Width == 2048 && td.Height == 4096) g_pick_scene_text++; } }
+            if (g_pick_armed) { ID3D11Texture2D* t0 = ps_tex(0); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); if (td.Width == 2048 && td.Height == 4096) g_pick_scene_text++; } }
             if (g_bisect_mode == 1 && sidx >= g_bisect_a && sidx <= g_bisect_b) return -1;
             if (g_bisect_mode == 2 && (sidx < g_bisect_a || sidx > g_bisect_b)) return -1;
             if (g_eye2_cur == nullptr) {
@@ -4688,6 +4883,7 @@ static Twin* twin_of(ID3D11Texture2D* game) {
     }
 
     Twin t = {}; t.game = game; t.w = d.Width; t.h = d.Height; t.fmt = d.Format; t.samples = d.SampleDesc.Count; t.mips = d.MipLevels; t.bind = d.BindFlags; t.last_used = g_frames;
+    t.is_bb = game == g_backbuffer;
 
     D3D11_TEXTURE2D_DESC cd = d;
     cd.Usage = D3D11_USAGE_DEFAULT; cd.CPUAccessFlags = 0; cd.MiscFlags = 0;
@@ -4854,7 +5050,32 @@ static void ui_pass_begin() {
 /// Switches every current target to its twin, every sampled render texture
 /// to its twin, and uploads the eye-2 image of the object buffer if there is
 /// one. The managed detour then re-issues the draw.
-ID3D11ShaderResourceView* g_saved_ps_srv[16] = {};
+// R11a: eye 2 works from the REAL bindings, asked from the context (each one AddRef'd, so alive until released), never
+// from the tracked raw pointers (g_cur_rtv / g_cur_ps_srv may name views the game has released since: those are keys only).
+struct E2Saved { ID3D11RenderTargetView* rtv[8]; ID3D11DepthStencilView* dsv; UINT nrtv; ID3D11ShaderResourceView* srv[16]; UINT nsrv; bool om_swapped, srv_swapped, valid; };
+E2Saved g_e2s = {};
+static void e2_release() {   // every saved view released; nothing is restored
+    if (!g_e2s.valid) return;
+    for (UINT i = 0; i < 8; ++i) if (g_e2s.rtv[i]) g_e2s.rtv[i]->Release();
+    if (g_e2s.dsv) g_e2s.dsv->Release();
+    for (UINT i = 0; i < 16; ++i) if (g_e2s.srv[i]) g_e2s.srv[i]->Release();
+    g_e2s = {};
+}
+static void e2_save(bool want_srvs) {   // OMGetRenderTargets(8) + PSGetShaderResources(0, g_ps_srv_hi); the tracked copies only feed counters
+    e2_release();
+    g_ctx->OMGetRenderTargets(8, g_e2s.rtv, &g_e2s.dsv);
+    for (UINT i = 0; i < 8; ++i) if (g_e2s.rtv[i]) g_e2s.nrtv = i + 1;
+    g_e2s.nsrv = want_srvs ? (g_ps_srv_hi < 16 ? g_ps_srv_hi : 16) : 0;   // the UI branch never swaps SRVs (B9-6)
+    if (g_e2s.nsrv) g_ctx->PSGetShaderResources(0, g_e2s.nsrv, g_e2s.srv);
+    if (g_e2s.rtv[0] != g_cur_rtv[0]) g_e2_track_mismatch++;                       // pointer compares, no dereference
+    for (UINT i = 0; i < g_e2s.nsrv; ++i) if (g_e2s.srv[i] != g_cur_ps_srv[i]) { g_e2_srv_mismatch++; break; }
+    g_e2s.valid = true;
+}
+static void e2_restore() {   // MUST run while g_in_eye2 is still true: the restore passes our managed detours (on_rendertargets_uav / on_ps_srvs)
+    if (g_e2s.om_swapped)  g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(g_e2s.nrtv, g_e2s.rtv, g_e2s.dsv, g_e2s.nrtv, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // up to 8 targets, UAVs kept (R42)
+    if (g_e2s.srv_swapped) g_ctx->PSSetShaderResources(0, g_e2s.nsrv, g_e2s.srv);
+    e2_release();
+}
 ID3D11BlendState* g_saved_blend = nullptr; float g_saved_blend_factor[4]; UINT g_saved_sample_mask = 0xFFFFFFFF;
 bool g_ui_pass_active_draw = false;
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
@@ -4863,72 +5084,75 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     if (g_ui_draw_now || g_imgui_draw_now) {
         ID3D11RenderTargetView* target = g_imgui_draw_now ? g_imgui_rtv : g_ui_rtv;
         if (target == nullptr || g_ctx == nullptr) return 0;
-        g_in_eye2 = true; g_ui_pass_active_draw = true;
+        e2_save(false);
+        g_in_eye2 = true; g_ui_pass_active_draw = true;   // before the bind: OMSetRenderTargets passes our detour, which must ignore it
         for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
-        for (int i = 0; i < 16; ++i) g_saved_ps_srv[i] = g_cur_ps_srv[i];
         g_ctx->OMGetBlendState(&g_saved_blend, g_saved_blend_factor, &g_saved_sample_mask);
         ID3D11RenderTargetView* rts[1] = { target };
-        g_ctx->OMSetRenderTargets(1, rts, nullptr);            // no depth: draw order is the layering
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // no depth: draw order is the layering; UAVs kept (R42, B9-4)
+        g_e2s.om_swapped = true;
         g_ctx->OMSetBlendState(g_ui_blend, nullptr, 0xFFFFFFFF);
         return 1;
     }
     if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
-    if (g_cur_rtv_n == 0 && g_cur_dsv == nullptr) { g_e2_begin_fail++; return 0; }
+    e2_save(true);
+    if (g_e2s.nrtv == 0 && g_e2s.dsv == nullptr) { e2_release(); g_e2_begin_fail++; return 0; }
     const bool split = split_ok(g_eye2_cur);
-    if (split && pass == 0) {   // the right hand into eye 1: same targets and inputs, only the part's own buffer changes
+    if (split && pass == 0) {   // the right hand into eye 1: same targets and inputs, only the part's own buffer changes (nothing swapped: the end only releases)
         g_in_eye2 = true; g_split_pass = true;
         for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
-        for (int i = 0; i < 16; ++i) g_saved_ps_srv[i] = g_cur_ps_srv[i];
         for (int sl = 0; sl < 14; ++sl) if (g_vs_cb[sl] == g_eye2_cur->cb) { g_eye2_slots[sl] = g_eye2_cur; g_ctx->UpdateSubresource(g_eye2_cur->cb, 0, nullptr, g_eye2_cur->eye1b.data(), 0, 0); break; }
         return 1;
     }
     g_split_pass = false;
     const bool right_variant = split && pass == 2;
 
-    ID3D11RenderTargetView* rtvs[4] = {};
-    for (UINT i = 0; i < g_cur_rtv_n; ++i) rtvs[i] = twin_rtv(g_cur_rtv[i]);
-    ID3D11DepthStencilView* dsv = twin_dsv(g_cur_dsv);
-    const bool to_bb = g_backbuffer && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_backbuffer;
+    // RTV0's texture: the bind-time cache when the real view is the one the detour saw, else from the real view (G2 tweak 1)
+    ID3D11Texture2D* t0 = g_e2s.nrtv ? (g_e2s.rtv[0] == g_cur_rtv[0] ? g_cur_rtv0_tex : texture_of(g_e2s.rtv[0])) : nullptr;
+    ID3D11RenderTargetView* rtvs[8] = {};
+    { Twin* tw0 = t0 ? twin_of(t0) : nullptr; rtvs[0] = tw0 ? tw0->rtv : nullptr; }
+    for (UINT i = 1; i < g_e2s.nrtv; ++i) rtvs[i] = twin_rtv(g_e2s.rtv[i]);
+    ID3D11DepthStencilView* dsv = twin_dsv(g_e2s.dsv);
+    const bool to_bb = g_backbuffer && t0 == g_backbuffer;
     if (to_bb) { g_bb_begin++; if (rtvs[0] == nullptr) g_bb_twin_null++; }
-    if (g_cur_rtv_n > 0 && rtvs[0] == nullptr) { g_e2_begin_fail++; return 0; }
-    if (g_cur_dsv != nullptr && dsv == nullptr) g_e2_no_depth_twin++;   // R12: eye 2 draws without depth here (unchanged); counted
+    if (g_e2s.nrtv > 0 && rtvs[0] == nullptr) { e2_release(); g_e2_begin_fail++; return 0; }
+    if (g_e2s.dsv != nullptr && dsv == nullptr) g_e2_no_depth_twin++;   // R12: eye 2 draws without depth here (unchanged); counted
 
-    g_in_eye2 = true;
-    g_ctx->OMSetRenderTargets(g_cur_rtv_n, rtvs, dsv);
+    g_in_eye2 = true;   // BEFORE the bind: OMSetRenderTargetsAndUnorderedAccessViews passes the managed detour (on_rendertargets_uav must ignore it)
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(g_e2s.nrtv, rtvs, dsv, g_e2s.nrtv, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+    g_e2s.om_swapped = true;
     {
-        ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
+        ID3D11Texture2D* gt = t0;
         if (gt != g_prev_e2_target) { g_prev_e2_target = gt; g_prev_e2_run = 0; }
         g_prev_e2_run++;
-        if (g_debug_red && gt && g_cur_dsv != nullptr && rtvs[0] != nullptr && g_red_done_frame[gt] != g_frames) {
+        if (g_debug_red && gt && g_e2s.dsv != nullptr && rtvs[0] != nullptr && g_red_done_frame[gt] != g_frames) {
             g_red_done_frame[gt] = g_frames;
             const float red[4] = { 1.f, 0.f, 0.f, 1.f };
             g_ctx->ClearRenderTargetView(rtvs[0], red); g_red_clears++;
         }
-        if (gt && g_cur_dsv != nullptr) {
+        if (gt && g_e2s.dsv != nullptr) {
             const uint32_t c = ++g_draws_per_target[gt];
             if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
         }
     }
 
-    ID3D11ShaderResourceView* srvs[16];
+    ID3D11ShaderResourceView* srvs[16] = {};
     bool any = false;
     char inputs[160] = ""; size_t il = 0;
-    for (int i = 0; i < 16; ++i) {
-        g_saved_ps_srv[i] = g_cur_ps_srv[i];
-        ID3D11ShaderResourceView* tw = twin_srv(g_cur_ps_srv[i]);
-        srvs[i] = tw ? tw : g_cur_ps_srv[i];
+    for (UINT i = 0; i < g_e2s.nsrv; ++i) {
+        ID3D11ShaderResourceView* gv = g_e2s.srv[i];
+        ID3D11ShaderResourceView* tw = twin_srv(gv);
+        srvs[i] = tw ? tw : gv;
         if (tw) any = true;
-        if (g_frame_live && g_cur_ps_srv[i] != nullptr) {
+        if (g_frame_live && gv != nullptr && il < sizeof(inputs) - 1) {
             // name the input: a rendered texture (twinned or not) by size, else "tex"
-            ID3D11Texture2D* t = texture_of(g_cur_ps_srv[i]);
+            ID3D11Texture2D* t = texture_of(gv);
             D3D11_TEXTURE2D_DESC d = {}; if (t) t->GetDesc(&d);
             const bool rendered = (d.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) != 0;
             const bool copied   = !rendered && g_twins.find(t) != g_twins.end();
-            if (rendered || copied) {
-                il += snprintf(inputs + il, sizeof(inputs) - il, " s%d:%p %ux%u f%u%s", i, static_cast<void*>(t), d.Width, d.Height,
+            if (rendered || copied)
+                il += snprintf(inputs + il, sizeof(inputs) - il, " s%u:%p %ux%u f%u%s", i, static_cast<void*>(t), d.Width, d.Height,
                                static_cast<unsigned>(d.Format), tw ? "" : (rendered ? "!NO-TWIN" : "!NO-TWIN(copy)"));
-                if (il >= sizeof(inputs) - 1) break;
-            }
         }
     }
     if (g_frame_live && inputs[0]) {
@@ -4937,8 +5161,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
         FrameEv e; strncpy_s(e.text, t, _TRUNCATE);
         if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
     }
-    if (any) g_ctx->PSSetShaderResources(0, 16, srvs);
-
+    if (any) { g_ctx->PSSetShaderResources(0, g_e2s.nsrv, srvs); g_e2s.srv_swapped = true; }
     // Upload the eye-2 image of every bound VS constant buffer that has one,
     // whichever slot it sits in: the shader may take the camera from a slot
     // other than 0.
@@ -4969,8 +5192,8 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
 /// Restores the game's targets, sampled textures and the eye-1 image.
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); if (g_qpf.QuadPart && g_e2_t0.QuadPart) g_e2_ms_this_frame += (t1.QuadPart - g_e2_t0.QuadPart) * 1000.0 / g_qpf.QuadPart; }
-    if (!g_in_eye2 || g_ctx == nullptr) return;
-    g_ctx->OMSetRenderTargets(g_cur_rtv_n, g_cur_rtv, g_cur_dsv);
+    if (!g_in_eye2 || g_ctx == nullptr) { e2_release(); return; }
+    e2_restore();   // R11a: the saved real bindings, while g_in_eye2 is still true (the restore passes our detours)
     if (g_ui_pass_active_draw) {
         g_ui_pass_active_draw = false;
         g_ctx->OMSetBlendState(g_saved_blend, g_saved_blend_factor, g_saved_sample_mask);
@@ -4978,7 +5201,6 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
         g_in_eye2 = false;
         return;
     }
-    g_ctx->PSSetShaderResources(0, 16, g_saved_ps_srv);
     if (!g_debug_leave) {
         for (int sl = 0; sl < 14; ++sl) {
             if (g_eye2_slots[sl] != nullptr) g_ctx->UpdateSubresource(g_eye2_slots[sl]->cb, 0, nullptr, g_eye2_slots[sl]->eye1.data(), 0, 0);
@@ -4991,7 +5213,11 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
 /// Tracks the pixel shader's resources, and in eye-2 mode is skipped.
 extern "C" __declspec(dllexport) void ffxvr_on_ps_srvs(unsigned start, unsigned n, void* const* views) {
     if (g_in_eye2) return;
-    for (unsigned i = 0; i < n && start + i < 16; ++i) g_cur_ps_srv[start + i] = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
+    for (unsigned i = 0; i < n && start + i < 16; ++i) {
+        ID3D11ShaderResourceView* v = views ? static_cast<ID3D11ShaderResourceView*>(views[i]) : nullptr;
+        g_cur_ps_srv[start + i] = v;
+        if (v && start + i + 1 > g_ps_srv_hi) g_ps_srv_hi = start + i + 1;   // R11a: eye 2 saves and restores this many slots
+    }
     // The first time this frame the game reads the texture that took the
     // scene pass, the scene is complete: snapshot both eyes now.
     if (views == nullptr || !g_stereo || !snap_wanted()) return;   // R3: no per-bind texture_of unless a snapshot is wanted
@@ -5073,7 +5299,7 @@ static void ui_pass_open() {
 extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth, const float* color, unsigned flags, float d, unsigned char st) {
     if (g_in_eye2 || g_ctx == nullptr) return;
     if (!g_stereo) {   // flat mode: the depth clear on the resolved scene target opens the UI pass
-        if (depth && g_ui_flat_resolved && g_cur_rtv_n > 0 && texture_of(g_cur_rtv[0]) == g_flat_scene_tex) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }
+        if (depth && g_ui_flat_resolved && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_flat_scene_tex) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }
         return;
     }
     if (!depth) {
@@ -5082,7 +5308,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
         snapshot_if_scene(ct, 3);   // about to be wiped: last chance
     }
     if (g_scene_live_tex && g_scene_live_draws >= 20) {
-        ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? texture_of(g_cur_rtv[0]) : nullptr;
+        ID3D11Texture2D* bound = g_cur_rtv_n > 0 ? g_cur_rtv0_tex : nullptr;
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
         else if (depth && bound == g_scene_live_tex) {
             g_ui_depth_clears_frame++;
@@ -5299,7 +5525,11 @@ extern "C" __declspec(dllexport) int ffxvr_measure() {
     return 0;
 }
 
-extern "C" __declspec(dllexport) void ffxvr_set_backbuffer(void* tex) { g_backbuffer = static_cast<ID3D11Texture2D*>(tex); }
+extern "C" __declspec(dllexport) void ffxvr_set_backbuffer(void* tex) {   // unused by the managed side; kept consistent with identification (B9-7)
+    ID3D11Texture2D* t = static_cast<ID3D11Texture2D*>(tex);
+    if (t) { bb_attach(t); D3D11_TEXTURE2D_DESC d; t->GetDesc(&d); g_bb_w = d.Width; g_bb_h = d.Height; g_bb_fmt = d.Format; g_bb_ident_gen = g_bb_rsz_begin_n; }
+    g_backbuffer = t;
+}
 
 /// Eye 2's final image: the twin of the backbuffer, as a shader resource.
 extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
@@ -5307,6 +5537,7 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_final_srv() {
     auto it = g_twins.find(g_backbuffer);
     if (it == g_twins.end() || it->second.rtv == nullptr) return nullptr;
     Twin& t = it->second;
+    if (t.w != g_bb_w || t.h != g_bb_h || t.fmt != g_bb_fmt) return nullptr;   // B9R-2: a stale twin at a reused address is about to be swept: never hand ImGui its SRV
     auto sit = t.srvs.find(nullptr);
     if (sit != t.srvs.end()) return sit->second;
     ID3D11ShaderResourceView* nv = nullptr;
@@ -5434,8 +5665,8 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     if (in == nullptr) return false;
 
     // Save the pipeline state we touch, run the pass, restore.
-    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr;
-    g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    ID3D11RenderTargetView* o_rtv[8] = {}; ID3D11DepthStencilView* o_dsv = nullptr;
+    g_ctx->OMGetRenderTargets(8, o_rtv, &o_dsv);
     UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
     ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
     g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
@@ -5449,7 +5680,7 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
 
     InEye2 guard;                                      // our hooks ignore this pass, restore included
     ID3D11RenderTargetView* rt[1] = { dst };
-    g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader((keep_alpha && g_copy_ps_alpha) ? g_copy_ps_alpha : g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
@@ -5458,7 +5689,7 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->Draw(3, 0);
 
-    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv);
+    om_restore_keep(o_rtv, o_dsv);
     if (nvp) g_ctx->RSSetViewports(1, &o_vp);
     g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
     g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
@@ -5552,7 +5783,7 @@ static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h
         if (!g_ptr_vb || !g_ptr_ib) return 0;
     }
     // save what we touch
-    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    ID3D11RenderTargetView* o_rtv[8] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(8, o_rtv, &o_dsv);
     UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
     ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
     g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
@@ -5567,7 +5798,7 @@ static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h
     ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
 
     InEye2 guard;
-    ID3D11RenderTargetView* rt[1] = { dst }; g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    ID3D11RenderTargetView* rt[1] = { dst }; g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
     g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST); g_ctx->IASetIndexBuffer(g_ptr_ib, DXGI_FORMAT_R16_UINT, 0);
@@ -5612,7 +5843,7 @@ static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h
         }
     }
     // restore
-    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv); if (nvp) g_ctx->RSSetViewports(1, &o_vp);
+    om_restore_keep(o_rtv, o_dsv); if (nvp) g_ctx->RSSetViewports(1, &o_vp);
     g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
     g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
     g_ctx->IASetVertexBuffers(0, 8, o_vb, o_stride, o_off); g_ctx->IASetIndexBuffer(o_ib, o_ifmt, o_ioff);
@@ -5706,7 +5937,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, VP, 64); g_orig_unmap(g_ctx, g_mk_cb, 0); }
 
     // Save, draw, restore (the subset of state we touch).
-    ID3D11RenderTargetView* o_rtv[4] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(4, o_rtv, &o_dsv);
+    ID3D11RenderTargetView* o_rtv[8] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(8, o_rtv, &o_dsv);
     UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
     ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
     g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
@@ -5721,7 +5952,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
 
     InEye2 guard;
     ID3D11RenderTargetView* rt[1] = { dst };
-    g_ctx->OMSetRenderTargets(1, rt, nullptr);
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->VSSetShader(g_mk_vs, nullptr, 0); g_ctx->PSSetShader(g_mk_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
@@ -5732,7 +5963,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     { ID3D11ShaderResourceView* sv = g_c3_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp); }   // C3: battle.dds (null when not held: no textured vertices then)
     g_ctx->Draw(static_cast<UINT>(nv), 0);
 
-    g_ctx->OMSetRenderTargets(4, o_rtv, o_dsv);
+    om_restore_keep(o_rtv, o_dsv);
     if (nvp) g_ctx->RSSetViewports(1, &o_vp);
     g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
     g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
@@ -5797,7 +6028,7 @@ extern "C" __declspec(dllexport) void* ffxvr_eye2_srv(int source) {
     ID3D11Texture2D* src = nullptr;
     if (source == 1) src = g_snap_tex;
     else if (source == 2) src = g_snap_game;
-    else if (g_backbuffer) { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) src = it->second.tex; }
+    else if (g_backbuffer) { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end() && it->second.w == g_bb_w && it->second.h == g_bb_h && it->second.fmt == g_bb_fmt) src = it->second.tex; }   // B9R-2: a stale twin counts as absent
     ID3D11ShaderResourceView* v = opaque_copy(source, src);   // alpha forced to 1 for the overlay
     if (v) return v;
     if (source == 1) return g_snap_srv;
@@ -5945,6 +6176,7 @@ static void leave_xr_state() {
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
     g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
     g_lowres = false;   // no stale low-resolution line when the headset comes back on
+    g_hap[0] = g_hap[1] = HapHand{};   // the session is gone: nothing to stop
     diag("xr: headset off, VR-only state reset");
 }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
@@ -6017,6 +6249,14 @@ extern "C" __declspec(dllexport) int ffxvr_vrpad_status(float* out24, char* prof
     return g_vrpad.ready ? 1 : 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_haptic(int hand, float amplitude, float seconds) { xr_haptic(hand, amplitude, seconds); }
+/// Rumble to haptics: on/off and the strength (0..1), every frame (and once at module init, before ffxvr_init installs the
+/// XInputSetState hook). Returns the overlay's status: decoded left byte | right byte << 8 | source << 16 | hooked << 20.
+extern "C" __declspec(dllexport) int ffxvr_haptics_set(int on, float gain) {
+    g_haptics = on != 0; g_haptics_gain = !(gain >= 0.f) ? 0.f : gain > 1.f ? 1.f : gain;
+    static bool prev_on = false; const bool rising = g_haptics && !prev_on; prev_on = g_haptics;
+    if (g_haptics && !g_xis_hooked && g_device != nullptr && (!g_xis_install_failed || rising)) install_xinput_set_hook();   // switched on mid-session; after a failed attempt only on an off -> on toggle (HP-1)
+    return g_hap_b[0] | (g_hap_b[1] << 8) | (g_hap_src << 16) | ((g_xis_hooked ? 1 : 0) << 20);
+}
 extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, float* yaw_cam_deg, float* delta_deg, uint32_t* hook_calls, int* hooked) {
     if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
     if (delta_deg) *delta_deg = g_move_delta * 57.29578f; if (hook_calls) *hook_calls = g_xi_hook_calls; if (hooked) *hooked = g_xi_hooked ? 1 : 0;
@@ -6184,7 +6424,8 @@ static void detect_cut() {
 // headset on; logged once per change; shown by the overlay through ffxvr_lowres_status.
 static void lowres_check() {
     if (g_backbuffer == nullptr || !xr_active()) { g_lowres = false; return; }
-    D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+    D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);   // non-null: alive (R11b sentinel)
+    g_bb_w = bd.Width; g_bb_h = bd.Height; g_bb_fmt = bd.Format;
     unsigned ew = 0, eh = 0; xr_eye_size(&ew, &eh);
     if (ew == 0 || eh == 0) { g_lowres = false; return; }
     const bool low = bd.Width < ew || bd.Height < eh;
@@ -6195,6 +6436,48 @@ static void lowres_check() {
     g_lowres = low;
 }
 
+// Rumble to haptics. The PC port sends XInputSetState(round(b * 65535.0)) truncated to 16 bits, so a PS2 motor byte b >= 1
+// arrives as 65536 - b (65535 for 1, 65282 for 254: on/off at full strength on a real pad). Decoded back to b here; a value
+// outside that band is taken as a plain linear level (in case the quirk is ever absent).
+static uint8_t rumble_byte(uint32_t v) {
+    if (v == 0) return 0;
+    if (v >= 65282u) return static_cast<uint8_t>(65536u - v);
+    const uint32_t b = v * 254u / 65535u; return static_cast<uint8_t>(b ? b : 1);
+}
+/// Every xr_tick (render thread). Left motor (large) -> left controller, right motor (small) -> right controller; amplitude
+/// gain * max(0.15, sqrt(b / 254)); 150 ms pulses renewed every 100 ms (or on a change of more than 0.05) while a motor runs,
+/// a stop when it ends. Quiet when haptics are off, the session is not focused, or a physical pad is connected while the VR
+/// pad is off (then only the pad rumbles). Source: the game's XInputSetState calls; if none came for 500 ms, the game's own
+/// pad block (port 0: +0x9D the in-game Vibration option, +0xFE large, +0xFF small; FhUtil 0xF30288). Either way the
+/// in-game Vibration option is respected: with it off the game sends no motor values (+0x9D gates them).
+static void haptics_tick() {
+    const ULONGLONG now = GetTickCount64(); const DWORD t32 = GetTickCount();
+    uint8_t b[2] = { 0, 0 }; int src = 0;
+    const bool pad_present = g_xi_seen[0].res == ERROR_SUCCESS && t32 - g_xi_seen[0].tick < 1000;   // the real XInput's answer for pad 0, before the VR pad
+    const bool on = g_haptics && g_haptics_gain > 0.f && g_xr_active && xr_focused() && (g_vrpad_enabled || !pad_present);
+    if (on) {
+        // The game's pad block, port 0 (HP-2/HP-3, guarded reads): +0x9D the in-game Vibration option, a hard gate every tick
+        // (the game keeps sending its last motor values after the option or its input gate closes); +0xFE / +0xFF the motor bytes
+        static uintptr_t blk = 0; if (blk == 0) blk = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) + 0xF30288;
+        uint8_t en = 0, pb[2] = { 0, 0 };
+        const bool blk_ok = wd_read(blk + 0x9D, &en, 1) && wd_read(blk + 0xFE, pb, 2);
+        const LONG tk = g_rumble_tick; const uint32_t rl = (uint32_t)g_rumble_l, rr = (uint32_t)g_rumble_r;
+        if (blk_ok && en == 0) src = 3;   // Vibration off in the game's Config: nothing
+        else if (tk != 0 && t32 - (DWORD)tk < 500 && (rl | rr) != 0) { b[0] = rumble_byte(rl); b[1] = rumble_byte(rr); src = 1; }
+        else if (blk_ok && (pb[0] | pb[1]) != 0) { b[0] = pb[0]; b[1] = pb[1]; src = 2; }   // no SetState, or 0/0 behind the game's input gate: the block's bytes
+        else if (tk != 0 && t32 - (DWORD)tk < 500) src = 1;   // the game sends silence
+        if (!g_hap_first_logged && src == 1 && (rl | rr) != 0) { g_hap_first_logged = true; diag("haptics: first rumble this session: raw XInput left %u right %u -> motor bytes %u %u (65282..65535 = the PC port's encoding of 254..1)", rl, rr, b[0], b[1]); }   // HP-4
+        else if (!g_hap_first_logged && src == 2) { g_hap_first_logged = true; diag("haptics: first rumble this session from the game's pad block: motor bytes %u %u (no XInputSetState values)", b[0], b[1]); }
+    }
+    for (int h = 0; h < 2; ++h) {
+        HapHand& s = g_hap[h];
+        float amp = 0.f;
+        if (b[h]) { amp = g_haptics_gain * fmaxf(0.15f, sqrtf(b[h] / 254.f)); if (amp > 1.f) amp = 1.f; }
+        if (amp <= 0.f) { if (s.active) { xr_haptic_stop(h); s.active = false; } continue; }
+        if (!s.active || fabsf(amp - s.a_last) > 0.05f || now >= s.renew_at) { xr_haptic(h, amp, 0.15f); s.a_last = amp; s.renew_at = now + 100; s.active = true; }
+    }
+    g_hap_b[0] = b[0]; g_hap_b[1] = b[1]; g_hap_src = src;
+}
 static void xr_tick() {
     if (!g_xr_want) return;
     lowres_check();
@@ -6306,6 +6589,7 @@ static void xr_tick() {
     motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
     xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
+    haptics_tick();   // rumble to haptics (render thread: every xrApplyHapticFeedback stays here, next to xrSyncActions)
     if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; diag("xr: recentre (headset gesture)"); }   // same as Home
     gesture_tick();
     // What the next frame renders with.
@@ -6314,7 +6598,7 @@ static void xr_tick() {
     const ULONGLONG now_ms = GetTickCount64();
     if (!xr_active()) {   // the session went away (the runtime stopped it): back to flat
         leave_xr_state();
-        if (now_ms - g_xr_started_at < k_xr_short_life_ms) {   // died at once: back off as for a failed start
+        if (xr_take_stuck() || now_ms - g_xr_started_at < k_xr_short_life_ms) {   // died at once, or a stuck swapchain (R8-3): back off as for a failed start
             g_xr_fails++; g_xr_retry_at = now_ms + (g_xr_fails < 3 ? 2000 : 5000);
             if (g_xr_fails <= 2 || g_xr_fails % 60 == 0) diag("xr: session ended %.1f s after starting; counted as failed attempt %u", (now_ms - g_xr_started_at) / 1000.0, g_xr_fails);
         }

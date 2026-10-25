@@ -21,9 +21,13 @@ Tested on one setup only: Windows 11, an RTX 3080 Ti, and a **Quest 3 over Virtu
 | `tools\game-settings.ps1`, `import-steam-saves.ps1`, `export-save-to-steam.ps1`, `install-texture-pack.ps1` | Optional extras (section 6) |
 | `LICENSE`, `THIRD-PARTY-NOTICES` | Licences (MIT for FFX VR; Apache-2.0 for the bundled OpenXR loader) |
 
-Extract it **anywhere outside the game folder**, e.g. `Documents\ffx-vr`. Run every command
-below from that folder, in PowerShell, **not as administrator**: Fahrenheit refuses to start
-when elevated.
+Extract it **anywhere outside the game folder**, e.g. `Documents`. Inside you'll find a folder
+`ffx-vr-{VERSION}` with this README and `tools\` in it. **Run every command below from that
+folder** (open it in Explorer, then right-click an empty spot > *Open in Terminal*; on Windows 10,
+Shift+right-click > *Open PowerShell window here*, or type `powershell` in Explorer's address bar
+and press Enter), in PowerShell,
+**not as administrator**: Fahrenheit refuses to start when elevated. Pick a folder whose name has
+no `[` or `]` in it: Windows PowerShell may not run scripts from there.
 
 ---
 
@@ -84,7 +88,7 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
   `$FfxvrGameOverride = 'D:\SteamLibrary\steamapps\common\FINAL FANTASY FFX&FFX-2 HD Remaster'`.
   The folder must contain `FFX.exe`.
 - **Updating:** extract the new zip and run its `install-mod.ps1`. Your settings
-  (`ffxvr.ini`) are kept.
+  (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game closed.
 - **Uninstalling:** `install-mod.ps1 -Uninstall`.
 
 ---
@@ -141,7 +145,7 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 | What | Command |
 |---|---|
 | **Lighter render resolution**: 2560x1440 instead of 4K, much easier on the GPU (the mod does its own anti-aliasing) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` puts yours back) |
-| **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in; `.\tools\export-save-to-steam.ps1` copies one back |
+| **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
 
 ### Later, if you like: HD textures
 

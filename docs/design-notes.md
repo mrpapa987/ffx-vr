@@ -1738,7 +1738,7 @@ OpenXR robustness (review items R8a, R15, R41, the watchdog wake, xrEndSession).
 - Small ones from the review: the hold is cleared when the runtime stops the
   session and its episode counter on xr_stop; the watchdog's handles are closed
   only once the thread has exited.
-- **Still open (for the R8b build):** hold the last frame on swapchain timeouts
+- **Done in R8b (branch `night`, see "R8b" below):** hold the last frame on swapchain timeouts
   too (and the UI / ImGui quads); escalate a swapchain whose wait keeps failing
   with a hard error (not a timeout): after ~300 consecutive failures (~5 s) set
   the status "swapchain N stuck" and xr_stop, so build 1's back-off restarts the
@@ -1875,6 +1875,93 @@ Review fixes:
 - diag() retries a contended open off the render thread.
 - The pan-scan map test compares raw bytes, and map changes bypass the line cap.
 - The follow actor is cleared when there is no actor table.
+
+## Build 8: settings file
+
+These are G1-final's settings items: R21, R22 and R27-R33.
+
+### When the file is read
+- **At start** (`settings_load`, the only place that sleeps):
+  - Order: the path, then the bone labels, then a read retried 10 × 100 ms, then a validated parse, then the launch effects (autostart, start view).
+  - The file's mtime, length and raw text are remembered. So the first frame does not reload, and the first write of a session still writes the canonical form and makes `.bak`.
+  - If the file parses fewer than 10 known keys while a `.bak` exists, there is a warning in core.log and an orange line in the overlay ("looks truncated").
+  - The `.bak` is not loaded automatically, and it is not overwritten that session.
+- **While playing** (`settings_reload_check`, once a second of wall time):
+  - A hand edit is read back, with no sleep.
+  - The mtime and length are marked as seen only after a successful read, so a locked file is retried. A read failure is logged once, and recovery is logged too.
+  - Only the keys the edit changed are applied, compared with the file as we last read or wrote it. With nothing unsaved, that is the same as reading the whole file. An overlay change not yet written is kept, and is written together with the edit.
+  - File values win, with no launch effects. A new `headset_autostart=0` stays 0. `world_scale` goes to the seat/diorama scale even in first or third person.
+  - Whether the overlay is open stays as it is for the session.
+  - The file stays as typed, comments included, until a setting really changes.
+  - A deleted ini is not recreated until the next change.
+
+### Parsing (R27, R32)
+- A bad value keeps the current one, and each load or reload logs one "ignored bad values" line.
+- Numbers use the invariant culture and are clamped. The ranges are G1's, with `follow_rate` 1..360 and the anchor smoothing values 0..500 / 0..3000 ms.
+- Bools accept 1/0, true/false, yes/no and on/off.
+- U+2212 reads as '-', and ints are written in the invariant culture.
+
+### Saving (R21, R29, R30)
+- **When it writes:** a snapshot every 0.5 s, written once the text has been the same for 1 s. A slider drag therefore writes once, after the release.
+- **How it writes:**
+  - Under a lock, because the ExitProcess detour flushes from its own thread first thing.
+  - Never over a hand edit: if the file's mtime or length moved since our last read or write, nothing is written and the file is reloaded.
+  - Temp file, then `Flush(true)`, then `File.Move(overwrite)`.
+- **The `.bak`:** made once a session, only from a startup file that parsed fully (10+ known keys), in its own try. A failed backup never blocks saving.
+- **Failures:** a failed write is logged once and retried every 5 s; "saving works again" is logged on recovery. The `.tmp` is removed on failure.
+
+### Per-frame savings (R22)
+- `name_is`: one 16-byte read, no allocation. The "not found" result is not cached, as agreed.
+- `_in_blitz` is cached on map change, with an ordinal compare.
+- The pick result is polled only for 3 s (plus 3 frames) after F9.
+- The head-parts mask is cached.
+
+### Timers (R33)
+- The ini check runs on `_now`, which is ImGui time.
+- The battle-follow waits stay frame-based, and the comment now says why.
+
+Review fixes (build 8):
+- **A truncated startup ini is not rewritten at launch.** It stays short until a real change, so the note repeats every session. The `.bak` is copied once to `ffxvr.ini.bak-keep`, which nothing overwrites or loads. The note also shows when native failed.
+- **The `.bak` is refreshed** through its own temp file, with ReadOnly cleared, because File.Copy carries the attribute over.
+- **Before every save,** the file's content is compared with what we last read or wrote, not only its mtime and length.
+- **A reloaded value that had to be ignored or clamped** gets the corrected text written. Clamping is now logged too.
+- **The reload body runs under the same lock as saving.** After the exit flush, no other save runs.
+- **A failed start-up read is completed by the reload** ("read at last"; the launch options apply from the next start). A file deleted during that read counts as "no file yet".
+- **A read-only ini fails fast,** with no temp file or fsync per retry.
+- **The exit flush exists only while the D3D/ExitProcess detours are installed,** i.e. when native init succeeded. Without them, a change made in the last ~1.5 s before quitting is lost.
+
+## Build 9: eye-2 bindings (R11)
+
+This is G4-final R11 (a)-(c) and the R42 sub-item, with the research updates from SYNTHESIS 5.1.
+
+- **(a) Eye 2 uses the real bindings.** `eye2_begin` saves the views the context really has bound, through `OMGetRenderTargets(8)` and `PSGetShaderResources(0, highest slot the game binds)`.
+  - Each saved view is AddRef'd, so it stays alive until we release it.
+  - The twins are derived from those views, and `eye2_end` restores the same views.
+  - The tracked `g_cur_rtv` / `g_cur_ps_srv` raw pointers are now only keys for comparisons; they are never dereferenced. Counters show how often they differ from the real bindings.
+  - `g_in_eye2` is set before the twin bind and cleared only after the restore, because the restore passes our own `OMSetRenderTargetsAndUAVs` / `PSSetShaderResources` detours.
+  - Restores take up to 8 targets and keep the UAVs (R42). That covers eye 2, the copy pass and both marker passes.
+- **(b) The backbuffer has a destruction sentinel.**
+  - At identification, an IUnknown is attached to the backbuffer texture with `SetPrivateDataInterface`. It holds no reference on the texture.
+  - When the texture is destroyed, the sentinel's last Release nulls `g_backbuffer`, with an interlocked compare-exchange, and queues the dead texture's twin for release two frames later.
+  - So a non-null `g_backbuffer` is alive, and the per-tick GetDesc stays (it also refreshes the cached size and format).
+  - Per the research, the game re-acquires its backbuffer on the main thread, in 0x599210, after flushing the render thread. Our OMSetRenderTargets hook therefore identifies the new backbuffer, and attaches its sentinel, on the main thread while the render thread is idle. Nothing in that path relies on being on the render thread.
+- **The 0x599210 hook is a second, hard signal.** Build 7's hook on 0x599210 now calls `ffxvr_bb_resized(w, h)` before the original, using interlocked stores only.
+  - At the next begin_frame, a backbuffer identified before that call is dropped, in case the sentinel did not fire. It is re-identified at the next bind.
+  - With `diag_build7=0` the hook does not exist, and the sentinel alone covers this.
+- **The backbuffer format is 28 (R8G8B8A8_UNORM).** It is cached alongside the size. No colour path changes.
+- **(c) Bind-time caches.** RTV0's texture, size and sample count are taken when the view is bound (`g_cur_rtv0_*`), and on_draw / clear_twin use them.
+  - The UI and census paths read slot textures through `ps_tex(slot)`, which asks the context.
+  - The history-draw aspect test uses the cached backbuffer size.
+- **ABI 7:** `ffxvr_bb_resized`.
+
+Review fixes (build 9):
+- The D3D method is `OMSetRenderTargetsAndUnorderedAccessViews`.
+- 0x599210 is reported in two phases: before the call and after it. Only a completed re-acquire is acted on, and a backbuffer identified inside the call carries the new count. Acting before the call would have dropped the still-live backbuffer at the last pre-flush Present.
+- Backbuffer twins are flagged at creation. Two frames after any sentinel firing or completed re-acquire, every flagged twin that isn't the current backbuffer's is released, and so is the current one's if its size or format changed (address reuse). There is no single dead-pointer slot any more.
+- The UI-branch, copy-pass and marker-pass binds now also keep UAVs. So R42 ("restores keep the UAVs") holds on every path.
+  - The caveat: with UAVs kept, an eye-2 re-issue would also write any game PS UAV, which has no twin. The game isn't believed to use PS UAVs.
+- A failed sentinel attach is logged once. Without the 0x599210 hook (diag_build7=0), such a backbuffer is guarded only as in build 8.
+- ABI 8: `ffxvr_bb_resized(w, h, phase)`.
 
 ## Cursor stage C2 (branch `cursors`, from build 7)
 
@@ -2043,3 +2130,95 @@ The owner's top priority after C3 is smoothness. His perf lines show steady 16.7
   - The status strings are literals, with the age shown separately.
   - The managed Motion-log columns now pair with the same line's "actor" column.
 - **Smoothing-off hint.** After about 60 moving logic frames in a row with d = 0 while the snapshot is used, the status adds "the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?".
+
+## Merge `night`: cursors + master (builds 8, 9) + scripts-pass
+
+- **ABI 10 on both sides.** Master's 7 and 8 (`ffxvr_bb_resized`, then its phase argument) are kept, followed by the branch's C2 exports (9: `ffxvr_cursor_game`, `ffxvr_cursor_skip`) and C3 exports (10: `ffxvr_cursor_look`, `ffxvr_markers_kinds`, `ffxvr_cursor_atlas_dump`). `clear_native_fns` nulls all of them.
+- **Settings.** Build 8's validated parser takes the branch's keys:
+  - `smooth_anchor` (bool);
+  - `cursor_source` (game|legacy) and `cursor_look` (game|mod), through a new two-word helper `pw` (anything else is listed as a bad value and the current value kept);
+  - `marker_lift` (-5..20) and `cursor_hand_size` (0.3..3), clamped;
+  - `fp_self_marker` (low|hide|normal).
+
+  All of them are written by `ini_text`, so build 8's reload of changed keys only, its write-back of corrected text, and its truncation count cover them like any other key.
+- **R11.**
+  - The C3 battle.dds search takes the SRV really bound at slot 0 from the context (PSGetShaderResources, whose reference becomes ours on a find), and checks liveness with `ps_tex(0)`. It no longer reads the tracked raw `g_cur_ps_srv[0]`.
+  - The marker pass merged onto R11's 8-target save and `om_restore_keep`, with UAVs kept.
+  - The pass's own PS SRV0 / sampler0 save and restore are real bindings (Get / Set) under InEye2, so `on_ps_srvs` ignores them.
+
+## R8b: hold the last frame on timeouts too; escalate a stuck swapchain (branch `night`)
+
+G4-final R8b, on top of R8a (build 5) and R15's interim hold.
+
+- **The held base layer** is now re-sent whenever the frame's base layer cannot go out fresh, for at most 30 frames, then zero layers (black) as before. The causes are a missing eye image (R15), a swapchain wait that timed out (R8a's all-or-nothing set leaves the partner SC_WAITED), or no located views.
+  - The conditions are unchanged: `shouldRender`, every swapchain the held layer references has been released at least once, and no space change, stop or loss since. Those events clear the held state.
+  - Re-sending a layer while a newer image of the same swapchain is acquired or waited but not yet released is legal: the compositor uses the last released image, and the held poses are the ones those images were rendered with.
+- **The UI panel and the ImGui layer** each keep their last fresh quad, with their own age.
+  - **UI panel:** held when its own image could not go out (a timeout on swapchain 3), or when the base is held (a no-image frame has no UI image either). It is never held in the screen modes, nor when a fresh frame legitimately has no UI.
+  - **ImGui layer:** held only when its image exists (the overlay is drawing) but its own wait timed out.
+  - Both go out only when a base layer does.
+- **B5-2.**
+  - A swapchain whose acquire or wait fails with a hard error (XR_FAILED, not a timeout) 300 times in a row (about 5 s) is escalated: after that frame's xrEndFrame, xr_frame logs "swapchain N stuck", calls xr_stop and sets the status "swapchain N stuck: restarting".
+  - xr_tick then sees the session gone (leave_xr_state), and the managed side's next ffxvr_xr_set(1) restarts it through the build 1 start back-off.
+  - A timeout or a success resets the count.
+- **Not used:** exe-engine's FMV / loading flag ([0xCDED3C]+0x6D0/+0x6D2). The hold is limited to 30 frames, so an FMV or a loading screen that keeps the image away longer still goes black. Telling the two apart would only matter for a longer hold, which this build does not add.
+- **No ABI change.** The heartbeat's held count now covers every hold cause.
+
+## Battle load diagnostics + model cache option (branch `night`)
+
+Research: battle-load.md 2.1, battle-data-load.md (with its section 7 correction), and exe-verify-round2 Part C. The verifier's corrections override the research.
+
+- **`diag_load=1`** (default; hooks at the next launch): log-only detours, queued at init before build 7's job join (which stays last in Fahrenheit's commit).
+  - **The hooks** (FhUtil offsets): teardown 0x381590, map load 0x509A20, map free 0x509EA0, map build 0x508000, chr flush 0x440030, the loader wait-all 0x36C490, chr model 0x429EF0, chr motion 0x42A4C0, loadPCluster 0x29B940 (thiscall, chained with Fahrenheit's file-loader hook).
+  - **Resolution** follows B7-1's pattern: `ld_resolve` on the render thread before our late D3D hooks, and `d7_resolve_main` on the detour's own thread before that.
+  - **Return values:** every detour returns the original's eax.
+  - **Not hooked:** MsBattleExe 0x381020 and the return 0x461160. FFX-60fps's QOL-RETRY sig-scans both prologues. Sg_MainLoop is not touched.
+  - **The battle start** is seen in the wait detour. MsBattleExe (mode 0, the random-battle call) calls the wait-all before it clears the request byte [0x112A8E2] (1 random, 2 script request), so the detour knows the battle kind and takes the per-battle baseline there.
+- **Timing.**
+  - Cumulative counters (Interlocked) are snapshotted on the main thread at the battle start and the teardown.
+  - Battle states are polled at Present (main-thread polling would miss them: Sg_MainLoop skips its tail while the loader is busy).
+  - Two summary lines per battle in ffxvr_diag.log, "load: battle N (...)" and "load: battle N way back". They give the phases, the HD cluster loads (count, ms, hits < 0.1 ms), the model and motion loads, the blocking waits with their callers, the chr cache entries in use, the game pool's reserved/committed counters (FhUtil 0x153CD44/48), and the address space (free and largest block, overall and below 2 GB).
+  - **Wait callers** come from a new native stack walk (`ffxvr_game_callers`: the first return addresses inside FFX.exe, as Ghidra VAs). The wait has about 25 call sites, including the chr wrapper 0x82A5E0.
+  - **Address space** comes from a VirtualQuery walk (`ffxvr_va_stats`) once per battle start and end.
+- **`battle_cache_models=0`** (default; applies at once). The decision is taken only at the flush call inside the map free (0x909F93), never at another time. The flush is skipped when all of these hold, otherwise the game's flush runs:
+  1. the map load is a random battle's own load (battle_state **9** at the call: the state-8 code writes 9 before it calls the map load; kind 1, map = Btl.battlefield & 0x3FF), or the first map load after that battle's teardown is the very field map that was current at its start;
+  2. at most 60 (way in: the battle then adds its own models) / 80 (way back) of the 100 cache entries are in use;
+  3. the largest free block below 2 GB is at least 256 MB (the last battle start or end measurement; not measured means no skip).
+
+  Why the bound: model and motion buffers come from the game pool, which never evicts, and the table-full eviction 0x8409A0 leaks the HD character (verifier B6-B8). So the cache must never fill.
+
+  Area changes, script battles, save loads and the title never match, so they always flush. The extra memory is bounded by about 80 entries plus one battle's models, and Fahrenheit grows the game pool bottom-up below 2 GB.
+- **ABI 11:** + `ffxvr_game_callers`, `ffxvr_va_stats`.
+
+## Rumble to Quest haptics (branch `night`)
+
+Research: vr-opportunities.md item 2.
+- **Capture.** The XInputSetState IAT hook (build 7) is installed when `diag_build7` or `haptics` is on (also later, if haptics are switched on mid-session). It records pad 0's motor values with interlocked stores, then always calls the real XInputSetState, so a physical pad still rumbles.
+- **Decode.** The PC port writes `round(b * 65535.0)` truncated to 16 bits, so a PS2 motor byte b ≥ 1 arrives as 65536 − b. Values 65282..65535 decode to b = 254..1. Anything else is taken as a linear level.
+  - **Fallback:** if no call came for 500 ms, the game's pad block is read (FhUtil 0xF30288: +0x9D the in-game Vibration option, +0xFE large, +0xFF small).
+- **Apply** (render thread, in xr_tick after the input sync).
+  - The left (large) motor drives the left controller, the right (small) motor the right controller.
+  - Amplitude = strength × max(0.15, sqrt(b / 254)).
+  - 150 ms pulses are renewed every 100 ms, or at once on a change of more than 0.05. `xrStopHapticFeedback` (now loaded) runs when the motor stops.
+- **Quiet when** haptics are off, the strength is 0, the session is not FOCUSED, or a physical pad answers on port 0 while the VR pad is off (then only the pad rumbles).
+- **The in-game Vibration option** is respected through the game itself: with it off, no motor values are produced.
+- **Settings:** `haptics=1` and `haptics_gain=0.8`, through build 8's parser, with a checkbox, a strength slider and a live status line under the controller rows. The existing "buzz left/right" buttons are unchanged.
+- **ABI 12:** + `ffxvr_haptics_set`.
+- **Also in this commit:** the optional R8-4 re-review nit. A 3D ↔ screen mode change now drops the held base layer for good.
+
+### Review fixes, battle load diagnostics
+
+- **LD-1: state 9, not 8.** The battle's own map load runs with battle_state 9 (0x7831A1 writes 9 before 0x908600), so the entry rule tests 9 and also requires kind 0x13 / 0x1A. The log's state-8 column is gone.
+- **LD-2: lower entry bound.** At most 60 entries in use on the way in (80 on the way back). The table is sampled every 30 Presents during a battle and at live and at the teardown, and the peak is logged. "chr cache TABLE FULL" is logged if 100 is ever seen.
+- **LD-3: the battle kind is owned by the main thread.**
+  - It is set with the teardown count at the start wait, and is valid only until that battle's teardown, which clears it.
+  - The entry rule needs `kind == 1 && kind_tear == tear_seq`.
+  - The render thread keeps its own copy for the log and never writes the main thread's.
+- **LD-4: the start-wait timer.** The "ended before live" timeout never runs during MsBattleExe's wait, and counts from the wait's end.
+- **LD-5: per-battle resets on the main thread.** The way-in values are reset at a start seen in the wait, at the battle's own map request, and at the teardown. The way-back values are reset at the teardown.
+- **LD-6: atomic times.** The cross-thread long times use Volatile reads and writes. The render thread keeps a "logged" teardown count instead of zeroing a main-thread field.
+- **LD-7: queue order.** The nine hooks are queued after build 7's job join, from init.
+- **LD-8: hooks seen working.** A seen-mask bit is set at each detour's first call. The option needs the map load and map free hooks seen working, and the summary lines run with whatever hooks are in. The mask is logged once and shown in the overlay.
+- **LD-10:** the stack walk keeps its frame pointer (`#pragma optimize("y", off)`) and captures 24 frames.
+- **LD-11 / LD-12 / LD-13:** a comment fix, unused fields removed, and `ld_resolve` runs once with a try per hook.
+- **LD-9** (the VirtualQuery walk on the render thread, twice per battle) is left as is for this diagnostic build.

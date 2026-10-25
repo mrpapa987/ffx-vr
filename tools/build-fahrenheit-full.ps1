@@ -109,9 +109,26 @@ if ($Latest) {
 }
 & git -C $repo submodule update --init --recursive 2>&1 | ForEach-Object { Log "  $_" }
 & git -C $repo log -1 --pretty='  building commit %h  (%ad)  %s' --date=short 2>&1 | ForEach-Object { Log $_ }
+# A failed reset (commit not fetched, a lock file) would otherwise build whatever is checked out.
+# rev-parse resolves an abbreviated or upper-case hash, or a tag, to the full commit.
+$head = "$(& git -C $repo rev-parse HEAD 2>$null)".Trim()
+if (-not $Latest) {
+    $want = "$(& git -C $repo rev-parse --verify --quiet "$Commit^{commit}" 2>$null)".Trim()
+    if (-not $want -or $head -ne $want) {
+        Log ''
+        Log "ERROR: _ext\fahrenheit is at '$head', not $Commit (see the git output above). Nothing built."
+        Log 'RESULT: FAILED'
+        Log "Log: $log"
+        exit 1
+    }
+}
 
 # ---------------------------------------------------------------- build
-Push-Location $repo
+# MSBuild error lines are collected so that a non-zero exit code can be told apart from the one
+# known harmless failure (see $knownQuirk below).
+$errLines = New-Object System.Collections.Generic.List[string]
+$errRe    = '(^|[\s:])error(\s+[A-Z]+\d+)?\s*:'
+Push-Location -LiteralPath $repo
 try {
     Log ''
     Log '[msbuild] restore'
@@ -123,7 +140,7 @@ try {
     Log ''
     Log '[msbuild] build'
     & $msbuild .\Fahrenheit.slnx /p:Configuration=Release /v:minimal 2>&1 |
-        ForEach-Object { Log "  $_" }
+        ForEach-Object { Log "  $_"; if ("$_" -match $errRe) { $errLines.Add("$_") } }
     $buildCode = $LASTEXITCODE
     Log "[msbuild] build exit code: $buildCode"
 }
@@ -135,26 +152,48 @@ finally {
 $deploy = Join-Path $repo 'artifacts\deploy\rel'
 Log ''
 Log '[artifacts] native loaders (the whole point of this build):'
+$missing = 0
 foreach ($f in 'bin\fhstage0.exe', 'bin\fhstage1.dll', 'bin\minhook.x32.dll', 'bin\nethost.dll') {
     $p = Join-Path $deploy $f
-    if (Test-Path $p) {
-        $i = Get-Item $p
+    if (Test-Path -LiteralPath $p) {
+        $i = Get-Item -LiteralPath $p
         Log ("  OK       $f  ($($i.Length) bytes, built $($i.LastWriteTime))")
     } else {
         Log ("  MISSING  $f")
+        $missing++
     }
 }
 
 Log ''
 Log '[artifacts] total files produced:'
-if (Test-Path $deploy) {
-    $all = Get-ChildItem $deploy -Recurse -File
+if (Test-Path -LiteralPath $deploy) {
+    $all = Get-ChildItem -LiteralPath $deploy -Recurse -File
     Log ("  $($all.Count) files, $([math]::Round(($all | Measure-Object Length -Sum).Sum / 1MB, 1)) MB")
     Log "  at $deploy"
 } else {
     Log "  nothing at $deploy"
 }
 
+# ---------------------------------------------------------------- verdict
+# The one known harmless failure: without the Debugging Tools for Windows, MSBuild can't copy
+# dbghelp.dll and symsrv.dll from the Windows Kits debugger folder (two MSB3030 errors, exit code 1;
+# install-fahrenheit.ps1 supplies dbghelp.dll). A non-zero exit passes only when every error line
+# is one of those two, so an unrecognised failure, with older loaders still in place, reads FAILED.
+$knownQuirk = 'error MSB3030:.*Windows Kits\\+10\\+Debuggers\\+x86\\+(dbghelp|symsrv)\.dll.*not found'   # \\+: tolerates a doubled separator
+$realErrors = @($errLines | Sort-Object -Unique | Where-Object { $_ -notmatch $knownQuirk })
+$ok = ($restoreCode -eq 0) -and ($missing -eq 0) -and
+      ($buildCode -eq 0 -or ($errLines.Count -gt 0 -and $realErrors.Count -eq 0))
 Log ''
+if ($buildCode -ne 0 -and $ok) {
+    Log "NOTE: msbuild exit code $buildCode came only from the known dbghelp.dll/symsrv.dll copy errors; the loaders were built."
+}
+if (-not $ok -and $realErrors.Count -gt 0) {
+    Log 'Errors:'
+    $realErrors | Select-Object -First 20 | ForEach-Object { Log "  $_" }
+}
+if ($restoreCode -ne 0) { Log "restore failed (exit code $restoreCode)." }
 Log ('=' * 70)
+if ($ok) { Log 'RESULT: OK. Next: tools\install-fahrenheit.ps1' }
+else     { Log 'RESULT: FAILED. Don''t run install-fahrenheit.ps1 until this builds.' }
 Log "Log: $log"
+exit $(if ($ok) { 0 } else { 1 })
