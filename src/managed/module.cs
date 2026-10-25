@@ -22,7 +22,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 4;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 5;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -99,7 +99,7 @@ public sealed unsafe class FFXVRModule : FhModule {
     private bool _hide_list_dirty = true; private readonly uint[] _hide_hits = new uint[16];
     private bool _hide_pointers = true; private uint _pointer_stats = 0;   // the pointer rule (small quads above where an actor projects through the game camera)
     private delegate* unmanaged[Cdecl]<int, void> _fn_ui_hide_pointers; private delegate* unmanaged[Cdecl]<uint> _fn_ui_pointer_stats;
-    private delegate* unmanaged[Cdecl]<float*, int, void> _fn_ui_hide_list; private delegate* unmanaged[Cdecl]<uint*, int, void> _fn_ui_hide_hits; private delegate* unmanaged[Cdecl]<uint*, uint*, void> _fn_draw_skip;
+    private delegate* unmanaged[Cdecl]<float*, int, void> _fn_ui_hide_list; private delegate* unmanaged[Cdecl]<uint*, int, void> _fn_ui_hide_hits; private delegate* unmanaged[Cdecl]<uint*, int, int> _fn_draw_skip_ranges;
     // Battle: first person follows whoever stands in the player's slot (Tidus until he is swapped out, then
     // the character that took his place), and the view can switch to a chosen mode for the battle's duration.
     private bool _battle_follow = true; private int _battle_view = -1;   // -1 keep the current view; else the fp_mode for battles
@@ -412,7 +412,7 @@ public sealed unsafe class FFXVRModule : FhModule {
             _fn_on_clear     = (delegate* unmanaged[Cdecl]<nint, int, void>)req("ffxvr_on_clear");
             _fn_frame_arm    = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_frame_arm");
             _fn_ui_hide = (delegate* unmanaged[Cdecl]<uint, uint, int, void>)req("ffxvr_ui_hide"); _fn_ui_hidden_draws = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_hidden_draws"); _fn_ui_hide_cursor = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_ui_hide_cursor"); _fn_ui_rect_stats = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_rect_stats");
-            _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_ui_hide_hits"); _fn_draw_skip = (delegate* unmanaged[Cdecl]<uint*, uint*, void>)req("ffxvr_draw_skip");
+            _fn_ui_hide_list = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_ui_hide_list"); _fn_ui_hide_hits = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_ui_hide_hits"); _fn_draw_skip_ranges = (delegate* unmanaged[Cdecl]<uint*, int, int>)req("ffxvr_draw_skip_ranges");
             _fn_ui_hide_pointers = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_ui_hide_pointers"); _fn_ui_pointer_stats = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_ui_pointer_stats");
             _fn_blitz_overlay = (delegate* unmanaged[Cdecl]<int, uint>)req("ffxvr_blitz_overlay");
             _fn_ui_pick = (delegate* unmanaged[Cdecl]<float, float, void>)req("ffxvr_ui_pick"); _fn_ui_pick_result = (delegate* unmanaged[Cdecl]<nint>)req("ffxvr_ui_pick_result");
@@ -502,7 +502,7 @@ public sealed unsafe class FFXVRModule : FhModule {
         _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null;
         _fn_eye2_size = null; _fn_on_updatesub = null; _fn_on_rendertargets = null; _fn_on_rendertargets_uav = null; _fn_on_resolve = null; _fn_on_viewport = null;
         _fn_on_clear = null; _fn_frame_arm = null; _fn_ui_hide = null; _fn_ui_hidden_draws = null; _fn_ui_hide_cursor = null; _fn_ui_rect_stats = null;
-        _fn_ui_hide_list = null; _fn_ui_hide_hits = null; _fn_draw_skip = null; _fn_ui_hide_pointers = null; _fn_ui_pointer_stats = null; _fn_blitz_overlay = null;
+        _fn_ui_hide_list = null; _fn_ui_hide_hits = null; _fn_draw_skip_ranges = null; _fn_ui_hide_pointers = null; _fn_ui_pointer_stats = null; _fn_blitz_overlay = null;
         _fn_ui_pick = null; _fn_ui_pick_result = null; _fn_slowmo = null; _fn_ui_hover = null; _fn_ui_hover_rects = null; _fn_dump_cb = null;
         _fn_census_arm = null; _fn_backdrop_set = null; _fn_cull_dist_set = null; _fn_cull_dist_get = null; _fn_cull_scene_set = null; _fn_cull_scene_get = null;
         _fn_msaa_set = null; _fn_vrpad_set = null; _fn_imgui_layer_set = null; _fn_imgui_draws = null; _fn_vrpad_status = null; _fn_haptic = null;
@@ -631,12 +631,17 @@ public sealed unsafe class FFXVRModule : FhModule {
         _o_drawindexed ??= new FhCallHandle<d_DrawIndexed>(new FhCallLocation((void*)_a_drawindexed)).chain_from(_h_drawindexed!).fnptr;
         if (r < 0) return;                          // hidden (the player's own body in first person)
         int eye2 = r & 15; bool noblend = (r & 16) != 0 && _fn_blend_off != null;
-        // partial hide: a range of indices (a batched 2D sprite on the hide list) is left out, the rest drawn in two pieces
-        uint skip_first = 0, skip_count = 0; bool partial = (r & 0x20000) != 0 && _fn_draw_skip != null;
-        if (partial) { _fn_draw_skip(&skip_first, &skip_count); if (skip_first + skip_count > n) partial = false; }
+        // partial hide: index ranges (batched 2D sprites: hide list, pointer rule) are left out, the rest drawn in pieces between them (R39)
+        uint* rg = stackalloc uint[16]; int nr = 0;
+        if ((r & 0x20000) != 0 && _fn_draw_skip_ranges != null) {
+            nr = _fn_draw_skip_ranges(rg, 8);
+            if (nr < 0 || nr > 8) nr = 0;
+            uint at = 0;   // sorted, non-overlapping, inside the draw; anything else -> drawn whole
+            for (int i = 0; i < nr; i++) { uint f = rg[i*2], c = rg[i*2+1]; if (c == 0 || f < at || f > n || c > n - f) { nr = 0; break; } at = f + c; }
+        }
         if (noblend) _fn_blend_off();
-        draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count);
-        for (int k = 0; k < eye2 && _fn_eye2_begin != null; k++) if (_fn_eye2_begin(k) != 0) { draw_pieces(ctx, n, start, base_vertex, partial, skip_first, skip_count); _fn_eye2_end(); }
+        draw_pieces(ctx, n, start, base_vertex, nr, rg);
+        for (int k = 0; k < eye2 && _fn_eye2_begin != null; k++) if (_fn_eye2_begin(k) != 0) { draw_pieces(ctx, n, start, base_vertex, nr, rg); _fn_eye2_end(); }
         if (noblend) _fn_blend_restore();
     }
     // Outlines, on the monitor, the UI quads the native side collected this frame (hover highlight), and
@@ -666,10 +671,12 @@ public sealed unsafe class FFXVRModule : FhModule {
             }
         }
     }
-    private void draw_pieces(nint ctx, uint n, uint start, int base_vertex, bool partial, uint skip_first, uint skip_count) {
-        if (!partial) { _o_drawindexed!(ctx, n, start, base_vertex); return; }
-        if (skip_first > 0) _o_drawindexed!(ctx, skip_first, start, base_vertex);
-        uint after = skip_first + skip_count; if (after < n) _o_drawindexed!(ctx, n - after, start + after, base_vertex);
+    // The draw minus nr skipped (first, count) ranges (validated by the caller): the gaps between them, in order.
+    private void draw_pieces(nint ctx, uint n, uint start, int base_vertex, int nr, uint* rg) {
+        if (nr <= 0) { _o_drawindexed!(ctx, n, start, base_vertex); return; }
+        uint at = 0;
+        for (int i = 0; i < nr; i++) { uint f = rg[i*2]; if (f > at) _o_drawindexed!(ctx, f - at, start + at, base_vertex); at = f + rg[i*2+1]; }
+        if (at < n) _o_drawindexed!(ctx, n - at, start + at, base_vertex);
     }
 
     private void h_draw(nint ctx, uint n, uint start) {

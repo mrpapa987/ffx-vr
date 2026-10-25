@@ -1743,3 +1743,56 @@ OpenXR robustness (review items R8a, R15, R41, the watchdog wake, xrEndSession).
   with a hard error (not a timeout): after ~300 consecutive failures (~5 s) set
   the status "swapchain N stuck" and xr_stop, so build 1's back-off restarts the
   session (today it retries forever with the headset black).
+
+## Review fixes, build 6 (24 Oct 2026)
+
+Eye-2 twin housekeeping (R12) and cursor hiding over several ranges (R39 + R48).
+R11 (real bindings in eye2_begin/end, the backbuffer sentinel) is build 7, on its own.
+
+- **Twin SRV cache (R12).** A twin's SRV cache that reached 256 entries was
+  emptied inside `twin_srv`, in the middle of a draw: a view bound to an earlier
+  slot of the same draw, or the eye preview's `srvs[nullptr]` that ImGui still
+  holds, could be freed. Now `twin_srv` only flags it and keeps adding;
+  `twin_srv_trim()` runs at the frame boundary (begin_frame, after
+  `sweep_caches`) and empties the caches of 256+ entries except the `nullptr`
+  key. The heartbeat's eye-2 line shows "twin srvs dropped".
+- **Failed twins (R12).** A twin that failed to create was remembered with no
+  views and never retried for the session. Now the record keeps the description
+  it failed for: the same texture is retried after 600 frames, the back-off
+  doubling per repeated failure up to 36000; a different texture at the same
+  address is tried at once. Failed records don't refresh `last_used`, so the
+  sweep drops them (and with them the back-off) after the idle time. The
+  "twin FAILED" diag is capped at 20 lines and gives the retry delay. `fail()`
+  now also releases a view it created (rtv / dsv) before the texture.
+- **Missing depth twin (R12).** When the game has a depth target and it has no
+  twin, eye 2 draws without depth, as before; it is now counted ("no depth twin"
+  on the heartbeat's eye-2 line). No behaviour change.
+- **Cursor hiding, several ranges (R39).** A batched UI draw could hide one
+  index range only: two hidden quads with visible ones between them (two target
+  pointers with a name or damage digits between) hid everything between them,
+  and the pointer rule did not run once the hide list matched. Now one shared
+  read per draw (up to 32 quads, was 12) feeds the hover highlight, the hide
+  list and the pointer rule; a quad is hidden when either matches, each run of
+  hidden quads becomes a skipped range (up to 8; more runs stay visible and are
+  counted), and the managed side draws the gaps between them, for eye 1 and the
+  eye-2 re-issues alike. All quads hidden still skips the draw. A single
+  pointer in a batch gives the same one range as before. ABI 5:
+  `ffxvr_draw_skip_ranges`; `ffxvr_draw_skip` stays as a shim that returns the
+  envelope (first range start to last range end).
+- **Base vertex and start index (R48).** The quad readers read at the bound
+  offset only, ignoring the draw's base vertex and start index (the cursor-art
+  capture applied the base). Now every reader starts at the base vertex, plus
+  quad `start / 6` when the start index is a multiple of 6; any other start (or
+  a negative base) is not read, so no hiding for that draw.
+- **Counters** on the `perf:` line (since the previous one): `ui verts read`,
+  `truncated` (batches of a hidden kind with more than 32 quads: the quads past
+  32 are never hidden; raise the constant to 64 if this shows), `start!=0` (and
+  `not read`), `base!=0` (draws R48 now reads at a different place) and
+  `skip overflow`.
+- Review fixes: the 32-bit quad mask is pinned by a `static_assert` (64 quads
+  needs a 64-bit mask); a run past the 8th is taken out of the hidden set, so
+  the game's cursor art is not captured for a pointer that stays visible (the
+  hit counters still count it; `skip overflow` flags it); zero-index draws are
+  not examined; "no depth twin" counts only draws that got an eye-2 pass; the
+  F9 pick dumps streams 1-5 at the picked quad's own vertices (base vertex
+  included), like stream 0.
