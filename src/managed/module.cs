@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 17;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 18;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -485,6 +485,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_bt_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_bt_set"); _fn_bt_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_bt_status");   // ABI 15: battle transition
             _fn_prof_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_set"); _fn_prof_mark = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_mark"); _fn_prof_phase = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_phase");   // ABI 17: load lock build
             _fn_prof_report = (delegate* unmanaged[Cdecl]<int, byte*, byte*, void>)req("ffxvr_prof_report"); _fn_lock_release_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_lock_release_set"); _fn_lock_release_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lock_release_status");
+            _fn_dream_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_dream_set"); _fn_dream_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_dream_status");   // ABI 18: dream overlay
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -535,6 +536,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_game_callers = null; _fn_va_stats = null; _fn_haptics_set = null; _fn_va_watch = null; _fn_va_report = null; _fn_va_regions = null;
         _fn_bt_set = null; _fn_bt_status = null;
         _fn_prof_set = null; _fn_prof_mark = null; _fn_prof_phase = null; _fn_prof_report = null; _fn_lock_release_set = null; _fn_lock_release_status = null;
+        _fn_dream_set = null; _fn_dream_status = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -942,6 +944,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "ui_panel":          pb(k, v, ref _ui_on); break;
                 case "ui_distance":       pf(k, v, ref _ui_dist, 0.5f, 4f); break;
                 case "ui_width":          pf(k, v, ref _ui_width, 0.5f, 4f); break;
+                case "dream_overlay":     pi(k, v, ref _dream_overlay, 0, 2); break;   // the game's dream filter in the headset: 1 hidden (default), 2 both eyes, 0 on the panel (applies at once)
                 case "pitch_follow":      pf(k, v, ref _xr_pitch_follow, 0f, 1f); break;
                 case "seat_height":       pf(k, v, ref _ovr_up, -5000f, 5000f); break;
                 case "seat_forward":      pf(k, v, ref _ovr_forward, -5000f, 5000f); break;
@@ -1241,6 +1244,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"ui_panel={(_ui_on ? 1 : 0)}\n" +
             $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
             $"ui_width={_ui_width.ToString("F2", ci)}\n" +
+            $"dream_overlay={_dream_overlay.ToString(ci)}\n" +
             $"pitch_follow={_xr_pitch_follow.ToString("F2", ci)}\n" +
             $"seat_height={_ovr_up.ToString("F0", ci)}\n" +
             $"seat_forward={_ovr_forward.ToString("F0", ci)}\n" +
@@ -1435,6 +1439,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
         ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
         if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
+        dream_ui();   // dream overlay: dream_overlay
         bt_ui();
         lp_ui();   // load lock build: load_lock_release
         ImGui.Checkbox("keep characters drawn (no distance or frustum cull of characters)", ref _cull_dist);
@@ -1540,6 +1545,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SliderFloat("distance (m)", ref _ui_dist, 0.5f, 4f);
             ImGui.SliderFloat("width (m)", ref _ui_width, 0.5f, 4f);
             if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
+            if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + dream_status_text());
             ImGui.TreePop();
         }
 
@@ -1809,7 +1815,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
 
         if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
-            if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves"); }
+            if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves (the automatic census at the first glass break goes to ffxvr_frame_auto.log)"); }
             if (_fn_motion_log != null) { if (ImGui.Button("Motion log (3 s)")) _fn_motion_log(180); ImGui.SameLine(); ImGui.Text("per drawn frame: actor position vs rendered position, view yaw, head yaw -> ffxvr_diag.log (walk and turn with the stick while it runs; Numpad 5 also starts it)"); }
             if (_fn_ui_atlas_dump != null) { if (ImGui.Button("Dump UI atlases")) _fn_ui_atlas_dump(); ImGui.SameLine(); ImGui.Text("the 1024x1024 sprite sheets the UI samples this frame -> ui_atlas_*.dds next to the mod (do it in a battle with a target selected)"); }
             if (_fn_census_arm != null) { if (ImGui.Button("Stack census (character draws)")) _fn_census_arm(1872, 16384); ImGui.SameLine(); ImGui.Text("ffxvr_stacks.log: the game's call chains behind one frame's skinned-character uploads (where the draw/cull loop lives)"); }
@@ -1927,6 +1933,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
         if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
+        dream_push();   // dream overlay: dream_overlay (every frame, so a change applies at once)
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle

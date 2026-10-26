@@ -2350,7 +2350,7 @@ Research: battle-transition.md. Code: native `bt_tick` and friends (`ffxvr_nativ
 - **BT-6, the capture and shard rules.**
   - Once per window, the capture target's size and sample count, from the bind-time cache, and the number of overlay matches.
   - Per window, the draws sampling the capture, by case: the shard rule, slot 1-3, with a camera image, without depth. Near misses (probed in the shatter until the frame's first match) count as shard activity for the phases.
-  - The session's first shatter arms one frame census (`ffxvr_frame.log`).
+  - The session's first shatter arms one frame census. Since the `dream` branch it goes to its own file, `ffxvr_frame_auto.log`, and waits for a manual census in progress instead of clearing it (see "Dream overlay", census files).
 - **Nits.**
   - The summary is 1 KB and starts with "ended: ...". "frozen" means the freeze was ever taken.
   - The per-frame line in the after phase is thinned to every 10th Present while nothing but the frame, gap and held count changes, and the session cap is 12000 lines.
@@ -2473,3 +2473,35 @@ Research: parse-time.md (sections 1.6, 4 and 5). Code: native "Load lock build" 
 - **Re-review (LL-R-1, LL-R-2).**
   - The frame chain is the default order again. A scanned return address goes in front only within 0x40 bytes of ESP, or when the chain found nothing. Stale scan hits further up the stack no longer outrank real frames.
   - The watcher thread also starts when `load_lock_release=1`, with `diag_load_prof=0` too. It then samples nothing, but the stuck re-acquire check (LL-7) always runs while the release is on.
+
+## Dream overlay (branch `dream`)
+
+Research: dream-overlay.md. Code: native `dream_rule` (called from `ffxvr_on_draw`), `dream_tick` (top of `xr_tick`, after `bt_tick`), the mode-2 branch at the top of `ffxvr_eye2_begin`, the census destinations next to `ffxvr_frame_arm`; managed `dream_overlay.cs`.
+
+- **What it was.** The HD port's own dream filter, `0x63DF70`, draws through the central 2D quad submit (`0x63EEE0`) after the depth clear that opens the UI pass. It draws three full-screen quads (film grain `Noise.dds` 1024x1024 at alpha 30, a textureless sepia quad at alpha 90, `Vignette.dds` 1024x512 at alpha 200) and, every third frame, three 16x16 dust specks. Our UI split sent them to the head-locked UI panel. On the monitor they cover the screen; in the headset they were a flat-screen-sized grainy sepia rectangle in front of an untinted world.
+- **How the game drives it.** `0x8223A0`, every frame from `Sg_MainLoop`, keys on the field map number `[0x1330844]` (seven maps) and a marker layer's visibility. The live state is `[0x12FB8F0]` (active) and `[0x12FB8F4]` (a warm-up count; the filter draws at 5). Screen fades scale its alpha through `[0x12FFAE8]` / `[0x12FFAF4]`.
+- **`dream_overlay`** (ini and overlay, applies at once, default 1):
+  - 0: on the panel, as before.
+  - 1: matched draws go into the game's own target only (`ffxvr_on_draw` returns 0). The monitor is unchanged; neither the panel nor the eyes get them. They still count as UI draws (`g_ui_draws_frame`), because on quiet frames they are the whole UI pass and `UI_DONE` at the resolve needs a count above 0.
+  - 2: the three full-screen layers are drawn into both eye images (`g_eye1_final` / `g_eye2_final`) with the game's shaders, textures, viewport and blend (`ffxvr_on_draw` returns 2; `ffxvr_eye2_begin` binds the eye image with no depth; `ffxvr_eye2_end`'s UI branch restores the targets and the blend). The tint covers the whole view and the vignette sits at the lens edge. The specks are hidden: head-locked dust at zero disparity reads as dirt on the lenses. The eye pass is skipped (counted) if the viewport is not the eye image's size at 0,0. A blend with alpha-to-coverage is copied without it (see below).
+- **The rule.** Both must hold. While the gate is closed the rule does nothing at all: no texture query, no vertex read, no stream learning (DR-1), so normal play runs exactly as before this build.
+  - **The game's flag.** `dream_tick` reads `[0x12FB8F0]` (8 bytes: active, count), `[0x12FFAE8]` (16 bytes: fade on, direction, length, factor) and `[0x1330844]` once per Present with ReadProcessMemory, which never faults under the stage-0 debugger.
+    - Live = active != 0 (from the first warm-up frame: those frames' UI draws learn the UI streams before the first filter frame, DR-1) and the field map number is one of the seven the switch `0x8223A0` drives the filter in: 0x86, 0xA5, 0xBF, 0xF9, 0xFC, 0x129, 0x187 (DR-3). A flag left stale where the switch did not run cannot open the gate anywhere else.
+    - A live read opens the gate for this frame and the next 2 (the latch). A failed read closes it. A full fade does not close it (the filter draws nothing then); those frames are counted.
+  - **The draw**, tested cheapest first: a UI-pass draw in the headset path (`g_ui_draw_now`), DrawIndexed with 6 indices; then the slot-0 texture: 1024x1024, 1024x512 or none (a layer), or 16x16 (a speck); only then the quad (the shared guarded read, `ui_quads_cached`): -950..950 x -530..530 or more and at most 2000 x 1200 for a layer, 36-43 x 24-31 UI units for a speck (10.5 PS2 units).
+  - **The colour (DR-4).** When the slot-2 colour stream can be read (its checked map pointer, then ReadProcessMemory), the first vertex's RGB must also be the filter's, within 0.02: (186, 158, 85)/255 for the sepia quad, 190/255 grey for Noise, 128/255 grey for Vignette and the specks. A screen fade scales only the alpha. A failed read does not block the match (counted as "matched without a colour read"). A draw of the right shape and texture but another colour is left alone, counted, and logged once a window.
+  - It cannot hit normal UI (the gate is closed outside the seven maps and their marker layer; inside them, glyphs, windows and icons fail the texture or geometry test), screen fades (the HD ScreenFade post-process, not UI quads), the glass break (`Draw n=3`; and no UI split in battle_transition modes 1 and 2), FMV (a screen frame: no UI split) or battle cursors (at most 90 units). The flat path is never touched.
+- **Mode 2 and alpha-to-coverage (DR-5).** If the game's blend has alpha-to-coverage, which on a one-sample eye image would cut alpha 30/90/200 to 0 or 1, the eye passes use a copy of the game's own blend description with it turned off. The copy is created once per distinct description. If that creation fails, the eye pass is skipped and counted.
+- **Diagnostics** (`ffxvr_diag.log`, batched on the render thread and written with `diag_try`, never from inside a draw):
+  - `dream: game filter on at frame F: map '…' field map 0x…, mode M …`, and `dream: game filter off at frame F (on since frame F0) after S s (why): frames with matches X / gate frames G, draws handled L layers + K specks (per frame max P), mode M, eye-pass skips E, …, matched without a colour read C, filter-shaped quads with the wrong colour R (not handled)`.
+  - `dream: matched draws in frame F: ui#0 layer 1024x1024 n=6 [-960,-540..960,540] (1920x1080) rgba … , …`: the window's first frame with matches. If the colour stream was not known yet, the line waits up to 5 frames with matches and prints `rgba ? (geometry only)`. A match after another UI draw in the same frame adds "not a prefix of the UI pass".
+  - Once a window: `dream: frame F: ui#N layer-shaped … has the filter's shape but not its colour …: not handled`. The session count is in the 10 s `ui:` line (`dream handled N (mode, filter on/off), filter-shaped quads with the wrong colour R this session`) and in the overlay row.
+  - The draft's "full-screen quad without the flag" diagnostic is gone with DR-1: it needed a vertex read of every single-quad UI draw in normal play.
+  - Census: the matched draws keep their census lines, tagged `DREAM layer (headset: hidden)`, `DREAM layer (headset: per eye)`, `DREAM speck (headset: hidden)` or `… (headset: on the panel, mode 0)`.
+- **Census files.**
+  - The overlay's Frame census goes to `ffxvr_frame.log`. The automatic one (the session's first glass break) goes to `ffxvr_frame_auto.log`.
+  - One census at a time: an arm while another is armed or live waits. It is armed at the Present that writes the other one (manual first) and goes live at the Present after (DR-7: a frame armed first, so geometry the game maps a frame ahead is captured). Nothing clears or truncates a census in progress; a second press while a manual census runs asks for one more frame after it.
+  - Every frame's header line ends with `| <local time> | game frame N | map '…' | <reason>`, taken when the census goes live.
+  - N1: the closing `-- Present --` line is written (it was dropped: it ran after the census stopped being live).
+  - N2: UI census lines decode the blend state: `(en, c src/dst, op, a src/dst, op, wm, a2c)`.
+- **ABI 18:** + `ffxvr_dream_set`, `ffxvr_dream_status`.

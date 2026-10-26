@@ -993,6 +993,30 @@ static inline void bt_user(const char* what) { if (g_bt_phase != BT_IDLE && g_bt
 static inline bool bt_no_split() { return g_bt_mode >= 1 && g_bt_phase != BT_IDLE; }   // no UI pass, the screen mode held
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
 
+// Dream overlay (research dream-overlay.md; design-notes "Dream overlay"). The HD port's dream filter (0x63DF70: film grain
+// Noise.dds 1024x1024, a sepia quad without texture, Vignette.dds 1024x512, and 16x16 dust specks every third frame) is drawn
+// through the 2D quad submit after the UI pass opens, so the UI split put it on the head-locked panel: a flat-screen-sized
+// sepia rectangle in the headset. Rule (ffxvr_on_draw): the game's own flag says the filter is live (dream_tick, once per
+// Present, guarded reads, a short latch, only in the seven dream maps) AND the UI draw has the filter's exact geometry and, when
+// its colour stream can be read, its colour. Nothing is read while the gate is closed. Mode (ini dream_overlay):
+// 0 = on the panel (the old behaviour), 1 = drawn into the game's target only (the monitor keeps it; the headset does not show
+// it), 2 = the three full-screen layers drawn into both eye images with the game's blend (specks hidden).
+int      g_dream_mode = 1;                      // ffxvr_dream_set (managed, every frame)
+bool     g_dream_gate = false;                  // the filter is live (latched): read by ffxvr_on_draw for this frame's draws
+int      g_dream_latch = 0;                     // frames the gate stays open after the flag drops (the 2D list can render a frame late)
+bool     g_dream_eye_now = false;               // mode 2: this draw's eye passes go into the eye images (ffxvr_eye2_begin)
+ID3D11BlendState* g_dream_blend_now = nullptr;  // ... and the blend to use instead of the game's (its copy without alpha-to-coverage), or null
+int      g_dream_map_no = -1;                   // the field map number [0x1330844] at the last read
+char     g_dream_map[16] = "";                  // the map name at the window's start
+// this frame (render thread; reset by dream_tick)
+uint32_t g_dream_layers_f = 0, g_dream_specks_f = 0; bool g_dream_other_f = false, g_dream_notprefix_f = false;
+char     g_dream_desc_f[900] = ""; size_t g_dream_desc_len = 0; bool g_dream_desc_colour_ok = true;
+// the window (gate on .. off) and the session
+struct DreamWin { uint32_t f0; ULONGLONG t0; uint32_t gate_frames, match_frames, layers, specks, max_frame, eye_skips, a2c, full_fade, desc_tries, rejected, colour_unread; bool desc_done, prefix_noted, reject_logged; };
+DreamWin g_dream_w = {};
+uint32_t g_dream_windows = 0, g_dream_rejected = 0, g_dream_handled_last = 0, g_dream_handled_10s = 0, g_dream_read_fail = 0;
+bool     g_dream_read_fail_logged = false;
+
 static void quat_to_mat(const float q[4], float M[9]) {   // rows: world axes of the rotated frame? No: M maps body -> reference
     const float x = q[0], y = q[1], z = q[2], w = q[3];
     M[0] = 1 - 2*(y*y + z*z); M[1] = 2*(x*y - w*z);     M[2] = 2*(x*z + w*y);
@@ -2126,6 +2150,16 @@ extern "C" __declspec(dllexport) int ffxvr_world_positions(float* out, int max) 
 struct FrameEv { char text[400]; };
 std::vector<FrameEv> g_frame_ev;
 bool  g_frame_arm = false, g_frame_live = false;
+// Census destinations (dream-overlay.md section 5): the overlay button's census goes to ffxvr_frame.log, the automatic one (the
+// session's first glass break) to ffxvr_frame_auto.log. One census at a time: an arm while another is armed or live waits
+// (pending), is armed at the Present that writes the other one (manual first) and goes live at the Present after. Nothing ever
+// clears a census in progress.
+// All of this is under g_mutex.
+enum FrameDest { FD_MANUAL = 0, FD_AUTO = 1 };
+int   g_frame_dest_armed = FD_MANUAL, g_frame_dest_live = FD_MANUAL;
+char  g_frame_reason_armed[112] = "manual", g_frame_reason_live[112] = "manual", g_frame_auto_reason[112] = "";
+bool  g_frame_manual_pending = false, g_frame_auto_pending = false;
+uint32_t g_frame_live_frame = 0; char g_frame_live_time[32] = ""; char g_frame_live_map[16] = "";
 // Draw arguments of the call being reported (set by ffxvr_draw_args just before ffxvr_on_draw), and
 // vertex / index buffer contents captured through Map/Unmap while a frame census is armed, so the
 // census can print the 2D UI quads' screen positions (the cursor is a textureless quad among others).
@@ -2761,11 +2795,57 @@ extern "C" __declspec(dllexport) unsigned ffxvr_ui_hidden_draws() { unsigned n =
 /// Cursor-rule bookkeeping: (rect lookups that failed) | (lookups made) << 16, both since the last call.
 extern "C" __declspec(dllexport) unsigned ffxvr_ui_rect_stats() { unsigned n = (g_rect_unknown & 0xFFFF) | ((g_rect_checked & 0xFFFF) << 16); g_rect_unknown = 0; g_rect_checked = 0; return n; }
 
-extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    g_frame_ev.clear();
+/// The game's current map name (gva 0x23CBC60, NUL-terminated, e.g. "znkd0400"), printable characters only; "" when not readable.
+/// ReadProcessMemory (wd_read): no faulting read under Fahrenheit's stage-0 debugger.
+static void read_map_name(char* out, size_t n) {
+    if (n == 0) return;
+    out[0] = 0;
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    char m[16] = {};
+    if (!wd_read(base + 0x1FCBC60, m, 15)) return;
+    size_t k = 0;
+    for (; k < 15 && k + 1 < n; ++k) { const unsigned char c = static_cast<unsigned char>(m[k]); if (c < 32 || c > 126) break; out[k] = static_cast<char>(c); }
+    out[k] = 0;
+}
+
+/// Arms a census for the next frame (the caller holds g_mutex and has checked that none is armed or live).
+static void frame_arm_locked(int dest, const char* reason) {
+    g_frame_ev.clear();    // nothing is armed or live: no census is cut short
     g_frame_arm = true;
     g_vb_capture = true;   // geometry buffers are copied at Unmap until the census frame is written
+    g_frame_dest_armed = dest;
+    strncpy_s(g_frame_reason_armed, reason ? reason : "", _TRUNCATE);
+}
+/// The overlay's Frame census button (ffxvr_frame.log). While the automatic census is armed or live, the manual one waits and
+/// is armed at the Present that writes it; a second press while a manual census is armed or live asks for one more frame after it.
+extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_frame_arm && g_frame_dest_armed == FD_MANUAL) return;           // already armed for the next frame
+    if (g_frame_arm || g_frame_live) { g_frame_manual_pending = true; return; }
+    frame_arm_locked(FD_MANUAL, "manual (the overlay's Frame census)");
+}
+/// The automatic census (ffxvr_frame_auto.log; the battle transition's first shatter). It never clears or truncates a census in
+/// progress: with one armed or live, it waits (pending) and is armed after that one is written.
+static void frame_arm_auto(const char* reason) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_frame_arm || g_frame_live) { g_frame_auto_pending = true; strncpy_s(g_frame_auto_reason, reason ? reason : "", _TRUNCATE); return; }
+    frame_arm_locked(FD_AUTO, reason);
+}
+/// At Present, after a census was written: a waiting arm (manual first) is armed now and goes live at the next Present (DR-7: one
+/// frame armed first, as for a normal arm, so geometry the game maps a frame ahead is captured too). g_mutex held.
+static void frame_arm_pending_locked() {
+    if (g_frame_arm || g_frame_live) return;
+    if (g_frame_manual_pending) { g_frame_manual_pending = false; frame_arm_locked(FD_MANUAL, "manual (the overlay's Frame census; it waited for the automatic census)"); }
+    else if (g_frame_auto_pending) { g_frame_auto_pending = false; char r[112]; strncpy_s(r, g_frame_auto_reason, _TRUNCATE); strncat_s(r, " (it waited for a manual census)", _TRUNCATE); frame_arm_locked(FD_AUTO, r); }
+}
+/// The armed census goes live for the frame that starts now (g_mutex held): its header facts are taken here.
+static void frame_go_live_locked() {
+    g_frame_arm = false; g_frame_live = true;
+    g_frame_dest_live = g_frame_dest_armed; strncpy_s(g_frame_reason_live, g_frame_reason_armed, _TRUNCATE);
+    g_frame_live_frame = g_frames;
+    SYSTEMTIME st; GetLocalTime(&st);
+    snprintf(g_frame_live_time, sizeof(g_frame_live_time), "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    read_map_name(g_frame_live_map, sizeof(g_frame_live_map));
 }
 
 /// The arguments of the draw call about to be reported through ffxvr_on_draw (kind 1 DrawIndexed, 2 Draw).
@@ -2774,13 +2854,16 @@ extern "C" __declspec(dllexport) void ffxvr_draw_args(int kind, unsigned n, unsi
 static void frame_dump() {
     frame_flush_draws();
     wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_frame.log", g_dir);
+    _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g_dir, g_frame_dest_live == FD_AUTO ? L"ffxvr_frame_auto.log" : L"ffxvr_frame.log");
     FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) return;
-    fprintf(f, "frame structure, %zu events; geometry buffers captured: %zu (%u via Map/Unmap, %u via UpdateSubresource)\n", g_frame_ev.size(), g_vbufs.size(), g_vb_maps, g_vb_updates);
-    for (const FrameEv& e : g_frame_ev) fprintf(f, "  %s\n", e.text);
-    fprintf(f, "\n");
-    fclose(f);
+    if (_wfopen_s(&f, path, L"a") == 0 && f != nullptr) {
+        fprintf(f, "frame structure, %zu events; geometry buffers captured: %zu (%u via Map/Unmap, %u via UpdateSubresource) | %s | game frame %u | map '%s' | %s\n",
+                g_frame_ev.size(), g_vbufs.size(), g_vb_maps, g_vb_updates, g_frame_live_time, g_frame_live_frame, g_frame_live_map, g_frame_reason_live);
+        for (const FrameEv& e : g_frame_ev) fprintf(f, "  %s\n", e.text);
+        fprintf(f, "\n");
+        fclose(f);
+    }
+    g_frame_ev.clear();
     g_vb_capture = false; g_vbufs.clear(); g_vb_in_flight.clear(); g_vb_maps = 0; g_vb_updates = 0;   // (the caller holds g_mutex)
 }
 
@@ -3972,7 +4055,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 17;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build)
+constexpr int FFXVR_ABI = 18;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -4651,8 +4734,8 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_backbuffer_seen_this_frame = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_frame_live)  { g_frame_live = false; frame_event("-- Present --"); frame_dump(); }
-        if (g_frame_arm)   { g_frame_arm = false; g_frame_live = true; g_noimg_census_lines = 0; g_scene_census_lines = 0; frame_event("-- frame start (after Present) --"); }
+        if (g_frame_live)  { frame_event("-- Present --"); g_frame_live = false; frame_dump(); frame_arm_pending_locked(); }   // N1: the closing line while still live
+        else if (g_frame_arm) { frame_go_live_locked(); g_noimg_census_lines = 0; g_scene_census_lines = 0; frame_event("-- frame start (after Present) --"); }
         if (g_stacks_live) { g_stacks_live = false; census_dump(); }
         if (g_stacks_arm)  { g_stacks_arm = false; g_stacks_live = true; }
     }
@@ -4676,8 +4759,10 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
         if (now >= next) {
             next = now + 10000;
-            if (g_ui_frames_3d) diag("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u)",
-                g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws);
+            if (g_ui_frames_3d) diag("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u) | dream handled %u (mode %d, filter %s), filter-shaped quads with the wrong colour %u this session",
+                g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws,
+                g_dream_handled_10s, g_dream_mode, g_dream_gate ? "on" : "off", g_dream_rejected);
+            g_dream_handled_10s = 0;
             g_ui_frames_3d = g_ui_frames_with_pass = 0; resolves_acc = clears_acc = no_pass_acc = 0;
         }
     }
@@ -4743,7 +4828,11 @@ static void ui_census_geometry() {
     ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(0, 1, &vb, &stride, &voff);
     ID3D11Buffer* ib = nullptr; DXGI_FORMAT ifmt = DXGI_FORMAT_UNKNOWN; UINT ioff = 0; g_ctx->IAGetIndexBuffer(&ib, &ifmt, &ioff);
     { D3D11_BUFFER_DESC vbd = {}; if (vb) vb->GetDesc(&vbd);
-      l += snprintf(line + l, sizeof(line) - l, "         %s n=%u start=%u base=%d topo=%d vs=%p ps=%p blend=%p stride=%u vb=%p/%uB", g_draw_kind == 1 ? "DrawIndexed" : "Draw", g_draw_n, g_draw_start, g_draw_base, (int)topo, (void*)vs, (void*)ps, (void*)bs, stride, (void*)vb, (unsigned)vbd.ByteWidth); }
+      char bdesc[96] = "";   // N2: the blend state decoded (RT0: enable, colour src/dst/op, alpha src/dst/op, write mask, alpha to coverage)
+      if (bs) { D3D11_BLEND_DESC bd = {}; bs->GetDesc(&bd); const D3D11_RENDER_TARGET_BLEND_DESC& r = bd.RenderTarget[0];
+                snprintf(bdesc, sizeof(bdesc), " (en %d c %d/%d op %d a %d/%d op %d wm %X a2c %d)", r.BlendEnable ? 1 : 0, (int)r.SrcBlend, (int)r.DestBlend, (int)r.BlendOp,
+                         (int)r.SrcBlendAlpha, (int)r.DestBlendAlpha, (int)r.BlendOpAlpha, (unsigned)r.RenderTargetWriteMask, bd.AlphaToCoverageEnable ? 1 : 0); }
+      l += snprintf(line + l, sizeof(line) - l, "         %s n=%u start=%u base=%d topo=%d vs=%p ps=%p blend=%p%s stride=%u vb=%p/%uB", g_draw_kind == 1 ? "DrawIndexed" : "Draw", g_draw_n, g_draw_start, g_draw_base, (int)topo, (void*)vs, (void*)ps, (void*)bs, bdesc, stride, (void*)vb, (unsigned)vbd.ByteWidth); }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         auto vit = vb ? g_vbufs.find(vb) : g_vbufs.end();
@@ -4821,6 +4910,37 @@ static void ui_census_geometry() {
     }
     if (vs) vs->Release(); if (ps) ps->Release(); if (bs) bs->Release(); if (vb) vb->Release(); if (ib) ib->Release();
 }
+// Census, first line per 2D UI draw: its textures and the head of its VS constant buffers (sprite transforms live there), then
+// the geometry line. `tag` (or null) goes in front of the textures: the dream rule's "DREAM layer (headset: hidden)" and the like.
+static void ui_census_draw(int idx, const char* tag) {
+    char line[400]; size_t l = 0;
+    l += snprintf(line + l, sizeof(line) - l, "      ui draw %u (frame draw %d):%s%s", g_ui_draws_frame, idx, tag ? " " : "", tag ? tag : "");
+    for (int i = 0; i < 4; ++i) {
+        ID3D11Texture2D* t = ps_tex(static_cast<UINT>(i)); if (!t) continue;
+        D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
+        if (l < sizeof(line) - 48) l += snprintf(line + l, sizeof(line) - l, " s%d:%p %ux%u f%u", i, static_cast<void*>(t), d.Width, d.Height, static_cast<unsigned>(d.Format));
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (int sl = 0; sl < 2; ++sl) {
+            auto it = g_vs_cb[sl] ? g_buffers.find(g_vs_cb[sl]) : g_buffers.end();
+            if (it == g_buffers.end()) continue;
+            const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
+            if (l < sizeof(line) - 24) l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.size);
+            for (UINT k = 0; k < nf && k < 12 && l < sizeof(line) - 16; ++k) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
+            if (sl == 0 && nf > 12) {   // the rest of cb0, on extra lines (sprite transforms / atlas rects live somewhere in here)
+                FrameEv e0; strncpy_s(e0.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e0);
+                l = (size_t)snprintf(line, sizeof(line), "            cb0+48:");
+                for (UINT k = 12; k < nf && k < 64; ++k) {
+                    if (l > sizeof(line) - 24) { FrameEv e1; strncpy_s(e1.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e1); l = (size_t)snprintf(line, sizeof(line), "            cb0+%u:", k * 4); }
+                    l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
+                }
+            }
+        }
+        FrameEv e; strncpy_s(e.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
+    }
+    ui_census_geometry();
+}
 
 /// Battle transition, once per window: what a capture-sampling draw after the real shards is (render thread, inside
 /// ffxvr_on_draw: every object comes from the context with a reference, released here). The texture's size is compared with
@@ -4850,8 +4970,143 @@ static void bt_detail_capture(int slot, bool rule) {
              static_cast<void*>(g_cur_rtv0_tex), g_cur_rtv0_w, g_cur_rtv0_h, g_cur_rtv0_samples, g_cur_rtv0_tex == g_scene_live_tex ? " (the scene target)" : "",
              g_cur_dsv != nullptr ? "bound" : "none", g_eye2_cur != nullptr ? "yes" : "no", g_draw_kind == 1 ? "DrawIndexed" : g_draw_kind == 2 ? "Draw" : "draw", g_draw_n, static_cast<int>(topo));
 }
+
+// ---- Dream overlay: the log batch, the colour read and the draw rule (dream-overlay.md 4.3, 4.5) ----
+// dream: lines are batched (render thread only) and written by dream_tick with diag_try, which never waits on the render thread:
+// a busy log keeps them for the next Present. Nothing is written from inside a draw.
+static char     g_dream_log_buf[8192]; static size_t g_dream_log_len = 0; static uint32_t g_dream_log_dropped = 0;
+static void dream_log(const char* fmt, ...) {
+    char line[1200]; va_list a; va_start(a, fmt); int n = vsnprintf(line, sizeof(line), fmt, a); va_end(a);
+    if (n < 0) return;
+    if (n >= static_cast<int>(sizeof(line))) n = static_cast<int>(sizeof(line)) - 1;
+    if (g_dream_log_len + static_cast<size_t>(n) + 2 > sizeof(g_dream_log_buf)) { g_dream_log_dropped++; return; }
+    if (g_dream_log_len) g_dream_log_buf[g_dream_log_len++] = '\n';   // diag_try ends the batch with its own newline
+    memcpy(g_dream_log_buf + g_dream_log_len, line, static_cast<size_t>(n)); g_dream_log_len += static_cast<size_t>(n); g_dream_log_buf[g_dream_log_len] = 0;
+}
+static void dream_flush() {
+    if (g_dream_log_len == 0) return;
+    if (!diag_try(g_dream_log_buf)) return;   // the log is open elsewhere: kept for the next Present
+    g_dream_log_len = 0; g_dream_log_buf[0] = 0;
+    if (g_dream_log_dropped) { char t[96]; snprintf(t, sizeof(t), "dream: %u lines dropped (the log stayed busy)", g_dream_log_dropped); if (diag_try(t)) g_dream_log_dropped = 0; }
+}
+/// The draw's first vertex colour from the slot-2 stream (float4, stride 16 in the census), found like c3_read_uv finds slot 3:
+/// the stream's last Map pointer, checked readable this frame (vb_live) and in bounds, then ReadProcessMemory (wd_read: never
+/// a faulting read). False when the stream is not known yet (it is learned here and readable from its next Map) or not floats.
+static bool dream_read_colour(float* rgba) {
+    if (g_ctx == nullptr) return false;
+    ID3D11Buffer* vb = nullptr; UINT stride = 0, voff = 0; g_ctx->IAGetVertexBuffers(2, 1, &vb, &stride, &voff);
+    if (!vb) return false;
+    const uint8_t* src = nullptr;
+    unsigned first_v = 0; const bool fv_ok = ui_first_v(&first_v);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        ui_vbs_learn(vb);
+        auto it = g_vb_last_map.find(vb);
+        if (fv_ok && it != g_vb_last_map.end() && it->second.p && stride >= 16 && (uint64_t)voff + ((uint64_t)first_v + 1) * stride <= it->second.size && vb_live(it->second))
+            src = static_cast<const uint8_t*>(it->second.p) + voff + (size_t)first_v * stride;
+    }
+    vb->Release();
+    if (src == nullptr || !wd_read(reinterpret_cast<uintptr_t>(src), rgba, 16)) return false;
+    for (int k = 0; k < 4; ++k) if (!std::isfinite(rgba[k]) || rgba[k] < -0.01f || rgba[k] > 4.f) return false;   // not a float colour
+    return true;
+}
+/// Mode 2 (DR-5): the game's own blend state without alpha-to-coverage, created once per distinct description (the cache is
+/// keyed by the description, not the pointer, so a reused address cannot hand back a stale state). Null if creation failed.
+static ID3D11BlendState* g_dream_blend_noa2c = nullptr; static D3D11_BLEND_DESC g_dream_blend_key = {}; static bool g_dream_blend_failed = false;
+static ID3D11BlendState* dream_blend_no_a2c(const D3D11_BLEND_DESC& game) {
+    D3D11_BLEND_DESC d = game; d.AlphaToCoverageEnable = FALSE;
+    if (g_dream_blend_noa2c != nullptr && memcmp(&d, &g_dream_blend_key, sizeof(d)) == 0) return g_dream_blend_noa2c;
+    if (g_dream_blend_failed && memcmp(&d, &g_dream_blend_key, sizeof(d)) == 0) return nullptr;
+    if (g_dream_blend_noa2c) { g_dream_blend_noa2c->Release(); g_dream_blend_noa2c = nullptr; }
+    g_dream_blend_key = d; g_dream_blend_failed = false;
+    if (g_device == nullptr || FAILED(g_device->CreateBlendState(&d, &g_dream_blend_noa2c)) || g_dream_blend_noa2c == nullptr) { g_dream_blend_noa2c = nullptr; g_dream_blend_failed = true; }
+    return g_dream_blend_noa2c;
+}
+/// DR-4: the filter's fixed vertex colours (0x63DF70's constants; a screen fade scales the alpha only): RGB within 0.02.
+static bool dream_colour_is(const float* c, bool tex, unsigned tw, unsigned th) {
+    float r, g, b;
+    if (!tex) { r = 186.f / 255.f; g = 158.f / 255.f; b = 85.f / 255.f; }                     // the sepia quad
+    else if (tw == 1024 && th == 1024) { r = g = b = 190.f / 255.f; }                       // Noise.dds
+    else { r = g = b = 128.f / 255.f; }                                                     // Vignette.dds, dirt01..03
+    return fabsf(c[0] - r) <= 0.02f && fabsf(c[1] - g) <= 0.02f && fabsf(c[2] - b) <= 0.02f;
+}
+/// The dream rule for one UI-pass draw (g_ui_draw_now: headset on, UI split). Returns k_dream_pass to go on as before (with
+/// *tag set for the census when a mode-0 match stays on the panel), else ffxvr_on_draw's return value:
+///   0 = drawn into the game's target only (the monitor keeps the effect; nothing reaches the panel or the eyes),
+///   2 = mode 2's two eye passes (ffxvr_eye2_begin draws into each eye image).
+/// DR-1: nothing at all happens while the gate is closed (no texture query, no vertex read, no stream learning), so normal play
+/// is exactly as before. With the gate open: the draw kind first, then the bound texture, and only then the vertices. A match
+/// needs one full-frame quad with the filter's texture sizes (or none), or a 16x16 speck of the exact size, and (DR-4) the
+/// filter's vertex colour whenever the colour stream can be read (a failed read does not block the match).
+static const int k_dream_pass = -1000;
+static int dream_rule(int idx, const char** tag) {
+    *tag = nullptr;
+    if (!g_dream_gate) return k_dream_pass;
+    if (g_draw_kind != 1 || g_draw_n != 6) { g_dream_other_f = true; return k_dream_pass; }   // one quad only (the 2D submit batches per texture)
+    ID3D11Texture2D* t = ps_tex(0); unsigned tw = 0, th = 0;
+    if (t) { D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d); tw = d.Width; th = d.Height; }
+    const bool tex_layer = t == nullptr || (tw == 1024 && (th == 1024 || th == 512)), tex_speck = t != nullptr && tw == 16 && th == 16;
+    if (!tex_layer && !tex_speck) { g_dream_other_f = true; return k_dream_pass; }   // glyph pages, menu atlases: no vertex read
+    const float* xy = nullptr; const unsigned nv = ui_quads_cached(&xy);   // the shared guarded read (R39), 4 vertices
+    if (nv < 4) { g_dream_other_f = true; return k_dream_pass; }
+    float x0, y0, x1, y1; quad_rect(xy, 0, &x0, &y0, &x1, &y1);
+    if (!std::isfinite(x0) || !std::isfinite(y0) || !std::isfinite(x1) || !std::isfinite(y1)) { g_dream_other_f = true; return k_dream_pass; }
+    const float w = x1 - x0, h = y1 - y0;
+    const bool full  = x0 <= -950.f && x1 >= 950.f && y0 <= -530.f && y1 >= 530.f && w <= 2000.f && h <= 1200.f;   // PS2 0,0-512,416 = the whole UI frame
+    const bool layer = full && tex_layer;                                                                        // Noise / sepia (none) / Vignette
+    const bool speck = tex_speck && w >= 36.f && w <= 43.f && h >= 24.f && h <= 31.f;                         // dirt01..03: 10.5 PS2 units = 39.4 x 27.3
+    if (!layer && !speck) { g_dream_other_f = true; return k_dream_pass; }
+    char tx[24]; if (t) snprintf(tx, sizeof(tx), "%ux%u", tw, th); else snprintf(tx, sizeof(tx), "none");
+    float c[4] = {}; const bool cok = dream_read_colour(c);
+    if (cok && !dream_colour_is(c, t != nullptr, tw, th)) {   // DR-4: the right shape and texture, not the filter's colour: left alone
+        g_dream_rejected++; g_dream_w.rejected++; g_dream_other_f = true;
+        if (!g_dream_w.reject_logged) {
+            g_dream_w.reject_logged = true;
+            dream_log("dream: frame %u: ui#%u %s %s [%.0f,%.0f..%.0f,%.0f] has the filter's shape but not its colour (rgba %.3f %.3f %.3f %.3f): not handled (once a window)",
+                      g_frames, g_ui_draws_frame, layer ? "layer-shaped" : "speck-shaped", tx, x0, y0, x1, y1, c[0], c[1], c[2], c[3]);
+        }
+        return k_dream_pass;
+    }
+    if (g_dream_other_f) g_dream_notprefix_f = true;   // another UI draw came first this frame
+    if (layer) g_dream_layers_f++; else g_dream_specks_f++;
+    if (!cok) g_dream_w.colour_unread++;
+    if (!g_dream_w.desc_done && g_dream_desc_len < sizeof(g_dream_desc_f) - 120) {   // the window's first frame with matches (dream_tick writes it)
+        if (!cok) g_dream_desc_colour_ok = false;
+        char col[64]; if (cok) snprintf(col, sizeof(col), " rgba %.3f %.3f %.3f %.3f", c[0], c[1], c[2], c[3]); else snprintf(col, sizeof(col), " rgba ? (geometry only)");
+        const int k = snprintf(g_dream_desc_f + g_dream_desc_len, sizeof(g_dream_desc_f) - g_dream_desc_len, "%sui#%u %s %s n=%u [%.0f,%.0f..%.0f,%.0f] (%.0fx%.0f)%s",
+                               g_dream_desc_len ? ", " : "", g_ui_draws_frame, layer ? "layer" : "speck", tx, g_draw_n, x0, y0, x1, y1, w, h, col);
+        if (k > 0) { g_dream_desc_len += static_cast<size_t>(k); if (g_dream_desc_len >= sizeof(g_dream_desc_f)) g_dream_desc_len = sizeof(g_dream_desc_f) - 1; }
+    }
+    if (g_dream_mode == 0) { *tag = layer ? "DREAM layer (headset: on the panel, mode 0)" : "DREAM speck (headset: on the panel, mode 0)"; return k_dream_pass; }
+    int ret = 0; const char* tg = layer ? "DREAM layer (headset: hidden)" : "DREAM speck (headset: hidden)";
+    if (g_dream_mode == 2 && layer) {
+        // Mode 2: the eye images have the scene resolve's size, which is the game's viewport for the UI pass. A viewport of any
+        // other size or origin would draw the layer misplaced: the eye pass is skipped then (counted), never re-set.
+        bool ok = g_ctx != nullptr && g_eye1_final != nullptr && g_eye1_final_rtv != nullptr && g_eye2_final_rtv != nullptr;
+        if (ok) {
+            D3D11_VIEWPORT vp = {}; UINT nvp = 1; g_ctx->RSGetViewports(&nvp, &vp);
+            D3D11_TEXTURE2D_DESC ed = {}; g_eye1_final->GetDesc(&ed);
+            ok = nvp >= 1 && fabsf(vp.TopLeftX) < 0.5f && fabsf(vp.TopLeftY) < 0.5f && fabsf(vp.Width - static_cast<float>(ed.Width)) < 0.5f && fabsf(vp.Height - static_cast<float>(ed.Height)) < 0.5f;
+        }
+        if (ok) {   // DR-5: alpha-to-coverage would cut the layer to 0 / 1 on a one-sample image: the game's blend without it
+            ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+            g_dream_blend_now = nullptr;
+            if (bs) {
+                D3D11_BLEND_DESC bd = {}; bs->GetDesc(&bd); bs->Release();
+                if (bd.AlphaToCoverageEnable) { g_dream_blend_now = dream_blend_no_a2c(bd); if (g_dream_blend_now) g_dream_w.a2c++; else ok = false; }
+            }
+        }
+        if (ok) { g_dream_eye_now = true; ret = 2; tg = "DREAM layer (headset: per eye)"; }
+        else { g_dream_w.eye_skips++; tg = "DREAM layer (headset: hidden; the eye pass skipped: viewport, eye images or blend)"; }
+    }
+    if (g_frame_live) ui_census_draw(idx, tg);
+    g_ui_draws_frame++;   // REQUIRED: the pass still counts as having UI draws (UI_DONE at the resolve needs > 0)
+    return ret;
+}
+
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
+    g_dream_eye_now = false; g_dream_blend_now = nullptr;   // set again below for a mode-2 dream layer only
     { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
@@ -4924,6 +5179,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (g_c3_srv && g_c3_seen_frame != g_frames && ps_tex(0) == g_c3_tex) g_c3_seen_frame = g_frames;   // the held one is still in use (R11: the real binding)
             else if (!g_c3_srv || stale) c3_atlas_scan();   // none yet, or stale: a new find swaps it
         }
+        const char* dream_tag = nullptr;   // dream overlay (dream-overlay.md 4.3): headset UI split only; the flat path is never touched
+        if (g_ui_draw_now) { const int dr = dream_rule(idx, &dream_tag); if (dr != k_dream_pass) return dr; }
         if (g_ui_hide_w != 0 || g_ui_hide_notex || g_ui_hide_cursor || g_hide_pointers) {
             ID3D11Texture2D* t = ps_tex(0);
             bool hide = false;
@@ -5006,35 +5263,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 g_ui_hidden_draws++; g_ui_draws_frame++; return -1;
             }
         }
-        if (g_frame_live) {   // census: every 2D UI draw with its texture and the head of its VS constant buffer (sprite transforms live there)
-            char line[400]; size_t l = 0;
-            l += snprintf(line + l, sizeof(line) - l, "      ui draw %u (frame draw %d):", g_ui_draws_frame, idx);
-            for (int i = 0; i < 4; ++i) {
-                ID3D11Texture2D* t = ps_tex(static_cast<UINT>(i)); if (!t) continue;
-                D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
-                l += snprintf(line + l, sizeof(line) - l, " s%d:%p %ux%u f%u", i, static_cast<void*>(t), d.Width, d.Height, static_cast<unsigned>(d.Format));
-            }
-            {
-                std::lock_guard<std::mutex> lock(g_mutex);
-                for (int sl = 0; sl < 2; ++sl) {
-                    auto it = g_vs_cb[sl] ? g_buffers.find(g_vs_cb[sl]) : g_buffers.end();
-                    if (it == g_buffers.end()) continue;
-                    const float* f = reinterpret_cast<const float*>(it->second.data.data()); const UINT nf = (UINT)(it->second.data.size() / 4);
-                    l += snprintf(line + l, sizeof(line) - l, " | cb%d %uB:", sl, (unsigned)it->second.size);
-                    for (UINT k = 0; k < nf && k < 12 && l < sizeof(line) - 16; ++k) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
-                    if (sl == 0 && nf > 12) {   // the rest of cb0, on extra lines (sprite transforms / atlas rects live somewhere in here)
-                        FrameEv e0; strncpy_s(e0.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e0);
-                        l = (size_t)snprintf(line, sizeof(line), "            cb0+48:");
-                        for (UINT k = 12; k < nf && k < 64; ++k) {
-                            if (l > sizeof(line) - 24) { FrameEv e1; strncpy_s(e1.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e1); l = (size_t)snprintf(line, sizeof(line), "            cb0+%u:", k * 4); }
-                            l += snprintf(line + l, sizeof(line) - l, " %.4g", f[k]);
-                        }
-                    }
-                }
-                FrameEv e; strncpy_s(e.text, line, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
-            }
-            ui_census_geometry();
-        }
+        if (g_frame_live) ui_census_draw(idx, dream_tag);   // census: every 2D UI draw (a dream filter draw left on the panel in mode 0 is tagged)
         if (g_ui_hide_cursor && (g_ui_draws_frame & 15) == 0) { float a, b, c, d; ui_sprite_rect(&a, &b, &c, &d); }   // keeps the stream set learned (cheap)
         g_ui_draws_frame++;
         if (g_ui_flat_draw_now) return 0;   // flat mode: drawn where the game puts it
@@ -5511,6 +5740,22 @@ bool g_ui_pass_active_draw = false;
 extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     QueryPerformanceCounter(&g_e2_t0);
     (void)pass;
+    if (g_dream_eye_now) {
+        // Dream overlay, mode 2 (ffxvr_on_draw returned 2 for a full-screen filter layer): pass 0 draws it into eye 1's image, pass 1
+        // into eye 2's, with the game's shaders, textures, viewport and blend (saved and restored by eye2_end's UI branch; replaced
+        // by its own copy without alpha-to-coverage when it uses that, DR-5). No depth: draw order is the layering, as on the monitor.
+        ID3D11RenderTargetView* rtv = pass == 0 ? g_eye1_final_rtv : pass == 1 ? g_eye2_final_rtv : nullptr;
+        if (rtv == nullptr || g_ctx == nullptr) { g_dream_w.eye_skips++; return 0; }
+        e2_save(false);
+        g_in_eye2 = true; g_ui_pass_active_draw = true;   // before the bind (our OMSetRenderTargets detour ignores it); eye2_end restores the targets and the blend
+        for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
+        g_ctx->OMGetBlendState(&g_saved_blend, g_saved_blend_factor, &g_saved_sample_mask);
+        ID3D11RenderTargetView* rts[1] = { rtv };
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42, B9-4)
+        g_e2s.om_swapped = true;
+        if (g_dream_blend_now) g_ctx->OMSetBlendState(g_dream_blend_now, g_saved_blend_factor, g_saved_sample_mask);   // DR-5: the game's blend without alpha-to-coverage
+        return 1;
+    }
     if (g_ui_draw_now || g_imgui_draw_now) {
         ID3D11RenderTargetView* target = g_imgui_draw_now ? g_imgui_rtv : g_ui_rtv;
         if (target == nullptr || g_ctx == nullptr) return 0;
@@ -7002,9 +7247,11 @@ static void bt_set_phase(int ph, const char* why) {
            static_cast<int>(r.bst), static_cast<unsigned>(r.trig), r.h, static_cast<unsigned>(r.bs4), static_cast<unsigned>(r.bs5));
     if (g_bt_phase == BT_SHATTER && ph != BT_SHATTER) { g_bt_bst_shatter_end = r.bst; g_bt_cap_tex = nullptr; g_bt_cap_done = true; }   // the shards are over: no more matching against that address
     g_bt_phase = ph; g_bt_phase_t = now; g_bt_phase_frame = g_frames; g_bt_quiet = 0;
-    if (ph == BT_SHATTER && g_bt_diag && !g_bt_census_done) {   // BT-11.6 / BT-R-3: one frame census (ffxvr_frame.log) of the session's first shatter, only with diag_transition=1
-        g_bt_census_done = true; ffxvr_frame_arm();
-        bt_add("bt: frame %u: the next frame is written to ffxvr_frame.log (the frame census, once a session)", g_frames);
+    if (ph == BT_SHATTER && g_bt_diag && !g_bt_census_done) {   // BT-11.6 / BT-R-3: one frame census (ffxvr_frame_auto.log) of the session's first shatter, only with diag_transition=1
+        g_bt_census_done = true;
+        char reason[96]; snprintf(reason, sizeof(reason), "first glass break of the session (bt window %u)", g_bt_win_n);
+        frame_arm_auto(reason);   // never clears a manual census in progress: it waits for it (dream-overlay.md section 5)
+        bt_add("bt: frame %u: the next frame is written to ffxvr_frame_auto.log (the frame census, once a session; after a manual census if one is in progress)", g_frames);
     }
     bt_flush();
 }
@@ -7218,11 +7465,94 @@ extern "C" __declspec(dllexport) int ffxvr_bt_status(char* buf, int n) {
     }
     return g_bt_phase;
 }
+
+// ---- Dream overlay: the game's flag, once per Present (dream-overlay.md 4.2, 4.5) ----
+static void dream_begin(int map_no, int count) {
+    g_dream_windows++;
+    g_dream_w = {}; g_dream_w.f0 = g_frames; g_dream_w.t0 = GetTickCount64();
+    read_map_name(g_dream_map, sizeof(g_dream_map));
+    dream_log("dream: game filter on at frame %u: map '%s' field map 0x%X, mode %d (0 panel, 1 hidden, 2 per eye); warm-up count %d; window %u this session",
+              g_frames, g_dream_map, static_cast<unsigned>(map_no), g_dream_mode, count, g_dream_windows);
+}
+static void dream_end(const char* why) {
+    const DreamWin& w = g_dream_w;
+    char extra[96] = ""; if (w.a2c) snprintf(extra, sizeof(extra), ", blends copied without alpha-to-coverage %u", w.a2c);
+    dream_log("dream: game filter off at frame %u (on since frame %u) after %.1f s (%s): frames with matches %u / gate frames %u, draws handled %u layers + %u specks (per frame max %u), mode %d, eye-pass skips %u%s, gate frames at a full fade %u, matched without a colour read %u, filter-shaped quads with the wrong colour %u (not handled); map '%s' field map 0x%X",
+              g_frames, w.f0, (GetTickCount64() - w.t0) / 1000.0, why, w.match_frames, w.gate_frames, w.layers, w.specks, w.max_frame, g_dream_mode, w.eye_skips, extra, w.full_fade,
+              w.colour_unread, w.rejected, g_dream_map, static_cast<unsigned>(g_dream_map_no));
+    g_dream_gate = false; g_dream_latch = 0;
+}
+/// Top of xr_tick (render thread, headset on): the tallies of the frame just finished, then the game's flag for the next one.
+/// Reads [0x12FB8F0] (active, warm-up count), [0x12FFAE8] (fade on, direction, length, factor) and [0x1330844] (the field map
+/// number) with ReadProcessMemory: no faulting read under the stage-0 debugger. A failed read closes the gate.
+static void dream_tick() {
+    {   // the frame just finished (its draws ran with g_frames one lower; the gate was the one decided at the last tick)
+        const uint32_t lf = g_dream_layers_f, sf = g_dream_specks_f, hf = lf + sf;
+        if (g_dream_gate) {
+            DreamWin& w = g_dream_w; w.gate_frames++;
+            if (hf) { w.match_frames++; w.layers += lf; w.specks += sf; if (hf > w.max_frame) w.max_frame = hf; }
+            // the matched draws of the window's first frame with matches; if a colour stream was not known yet, up to 5 frames later
+            if (hf && !w.desc_done && (g_dream_desc_colour_ok || ++w.desc_tries >= 5)) {
+                w.desc_done = true;
+                dream_log("dream: matched draws in frame %u: %s%s", g_frames - 1, g_dream_desc_f, g_dream_notprefix_f ? " | not a prefix of the UI pass" : "");
+            }
+            if (g_dream_notprefix_f && !w.prefix_noted) { w.prefix_noted = true; dream_log("dream: frame %u: a matched draw came after another UI draw (not a prefix of the UI pass; the filter is submitted before the menus and text: worth a look)", g_frames - 1); }
+        }
+        g_dream_handled_last = hf; g_dream_handled_10s += hf;
+        g_dream_layers_f = g_dream_specks_f = 0; g_dream_other_f = g_dream_notprefix_f = false;
+        g_dream_desc_f[0] = 0; g_dream_desc_len = 0; g_dream_desc_colour_ok = true;   // collected afresh each frame until written
+    }
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    int32_t ac[2] = { 0, 0 }; uint8_t fd[16] = {}; int32_t map_no = -1;
+    const bool ok = wd_read(base + 0xEFB8F0, ac, 8) && wd_read(base + 0xEFFAE8, fd, 16) && wd_read(base + 0xF30844, &map_no, 4);
+    if (!ok) {
+        g_dream_read_fail++;
+        if (!g_dream_read_fail_logged) { g_dream_read_fail_logged = true; dream_log("dream: flag read failed at frame %u (the gate stays closed while it fails; counted)", g_frames); }
+        if (g_dream_gate) dream_end("the game's filter flag is not readable");
+        g_dream_latch = 0; g_dream_gate = false;
+        dream_flush();
+        return;
+    }
+    int32_t fade_on = 0; float factor = 0.f; memcpy(&fade_on, fd, 4); memcpy(&factor, fd + 12, 4);
+    g_dream_map_no = map_no;
+    // DR-1: live as soon as the flag is set (warm-up count 0..5; the filter draws at 5), so the warm-up frames' UI draws learn the
+    // UI streams before the first filter frame. DR-3: and only in the seven maps the switch 0x8223A0 drives the filter in: a flag
+    // left stale (the switch skipped, a quit to the title) cannot open the gate anywhere else. The gate is only a permission: a
+    // draw must still have the filter's geometry and colour.
+    const bool dream_map = map_no == 0x86 || map_no == 0xA5 || map_no == 0xBF || map_no == 0xF9 || map_no == 0xFC || map_no == 0x129 || map_no == 0x187;
+    const bool live = ac[0] != 0 && dream_map;
+    if (live) g_dream_latch = 3;                 // this frame and the next 2 (the 2D list can render a frame after the logic)
+    else if (g_dream_latch > 0) g_dream_latch--;
+    const bool gate = g_dream_latch > 0;
+    if (gate && !g_dream_gate) dream_begin(map_no, ac[1]);
+    else if (!gate && g_dream_gate) dream_end("the game's filter is off");
+    g_dream_gate = gate;
+    if (gate && fade_on != 0 && std::isfinite(factor) && factor >= 1.f) g_dream_w.full_fade++;   // the filter is not drawn then (alpha * 0)
+    dream_flush();
+}
+/// The headset is off (xr_tick's early return): an open window ends; the batch is still written.
+static void dream_headset_off() {
+    if (g_dream_gate) dream_end("the headset is off");
+    g_dream_gate = false; g_dream_latch = 0;
+    dream_flush();
+}
+/// ABI 18: the dream overlay's mode (0 on the panel, 1 hidden in the headset, 2 per-eye layers); managed, every frame.
+extern "C" __declspec(dllexport) void ffxvr_dream_set(int mode) { g_dream_mode = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
+/// ABI 18: for the overlay. out[0] gate (the filter is live, latched), [1] the latch, [2] draws handled last frame, [3] gate
+/// frames in this window (or the last one), [4] the field map number at the last read, [5] filter-shaped quads with the wrong
+/// colour this session (not handled), [6] windows this session, [7] the mode, [8] flag reads failed. Returns how many values exist (9).
+extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
+    const int v[9] = { g_dream_gate ? 1 : 0, g_dream_latch, static_cast<int>(g_dream_handled_last), static_cast<int>(g_dream_w.gate_frames), g_dream_map_no,
+                       static_cast<int>(g_dream_rejected), static_cast<int>(g_dream_windows), g_dream_mode, static_cast<int>(g_dream_read_fail) };
+    if (out != nullptr) for (int i = 0; i < n && i < 9; ++i) out[i] = v[i];
+    return 9;
+}
 static void xr_tick() {
-    if (!g_xr_want) return;
+    if (!g_xr_want) { dream_headset_off(); return; }
     lowres_check();
     detect_cut();
     bt_tick();                                   // battle transition phases (before anything this tick decides from them)
+    dream_tick();                                // the dream filter's flag (after bt_tick; ffxvr_on_draw reads the gate this frame)
     if (!g_bt_frozen) turn_tick();               // frozen world: no stick turning while the view is pinned...
     else if (g_turn_stick && right_stick_x() != 0.f) bt_user("stick turning");   // ... a push ends the window instead (the player is never locked out)
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
