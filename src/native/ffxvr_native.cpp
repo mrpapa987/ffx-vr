@@ -823,6 +823,27 @@ bool  g_backdrop_room = false;          // last frame had painted-backdrop draws
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f, g_xr_screen_dist_placed = -1.f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
+// Shadow camera (research shadows-one-eye.md, fix A; design-notes "Character shadows: the light camera"). The ShadowManager
+// draws each character from straight above into its own tile of a 4096x4096 8x8 atlas. Those caster uploads carry the
+// light's view at the view slot, the light's ORTHOGRAPHIC projection in the near-variant slot (+128) and the scene's
+// perspective in the main slot (+256), so the camera test took them for the scene camera and write_camera put the head pose
+// and each eye's FOV into the light: each eye's tiles got a sheared slice of the characters about 15 degrees to its side.
+// Such a light camera is now left alone (both eyes draw the game's tiles) and kept out of every camera decision.
+int      g_shadow_cam = 1, g_shadow_cam_req = 1;          // 1: light cameras left alone (default); 0: overridden as before (A/B). _req: the export; applied at Present
+int      g_fp_self_shadow = 1;                            // 1: the player's own shadow is drawn in every mode; 0: hidden in first person's whole-body modes only
+uint32_t g_lc_frame = 0, g_lc_report = 0;                 // light-camera uploads this frame / the frame before (perf: line, status)
+uint32_t g_lc_total = 0, g_lc_tilted_total = 0, g_lc_mode0_total = 0;   // session: all, not looking straight down, overridden with shadow_cam 0
+uint32_t g_lc_self_hidden = 0, g_lc_self_hidden_report = 0;           // fp_self_shadow 0: the player's caster draws hidden this frame / the frame before
+struct LightCb { ID3D11Buffer* cb; uint32_t frame; bool has_world; float wpos[3]; };
+LightCb  g_lc_tab[32] = {}; int g_lc_tab_next = 0; uint32_t g_lc_tab_frame = ~0u;   // this frame's light-camera buffers (the census tag, fp_self_shadow)
+struct LightFirst { bool valid; uint32_t frame; UINT size, base; bool tilted, has_world; float v[12], pn[16], pm[16], wpos[3]; };
+LightFirst g_lc_first = {};                               // the first light camera of the frame (the per-map diag line)
+char     g_lc_logged_map[16] = ""; uint32_t g_lc_map_lines = 0, g_lc_quiet_frames = 0; ULONGLONG g_lc_next_check = 0, g_lc_last_line = 0;
+LightFirst g_lc_tilt = {};                                // SH-3: a light camera not looking straight down, waiting for its per-map line
+char     g_lc_tilt_map[16] = ""; bool g_lc_tilt_logged = false; uint32_t g_lc_tilt_lines = 0; ULONGLONG g_lc_tilt_next_check = 0;
+uint32_t g_frame_run_light = 0;                           // census: draws in the current run whose slot-0 buffer holds a light camera
+uint32_t g_lc_run_n = 0, g_lc_run_tilted = 0; char g_lc_run_first[288] = "";   // SH-4 census: light-camera uploads since the last event, the first one described
+constexpr UINT k_lc_min_size = 1872;                      // SH-3: light cameras are skinned-layout buffers (every caster in the captures: 6992 B)
 UINT g_dump_cb_size = 0; int g_dump_cb_left = 0;   // one-shot constant-buffer layout dump (ffxvr_dump_cb)
 // One-frame capture of the player's skinned buffers (bone palettes), raw, to
 // ffxvr_bones.bin, with the actor's sub-positions in ffxvr_bones.log (phase 3).
@@ -2189,12 +2210,23 @@ int   g_frame_draw_run = 0;        // draws since the last non-draw event
 int   g_frame_run_small = 0, g_frame_run_mid = 0, g_frame_run_big = 0, g_frame_run_none = 0;
 
 static void frame_flush_draws() {
+    if (g_frame_draw_run == 0 && g_lc_run_n == 0) return;
+    if (g_lc_run_n > 0) {   // SH-4: one summary of the light-camera uploads since the last event, not a line each (that split every caster run)
+        FrameEv l;
+        snprintf(l.text, sizeof(l.text), "      LIGHT CAM uploads: %u since the last event%s | first: %s | %s", g_lc_run_n,
+                 g_lc_run_tilted ? " (some NOT straight down)" : "", g_lc_run_first,
+                 g_shadow_cam == 1 ? "light cam (game's): left alone, no eye image" : "shadow_cam 0: overridden as the scene camera (old)");
+        if (g_frame_ev.size() < 2000) g_frame_ev.push_back(l);
+        g_lc_run_n = 0; g_lc_run_tilted = 0; g_lc_run_first[0] = 0;
+    }
     if (g_frame_draw_run == 0) return;
     FrameEv e;
-    snprintf(e.text, sizeof(e.text), "      %4d draws   (slot0: none %d, <=512B %d, ~1KB %d, >=1872B %d)",
-             g_frame_draw_run, g_frame_run_none, g_frame_run_small, g_frame_run_mid, g_frame_run_big);
+    char lt[64] = "";
+    if (g_frame_run_light) snprintf(lt, sizeof(lt), g_shadow_cam == 1 ? "; light cam (game's) %u" : "; light cam (overridden, shadow_cam 0) %u", g_frame_run_light);
+    snprintf(e.text, sizeof(e.text), "      %4d draws   (slot0: none %d, <=512B %d, ~1KB %d, >=1872B %d%s)",
+             g_frame_draw_run, g_frame_run_none, g_frame_run_small, g_frame_run_mid, g_frame_run_big, lt);
     if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e);
-    g_frame_draw_run = g_frame_run_small = g_frame_run_mid = g_frame_run_big = g_frame_run_none = 0;
+    g_frame_draw_run = g_frame_run_small = g_frame_run_mid = g_frame_run_big = g_frame_run_none = 0; g_frame_run_light = 0;
 }
 
 static void frame_event(const char* text) {
@@ -3384,6 +3416,178 @@ extern "C" __declspec(dllexport) int ffxvr_bones_capture(const float* optpos78, 
     g_bones_left = max_buffers; g_bones_frame = 0;
     return g_bones_take;
 }
+/// The 2D layer system's dummy camera: rows (-1 0 0)(0 1 0)(0 0 -1), position (0,0,-1).
+static bool is_dummy_view(const float v[12]) {
+    return fabsf(v[0] + 1.f) < 1e-3f && fabsf(v[1]) < 1e-3f && fabsf(v[2]) < 1e-3f
+        && fabsf(v[4]) < 1e-3f && fabsf(v[5] - 1.f) < 1e-3f && fabsf(v[6]) < 1e-3f
+        && fabsf(v[8]) < 1e-3f && fabsf(v[9]) < 1e-3f && fabsf(v[10] + 1.f) < 1e-3f
+        && fabsf(v[3]) < 1e-3f && fabsf(v[7]) < 1e-3f && fabsf(v[11] + 1.f) < 1e-3f;
+}
+/// Light camera (the ShadowManager's casters, shadows-one-eye.md): an orthographic matrix in the near-variant slot (base + 64:
+/// last row 0 0 0 1, a finite non-zero x, y and depth scale) next to a real 3D perspective in the main slot (base + 192: last
+/// row 0 0 -1 0, |P0|, |P5| > 0.2, so never the intro's near-2D camera). The scene camera carries a perspective in both slots.
+/// The caller has checked that the buffer holds base + 256 bytes or more (it reads the inverse at base + 256), so every float
+/// read here is inside the bytes UpdateSubresource was handed.
+static bool light_proj(const uint8_t* p, UINT base) {
+    const float* pn = reinterpret_cast<const float*>(p + base + 64);
+    const float* pm = reinterpret_cast<const float*>(p + base + 192);
+    if (!(pm[14] < -0.99f && pm[14] > -1.01f && fabsf(pm[15]) < 1e-4f)) return false;                 // main: perspective
+    if (!(fabsf(pm[0]) > 0.2f && fabsf(pm[5]) > 0.2f)) return false;                                   // ... of a real 3D camera
+    if (!(fabsf(pn[15] - 1.f) < 1e-3f && fabsf(pn[14]) < 1e-3f && fabsf(pn[12]) < 1e-4f && fabsf(pn[13]) < 1e-4f)) return false;   // near variant: orthographic
+    return std::isfinite(pn[0]) && std::isfinite(pn[5]) && std::isfinite(pn[10]) && fabsf(pn[0]) > 1e-6f && fabsf(pn[5]) > 1e-6f && fabsf(pn[10]) > 1e-9f;
+}
+/// This frame's light-camera entry for a buffer (most recent first), or null.
+static const LightCb* lightcam_find(ID3D11Buffer* cb) {
+    if (cb == nullptr || g_lc_tab_frame != g_frames) return nullptr;
+    for (int k = 0; k < 32; ++k) {
+        const LightCb& e = g_lc_tab[(g_lc_tab_next - 1 - k + 64) % 32];
+        if (e.cb == cb && e.frame == g_frames) return &e;
+    }
+    return nullptr;
+}
+/// A later upload of something else into a buffer that last held a light camera: it holds no light camera any more.
+static void lightcam_forget(ID3D11Buffer* cb) {
+    if (cb == nullptr || g_lc_tab_frame != g_frames) return;
+    for (LightCb& e : g_lc_tab) if (e.cb == cb) e.cb = nullptr;
+}
+/// A light camera left alone: any eye image taken earlier this frame for the same buffer is stale (the draw and eye 2's
+/// re-issue must use the game's bytes, not an older object's camera). Nothing is mid-draw here: uploads come between draws.
+static void lightcam_drop_images(ID3D11Buffer* cb) {
+    if (cb == nullptr) return;
+    for (EyeImage& e : g_eye_ring) if (e.cb == cb && e.frame == g_frames) e.cb = nullptr;
+}
+/// Records a light-camera upload (under g_mutex, from maybe_override): the per-frame table, the frame's first one for the
+/// per-map diag line, the first one not looking straight down (SH-3), and the census summary's count while a census is live.
+static void lightcam_note(const uint8_t* p, UINT size, UINT base, ID3D11Buffer* buf, const float v[12], bool tilted) {
+    float wpos[3] = {}; bool has_world = false;
+    if (size >= 1872 && base + 416 + 160 + 64 <= size) {   // skinned buffers: the object's world translation (+640 at base 64), as maybe_override reads it
+        const float* W = reinterpret_cast<const float*>(p + base + 416 + 160);
+        if (std::isfinite(W[3]) && std::isfinite(W[7]) && std::isfinite(W[11])) { wpos[0] = W[3]; wpos[1] = W[7]; wpos[2] = W[11]; has_world = true; }
+    }
+    if (buf != nullptr) {
+        LightCb& e = g_lc_tab[g_lc_tab_next]; g_lc_tab_next = (g_lc_tab_next + 1) % 32;
+        e.cb = buf; e.frame = g_frames; e.has_world = has_world; memcpy(e.wpos, wpos, sizeof(wpos));
+        g_lc_tab_frame = g_frames;
+    }
+    const float* pn = reinterpret_cast<const float*>(p + base + 64);
+    const float* pm = reinterpret_cast<const float*>(p + base + 192);
+    if (!g_lc_first.valid || g_lc_first.frame != g_frames) {
+        LightFirst& f = g_lc_first;
+        f.valid = true; f.frame = g_frames; f.size = size; f.base = base; f.tilted = tilted; f.has_world = has_world;
+        memcpy(f.v, v, sizeof(f.v)); memcpy(f.pn, pn, sizeof(f.pn)); memcpy(f.pm, pm, sizeof(f.pm)); memcpy(f.wpos, wpos, sizeof(f.wpos));
+    }
+    if (tilted && !g_lc_tilt.valid) {   // kept until lightcam_frame_end has checked it against the map
+        LightFirst& f = g_lc_tilt;
+        f.valid = true; f.frame = g_frames; f.size = size; f.base = base; f.tilted = true; f.has_world = has_world;
+        memcpy(f.v, v, sizeof(f.v)); memcpy(f.pn, pn, sizeof(f.pn)); memcpy(f.pm, pm, sizeof(f.pm)); memcpy(f.wpos, wpos, sizeof(f.wpos));
+    }
+    if (g_frame_live) {   // SH-4: counted here, written by frame_flush_draws at the next event (no event here: it would split the run)
+        if (g_lc_run_n == 0)
+            snprintf(g_lc_run_first, sizeof(g_lc_run_first), "cb %p %u B (view at +%u) ortho x %.4f y %.4f z %.4f %.4f | light forward (%.2f %.2f %.2f)%s | world %s(%.1f %.1f %.1f)",
+                     static_cast<void*>(buf), size, base, pn[0], pn[5], pn[10], pn[11], -v[8], -v[9], -v[10], tilted ? " NOT straight down" : "",
+                     has_world ? "" : "none ", wpos[0], wpos[1], wpos[2]);
+        g_lc_run_n++; if (tilted) g_lc_run_tilted++;
+    }
+}
+/// A light camera's numbers for a diag line: size and layout, the light's position and forward axis, the caster's world
+/// translation, and the near-variant, main and view rows.
+static void lightcam_describe(char* out, size_t n, const LightFirst& f) {
+    float eye[3];   // the light's position: -R^T t
+    for (int i = 0; i < 3; ++i) eye[i] = -(f.v[0*4+i] * f.v[3] + f.v[1*4+i] * f.v[7] + f.v[2*4+i] * f.v[11]);
+    const float* a = f.pn; const float* b = f.pm; const float* v = f.v;
+    snprintf(out, n,
+             "%u B, view at +%u, light at (%.2f %.2f %.2f) forward (%.3f %.3f %.3f)%s, caster world %s(%.2f %.2f %.2f) | "
+             "near-variant (ortho) row0 (%.4f %.4f %.4f %.4f) row1 (%.4f %.4f %.4f %.4f) row2 (%.4f %.4f %.4f %.4f) row3 (%.4f %.4f %.4f %.4f) | "
+             "main row0 (%.4f %.4f %.4f %.4f) row1 (%.4f %.4f %.4f %.4f) row2 (%.4f %.4f %.4f %.4f) row3 (%.4f %.4f %.4f %.4f) | "
+             "view row0 (%.4f %.4f %.4f %.2f) row1 (%.4f %.4f %.4f %.2f) row2 (%.4f %.4f %.4f %.2f)",
+             f.size, f.base, eye[0], eye[1], eye[2], -v[8], -v[9], -v[10], f.tilted ? " NOT straight down" : "", f.has_world ? "" : "none ", f.wpos[0], f.wpos[1], f.wpos[2],
+             a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15],
+             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11]);
+}
+/// A line for diag_try, kept until it is written: a second line while one waits is appended (or dropped if it does not fit).
+static void lightcam_queue(char* q, size_t n, const char* line) {
+    const size_t l = strlen(q), k = strlen(line);
+    if (l == 0) { strncpy_s(q, n, line, _TRUNCATE); return; }
+    if (l + 1 + k < n) { q[l] = '\n'; memcpy(q + l + 1, line, k + 1); }
+}
+/// At Present (ffxvr_begin_frame, render thread; g_mutex is not held on entry): the frame's light-camera count for the perf:
+/// line and the status, shadow_cam as requested for the next frame (never mid-frame: the eyes would disagree for a frame),
+/// one diag line per map with that map's first light camera, and one per map with the first light camera that does not look
+/// straight down (SH-3). Rate-limited: the map name (ReadProcessMemory through
+/// read_map_name) is read at most once a second and only while light cameras are uploaded; a line at most every 5 s and 200 a
+/// session. A map that shows no light camera for 120 frames is forgotten, so coming back to it logs again. A line the
+/// render thread could not write (the log open elsewhere) is kept and tried again at the next Present (SH-5: the shadow_cam
+/// switch line too).
+static void lightcam_frame_end() {
+    static char pend_map[1600] = "", pend_tilt[1600] = "", pend_switch[640] = ""; static bool have_logged = false;
+    for (char* q : { pend_switch, pend_map, pend_tilt }) if (q[0] && diag_try(q)) q[0] = 0;   // SH-5: every line kept until written
+    LightFirst f = {}, ft = {}; uint32_t n = 0; int was = 0, now_mode = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        n = g_lc_frame; g_lc_report = n; g_lc_frame = 0;
+        g_lc_self_hidden_report = g_lc_self_hidden; g_lc_self_hidden = 0;
+        if (n > 0 && g_lc_first.valid) f = g_lc_first;
+        g_lc_first.valid = false;
+        if (g_lc_tilt.valid) ft = g_lc_tilt;
+        was = g_shadow_cam; now_mode = g_shadow_cam_req; g_shadow_cam = now_mode;
+    }
+    if (was != now_mode) {
+        char t[256];
+        snprintf(t, sizeof(t), "shadow: shadow_cam %d -> %d at frame %u (%s)", was, now_mode, g_frames,
+                 now_mode == 1 ? "light cameras left alone: the game's shadow tiles in both eyes" : "light cameras overridden as the scene camera: the old behaviour, for A/B");
+        lightcam_queue(pend_switch, sizeof(pend_switch), t);
+        if (diag_try(pend_switch)) pend_switch[0] = 0;
+    }
+    const ULONGLONG t = GetTickCount64();
+    // SH-3: the first light camera per map that does not look straight down, in full (a scene camera taken for a light would
+    // show here). Checked at most once a second, 50 lines a session; until checked, later tilted ones are not recorded.
+    if (ft.valid && !pend_tilt[0] && t >= g_lc_tilt_next_check) {
+        g_lc_tilt_next_check = t + 1000;
+        char map[16]; read_map_name(map, sizeof(map));
+        if ((!g_lc_tilt_logged || strcmp(map, g_lc_tilt_map) != 0) && g_lc_tilt_lines < 50) {
+            g_lc_tilt_logged = true; g_lc_tilt_lines++; strncpy_s(g_lc_tilt_map, map, _TRUNCATE);
+            char d[1400]; lightcam_describe(d, sizeof(d), ft);
+            snprintf(pend_tilt, sizeof(pend_tilt), "shadow: map '%s' frame %u: a light camera NOT looking straight down (shadow_cam %d; %u such this session): %s",
+                     map[0] ? map : "?", ft.frame, now_mode, g_lc_tilted_total, d);
+            if (diag_try(pend_tilt)) pend_tilt[0] = 0;
+        }
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_lc_tilt.valid = false;
+    }
+    if (n == 0) { if (g_lc_quiet_frames < 1000000u && ++g_lc_quiet_frames > 120) have_logged = false; return; }
+    g_lc_quiet_frames = 0;
+    if (!f.valid || pend_map[0] || g_lc_map_lines >= 200) return;
+    if (t < g_lc_next_check) return;
+    g_lc_next_check = t + 1000;
+    char map[16]; read_map_name(map, sizeof(map));
+    if (have_logged && strcmp(map, g_lc_logged_map) == 0) return;
+    if (g_lc_last_line != 0 && t - g_lc_last_line < 5000) return;   // a new map, but the last line was under 5 s ago: checked again in a second
+    have_logged = true; g_lc_last_line = t; g_lc_map_lines++;
+    strncpy_s(g_lc_logged_map, map, _TRUNCATE);
+    char d[1400]; lightcam_describe(d, sizeof(d), f);
+    snprintf(pend_map, sizeof(pend_map), "shadow: map '%s' frame %u: %u light cameras in the frame (shadow_cam %d; session %u, not straight down %u, overridden with shadow_cam 0 %u) | first: %s",
+             map[0] ? map : "?", g_frames, n, now_mode, g_lc_total, g_lc_tilted_total, g_lc_mode0_total, d);
+    if (diag_try(pend_map)) pend_map[0] = 0;
+}
+/// shadow_cam: 1 = light cameras left alone (default), 0 = overridden as before (A/B). fp_self_shadow: 1 = the player's own
+/// shadow is drawn, stable, in every view and body mode (default); 0 = hidden in the whole-body modes only (see ffxvr_on_draw). Managed pushes both every frame;
+/// shadow_cam takes effect at the next Present.
+extern "C" __declspec(dllexport) void ffxvr_shadow_set(int shadow_cam, int fp_self_shadow) {
+    g_shadow_cam_req = shadow_cam == 0 ? 0 : 1;
+    g_fp_self_shadow = fp_self_shadow == 0 ? 0 : 1;
+}
+/// out: [0] light cameras last frame, [1] this session, [2] of which not looking straight down, [3] overridden with
+/// shadow_cam 0, [4] the player's caster draws hidden last frame (fp_self_shadow 0), [5] per-map lines written,
+/// [6] shadow_cam in effect, [7] fp_self_shadow. Returns the number of values written (at most n).
+extern "C" __declspec(dllexport) int ffxvr_shadow_status(int* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    const int v[8] = { (int)g_lc_report, (int)g_lc_total, (int)g_lc_tilted_total, (int)g_lc_mode0_total, (int)g_lc_self_hidden_report,
+                       (int)g_lc_map_lines, g_shadow_cam, g_fp_self_shadow };
+    const int k = n < 8 ? n : 8;
+    for (int i = 0; i < k; ++i) out[i] = v[i];
+    return k;
+}
 static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf) {
     if (g_in_eye2) return src;
     if (!g_ovr_enabled || size < 64) return src;
@@ -3393,6 +3597,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
     // Where is the view? Common layout has it at +64, the shifted one at +48.
     UINT base = 0;
     float v[12], pos[3];
+    bool light = false;                         // a light camera (the ShadowManager's casters): see light_proj
     for (UINT cand : { 64u, 48u }) {
         const UINT o_inv = cand + 256;
         if (size < o_inv + 64) continue;        // no inverse to validate against: not this layout
@@ -3407,18 +3612,20 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         // projection. Moving that would misalign every shadow.
         const float* proj = reinterpret_cast<const float*>(p + cand + 192);   // main projection (+256 in the common layout)
         if (!(proj[14] < -0.99f && proj[14] > -1.01f && fabsf(proj[15]) < 1e-4f)) continue;
+        // That check passes for the ShadowManager's casters too: their light's orthographic projection sits in the near-
+        // variant slot and the scene's perspective stays in the main slot (shadows-one-eye.md). light_proj tells them apart.
         base = cand;
+        light = size >= k_lc_min_size && light_proj(p, cand);   // SH-3: only the skinned layout (a ~1 KB scene buffer is never reclassified)
         break;
     }
 
     if (g_dump_cb_left > 0 && size == g_dump_cb_size) { g_dump_cb_left--; dump_cb_layout(p, size, base, "upload"); }
 
     // The 2D layer system's dummy camera: rows (-1 0 0)(0 1 0)(0 0 -1), position (0,0,-1). Not ours to move.
+    const bool dummy = base != 0 && is_dummy_view(v);
+    if (dummy) light = false;                   // the dummy keeps its own path, whatever its near variant holds
+    if (!light) lightcam_forget(buf);           // this buffer now holds something else (a no-op unless the frame has light cameras)
     if (base != 0) {
-        const bool dummy = fabsf(v[0] + 1.f) < 1e-3f && fabsf(v[1]) < 1e-3f && fabsf(v[2]) < 1e-3f
-                        && fabsf(v[4]) < 1e-3f && fabsf(v[5] - 1.f) < 1e-3f && fabsf(v[6]) < 1e-3f
-                        && fabsf(v[8]) < 1e-3f && fabsf(v[9]) < 1e-3f && fabsf(v[10] + 1.f) < 1e-3f
-                        && fabsf(v[3]) < 1e-3f && fabsf(v[7]) < 1e-3f && fabsf(v[11] + 1.f) < 1e-3f;
         if (dummy) {
             g_bg_uploads_frame++; g_bg_uploads_total++;
             if (g_backdrop_mode != 0 || !g_xr_active || !g_xr_rotate) return src;      // screen mode: the game's own frame
@@ -3436,6 +3643,18 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
             }
             g_ovr_applied++;
             return g_scratch.data();
+        }
+        if (light) {
+            // A light camera: the game's light, straight down over one character, drawn into that character's atlas tile. With
+            // shadow_cam 1 it is not ours to move: no override and no eye image, so eye 1 draws the game's bytes and eye 2's
+            // re-issue uploads nothing for it (its atlas twin gets the same tile). It is kept out of the frame's camera counts
+            // (the 3D-or-screen decision, the battle transition), the view tick, the latches (write_camera is not called) and
+            // the first-person body hide (no image, so no world position); fp_self_shadow 0 hides its draws in on_draw instead.
+            const bool tilted = !(fabsf(v[9]) > 0.99f);   // the back axis is vertical when the light looks straight down
+            g_lc_frame++; g_lc_total++; if (tilted) g_lc_tilted_total++;
+            lightcam_note(p, size, base, buf, v, tilted);
+            if (g_shadow_cam == 1) { lightcam_drop_images(buf); return src; }
+            g_lc_mode0_total++;                          // shadow_cam 0 (A/B): overridden as the scene camera, as before
         }
         // Counted here, before anything can return early: the frame-type decision
         // (3D or screen) reads these, and a suspended override must still count.
@@ -3523,6 +3742,9 @@ static void camera_from_write(const void* src, UINT size) {
     float m[12], pos[3];
     memcpy(m, p + CAM_VIEW_OFFSET, sizeof(m));
     if (!looks_like_view(m, pos)) return;
+    // A light camera (shadow_cam 1) is not the game's camera: markers, pointers and ffxvr_project read g_cam. size >= 384 here
+    // (and the rule needs >= 1872, so only 1872-2048 B buffers are tested; the observed casters, 6992 B, never come here).
+    if (g_shadow_cam == 1 && size >= k_lc_min_size && !is_dummy_view(m) && light_proj(p, CAM_VIEW_OFFSET)) return;
 
     if (memcmp(g_cam_last_view, m, sizeof(m)) != 0) {
         memcpy(g_cam_last_view, m, sizeof(m));
@@ -4055,7 +4277,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 18;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build)
+constexpr int FFXVR_ABI = 19;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -4656,9 +4878,13 @@ static void perf_tick() {
     const bool slow = g_perf.frame_ms > 40.0;
     if (t - g_perf_log_tick > (slow ? 5000ULL : 30000ULL)) {
         g_perf_log_tick = t;
-        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u",
+        char lc_extra[96] = "";   // shadow camera: only what is not zero
+        if (g_lc_tilted_total || g_lc_self_hidden_report)
+            snprintf(lc_extra, sizeof(lc_extra), ", not straight down %u this session, own shadow hidden %u", g_lc_tilted_total, g_lc_self_hidden_report);
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u",
              g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
+             g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
              g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow);
         g_ui_verts_read = g_ui_trunc = g_ui_start_nonzero = g_ui_start_bail = g_ui_base_nonzero = g_skip_overflow = 0;   // R39/R48: since the last perf: line
     }
@@ -4747,6 +4973,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_have_PV       = false;
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
     g_e2_same_inputs_report = g_e2_same_inputs; g_e2_same_inputs = 0;
+    lightcam_frame_end();           // shadow camera: the frame's light-camera count, the per-map line, shadow_cam applied for the next frame
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
     bones_frame_end();
     {   // UI pass health: how many 3D frames had a captured UI pass, and the frame structure the detector saw
@@ -5122,6 +5349,22 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
     }
     const bool fp_hiding = g_fp_mode == 1 && g_fp_hide_body;
+    // A light-camera caster (shadow_cam 1): the slot-0 buffer's latest upload this frame was a light camera left alone.
+    // (With shadow_cam 0 such a buffer also has its eye image, which the body hide below reads as before.)
+    const LightCb* lc = (g_lc_tab_frame == g_frames) ? lightcam_find(g_slot0_cur) : nullptr;
+    if (lc != nullptr && g_eye2_cur == nullptr && g_shadow_cam == 1 && g_fp_self_shadow == 0 && fp_hiding && g_fp_solo < 0 && lc->has_world && g_cur_dsv == nullptr
+        && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room) {
+        // fp_self_shadow 0: the player's own shadow is hidden, in the whole-body modes only: fp_body_mode 0 without the VR hands
+        // (the old result), or the VR hands with floating hands (hands_show >= 2), where the hand parts' shadow goes too (there
+        // is no bone record for a light camera to tell hand parts apart). fp_body_mode 1 or 2, and the VR hands with
+        // hands_show < 2, hide nothing: the shadow is drawn with the game's light. The atlas has no depth target; the radius
+        // is the body hide's.
+        const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;
+        const bool whole = bm == 0 || (g_hands_on && g_hands_show >= 2);
+        const float dx = lc->wpos[0] - g_fp_pos[0], dy = lc->wpos[1] - g_fp_pos[1], dz = lc->wpos[2] - g_fp_pos[2];
+        const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
+        if (whole && dx*dx + dy*dy + dz*dz < r * r) { g_lc_self_hidden++; return -1; }
+    }
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
         const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
@@ -5397,6 +5640,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_frame_live) {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_frame_draw_run++;
+        if (lc != nullptr) g_frame_run_light++;   // census: tagged "light cam (game's)" in the run line
         if (!g_slot0_cur) g_frame_run_none++;
         else {
             D3D11_BUFFER_DESC bd = {}; g_slot0_cur->GetDesc(&bd);

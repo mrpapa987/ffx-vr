@@ -641,3 +641,47 @@ Rules (H):
   function.
 - No FFX-60fps row touches 0x89C870, 0x892590, 0xA44B30 or 0x599210. Its nearest patches are 0x89C9F5 and
   0x89B1D0.
+
+## 27. ShadowManager: the character shadow atlas (25 Oct 2026, static + frame census)
+
+FFX HD's character shadows are not a cascaded or scene shadow map. Each
+character is drawn from straight above into its own tile of an atlas, and
+the ground receives the tiles as CPU-built decal quads. Read from the decomp
+(chunk_0069) and confirmed in three frame censuses in Luca (lc/lchb1300);
+research note shadows-one-eye.md. "static" where not seen at runtime.
+
+| gva | What |
+|---|---|
+| 0x6D18B0 | creates the targets: `ShadowManager_TempShadowMaptarget` x2 (+0x6C, +0x70); `ShadowManager_OriginalAdvShadowMap` (+0x60) and `ShadowManager_SecondAdvShadowMap` (+0x64), with +0x58 / +0x5C pointing at the second; `ShadowManager_dummyAdvShadowMap` 8x8 (+0x68). The size is `[0xC34408]`: 1024 in the file, 4096 at runtime at 4K. |
+| 0x6D3000 | per actor (from 0x82E3E0 via 0x644A00): allocates the actor a tile in an **8x8 grid** (0x6CE3E0 / 0x6CE4F0; "Insert failed, maybe the shadow map is full"); builds the actor's light matrix (translation to the bounding-box centre at y = 0, a scale, and `Rx(-pi/2)` from `[0xB499A0]` = -1.5708: the light looks straight down); stores a per-tile matrix at +0x17E8 + tile * 0x40; sizes the tile viewport from the light-space bounds (0x6D2530, 10 or 20 px per unit); returns the tile's UV rectangle for the decal. |
+| 0x6CBF20 | the caster loop. For each dirty tile: the tile camera (near `[0xB10F38]` = 0.1, far from the bounds, aspect = w/h, half-height = h/2: **orthographic**) and the tile viewport (0x5BC060 / 0x5BBDC0), then every mesh part of the actor with the character's own shader in the `ZPrePass` technique. A round-robin cursor at +0x3FC0 caps it at 32 tiles a call. |
+| 0x831D10 | builds the receiver's ground quads on the CPU (one quad per actor; no shadow matrix in any constant buffer). |
+| 0x65B8A0 | sets up the map shaders' "AdvShadowMap" inputs (`LightViewProjection`, `LVP2`, `MySMSampler2`, `mainChrYPos`). In the Luca census they bind the 8x8 dummy: environment shadows do not come from the atlas. |
+
+`ShadowBlur.cgfx` holds the blur passes (`ShadowGaussianBlurX/Y`, `_Adv`,
+`_FromDepth`); `ShadowDynamicMesh` / `ShadowDynamicMeshInstance` is the
+receiver mesh.
+
+**The frame** (runtime, D3D11): right after the backbuffer clear and before
+the scene, into the atlas (4096x4096, format 28 RGBA8, one sample, **no
+depth target**):
+- one clear quad per used 512x512 tile (VS cb <= 512 B);
+- the casters: per tile a viewport (e.g. 66x74 at 514,4020) and 4-24
+  skinned draws of the character (slot-0 cb >= 1872 B, the normal
+  skinned-character layout). They write colour silhouettes, not depth.
+- a blur into the temp target (4096x4096) and back into a 256x256 sub-tile
+  of each tile.
+
+Then, in the scene pass after the opaque and alpha-tested geometry, **one**
+receiver draw: 10 quads (60 vertices), VS cb 224 B (the 2D-layer layout;
+its PV block is the scene camera's), blend on, z-write off, the atlas at PS
+s0. Tiles persist across frames: a tile with no caster draws this frame is
+still drawn from its old content.
+
+**The caster constant buffer** is the skinned-character layout with the
+light in it: the light's view at the view slot (+64), the light's
+orthographic projection in the near-variant slot (+128: last row 0 0 0 1;
+seen as x 0.2475, y 0.3191, z -0.0152 / -0.0015), and the **scene's
+perspective projection left in the main slot** (+256). A test of the main
+slot alone takes it for the scene camera; the mod's `light_proj` checks
+both slots (design-notes, "Character shadows: the light camera").

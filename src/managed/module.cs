@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 18;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 19;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -486,6 +486,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_prof_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_set"); _fn_prof_mark = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_mark"); _fn_prof_phase = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_prof_phase");   // ABI 17: load lock build
             _fn_prof_report = (delegate* unmanaged[Cdecl]<int, byte*, byte*, void>)req("ffxvr_prof_report"); _fn_lock_release_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_lock_release_set"); _fn_lock_release_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lock_release_status");
             _fn_dream_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_dream_set"); _fn_dream_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_dream_status");   // ABI 18: dream overlay
+            _fn_shadow_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_shadow_set"); _fn_shadow_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_status");   // ABI 19: shadow camera
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -537,6 +538,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_bt_set = null; _fn_bt_status = null;
         _fn_prof_set = null; _fn_prof_mark = null; _fn_prof_phase = null; _fn_prof_report = null; _fn_lock_release_set = null; _fn_lock_release_status = null;
         _fn_dream_set = null; _fn_dream_status = null;
+        _fn_shadow_set = null; _fn_shadow_status = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -966,6 +968,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     else _fp_actor = fa;
                 } break;
                 case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
+                case "shadow_cam":        pi(k, v, ref _shadow_cam, 0, 1); break;       // character shadows: 1 the game's light camera left alone (default), 0 overridden (old, A/B)
+                case "fp_self_shadow":    pi(k, v, ref _fp_self_shadow, 0, 1); break;   // 1 own shadow always drawn (default), 0 hidden in first person's whole-body mode
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
                 case "follow_rate":       pf(k, v, ref _follow_rate, 1f, 360f); break;
@@ -1259,6 +1263,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"move_invert={(_move_invert ? 1 : 0)}\n" +
             $"fp_actor={_fp_actor}\n" +
             $"noimg_mode={_noimg_mode.ToString(ci)}\n" +
+            $"shadow_cam={_shadow_cam.ToString(ci)}\n" +
+            $"fp_self_shadow={_fp_self_shadow.ToString(ci)}\n" +
             $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
@@ -1413,7 +1419,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         // View
         ImGui.Separator();
-        ImGui.Checkbox("headset field of view", ref _xr_fov);
+        ImGui.Checkbox("headset field of view", ref _xr_fov); ImGui.SameLine();
+        shadow_ui();   // shadow camera: shadow_cam, fp_self_shadow
         ImGui.Text("2D screens:"); ImGui.SameLine();
         ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
@@ -1553,6 +1560,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SliderFloat("width (m)", ref _xr_screen_width, 1f, 6f);
             ImGui.SliderFloat("distance (m)", ref _xr_screen_dist, 1f, 6f);
             ImGui.TextDisabled("both apply at once; Home re-places the screen in front of you");
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("Character shadows (the ShadowManager's light camera)")) {
+            shadow_debug_ui();
             ImGui.TreePop();
         }
 
@@ -1935,6 +1947,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
         dream_push();   // dream overlay: dream_overlay (every frame, so a change applies at once)
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
+        shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle
         push_hands();
