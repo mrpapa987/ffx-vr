@@ -11,7 +11,7 @@ struct XrHost {
     ID3D11DeviceContext* ctx;
     const wchar_t*       dir;                               // where openxr_loader.dll lives (next to our DLL)
     void (*diag)(const char* fmt, ...);                     // append a line to ffxvr_diag.log
-    bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha);   // stretch copy; alpha forced to 1 unless kept
+    bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int mode);   // stretch copy. mode 0: alpha forced to 1; 1: alpha kept (the UI panel); 2: the ImGui layer, premultiplied (saveui)
     int  (*wait_begin)();                                   // load lock build: right before xrWaitFrame (may give up the game's render lock); null = none
     void (*wait_end)(int token);                            // right after xrWaitFrame returns, on every path, with wait_begin's result (takes the lock back)
 };
@@ -42,6 +42,8 @@ struct XrUiPanel {
     float dist, width;                                      // metres; height follows 16:9 (uidepth: the adaptive distance, width scaled with it)
     ID3D11Texture2D* tex2;                                  // a second head-locked quad (the ImGui layer: Fahrenheit's menus, our overlay); null: none
     float im_dist, im_width;                                // the ImGui layer's own distance / width (the ui_distance / ui_width settings; never adaptive)
+    bool  im_world;                                         // saveui: the ImGui layer lies on the virtual screen (world-locked, the reference space) instead of head-locked
+    float im_q[4], im_p[3], im_w;                           // ... with this pose (the screen's centre) and width (the screen's; height 16:9). Only with a screen base layer
 };
 
 /// Controller input through the OpenXR action system (Touch controllers;
@@ -70,6 +72,7 @@ void        xr_debug(int sim_timeouts);                     // test hook: the ne
 void        xr_counters(unsigned* held_frames, unsigned* wait_timeouts);   // frames held (no eye image, a wait timeout or error, no views), swapchain wait timeouts (for the heartbeat)
 bool        xr_take_stuck();   // R8-3: true once after a B5-2 stop (a stuck swapchain): xr_tick counts it as a failed start, so the restart backs off
 void        xr_eye_size(unsigned* w, unsigned* h);          // the eye swapchains' size: the headset's recommended width at 16:9 (0 x 0 while no session)
+void        xr_imgui_size(unsigned* w, unsigned* h);        // the ImGui layer's swapchain size (saveui: 1920x1080; 0 x 0 while no session)
 bool        xr_srgb();                                      // the swapchains are R8G8B8A8_UNORM_SRGB: the compositor decodes our UNORM bytes before it blends (uidepth's plate)
 void xr_timing(double* wait_ms, double* end_ms);
 const char* xr_stage();                                    // the render thread's current stage name (a string literal; the load profiler reads it)

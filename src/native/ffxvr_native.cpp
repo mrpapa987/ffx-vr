@@ -37,6 +37,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <share.h>     // _SH_DENYNO (the census log, opened shared)
 #include <limits>
 #include <map>
 #include <set>
@@ -51,6 +53,7 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
 static bool diag_try(const char* text);   // ... the same append, false when the log is busy on the render thread (a bt: batch keeps it)
+static void haze_tick();                 // heat haze: at Present (defined before ffxvr_on_draw)
 static void bt_flush();                   // battle transition log batch (defined with bt_tick)
 static void bt_add(const char* fmt, ...);
 static void bt_end(const char* why);
@@ -946,6 +949,20 @@ ID3D11Texture2D* g_ui_tex = nullptr; ID3D11RenderTargetView* g_ui_rtv = nullptr;
 ID3D11Texture2D* g_imgui_tex = nullptr; ID3D11RenderTargetView* g_imgui_rtv = nullptr;
 bool g_imgui_draw_now = false; bool g_imgui_layer = true; uint32_t g_imgui_draws_frame = 0, g_imgui_draws_last = 0;
 bool g_imgui_force = false; uint32_t g_imgui_min_draws = 12;   // shown when the managed side says so (overlay open, save screen) or when there is a real menu's worth of draws
+// Save UI in VR (branch `saveui`; design-notes "Fahrenheit's save screen in the headset"). g_imgui_menu (managed, ABI 21): the
+// setting fh_menu_on_screen is on and Fahrenheit's save screen is open (0x8CB994, latched from OPEN to CLOSED). While it is, the
+// frame is forced to the virtual screen and the ImGui layer lies exactly over it, world-locked (xr_tick). g_imgui_menu_pose: the
+// screen pose taken from the head's yaw when the menu opened from the 3D view (dropped at close, at a recentre, at headset off).
+bool g_imgui_menu = false, g_imgui_menu_prev = false, g_imgui_menu_place = false, g_imgui_menu_pose = false;
+float g_imgui_menu_q[4] = { 0, 0, 0, 1 }, g_imgui_menu_p[3] = {};
+uint32_t g_imgui_refused = 0, g_imgui_refused_10s = 0;    // re-issues refused because the capture could not blend (A)
+// SU-1 / SU-2 (review): the raw save-screen state managed sends with the latch (2 = OPEN: Fahrenheit draws the menu), the frames
+// since the last latched frame whose capture had the menu (OPEN with ImGui draws), the black-outs, and the latch watchdog.
+int g_imgui_menu_state = 0; uint32_t g_imgui_menu_gap = 0, g_imgui_menu_black_10s = 0;
+const uint32_t k_imgui_menu_black = 8;                   // latched frames without a menu image that eye 1 is blacked out for (then shown as is: a game prompt in a long state 4 stays visible)
+bool g_imgui_menu_wd = false; ULONGLONG g_imgui_menu_quiet_t0 = 0; uint32_t g_imgui_menu_quiet_n = 0;
+const ULONGLONG k_imgui_menu_wd_ms = 5000;               // SU-2: latched, state not OPEN and no menu draws for this long: the forced screen is released
+bool g_imgui_first_logged = false;                      // the one-time "first capture" line
 ID3D11Texture2D* g_eye1_final = nullptr; ID3D11RenderTargetView* g_eye1_final_rtv = nullptr;
 ID3D11Texture2D* g_eye2_final = nullptr; ID3D11RenderTargetView* g_eye2_final_rtv = nullptr;
 uint32_t g_ui_pass_frame = 0;                   // frame in which a UI pass completed
@@ -984,7 +1001,8 @@ ID3D11ShaderResourceView* g_c3_srv = nullptr; ID3D11Texture2D* g_c3_tex = nullpt
 bool g_c3_verify = false, g_c3_dump = false; uint32_t g_c3_seen_frame = 0, g_c3_scan_frame = ~0u, g_c3_found_n = 0, g_c3_logged_n = 0, g_c3_swaps = 0; int g_c3_scans_frame = 0;
 ID3D11Texture2D* g_c3_stage = nullptr; UINT g_c3_stage_aw = 0, g_c3_stage_ah = 0, g_c3_stage_x = 0, g_c3_stage_y = 0, g_c3_stage_w = 0, g_c3_stage_h = 0; int g_c3_stage_fk = 0, g_c3_stage_tries = 0;   // C3-4: the one readback (atlas size, the copy's origin and size), polled
 const uint32_t k_c3_stale = 600;
-ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha
+ID3D11BlendState* g_ui_blend = nullptr;         // straight alpha with coverage alpha (ensure_ui_blend; the UI pass and the ImGui layer)
+bool  g_ui_blend_failed = false;                // CreateBlendState failed once (logged; retried each call, cheap)
 bool  g_ui_draw_now = false;                    // the draw being re-issued is a UI draw
 // Battle transition, the "glass break" (research battle-transition.md; bt_tick, with xr_tick, has the phase machine).
 // The game's BrokenScreenEffect copies the previous frame into BrokenScreen_capturedFrame at the top of a renderer frame,
@@ -1095,6 +1113,7 @@ static void xr_apply_poses(const XrFrameOut& f) {
         memcpy(g_xr_ref_p, g_xr_raw_p, sizeof(g_xr_ref_p));
         g_xr_recenter_pending = false;
         g_xr_screen_dist_placed = -1.f;   // re-place the screen below
+        g_imgui_menu_pose = false; g_imgui_menu_place = false;   // saveui: an open menu follows the re-placed screen (it now faces the user too)
     }
     if (g_xr_screen_dist_placed != g_xr_screen_dist) {
         // The virtual screen sits g_xr_screen_dist in front of the reference, facing the user; re-placed from the
@@ -2927,8 +2946,11 @@ static void frame_dump() {
     frame_flush_draws();
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\%s", g_dir, g_frame_dest_live == FD_AUTO ? L"ffxvr_frame_auto.log" : L"ffxvr_frame.log");
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") == 0 && f != nullptr) {
+    // Opened shared (fire-haze.md 6): _wfopen_s denies sharing, so a log viewer holding the file made the open fail and the frame
+    // was lost without a word. Our own writes are serialised by g_mutex (the caller holds it).
+    FILE* f = _wfsopen(path, L"a", _SH_DENYNO);
+    if (f == nullptr) diag("census: could not open %ls (errno %d): frame %u lost", g_frame_dest_live == FD_AUTO ? L"ffxvr_frame_auto.log" : L"ffxvr_frame.log", errno, g_frame_live_frame);
+    if (f != nullptr) {
         fprintf(f, "frame structure, %zu events; geometry buffers captured: %zu (%u via Map/Unmap, %u via UpdateSubresource) | %s | game frame %u | map '%s' | %s\n",
                 g_frame_ev.size(), g_vbufs.size(), g_vb_maps, g_vb_updates, g_frame_live_time, g_frame_live_frame, g_frame_live_map, g_frame_reason_live);
         for (const FrameEv& e : g_frame_ev) fprintf(f, "  %s\n", e.text);
@@ -4317,7 +4339,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 20;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build)
+constexpr int FFXVR_ABI = 22;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5014,6 +5036,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_eye2_draws_report = g_eye2_draws; g_eye2_draws = 0;
     g_e2_same_inputs_report = g_e2_same_inputs; g_e2_same_inputs = 0;
     lightcam_frame_end();           // shadow camera: the frame's light-camera count, the per-map line, shadow_cam applied for the next frame
+    haze_tick();                    // heat haze: heat_haze applied for the next frame, the frame's counts, the 10 s haze: line
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
     bones_frame_end();
     {   // UI pass health: how many 3D frames had a captured UI pass, and the frame structure the detector saw
@@ -5371,9 +5394,300 @@ static int dream_rule(int idx, const char** tag) {
     return ret;
 }
 
+// ---- Heat haze (research fire-haze.md; design-notes "Heat haze in fire (branch `haze`)") ----
+// The PS2-VFX "FrameBuffer" shimmer over torches and fire spells samples a screen copy of the scene (a twinned render target,
+// so eye 2 already samples its own copy) at a UV the pixel shader computes from its own constant buffer (PS slot 0, a 256 B
+// product-only buffer). maybe_override patches that buffer for eye 1 and stores its eye-2 image in the ring like any other, but
+// ffxvr_eye2_begin uploaded eye-2 images into VS slots only: eye 2 placed the quads with its own camera and computed the UV with
+// eye 1's (about 240 px off at 960 wide: the "reflection" inside the flame). heat_haze:
+//   1 (default): for draws matching the signature (haze_match), eye2_begin also uploads the eye-2 image of every PS-bound
+//     constant buffer that has one this frame and is not bound in a VS slot (those are already uploaded); eye2_end restores eye 1's;
+//   0: those draws are skipped (not drawn in eye 1, no eye-2 pass) while the headset shows 3D; screen frames and flat mode draw them;
+//   2: as before this build (no PS uploads, no skips): the A/B baseline.
+int      g_heat_haze = 1, g_heat_haze_req = 1;          // _req: the export; applied at Present (haze_tick)
+bool     g_haze_now = false;                            // set by ffxvr_on_draw for a draw matching the signature, read by eye2_begin
+EyeImage*     g_eye2_ps_slots[14] = {};                 // PS-slot images uploaded for the current eye-2 draw (heat_haze 1)
+ID3D11Buffer* g_eye2_ps_cb[14] = {};                    // ... the buffer each went into, AddRef'd until eye2_end's restore
+// Per frame (reset at Present by haze_tick; "_last" is the frame just finished, for the overlay).
+uint32_t g_haze_match_f = 0, g_haze_up_f = 0, g_haze_skip_f = 0;
+uint32_t g_haze_match_last = 0, g_haze_up_last = 0, g_haze_skip_last = 0;
+// 10 s window (the haze: heartbeat line) and the session.
+struct HazeWin { uint32_t match, up, noimg, same, sizebad, skip, r3, r4, r5, bt, nearmiss, probed, other, other_diff, stale; };   // bt: samples the glass-break capture; nearmiss: camera kind passing 4-5 (census frames only, HZ-4); stale: ring entries dropped (HZ-1)
+HazeWin  g_haze_w = {}, g_haze_s = {};
+void*    g_haze_pairs[16][2] = {}; int g_haze_pairs_n = 0;   // distinct (VS, PS) shader pairs among this window's matches (pointer keys)
+char     g_haze_other_first[96] = "";                        // the window's first other draw with a PS-only image (slot, size, kind)
+char     g_haze_pend[320] = "";                              // a one-time line from inside a draw, written at Present
+bool     g_haze_same_logged = false;
+
+/// This frame's ring entry for `cb` (newest first), or null: the same lookup as on_draw's and eye2_begin's VS slots.
+static EyeImage* ring_find(ID3D11Buffer* cb) {
+    if (cb == nullptr) return nullptr;
+    for (int k = 0; k < 32; ++k) {
+        EyeImage& e = g_eye_ring[(g_eye_ring_next - 1 - k + 64) % 32];
+        if (e.cb == cb && e.frame == g_frames) return &e;
+    }
+    return nullptr;
+}
+/// A ring entry whose images may be handed to UpdateSubresource for `cb`: both images exactly the buffer's size (GetDesc on the
+/// live, bound buffer), so the runtime can never read past our vectors (a reused buffer address would fail here, not fault).
+static bool ring_entry_fits(const EyeImage* e, ID3D11Buffer* cb) {
+    if (e == nullptr || cb == nullptr) return false;
+    D3D11_BUFFER_DESC bd = {}; cb->GetDesc(&bd);
+    return bd.ByteWidth != 0 && e->size == bd.ByteWidth && e->eye1.size() == e->size && e->eye2.size() == e->size;
+}
+static int vs_slot_of(ID3D11Buffer* cb) { for (int q = 0; q < 14; ++q) if (g_vs_cb[q] == cb) return q; return -1; }   // pointer compares only
+/// HZ-1 (from ffxvr_on_updatesub, under g_mutex): an upload of `cb` that took no ring slot (no camera in it, a screen frame, the
+/// override off, nothing of ours to replace) leaves the GPU with the game's bytes, so this frame's older entries for `cb` are stale:
+/// without this, eye 2 (VS loop and haze_ps_upload alike) would upload an older object's image and eye2_end restore that object's
+/// eye-1 bytes over the game's. The same as lightcam_drop_images, for every such upload. Uploads come between draws: nothing is mid-draw.
+static void ring_drop_stale(ID3D11Buffer* cb) {
+    if (cb == nullptr) return;
+    for (EyeImage& e : g_eye_ring) if (e.cb == cb && e.frame == g_frames) { e.cb = nullptr; g_haze_w.stale++; g_haze_s.stale++; }
+}
+
+struct HazeHit { int slot; ID3D11Texture2D* copy; ID3D11Texture2D* twin; void* vs; void* ps; bool camera_kind; };
+/// Rules 4 and 5 of the signature (below): 0 = both pass (hit filled), 4 = blending off or depth writes on, 5 = no screen copy bound,
+/// 6 = a PS slot samples the glass-break capture (HZ-3: that, not the battle transition window, keeps the shards out).
+static int haze_rules45(HazeHit* hit) {
+    {
+        ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
+        bool blend = false; if (bs) { D3D11_BLEND_DESC bd = {}; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable != 0; bs->Release(); }
+        ID3D11DepthStencilState* ds = nullptr; UINT sref = 0; g_ctx->OMGetDepthStencilState(&ds, &sref);
+        bool zwrite = true;   // a null state is the default: depth on, writes on
+        if (ds) { D3D11_DEPTH_STENCIL_DESC dd = {}; ds->GetDesc(&dd); zwrite = dd.DepthEnable && dd.DepthWriteMask != D3D11_DEPTH_WRITE_MASK_ZERO; ds->Release(); }
+        if (!blend || zwrite) return 4;
+    }
+    ID3D11ShaderResourceView* v[8] = {}; g_ctx->PSGetShaderResources(0, 8, v);   // AddRef'd: every one released below
+    bool found = false, bt = false;
+    for (int i = 0; i < 8; ++i) {
+        if (v[i] == nullptr) continue;
+        ID3D11Texture2D* t = texture_of(v[i]);
+        if (t != nullptr && g_bt_cap_tex != nullptr && t == g_bt_cap_tex) bt = true;   // pointer compare (the capture's address, held as a key)
+        if (!found && t != nullptr && t != g_cur_rtv0_tex) {
+            D3D11_TEXTURE2D_DESC d = {}; t->GetDesc(&d);
+            if (d.SampleDesc.Count == 1 && (d.BindFlags & D3D11_BIND_RENDER_TARGET) && d.Width == g_cur_rtv0_w && d.Height == g_cur_rtv0_h) {
+                auto it = g_twins.find(t);
+                if (it != g_twins.end() && it->second.tex != nullptr) { found = true; hit->slot = i; hit->copy = t; hit->twin = it->second.tex; }
+            }
+        }
+        v[i]->Release();
+    }
+    if (bt) return 6;
+    return found ? 0 : 5;
+}
+/// The draw's shaders, as pointer keys (two context calls; only for matches and census near misses).
+static void haze_shaders(HazeHit* hit) {
+    ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
+    hit->vs = vs; hit->ps = ps;
+    if (vs) vs->Release(); if (ps) ps->Release();
+}
+/// The haze signature, for a scene-pass draw (the caller's block: stereo, not the overlay phase, an MSAA RT0 with depth bound, so
+/// rule 2 holds). Cheapest rules first; only draws that pass 1, 3 and 4 make the SRV query (about 40 a frame at the Luca torch).
+///   1. not a UI / ImGui / dream draw, not in the UI pass;
+///   3. the draw's VS buffer has a product-only eye image (kind 2: the PS2-VFX family; water and field geometry are camera kind,
+///      the glass-break shards, blitz overlays and other effects have no image);
+///   4. blending on RT0, depth writes off;
+///   5. a PS slot 0-7 holds a single-sample render-target texture of the scene target's exact size, not RT0 itself, with a twin
+///      (the game's backup copy of the frame; water samples 4096x4096 reflections, the distortion grid draws outside this pass),
+///      and no PS slot samples the glass-break capture.
+/// HZ-3: there is no battle-transition-window rule any more (the shards already fail 3, and the window lasted into the battle's
+/// first seconds, where spell haze kept the old patch). HZ-4: during a census, camera-kind draws (kind 1) also run 4-5 and a pass
+/// is returned as hit->camera_kind (tagged HAZE? in the census, counted as a near miss): never handled, diagnostics only.
+static bool haze_match(HazeHit* hit) {
+    if (g_ui_draw_now || g_imgui_draw_now || g_dream_eye_now || g_ui_state == UI_PASS || g_ctx == nullptr) return false;
+    if (g_eye2_cur == nullptr || g_eye2_cur->kind != 2) {
+        g_haze_w.r3++;
+        if (g_frame_live && g_eye2_cur != nullptr && g_eye2_cur->kind == 1 && haze_rules45(hit) == 0) {
+            hit->camera_kind = true; haze_shaders(hit); g_haze_w.nearmiss++; g_haze_s.nearmiss++;
+        }
+        return false;
+    }
+    const int r = haze_rules45(hit);
+    if (r == 4) g_haze_w.r4++; else if (r == 5) g_haze_w.r5++; else if (r == 6) g_haze_w.bt++;
+    if (r != 0) return false;
+    haze_shaders(hit);   // the window's distinct shader pairs, and the census dump cap
+    bool seen = false;
+    for (int i = 0; i < g_haze_pairs_n; ++i) if (g_haze_pairs[i][0] == hit->vs && g_haze_pairs[i][1] == hit->ps) seen = true;
+    if (!seen && g_haze_pairs_n < 16) { g_haze_pairs[g_haze_pairs_n][0] = hit->vs; g_haze_pairs[g_haze_pairs_n][1] = hit->ps; g_haze_pairs_n++; }
+    g_haze_match_f++; g_haze_w.match++; g_haze_s.match++;
+    return true;
+}
+/// heat_haze 0: a matching draw is skipped while the headset shows the 3D view (eye 1 is then the game's backbuffer, so the monitor
+/// loses it too); screen frames, the stereo screen and flat mode draw it as the game does.
+static inline bool haze_skip_now() { return g_heat_haze == 0 && g_xr_want && !g_ovr_suspend && !g_xr_screen_now && !g_screen3d_now; }
+
+/// Census (step 0, fire-haze.md 4.4): the HAZE line for a matching draw (HAZE? for a camera-kind near miss, HZ-4). Which PS buffers
+/// are bound, whether each has an image this frame and whether it is also a VS buffer; and for each PS buffer with its own image,
+/// the 64-byte blocks where eye 1's and eye 2's images differ (16 floats each): the blocks that carry the projection. HZ-2: the
+/// blocks only for the first match of each (VS, PS) shader pair, at most 4 a frame, so a busy battle frame cannot push the rest of
+/// the frame out of the census. HZ-5: written before eye2_begin runs, so it says what is to be uploaded, never that it was.
+/// Render thread; the caller does not hold g_mutex.
+static void haze_census(const HazeHit& h) {
+    static uint32_t s_frame = 0; static int s_n = 0, s_lines = 0; static void* s_pairs[4][2] = {};
+    if (s_frame != g_frames) { s_frame = g_frames; s_n = 0; s_lines = 0; }
+    if (s_lines >= 32) {   // HZ-2: at most 32 HAZE / HAZE? lines a frame (the scene draw lines keep their tags)
+        if (s_lines++ == 32) { FrameEv fe; snprintf(fe.text, sizeof(fe.text), "      HAZE: 32 lines this frame: the rest are left out (the scene draw lines keep their HAZE tags)"); std::lock_guard<std::mutex> lock(g_mutex); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(fe); }
+        return;
+    }
+    s_lines++;
+    bool blocks = false;
+    {
+        bool seen = false;
+        for (int i = 0; i < s_n; ++i) if (s_pairs[i][0] == h.vs && s_pairs[i][1] == h.ps) seen = true;
+        if (!seen && s_n < 4) { s_pairs[s_n][0] = h.vs; s_pairs[s_n][1] = h.ps; s_n++; blocks = true; }
+    }
+    std::vector<FrameEv> out;
+    char line[400]; size_t l = 0;
+    const char* what = h.camera_kind ? "camera-kind near miss: not handled, census only"
+                     : g_heat_haze == 1 ? "eye 2 is to get the PS images marked 'to upload'"
+                     : g_heat_haze == 0 ? (haze_skip_now() ? "skipped" : "drawn: not a headset 3D frame") : "as before";
+    l += snprintf(line + l, sizeof(line) - l, "      %s (heat_haze %d: %s): screen copy s%d %p %ux%u, twin %p |", h.camera_kind ? "HAZE?" : "HAZE", g_heat_haze, what,
+                  h.slot, static_cast<void*>(h.copy), g_cur_rtv0_w, g_cur_rtv0_h, static_cast<void*>(h.twin));
+    ID3D11Buffer* pcb[4] = {}; g_ctx->PSGetConstantBuffers(0, 4, pcb);
+    EyeImage* dump[4] = {};
+    const bool up = !h.camera_kind && g_heat_haze == 1;
+    for (int k = 0; k < 4; ++k) {
+        if (pcb[k] == nullptr) continue;
+        D3D11_BUFFER_DESC bd = {}; pcb[k]->GetDesc(&bd);
+        EyeImage* e = ring_find(pcb[k]); const int vq = vs_slot_of(pcb[k]);
+        const bool fits = e != nullptr && vq < 0 && ring_entry_fits(e, pcb[k]);
+        if (l < sizeof(line) - 96) {
+            if (vq >= 0) l += snprintf(line + l, sizeof(line) - l, " ps%d %p %uB %s = vs%d (same buffer: the VS upload handles it)", k, static_cast<void*>(pcb[k]), bd.ByteWidth, e ? "img" : "-", vq);
+            else if (e == nullptr) l += snprintf(line + l, sizeof(line) - l, " ps%d %p %uB NO IMAGE, not a VS buffer: nothing to upload", k, static_cast<void*>(pcb[k]), bd.ByteWidth);
+            else l += snprintf(line + l, sizeof(line) - l, " ps%d %p %uB img, not a VS buffer (eye images %s)%s", k, static_cast<void*>(pcb[k]), bd.ByteWidth,
+                               e->eye1 == e->eye2 ? "equal" : "differ", !fits ? ": SIZE MISMATCH, not uploaded" : up ? ": to upload" : "");
+        }
+        if (fits && blocks) dump[k] = e;
+        pcb[k]->Release();
+    }
+    if (!blocks && l < sizeof(line) - 64) l += snprintf(line + l, sizeof(line) - l, " (blocks: first match per shader pair only, at most 4 a frame)");
+    { FrameEv fe; strncpy_s(fe.text, line, _TRUNCATE); out.push_back(fe); }
+    for (int k = 0; k < 4; ++k) {
+        const EyeImage* e = dump[k]; if (e == nullptr) continue;
+        for (UINT b = 0; b + 64 <= e->size; b += 64) {
+            if (memcmp(e->eye1.data() + b, e->eye2.data() + b, 64) == 0) continue;
+            for (int eye = 0; eye < 2; ++eye) {
+                const float* f = reinterpret_cast<const float*>((eye == 0 ? e->eye1 : e->eye2).data() + b);
+                l = (size_t)snprintf(line, sizeof(line), "        ps%d +%u eye%d:", k, b, eye + 1);
+                for (int j = 0; j < 16 && l < sizeof(line) - 16; ++j) l += snprintf(line + l, sizeof(line) - l, " %.4g", f[j]);
+                FrameEv fe; strncpy_s(fe.text, line, _TRUNCATE); out.push_back(fe);
+            }
+        }
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (const FrameEv& fe : out) if (g_frame_ev.size() < 2000) g_frame_ev.push_back(fe);
+}
+
+/// Releases the PS-slot references eye2_begin kept (none outside a begin/end pair), without restoring.
+static void haze_ps_drop() {
+    for (int sl = 0; sl < 14; ++sl) { if (g_eye2_ps_cb[sl]) g_eye2_ps_cb[sl]->Release(); g_eye2_ps_cb[sl] = nullptr; g_eye2_ps_slots[sl] = nullptr; }
+}
+/// heat_haze 1, in eye2_begin after the VS uploads, for a matching draw: the eye-2 image of every bound PS constant buffer that has
+/// one this frame and is not bound in a VS slot (a buffer in both is handled by the VS loop; counted and logged once).
+static void haze_ps_upload(bool* differs) {
+    haze_ps_drop();
+    ID3D11Buffer* pcb[14] = {}; g_ctx->PSGetConstantBuffers(0, 14, pcb);   // the real bindings, AddRef'd
+    for (int sl = 0; sl < 14; ++sl) {
+        ID3D11Buffer* cb = pcb[sl];
+        if (cb == nullptr) continue;
+        bool keep = false, dup = false;
+        for (int q = 0; q < sl; ++q) if (pcb[q] == cb) dup = true;   // the same buffer in two PS slots: uploaded once (this extra reference released below)
+        const int vq = dup ? -1 : vs_slot_of(cb);
+        if (!dup && vq >= 0) {
+            g_haze_w.same++; g_haze_s.same++;
+            if (!g_haze_same_logged && !g_haze_pend[0]) {
+                g_haze_same_logged = true;
+                snprintf(g_haze_pend, sizeof(g_haze_pend), "haze: frame %u: a haze draw's PS slot %d buffer %p is also VS slot %d: the VS upload already gives it eye 2's image (this draw's UV does not come from a separate PS buffer; logged once)",
+                         g_frames, sl, static_cast<void*>(cb), vq);
+            }
+        }
+        else if (!dup) {
+            EyeImage* e = ring_find(cb);
+            if (e == nullptr) { g_haze_w.noimg++; g_haze_s.noimg++; }
+            else if (!ring_entry_fits(e, cb)) { g_haze_w.sizebad++; g_haze_s.sizebad++; }
+            else {
+                g_ctx->UpdateSubresource(cb, 0, nullptr, e->eye2.data(), 0, 0);   // g_in_eye2 is set: our detour passes it through
+                g_eye2_ps_slots[sl] = e; g_eye2_ps_cb[sl] = cb; keep = true;       // the reference is held until eye2_end restores eye 1's bytes
+                g_haze_up_f++; g_haze_w.up++; g_haze_s.up++;
+                if (e->eye1 != e->eye2) *differs = true;
+            }
+        }
+        if (!keep) cb->Release();
+    }
+}
+/// In eye2_end, before g_in_eye2 is cleared: eye 1's bytes back into every PS buffer haze_ps_upload wrote.
+static void haze_ps_restore() {
+    for (int sl = 0; sl < 14; ++sl) {
+        if (g_eye2_ps_cb[sl] == nullptr) continue;
+        if (!g_debug_leave && g_eye2_ps_slots[sl] != nullptr) g_ctx->UpdateSubresource(g_eye2_ps_cb[sl], 0, nullptr, g_eye2_ps_slots[sl]->eye1.data(), 0, 0);
+    }
+    haze_ps_drop();
+}
+/// Heartbeat input for a general fix (fire-haze.md 4.5 "O"): of the other eye-2 draws (not matching the signature), how many have a
+/// PS-bound buffer with an eye image this frame that is not bound in a VS slot, i.e. PS-stage camera data eye 2 never gets. Sampled:
+/// one eye-2 draw in 32 (rotating with the frame), so the cost is one context call per 32 draws. Counts only, nothing uploaded.
+static void haze_probe_other() {
+    ID3D11Buffer* pcb[14] = {}; g_ctx->PSGetConstantBuffers(0, 14, pcb);
+    bool hit = false, diff = false;
+    for (int sl = 0; sl < 14; ++sl) {
+        ID3D11Buffer* cb = pcb[sl]; if (cb == nullptr) continue;
+        if (!hit && vs_slot_of(cb) < 0) {
+            EyeImage* e = ring_find(cb);
+            if (e != nullptr) {
+                hit = true; diff = e->eye1 != e->eye2;
+                if (!g_haze_other_first[0]) snprintf(g_haze_other_first, sizeof(g_haze_other_first), "ps%d %uB %s%s, VS buffer %s", sl, e->size, e->kind == 1 ? "camera" : "product",
+                                                      diff ? "" : " (images equal)", g_eye2_cur ? (g_eye2_cur->kind == 1 ? "camera" : "product") : "no image");
+            }
+        }
+        cb->Release();
+    }
+    g_haze_w.probed++; g_haze_s.probed++;
+    if (hit) { g_haze_w.other++; g_haze_s.other++; if (diff) { g_haze_w.other_diff++; g_haze_s.other_diff++; } }
+}
+/// At Present (ffxvr_begin_frame): heat_haze applied for the next frame, the frame's counts for the overlay, the one-time line,
+/// and every 10 s the haze: line when anything was counted.
+static void haze_tick() {
+    if (g_heat_haze != g_heat_haze_req) {
+        char t[200]; snprintf(t, sizeof(t), "haze: heat_haze %d -> %d at frame %u (%s)", g_heat_haze, g_heat_haze_req, g_frames,
+                              g_heat_haze_req == 1 ? "eye 2 gets its own PS images on haze draws" : g_heat_haze_req == 0 ? "haze draws skipped in the headset's 3D view" : "as before: no PS uploads, no skips");
+        g_heat_haze = g_heat_haze_req;
+        diag_try(t);
+    }
+    g_haze_match_last = g_haze_match_f; g_haze_up_last = g_haze_up_f; g_haze_skip_last = g_haze_skip_f;
+    g_haze_match_f = g_haze_up_f = g_haze_skip_f = 0;
+    if (g_haze_pend[0] && diag_try(g_haze_pend)) g_haze_pend[0] = 0;
+    static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
+    if (now < next) return;
+    next = now + 10000;
+    const HazeWin& w = g_haze_w;
+    if (w.match || w.skip || w.other || w.nearmiss) {
+        char t[800];
+        snprintf(t, sizeof(t), "haze: mode %d | matched %u draws (shader pairs %d) | PS uploads %u (no PS image %u, PS buffer = VS buffer %u, size mismatch %u) | skipped %u | rejected by rule: not product %u, blend/z-write %u, no screen copy %u, samples the glass-break capture %u | camera-kind near misses (census frames only) %u | stale ring entries dropped %u | other eye-2 draws with a PS-only image %u of %u sampled (images differ %u)%s%s",
+                 g_heat_haze, w.match, g_haze_pairs_n, w.up, w.noimg, w.same, w.sizebad, w.skip, w.r3, w.r4, w.r5, w.bt, w.nearmiss, w.stale, w.other, w.probed, w.other_diff,
+                 g_haze_other_first[0] ? "; first: " : "", g_haze_other_first);
+        diag_try(t);   // a busy log loses this window's line only (the session counts stay in the overlay)
+    }
+    g_haze_w = {}; g_haze_pairs_n = 0; g_haze_other_first[0] = 0;
+}
+/// heat_haze: 1 PS images per eye on haze draws (default), 0 skipped in the headset's 3D view, 2 as before. Managed pushes it every
+/// frame; it takes effect at the next Present.
+extern "C" __declspec(dllexport) void ffxvr_haze_set(int mode) { g_heat_haze_req = (mode == 0 || mode == 2) ? mode : 1; }
+/// out: [0] heat_haze in effect, [1] matching draws last frame, [2] PS uploads last frame, [3] skipped last frame, then the session:
+/// [4] matches, [5] PS uploads, [6] no PS image, [7] PS buffer = VS buffer, [8] other draws with a PS-only image, [9] of sampled,
+/// [10] of which the images differ, [11] size mismatches. Returns the number of values written (at most n).
+extern "C" __declspec(dllexport) int ffxvr_haze_status(int* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    const int v[12] = { g_heat_haze, (int)g_haze_match_last, (int)g_haze_up_last, (int)g_haze_skip_last, (int)g_haze_s.match, (int)g_haze_s.up,
+                        (int)g_haze_s.noimg, (int)g_haze_s.same, (int)g_haze_s.other, (int)g_haze_s.probed, (int)g_haze_s.other_diff, (int)g_haze_s.sizebad };
+    const int k = n < 12 ? n : 12;
+    for (int i = 0; i < k; ++i) out[i] = v[i];
+    return k;
+}
+
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     g_dream_eye_now = false; g_dream_blend_now = nullptr;   // set again below for a mode-2 dream layer only
+    g_haze_now = false;                                     // set again in the scene-pass block for a heat haze draw only
     { const DWORD tid = GetCurrentThreadId(); if (g_render_tid != 0 && tid != g_render_tid) { g_other_thread_calls++; g_other_thread_last = tid; } }
     if (which >= 1 && which <= 4) bump(static_cast<CounterId>(which));
     const int idx = g_draw_in_frame++;
@@ -5639,13 +5953,19 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         if (tt && td.SampleDesc.Count > 1) {
             const int sidx = (int)g_scene_draw_idx++;
             if (g_eye2_cur == nullptr) g_noimg_draws++;
+            HazeHit hz = { -1, nullptr, nullptr, nullptr, nullptr, false };
+            g_haze_now = haze_match(&hz);   // heat haze (every mode, so the counts and the census show matches in 2 as well)
             if (g_frame_live && g_scene_census_lines < 700 && g_ctx) {
                 ID3D11Buffer* vcb[4] = {}; ID3D11Buffer* pcb[4] = {}; UINT vsz[4] = {}, psz[4] = {};
                 g_ctx->VSGetConstantBuffers(0, 4, vcb); g_ctx->PSGetConstantBuffers(0, 4, pcb);
-                for (int k = 0; k < 4; ++k) {
+                for (int k = 0; k < 4; ++k) {   // the pointers stay as keys: the buffers are bound, so alive for this draw
                     if (vcb[k]) { D3D11_BUFFER_DESC bd; vcb[k]->GetDesc(&bd); vsz[k] = bd.ByteWidth; vcb[k]->Release(); }
                     if (pcb[k]) { D3D11_BUFFER_DESC bd; pcb[k]->GetDesc(&bd); psz[k] = bd.ByteWidth; pcb[k]->Release(); }
                 }
+                // step 0 (fire-haze.md 4.4): which buffers VS cb0 and PS cb0 are, whether each has an eye image this frame, and "same"
+                char cbp[96];
+                snprintf(cbp, sizeof(cbp), " | vs0 %p%s ps0 %p%s%s", static_cast<void*>(vcb[0]), vcb[0] ? (ring_find(vcb[0]) ? "(img)" : "(-)") : "",
+                         static_cast<void*>(pcb[0]), pcb[0] ? (ring_find(pcb[0]) ? "(img)" : "(-)") : "", (vcb[0] && vcb[0] == pcb[0]) ? " same" : "");
                 ID3D11BlendState* bs = nullptr; float bf[4]; UINT bm = 0; g_ctx->OMGetBlendState(&bs, bf, &bm);
                 int blend = -1; if (bs) { D3D11_BLEND_DESC bd; bs->GetDesc(&bd); blend = bd.RenderTarget[0].BlendEnable ? 1 : 0; bs->Release(); }
                 ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr);
@@ -5653,13 +5973,17 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 int zwrite = -1; if (ds) { D3D11_DEPTH_STENCIL_DESC dd; ds->GetDesc(&dd); zwrite = (dd.DepthEnable && dd.DepthWriteMask) ? 1 : 0; ds->Release(); }
                 char s0[48] = ""; { ID3D11Texture2D* t0 = ps_tex(0); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); snprintf(s0, sizeof(s0), " s0 %p %ux%u", static_cast<void*>(t0), td.Width, td.Height); } }
                 FrameEv e;
-                snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u blend %d zwrite %d vs %p ps %p%s n=%u",
-                         sidx, idx, g_eye2_cur == nullptr ? "NO IMAGE" : (g_eye2_cur->kind == 1 ? "camera" : "product"),
-                         vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], blend, zwrite, (void*)vs, (void*)ps, s0, g_draw_n);
+                snprintf(e.text, sizeof(e.text), "      scene draw %d (frame draw %d) %s%s: vs cb %u/%u/%u/%u ps cb %u/%u/%u/%u%s blend %d zwrite %d vs %p ps %p%s n=%u",
+                         sidx, idx, g_eye2_cur == nullptr ? "NO IMAGE" : (g_eye2_cur->kind == 1 ? "camera" : "product"), g_haze_now ? " HAZE" : hz.camera_kind ? " HAZE?(camera kind)" : "",
+                         vsz[0], vsz[1], vsz[2], vsz[3], psz[0], psz[1], psz[2], psz[3], cbp, blend, zwrite, (void*)vs, (void*)ps, s0, g_draw_n);
                 if (vs) vs->Release(); if (ps) ps->Release();
-                std::lock_guard<std::mutex> lock(g_mutex);
-                if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_scene_census_lines++; }
+                {
+                    std::lock_guard<std::mutex> lock(g_mutex);
+                    if (g_frame_ev.size() < 2000) { g_frame_ev.push_back(e); g_scene_census_lines++; }
+                }
+                if (g_haze_now || hz.camera_kind) haze_census(hz);
             }
+            if (g_haze_now && haze_skip_now()) { g_haze_skip_f++; g_haze_w.skip++; g_haze_s.skip++; g_haze_now = false; return -1; }   // heat_haze 0
             if (g_pick_armed) { ID3D11Texture2D* t0 = ps_tex(0); if (t0) { D3D11_TEXTURE2D_DESC td = {}; t0->GetDesc(&td); if (td.Width == 2048 && td.Height == 4096) g_pick_scene_text++; } }
             if (g_bisect_mode == 1 && sidx >= g_bisect_a && sidx <= g_bisect_b) return -1;
             if (g_bisect_mode == 2 && (sidx < g_bisect_a || sidx > g_bisect_b)) return -1;
@@ -5723,7 +6047,10 @@ extern "C" __declspec(dllexport) const void* ffxvr_on_updatesub(void* resource, 
 
     std::lock_guard<std::mutex> lock(g_mutex);
     record_buffer(buf, size, src, "UpdateSubresource");   // records the game's own camera
-    return maybe_override(src, size, buf);                  // uploads ours
+    const int ring_before = g_eye_ring_next;
+    const void* out = maybe_override(src, size, buf);       // uploads ours
+    if (g_stereo && buf != nullptr && g_eye_ring_next == ring_before) ring_drop_stale(buf);   // HZ-1: no slot taken: older entries are stale
+    return out;
 }
 
 extern "C" __declspec(dllexport) void ffxvr_override_set(int enabled, int freeze, float yaw, float pitch,
@@ -5965,18 +6292,33 @@ static bool snapshot_if_scene(ID3D11Texture2D* tex, uint32_t how) {
 /// The UI pass starts: both eye images are the scene resolved just before
 /// it; the UI texture is cleared to transparent for the pass's draws.
 static ID3D11Texture2D* ensure_copy(ID3D11Texture2D*& tex, ID3D11RenderTargetView*& rtv, const D3D11_TEXTURE2D_DESC& like);
+/// saveui A: the blend state both re-issues bind (the game's UI pass into the UI texture, the ImGui layer into its capture). The
+/// same equation as Dear ImGui's D3D11 backend: colour SRC_ALPHA / INV_SRC_ALPHA, alpha ONE / INV_SRC_ALPHA, so a target cleared
+/// to (0,0,0,0) ends up premultiplied (rgb = c a) with coverage alpha. It used to be created only by ui_pass_begin, the opener of
+/// a 3D frame's UI pass, so at boot (every frame SCREEN) the ImGui capture bound a null state: blending off, and every ImGui draw
+/// overwrote the capture (see-through holes, a dark box behind every glyph). Now made before any use; a re-issue without it is
+/// refused (the draw then reaches the backbuffer only), never drawn unblended.
+static bool ensure_ui_blend() {
+    if (g_ui_blend != nullptr) return true;
+    if (g_device == nullptr) return false;
+    D3D11_BLEND_DESC bd = {};
+    bd.RenderTarget[0].BlendEnable = TRUE;
+    bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;  bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;  bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;   bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    const HRESULT hr = g_device->CreateBlendState(&bd, &g_ui_blend);
+    if (FAILED(hr) || g_ui_blend == nullptr) {
+        g_ui_blend = nullptr;
+        if (!g_ui_blend_failed) { g_ui_blend_failed = true; diag("ui blend: CreateBlendState failed 0x%08X: the UI and ImGui re-issues are refused (drawn on the monitor only)", static_cast<unsigned>(hr)); }
+        return false;
+    }
+    return true;
+}
 static void ui_pass_begin() {
     if (g_scene_resolved == nullptr || g_device == nullptr) return;
     D3D11_TEXTURE2D_DESC d; g_scene_resolved->GetDesc(&d);
     if (!ensure_copy(g_eye1_final, g_eye1_final_rtv, d) || !ensure_copy(g_eye2_final, g_eye2_final_rtv, d) || !ensure_copy(g_ui_tex, g_ui_rtv, d)) return;
-    if (g_ui_blend == nullptr) {
-        D3D11_BLEND_DESC bd = {};
-        bd.RenderTarget[0].BlendEnable = TRUE;
-        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;  bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;  bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
-        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;   bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
-        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        g_device->CreateBlendState(&bd, &g_ui_blend);
-    }
+    ensure_ui_blend();   // saveui A (eye2_begin refuses a UI re-issue without it)
     ID3D11Texture2D* twin = nullptr;
     { auto it = g_twins.find(g_scene_resolved); if (it != g_twins.end()) twin = it->second.tex; }
     {
@@ -6043,6 +6385,13 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
     if (g_ui_draw_now || g_imgui_draw_now) {
         ID3D11RenderTargetView* target = g_imgui_draw_now ? g_imgui_rtv : g_ui_rtv;
         if (target == nullptr || g_ctx == nullptr) return 0;
+        // saveui A: never captured with a null (blending off) state: such a draw goes to the backbuffer / the game's target only.
+        // Checked before anything is saved or bound, so a refusal leaves the pipeline untouched.
+        if (!ensure_ui_blend()) { if (g_imgui_draw_now) { g_imgui_refused++; g_imgui_refused_10s++; } return 0; }
+        if (g_imgui_draw_now && !g_imgui_first_logged) {
+            g_imgui_first_logged = true;
+            diag("imgui layer: first capture at frame %u, blend ready (%s frame, layer %s)", g_frames, g_xr_screen_now ? "SCREEN" : g_screen3d_now ? "STEREO SCREEN" : "3D", g_imgui_layer ? "on" : "off");
+        }
         e2_save(false);
         g_in_eye2 = true; g_ui_pass_active_draw = true;   // before the bind: OMSetRenderTargets passes our detour, which must ignore it
         for (int sl = 0; sl < 14; ++sl) g_eye2_slots[sl] = nullptr;
@@ -6144,6 +6493,10 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
         if (rv ? g_eye2_slots[sl]->eye2b != g_eye2_slots[sl]->eye1b : !same) e2_data_differs = true;   // R23: only eye-2 data that differs from eye 1's counts
         g_ctx->UpdateSubresource(cb, 0, nullptr, rv ? g_eye2_slots[sl]->eye2b.data() : g_eye2_slots[sl]->eye2.data(), 0, 0);
     }
+    // Heat haze (heat_haze 1): the PS-stage images too, for haze draws only; other eye-2 draws are sampled for the heartbeat's
+    // "other draws with a PS-only image" (one in 32, rotating with the frame: no upload, counts only).
+    if (g_haze_now) { if (g_heat_haze == 1) haze_ps_upload(&e2_data_differs); }
+    else if (((g_eye2_draws + g_frames) & 31u) == 0) haze_probe_other();
     if (!any && !e2_data_differs) g_e2_same_inputs++;   // R23: no swapped input, no eye-2 constant data that differs: a true upper bound
     return 1;
 }
@@ -6151,7 +6504,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
 /// Restores the game's targets, sampled textures and the eye-1 image.
 extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); if (g_qpf.QuadPart && g_e2_t0.QuadPart) g_e2_ms_this_frame += (t1.QuadPart - g_e2_t0.QuadPart) * 1000.0 / g_qpf.QuadPart; }
-    if (!g_in_eye2 || g_ctx == nullptr) { e2_release(); return; }
+    if (!g_in_eye2 || g_ctx == nullptr) { e2_release(); haze_ps_drop(); return; }
     e2_restore();   // R11a: the saved real bindings, while g_in_eye2 is still true (the restore passes our detours)
     if (g_ui_pass_active_draw) {
         g_ui_pass_active_draw = false;
@@ -6165,6 +6518,7 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
             if (g_eye2_slots[sl] != nullptr) g_ctx->UpdateSubresource(g_eye2_slots[sl]->cb, 0, nullptr, g_eye2_slots[sl]->eye1.data(), 0, 0);
         }
     }
+    haze_ps_restore();   // heat haze: eye 1's bytes back into the PS buffers eye2_begin wrote (released either way; g_debug_leave leaves eye 2's)
     g_eye2_draws++;
     g_in_eye2 = false;
 }
@@ -6527,7 +6881,32 @@ static const char k_copy_hlsl[] =
     "V vs(uint id : SV_VertexID) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.uv = uv; o.p = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1); return o; }\n"
     "float4 ps(V i) : SV_Target { return float4(t.Sample(s, i.uv).rgb, 1); }\n"
     "float4 ps_alpha(V i) : SV_Target { return t.Sample(s, i.uv); }\n";
+// saveui B + D, SU-3: the ImGui layer's copy (mode 2), in a string of its own: FXC parses the whole source for every entry point, so
+// an error here can only lose these two shaders (the layer then uses ps_alpha), never the copies every headset image needs.
+static const char k_copy_premul_hlsl[] =
+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    // The ImGui layer (copy mode 2). Its capture is premultiplied (blended into (0,0,0,0) with ImGui's equation), so
+    // it is filtered as is (filtering is only correct on premultiplied texels). Four bilinear taps a quarter of a target pixel
+    // around the centre: at the 2:1 of a 4K capture into the 1920x1080 swapchain they land on the four source texel centres (an
+    // exact 2x2 box); at other ratios they are a small area filter instead of one tap that skips texels.
+    "float4 premul4(V i) {\n"
+    "    float2 dx = ddx(i.uv) * 0.25, dy = ddy(i.uv) * 0.25;\n"
+    "    return 0.25 * (t.Sample(s, i.uv - dx - dy) + t.Sample(s, i.uv + dx - dy) + t.Sample(s, i.uv - dx + dy) + t.Sample(s, i.uv + dx + dy));\n"
+    "}\n"
+    "float3 srgb_dec(float3 c) { return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c)); }\n"
+    "float3 srgb_enc(float3 l) { return lerp(l * 12.92, 1.055 * pow(max(l, 1e-8), 1.0 / 2.4) - 0.055, step(0.0031308, l)); }\n"
+    // UNORM swapchain: the compositor blends the bytes, exactly the monitor's c a + dst (1 - a)
+    "float4 ps_premul(V i) : SV_Target { return premul4(i); }\n"
+    // sRGB swapchain: the compositor decodes the bytes before it blends, so the colour is un-premultiplied, decoded, premultiplied
+    // in linear light and encoded; it then shows dec(c) a + scene (1 - a), the straight-alpha result in linear light.
+    "float4 ps_premul_srgb(V i) : SV_Target {\n"
+    "    float4 p = premul4(i);\n"
+    "    float3 c = saturate(p.rgb / max(p.a, 1e-6));\n"
+    "    return float4(p.a > 0.0 ? srgb_enc(srgb_dec(c) * p.a) : float3(0, 0, 0), p.a);\n"
+    "}\n";
 ID3D11VertexShader* g_copy_vs = nullptr; ID3D11PixelShader* g_copy_ps = nullptr; ID3D11PixelShader* g_copy_ps_alpha = nullptr; ID3D11SamplerState* g_copy_smp = nullptr;
+ID3D11PixelShader* g_copy_ps_premul = nullptr; ID3D11PixelShader* g_copy_ps_premul_srgb = nullptr;   // saveui: copy mode 2 (the ImGui layer)
 bool g_copy_tried = false;
 struct OpaqueCopy { ID3D11Texture2D* tex = nullptr; ID3D11RenderTargetView* rtv = nullptr; ID3D11ShaderResourceView* srv = nullptr; UINT w = 0, h = 0; };
 OpaqueCopy g_opaque[3];
@@ -6562,11 +6941,22 @@ static bool copy_pass_init() {
         else diag("copy pass: ps_alpha compile failed 0x%08X", static_cast<unsigned>(h2));
         if (err2) err2->Release();
     }
+    {   // saveui: the ImGui layer's premultiplied copies, from their own source (SU-3; a failure falls back to ps_alpha, logged)
+        const char* entry[2] = { "ps_premul", "ps_premul_srgb" }; ID3D11PixelShader** out[2] = { &g_copy_ps_premul, &g_copy_ps_premul_srgb };
+        for (int k = 0; k < 2; ++k) {
+            ID3DBlob *pb = nullptr, *e3 = nullptr;
+            HRESULT h3 = compile(k_copy_premul_hlsl, sizeof(k_copy_premul_hlsl) - 1, "copy_premul", nullptr, nullptr, entry[k], "ps_4_0", 0, 0, &pb, &e3);
+            if (SUCCEEDED(h3)) { if (FAILED(g_device->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, out[k]))) *out[k] = nullptr; pb->Release(); }
+            if (*out[k] == nullptr) diag("copy pass: %s compile / create failed 0x%08X: %s (the ImGui layer uses the plain alpha copy)", entry[k], static_cast<unsigned>(h3), e3 ? static_cast<const char*>(e3->GetBufferPointer()) : "");
+            if (e3) e3->Release();
+        }
+    }
     if (FAILED(hr)) { diag("copy pass: shader create failed 0x%08X", static_cast<unsigned>(hr)); return false; }
     D3D11_SAMPLER_DESC sd = {};
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
     g_device->CreateSamplerState(&sd, &g_copy_smp);
-    diag("copy pass: ready");
+    diag("copy pass: ready (the ImGui layer: %s)", g_copy_ps_premul && g_copy_ps_premul_srgb ? "premultiplied 4-tap copy, linear-light for an sRGB swapchain"
+                                                  : g_copy_ps_alpha ? "FALLBACK single-tap alpha copy (the premultiplied shaders failed, see above)" : "FALLBACK opaque copy");
     return true;
 }
 
@@ -7172,7 +7562,7 @@ static void uid_headset_off() {
 static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
 static uint32_t g_plain_srvs_count() { return (uint32_t)g_plain_srvs.size(); }
 static void g_plain_srvs_forget(ID3D11Texture2D* t) { auto it = g_plain_srvs.find(t); if (it != g_plain_srvs.end()) { if (it->second) it->second->Release(); g_plain_srvs.erase(it); } }
-bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha = false);
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int mode = 0);   // mode: XrHost::copy
 
 /// Renders `src` into the opaque copy for `slot` (0..2) and returns its SRV.
 static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
@@ -7203,14 +7593,16 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
         if (FAILED(hr)) diag("preview: srv failed hr=0x%08X", static_cast<unsigned>(hr));
         oc.w = d.Width; oc.h = d.Height;
     }
-    return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h, false) ? oc.srv : nullptr;
+    return ffxvr_copy_pass(src, oc.rtv, oc.w, oc.h, 0) ? oc.srv : nullptr;
 }
 
-/// Stretch-copies `src` into `dst` (w x h) with alpha forced to 1, saving
-/// and restoring the pipeline state it touches. Also used for the headset.
-bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha) {
+/// Stretch-copies `src` into `dst` (w x h), saving and restoring the pipeline state it touches. Also used for the headset.
+/// mode 0: alpha forced to 1; 1: alpha kept, one tap (the UI panel, or its backing-plate copy); 2: the ImGui layer, premultiplied,
+/// four taps, linear-light premultiplied for an sRGB swapchain (saveui B / D; ps_alpha if those shaders are missing).
+bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int mode) {
+    const bool keep_alpha = mode != 0;
     if (src == nullptr || dst == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
-    if (keep_alpha && g_uib_now && src == g_uib_src_now && uib_copy(src, dst, w, h)) return true;   // uidepth: the UI panel with its backing plate (this frame's)
+    if (mode == 1 && g_uib_now && src == g_uib_src_now && uib_copy(src, dst, w, h)) return true;   // uidepth: the UI panel with its backing plate (this frame's)
     if (!copy_pass_init()) return false;
     ID3D11ShaderResourceView* in = nullptr;
     auto it = g_plain_srvs.find(src);
@@ -7246,7 +7638,9 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
     g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
     D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
     g_ctx->RSSetViewports(1, &vp);
-    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader((keep_alpha && g_copy_ps_alpha) ? g_copy_ps_alpha : g_copy_ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    ID3D11PixelShader* ps = (keep_alpha && g_copy_ps_alpha) ? g_copy_ps_alpha : g_copy_ps;
+    if (mode == 2) { ID3D11PixelShader* pm = xr_srgb() ? g_copy_ps_premul_srgb : g_copy_ps_premul; if (pm) ps = pm; }
+    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(ps, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
     g_ctx->PSSetShaderResources(0, 1, &in); g_ctx->PSSetSamplers(0, 1, &g_copy_smp);
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -7739,6 +8133,7 @@ static void leave_xr_state() {
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
     g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
     g_lowres = false;   // no stale low-resolution line when the headset comes back on
+    g_imgui_menu_prev = false; g_imgui_menu_place = false; g_imgui_menu_pose = false;   // saveui: a menu open at the next start is a new opening
     g_hap[0] = g_hap[1] = HapHand{};   // the session is gone: nothing to stop
     const bool rt = g_render_tid != 0 && GetCurrentThreadId() == g_render_tid;   // BT-R-4: the bt state is the render thread's
     if (rt) { if (g_bt_phase != BT_IDLE) bt_end("the headset is off"); else bt_flush(); }   // its summary, flushed (BT-4)
@@ -7754,7 +8149,11 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
     XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
-    if (g_xr_want) { if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true; return 1; }   // g_xr_fails clears in xr_tick after 5 s alive
+    if (g_xr_want) {
+        if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
+        copy_pass_init();   // SU-8: the copy shaders compile at headset start, not inside the first frame's submit (tried once; a later call is a no-op)
+        return 1;
+    }   // g_xr_fails clears in xr_tick after 5 s alive
     g_xr_fails++; g_xr_retry_at = now + (g_xr_fails < 3 ? 2000 : 5000);
     if (g_xr_fails == 2 || g_xr_fails % 60 == 0) diag("xr: start failed %u times (last: %s); retrying every %d s without logging", g_xr_fails, xr_status(), g_xr_fails < 3 ? 2 : 5);
     return 0;
@@ -7775,8 +8174,23 @@ extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
         g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
         (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
 }
-extern "C" __declspec(dllexport) void ffxvr_imgui_layer_set(int on, int force_show, int min_draws) { g_imgui_layer = on != 0; g_imgui_force = force_show != 0; g_imgui_min_draws = (uint32_t)(min_draws < 1 ? 1 : min_draws); }
+/// ABI 21: + `menu` (saveui): 0, or 1 | (state << 8) while fh_menu_on_screen is on and Fahrenheit's save screen is open (managed
+/// latches 0x8CB994 from OPEN to CLOSED, guarded read; `state` is this frame's raw word, 2 = OPEN). Managed, every frame; xr_tick
+/// acts on the edges.
+extern "C" __declspec(dllexport) void ffxvr_imgui_layer_set(int on, int force_show, int min_draws, int menu) { g_imgui_layer = on != 0; g_imgui_force = force_show != 0; g_imgui_min_draws = (uint32_t)(min_draws < 1 ? 1 : min_draws); g_imgui_menu = (menu & 1) != 0; g_imgui_menu_state = (menu >> 8) & 0xFF; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_draws() { return g_imgui_draws_last; }
+static int g_imgui_where = 0;   // the ImGui layer last frame: 0 not shown, 1 head-locked, 2 on the virtual screen (the menu)
+/// ABI 21 (saveui): for the overlay. out[0] the menu is open and forcing the screen (1) or not (0), [1] where the ImGui layer went
+/// last frame (0 not shown, 1 head-locked, 2 on the virtual screen), [2] the menu's screen was placed from the head's yaw (1) or is
+/// the usual virtual screen (0), [3] re-issues refused for a missing blend state this session, [4] / [5] the ImGui swapchain's
+/// width / height (0 while no session). Returns how many values exist (6).
+extern "C" __declspec(dllexport) int ffxvr_imgui_status(int* out, int n) {
+    unsigned w = 0, h = 0; xr_imgui_size(&w, &h);
+    const bool forcing = g_imgui_menu && g_imgui_layer && g_xr_want && !bt_no_split() && !g_imgui_menu_wd;
+    const int v[6] = { forcing ? 1 : 0, g_imgui_where, g_imgui_menu_pose ? 1 : 0, static_cast<int>(g_imgui_refused), static_cast<int>(w), static_cast<int>(h) };
+    if (out != nullptr) for (int i = 0; i < n && i < 6; ++i) out[i] = v[i];
+    return 6;
+}
 extern "C" __declspec(dllexport) void ffxvr_msaa_set(int samples) { g_msaa_override = (samples == 2 || samples == 4) ? samples : 0; }
 extern "C" __declspec(dllexport) void ffxvr_msaa_status(uint32_t* seen, uint32_t* changed, uint32_t* last_w, uint32_t* last_h, uint32_t* last_n) {
     if (seen) *seen = g_msaa_seen; if (changed) *changed = g_msaa_changed; if (last_w) *last_w = g_msaa_last_w; if (last_h) *last_h = g_msaa_last_h; if (last_n) *last_n = g_msaa_last_n;
@@ -8462,8 +8876,9 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
     return 9;
 }
 static void xr_tick() {
-    if (!g_xr_want) { dream_headset_off(); uid_headset_off(); return; }
+    if (!g_xr_want) { dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
     if (!g_uid_tried && (g_uid_on || g_uid_backing > 0.001f)) uid_init();   // UD-6: the shaders compile here at Present, at headset start, not inside the game's frame
+    if (!g_copy_tried) copy_pass_init();         // SU-8 backstop: never inside xr_frame's submit
     lowres_check();
     detect_cut();
     bt_tick();                                   // battle transition phases (before anything this tick decides from them)
@@ -8480,14 +8895,59 @@ static void xr_tick() {
     // it, and the UI goes on its own panel.
     ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
-    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width, nullptr, g_ui_dist, g_ui_width };   // uidepth sets dist / width below; im_dist / im_width stay the settings'
+    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width, nullptr, g_ui_dist, g_ui_width, false, { 0, 0, 0, 1 }, { 0, 0, 0 }, 0.f };   // uidepth sets dist / width below; im_dist / im_width stay the settings'; saveui sets im_world and its pose below
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
     // The ImGui layer: what Fahrenheit drew after our hook last Present.
     g_imgui_draws_last = g_imgui_draws_frame; g_imgui_draws_frame = 0;
     if (g_imgui_layer && g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+        ID3D11Texture2D* const was = g_imgui_tex;
         ensure_copy(g_imgui_tex, g_imgui_rtv, bd);
-        if (g_imgui_tex && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;
+        ensure_ui_blend();   // saveui A: before the first ImGui draw can be re-issued into the capture (eye2_begin refuses without it)
+        if (g_imgui_tex != was && g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); }   // a new capture starts transparent
+        if (g_imgui_tex && g_imgui_tex == was && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;   // (a new texture holds none of last frame's draws)
+    }
+    // saveui C: Fahrenheit's save screen (fh_menu_on_screen and 0x8CB994, from managed) is a full-screen 2D program: while it is
+    // open the frame goes to the virtual screen and the ImGui layer lies on it (below). Not inside a battle transition window (the
+    // glass break keeps the view it started in) and not with the ImGui layer off (the menu would not be in the headset at all).
+    // The edges fall inside the menu's own fades: Fahrenheit draws it only in OPEN, starting from a full-screen black that fades
+    // out over 0.5 s, and managed raises the flag at the first OPEN frame, whose ImGui image (that black) goes out with the first
+    // forced screen frame; at the close the flag drops once the state is CLOSED, after its fade to black and the action.
+    // SU-2: a latch that never clears (the game's handler stopped with the word at 1 / 3 / 4, e.g. a soft reset from inside the
+    // menu) would keep the frame on the screen. Released after 5 s with the word not OPEN and fewer than min_draws ImGui draws in
+    // every one of those frames; re-armed when managed unlatches (CLOSED) or the word is OPEN again.
+    if (!g_imgui_menu || g_imgui_menu_state == 2) { g_imgui_menu_wd = false; g_imgui_menu_quiet_t0 = 0; g_imgui_menu_quiet_n = 0; }
+    else if (g_imgui_draws_last >= g_imgui_min_draws) { g_imgui_menu_quiet_t0 = 0; g_imgui_menu_quiet_n = 0; }
+    else if (!g_imgui_menu_wd) {
+        const ULONGLONG tq = GetTickCount64();
+        if (g_imgui_menu_quiet_t0 == 0) g_imgui_menu_quiet_t0 = tq;
+        g_imgui_menu_quiet_n++;
+        if (tq - g_imgui_menu_quiet_t0 > k_imgui_menu_wd_ms) {
+            g_imgui_menu_wd = true;
+            diag("imgui: save screen latch released (state %d for %u frames, %.1f s, no menu draws): the forced screen ends until the save screen closes or opens again", g_imgui_menu_state, g_imgui_menu_quiet_n, (tq - g_imgui_menu_quiet_t0) / 1000.0);
+        }
+    }
+    const bool menu = g_imgui_menu && g_imgui_layer && !bt_no_split() && !g_imgui_menu_wd;
+    // SU-1: this frame's capture has the menu (or Fahrenheit's black) only when the word was OPEN and ImGui drew. Latched frames
+    // without it (3 / 4 at a close, the open read race, the menu's textures not loaded yet, a 4 -> 1 reopen) black out eye 1 for at
+    // most k_imgui_menu_black frames since the last menu image, as a cut blink does: the field never shows flat on a floating screen.
+    const bool menu_img = g_imgui_menu_state == 2 && g_imgui_draws_last > 0;
+    if (menu != g_imgui_menu_prev) g_imgui_menu_gap = 0;
+    if (menu) { if (menu_img) g_imgui_menu_gap = 0; else if (g_imgui_menu_gap < 100000) g_imgui_menu_gap++; }
+    const bool menu_black = menu && !menu_img && g_imgui_menu_gap <= k_imgui_menu_black;
+    if (menu != g_imgui_menu_prev) {
+        const bool from_3d = !g_xr_screen_now && !g_screen3d_now;   // the headset view before this frame's decision
+        g_imgui_menu_pose = false; g_imgui_menu_place = menu && from_3d;
+        diag("imgui: frame %u: Fahrenheit's save screen %s%s", g_frames, menu ? "open: on the virtual screen" : "closed: the ImGui layer is head-locked again",
+             menu ? (from_3d ? " (opened from the 3D view: the screen is placed from the head's yaw)" : " (opened in a screen mode: the usual screen)") : "");
+        g_imgui_menu_prev = menu;
+    }
+    if (menu && g_imgui_menu_place && g_xr_active) {   // the head's yaw and position now, as the recentre does (no recentre: the seat, first-person yaw etc. stay)
+        const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d);
+        const float a = atan2f(-d[0], -d[2]);
+        g_imgui_menu_q[0] = 0; g_imgui_menu_q[1] = sinf(a * 0.5f); g_imgui_menu_q[2] = 0; g_imgui_menu_q[3] = cosf(a * 0.5f);
+        memcpy(g_imgui_menu_p, g_xr_raw_p, sizeof(g_imgui_menu_p));   // the anchor; the screen goes g_xr_screen_dist ahead of it (the slider stays live)
+        g_imgui_menu_pose = true; g_imgui_menu_place = false;
     }
     g_ui_state = UI_IDLE; g_ui_last_frame_had_pass = ui_frame;
     g_ui_early = false; g_ui_early_keep = false; g_ui_early_report = g_ui_early_draws; g_ui_early_draws = 0;
@@ -8523,6 +8983,10 @@ static void xr_tick() {
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
     }
+    if (menu_black && e1 != nullptr) {              // SU-1: latched without a menu image (see above): eye 1 black, as the blink does
+        ID3D11RenderTargetView* const brtv = e1 == g_bb_copy ? g_bb_copy_rtv : e1 == g_eye1_final ? g_eye1_final_rtv : nullptr;   // our own copies only
+        if (brtv) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(brtv, black); e2 = e1; g_imgui_menu_black_10s++; }
+    }
     if (e1 && g_seq_left > 0) {
         wchar_t n1[64], n2[64];
         _snwprintf_s(n1, _TRUNCATE, L"seq_%02d_eye1.bmp", g_seq_index); _snwprintf_s(n2, _TRUNCATE, L"seq_%02d_eye2.bmp", g_seq_index);
@@ -8542,6 +9006,7 @@ static void xr_tick() {
     const bool is2d = g_frames_without_cam >= 2;
     bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
     if (bt_no_split()) screen_next = g_bt_screen_pin;   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
+    else if (menu) screen_next = true;                  // saveui C: Fahrenheit's save screen is shown on the virtual screen, as on the monitor
     if (screen_next != g_xr_screen_now) {
         static int logged = 0;
         if (logged++ < 400) {
@@ -8567,6 +9032,36 @@ static void xr_tick() {
     screen.on = g_xr_screen_now || g_screen3d_now; screen.width = g_xr_screen_width;
     screen.stereo = g_screen3d_now && e2 != nullptr; screen.eye2 = screen.stereo ? e2 : nullptr;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
+    if (menu && g_imgui_menu_pose && screen.on && !screen.stereo) {   // saveui C: opened from 3D: the screen where the user faced
+        const float ahead[3] = { 0.f, 0.f, -g_xr_screen_dist }; float off[3]; quat_rotate(g_imgui_menu_q, ahead, off);
+        memcpy(screen.q, g_imgui_menu_q, sizeof(screen.q));
+        for (int k = 0; k < 3; ++k) screen.p[k] = g_imgui_menu_p[k] + off[k];
+    }
+    if (menu && screen.on && !screen.stereo && ui.tex2 != nullptr) {   // saveui C: the ImGui layer exactly over the screen
+        ui.im_world = true; memcpy(ui.im_q, screen.q, sizeof(ui.im_q)); memcpy(ui.im_p, screen.p, sizeof(ui.im_p)); ui.im_w = screen.width;
+    }
+    g_imgui_where = ui.tex2 == nullptr ? 0 : ui.im_world ? 2 : 1;
+    {   // saveui A.3: the ImGui layer, every 10 s while it drew (screen frames included: the boot menu used to leave no trace)
+        static ULONGLONG next = 0; static uint32_t f_screen = 0, f_screen_shown = 0, f_3d_shown = 0, f_world = 0, draws_max = 0, f_draws = 0;
+        if (g_imgui_draws_last > 0) f_draws++;
+        if (g_imgui_draws_last > draws_max) draws_max = g_imgui_draws_last;
+        if (screen.on) { f_screen++; if (ui.tex2) f_screen_shown++; } else if (ui.tex2) f_3d_shown++;
+        if (ui.im_world) f_world++;
+        const ULONGLONG now = GetTickCount64();
+        if (now >= next) {
+            next = now + 10000;
+            if (f_screen_shown + f_3d_shown + f_world > 0 || g_imgui_refused_10s > 0) {   // SU-7: only when the layer was shown (not for the title's mod list alone)
+                D3D11_TEXTURE2D_DESC td = {}; if (g_imgui_tex) g_imgui_tex->GetDesc(&td);
+                unsigned sw = 0, sh = 0; xr_imgui_size(&sw, &sh);
+                diag("imgui: 10 s: frames with ImGui draws %u (max %u a frame, last %u) | screen frames %u, the layer shown on %u; 3D frames with the layer %u | on the virtual screen (save screen) %u frames%s, eye 1 blacked out (latched, no menu image) %u | layer %s, force %d, min %u | capture %ux%u fmt %u -> swapchain %ux%u, %s copy | refused (no blend state) %u (session %u)",
+                     f_draws, draws_max, g_imgui_draws_last, f_screen, f_screen_shown, f_3d_shown, f_world, g_imgui_menu_pose ? " (placed from the head)" : "", g_imgui_menu_black_10s,
+                     g_imgui_layer ? "on" : "off", g_imgui_force ? 1 : 0, g_imgui_min_draws, td.Width, td.Height, static_cast<unsigned>(td.Format), sw, sh,
+                     (xr_srgb() ? g_copy_ps_premul_srgb : g_copy_ps_premul) ? (xr_srgb() ? "premultiplied linear (sRGB)" : "premultiplied") : "single-tap alpha",
+                     g_imgui_refused_10s, g_imgui_refused);
+            }
+            f_screen = f_screen_shown = f_3d_shown = f_world = draws_max = f_draws = 0; g_imgui_refused_10s = 0; g_imgui_menu_black_10s = 0;
+        }
+    }
     // uidepth: the panel's distance / width and its backing plate, for a frame that submits the 3D UI panel (xr_frame shows it
     // only with a base layer that is not a screen; a held base keeps the held quad).
     uid_present(ui.tex != nullptr && !screen.on && e1 != nullptr, ui);

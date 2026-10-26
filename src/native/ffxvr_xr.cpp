@@ -330,6 +330,7 @@ void xr_debug(int sim_timeouts) { if (sim_timeouts > 0) g_sim_timeouts += sim_ti
 bool xr_take_stuck() { const bool v = g_stuck_stop; g_stuck_stop = false; return v; }
 void xr_counters(unsigned* held_frames, unsigned* wait_timeouts) { if (held_frames) *held_frames = g_held_frames; if (wait_timeouts) *wait_timeouts = g_wait_timeouts; }   // held: base-layer frames (quads held alone are in the diag log)
 void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
+void xr_imgui_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[4].w; if (h) *h = g_eye[4].h; }   // 0 x 0 while no session
 bool xr_srgb() { return g_sc_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; }
 
 void xr_stop() {
@@ -465,7 +466,8 @@ bool xr_start(const XrHost& host) {
             e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
             if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
-        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2, 5), the UI panel (3), the ImGui layer (4)
+        else if (i == 4) { e.w = 1920; e.h = 1080; }       // the ImGui layer (saveui D): exactly half a 4K capture, so the copy's taps are a 2x2 box; ~34 px/deg on a 56 deg quad, above the display's ~25
+        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2, 5), the UI panel (3)
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
@@ -577,7 +579,7 @@ bool prepare(int i, bool short_wait) {
 void copy_release(int i, ID3D11Texture2D* src) {
     Eye& e = g_eye[i];
     stage(i == 0 ? "copy eye 0" : i == 1 ? "copy eye 1" : "copy");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 || i == 4)) g_h.ctx->CopyResource(e.images[e.idx], e.mid);
+    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : i == 4 ? 2 : 0)) g_h.ctx->CopyResource(e.images[e.idx], e.mid);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui)
     stage("release image");
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     if (XR_SUCCEEDED(p_xrReleaseSwapchainImage(e.sc, &ri))) e.ever_released = true;
@@ -706,19 +708,33 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrCompositionLayerQuad imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_imgui = false;
         const bool im_src = base && ui != nullptr && ui->tex2 != nullptr;   // the ImGui image exists whenever the overlay draws (no-image frames included)
+        // saveui C: with Fahrenheit's save screen open the layer lies exactly over the virtual screen (world-locked, the same pose
+        // and width, 16:9 onto 16:9, after the screen quad in the layer order), as the menu sits over the game's frame on the
+        // monitor. Only over a screen base (a held base keeps its mode, so use_screen is this frame's truth); otherwise head-locked.
+        const bool im_world = im_src && ui->im_world && use_screen;
         if (im_src && submit_eye(4, ui->tex2)) {
             have_imgui = true;
-            imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT | XR_COMPOSITION_LAYER_UNPREMULTIPLIED_ALPHA_BIT;
-            imq.space = g_view_space; imq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // saveui B: premultiplied (the capture is; the copy keeps it so)
+            imq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             imq.subImage.swapchain = g_eye[4].sc;
             imq.subImage.imageRect.offset = { 0, 0 };
             imq.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[4].w), static_cast<int32_t>(g_eye[4].h) };
-            imq.pose.orientation = { 0, 0, 0, 1 };
-            imq.pose.position = { 0, 0, -(ui->im_dist * 0.95f) };   // uidepth: the settings' distance, not the UI panel's adaptive one
-            imq.size = { ui->im_width * 0.95f, ui->im_width * 0.95f * 9.f / 16.f };
+            if (im_world) {
+                imq.space = g_space;
+                imq.pose.orientation = { ui->im_q[0], ui->im_q[1], ui->im_q[2], ui->im_q[3] };
+                imq.pose.position = { ui->im_p[0], ui->im_p[1], ui->im_p[2] };
+                imq.size = { ui->im_w, ui->im_w * 9.f / 16.f };
+            }
+            else {
+                imq.space = g_view_space;
+                imq.pose.orientation = { 0, 0, 0, 1 };
+                imq.pose.position = { 0, 0, -(ui->im_dist * 0.95f) };   // uidepth: the settings' distance, not the UI panel's adaptive one
+                imq.size = { ui->im_width * 0.95f, ui->im_width * 0.95f * 9.f / 16.f };
+            }
             g_held.have_imgui = true; g_held.imgui_age = 0; g_held.imq = imq;
         }
-        else if (im_src && g_held.have_imgui && g_held.imgui_age < k_hold_max && g_eye[4].ever_released) {   // R8b: its own wait timed out
+        else if (im_src && g_held.have_imgui && g_held.imgui_age < k_hold_max && g_eye[4].ever_released
+                 && g_held.imq.space == (im_world ? g_space : g_view_space)) {   // R8b: its own wait timed out; saveui: never across a head-locked / on-screen change
             have_imgui = true; imq = g_held.imq; g_held.imgui_age++; g_held_quads++;
         }
         const XrCompositionLayerBaseHeader* layers[4] = {

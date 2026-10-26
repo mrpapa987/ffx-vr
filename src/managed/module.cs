@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 20;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 22;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -188,9 +188,21 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private bool _vrpad = true;
     private bool _haptics = true; private float _haptics_gain = 0.8f; private int _haptics_status;   // rumble to haptics (ini haptics, haptics_gain)
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_haptics_set;
-    private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_imgui_layer_set; private delegate* unmanaged[Cdecl]<uint> _fn_imgui_draws; private bool _imgui_layer = true; private int _imgui_min_draws = 12;
-    /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal): 0 closed, 1 opening, 2 open.</summary>
-    private static byte save_screen_state() { try { return FhUtil.get_at<byte>(0x8CB994); } catch { return 0; } }
+    private delegate* unmanaged[Cdecl]<int, int, int, int, void> _fn_imgui_layer_set; private delegate* unmanaged[Cdecl]<uint> _fn_imgui_draws; private bool _imgui_layer = true; private int _imgui_min_draws = 12;
+    private delegate* unmanaged[Cdecl]<int*, int, int> _fn_imgui_status;   // ABI 21 (saveui): where the ImGui layer goes, the forced screen
+    /// <summary>saveui: ini fh_menu_on_screen (default 1, applies at once). While Fahrenheit's save screen is open the frame goes to
+    /// the virtual screen and its menu lies exactly over it, world-locked, as on the monitor (native xr_tick). 0: the old
+    /// head-locked layer over whatever view was showing.</summary>
+    private bool _fh_menu_on_screen = true;
+    private bool _fh_menu_open;   // latched: set at OPEN (2: Fahrenheit draws the menu, from a full-screen black), cleared at CLOSED (0)
+    /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal; FhSavePal.pal_addr_screen_state, FFX: 0x8CB994, a DWORD in
+    /// FFX.exe's .data, VA 0xCCB994): 0 closed, 1 opening, 2 open, 3 / 4 unnamed. A guarded read (native, VirtualQuery first):
+    /// an access violation is fatal under Fahrenheit's stage-0 debugger even inside a try.</summary>
+    private uint save_screen_state() {
+        if (_fn_safe_read == null) return 0;
+        uint v = 0;
+        return _fn_safe_read(FhUtil.ptr_at<uint>(0x8CB994), &v, 4) != 0 ? v : 0u;
+    }
     private delegate* unmanaged[Cdecl]<int, float, void> _fn_gesture_set;
     private delegate* unmanaged[Cdecl]<void> _fn_gesture_reset;
     private delegate* unmanaged[Cdecl]<float*, float*, int*, uint> _fn_gesture_poll;
@@ -433,7 +445,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_cull_scene_get = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_cull_scene_get");
             _fn_msaa_set     = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_msaa_set");
             _fn_vrpad_set    = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_vrpad_set");
-            _fn_imgui_layer_set = (delegate* unmanaged[Cdecl]<int, int, int, void>)req("ffxvr_imgui_layer_set");
+            _fn_imgui_layer_set = (delegate* unmanaged[Cdecl]<int, int, int, int, void>)req("ffxvr_imgui_layer_set");   // ABI 21: + menu
+            _fn_imgui_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_imgui_status");   // ABI 21 (saveui)
             _fn_imgui_draws  = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_imgui_draws");
             _fn_vrpad_status = (delegate* unmanaged[Cdecl]<float*, byte*, byte*, int, uint*, int>)req("ffxvr_vrpad_status");
             _fn_haptic       = (delegate* unmanaged[Cdecl]<int, float, float, void>)req("ffxvr_haptic");
@@ -488,6 +501,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_dream_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_dream_set"); _fn_dream_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_dream_status");   // ABI 18: dream overlay
             _fn_shadow_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_shadow_set"); _fn_shadow_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_status");   // ABI 19: shadow camera
             _fn_uidepth_set = (delegate* unmanaged[Cdecl]<int, float, float, float, int, void>)req("ffxvr_uidepth_set"); _fn_uidepth_status = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_uidepth_status");   // ABI 20: adaptive UI panel
+            _fn_haze_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_haze_set"); _fn_haze_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_haze_status");   // ABI 22: heat haze
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -541,6 +555,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_dream_set = null; _fn_dream_status = null;
         _fn_shadow_set = null; _fn_shadow_status = null;
         _fn_uidepth_set = null; _fn_uidepth_status = null;
+        _fn_imgui_status = null;   // ABI 21 (saveui; _fn_imgui_layer_set is cleared above)
+        _fn_haze_set = null; _fn_haze_status = null;   // ABI 22 (heat haze)
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -918,6 +934,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "haptics":           pb(k, v, ref _haptics); break;                  // the game's rumble on the Quest controllers
                 case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
+                case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
                 case "gestures":          pb(k, v, ref _gestures); break;
                 case "gest_tilt":         pf(k, v, ref _gest_tilt, -2f, 2f); break;
                 case "fp_body_mode":      pe(k, v, ref _fp_body_mode, 0, 1, 2); break;
@@ -976,6 +993,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
                 case "shadow_cam":        pi(k, v, ref _shadow_cam, 0, 1); break;       // character shadows: 1 the game's light camera left alone (default), 0 overridden (old, A/B)
                 case "fp_self_shadow":    pi(k, v, ref _fp_self_shadow, 0, 1); break;   // 1 own shadow always drawn (default), 0 hidden in first person's whole-body mode
+                case "heat_haze":         pi(k, v, ref _heat_haze, 0, 2); break;        // fire shimmer: 1 fixed per eye (default), 0 off in the headset's 3D view, 2 as before (A/B)
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
                 case "follow_rate":       pf(k, v, ref _follow_rate, 1f, 360f); break;
@@ -1228,6 +1246,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"haptics={(_haptics ? 1 : 0)}\n" +
             $"haptics_gain={_haptics_gain.ToString("0.##", ci)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
+            $"fh_menu_on_screen={(_fh_menu_on_screen ? 1 : 0)}\n" +
             $"gestures={(_gestures ? 1 : 0)}\n" +
             $"gest_tilt={_gest_tilt.ToString("F2", ci)}\n" +
             $"fp_body_mode={_fp_body_mode.ToString(ci)}\n" +
@@ -1275,6 +1294,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"noimg_mode={_noimg_mode.ToString(ci)}\n" +
             $"shadow_cam={_shadow_cam.ToString(ci)}\n" +
             $"fp_self_shadow={_fp_self_shadow.ToString(ci)}\n" +
+            $"heat_haze={_heat_haze.ToString(ci)}\n" +
             $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
@@ -1431,6 +1451,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Separator();
         ImGui.Checkbox("headset field of view", ref _xr_fov); ImGui.SameLine();
         shadow_ui();   // shadow camera: shadow_cam, fp_self_shadow
+        haze_ui();     // heat haze: heat_haze
         ImGui.Text("2D screens:"); ImGui.SameLine();
         ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
@@ -1456,6 +1477,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
         ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
         if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
+        if (_imgui_layer) fh_menu_ui();   // saveui: fh_menu_on_screen
         if (_ui_on) uidepth_ui();   // adaptive UI panel: ui_adaptive, ui_backing (the rest in Debug > UI panel)
         dream_ui();   // dream overlay: dream_overlay
         bt_ui();
@@ -1577,6 +1599,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         if (ImGui.TreeNode("Character shadows (the ShadowManager's light camera)")) {
             shadow_debug_ui();
+            ImGui.TreePop();
+        }
+
+        if (ImGui.TreeNode("Heat haze (the shimmer over fire)")) {
+            haze_debug_ui();
             ImGui.TreePop();
         }
 
@@ -1912,6 +1939,20 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (toggles != 0 || act != 0) _bt_user_ev = true;   // a gesture chord or a world grab ends an open battle transition window
     }
 
+    /// <summary>saveui: the main window's row under the ImGui layer checkbox (fh_menu_on_screen) and its live state.</summary>
+    private void fh_menu_ui() {
+        ImGui.Checkbox("Fahrenheit's save screen on the virtual screen (as on the monitor)", ref _fh_menu_on_screen);
+        if (_fn_imgui_status == null) return;
+        int* v = stackalloc int[6];
+        if (_fn_imgui_status(v, 6) < 6) return;
+        string where = v[1] == 2 ? "on the virtual screen" : v[1] == 1 ? "head-locked" : "not shown";
+        string head = v[0] != 0 ? (v[2] != 0 ? "save screen open: on the screen, placed where you faced; " : "save screen open: on the screen; ") : "";
+        string size = v[4] > 0 ? $", {v[4]}x{v[5]}" : "";
+        string refused = v[3] > 0 ? $", {v[3]} draws refused (no blend state)" : "";
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{head}layer {where}{size}{refused}");
+    }
+
     /// <summary>Every setting to the native side, exactly once per frame, whether the window is open or not. The window
     /// only draws widgets, reads status and runs one-shot buttons. Several setters are not idempotent (xr_set and fp_set
     /// are edge-triggered, player_set / player_head_set integrate per call, the stats reads clear), so none of them may
@@ -1943,7 +1984,15 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_haptics_set != null) _haptics_status = _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);
         bt_push();
         lp_push();   // load lock build: diag_load_prof, load_lock_release
-        if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || save_screen_state() != 0) ? 1 : 0, _imgui_min_draws);
+        {   // saveui: one guarded read of the save-screen state a frame; the menu flag is latched from OPEN to CLOSED (no flapping
+            // through the unnamed states 1 / 3 / 4), so the switch to the screen comes with Fahrenheit's first frame of the menu
+            uint st = save_screen_state();
+            if (st == 2) _fh_menu_open = true; else if (st == 0) _fh_menu_open = false;
+            // menu: 0 not latched; latched: 1 | (the raw state << 8), so native can tell the frames Fahrenheit draws the menu in
+            // (state 2) from the latched ones without it (3 / 4 at a close, 1 in a reopen: SU-1's black-out, SU-2's watchdog)
+            int menu = (_fh_menu_on_screen && _imgui_layer && _fh_menu_open) ? 1 | (int)((st & 0xFF) << 8) : 0;
+            if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || st != 0) ? 1 : 0, _imgui_min_draws, menu);
+        }
         if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
         if (_fp_head_parts != _head_mask_src) { _head_mask_src = _fp_head_parts; _head_mask = parse_mask(_fp_head_parts); }   // R22: parsed only when the text changes
         if (_fn_fp_body_set != null) _fn_fp_body_set(_fp_body_mode, _head_mask, _fp_solo);
@@ -1961,6 +2010,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         dream_push();   // dream overlay: dream_overlay (every frame, so a change applies at once)
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)
+        haze_push();     // heat haze: heat_haze (every frame; applied at the next Present)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle
         push_hands();
