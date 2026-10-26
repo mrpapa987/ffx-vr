@@ -39,8 +39,9 @@ struct XrScreen {
 /// The UI panel: the game's UI pass on a head-locked, alpha-blended quad.
 struct XrUiPanel {
     ID3D11Texture2D* tex;                                   // null: no panel this frame
-    float dist, width;                                      // metres; height follows 16:9
+    float dist, width;                                      // metres; height follows 16:9 (uidepth: the adaptive distance, width scaled with it)
     ID3D11Texture2D* tex2;                                  // a second head-locked quad (the ImGui layer: Fahrenheit's menus, our overlay); null: none
+    float im_dist, im_width;                                // the ImGui layer's own distance / width (the ui_distance / ui_width settings; never adaptive)
 };
 
 /// Controller input through the OpenXR action system (Touch controllers;
@@ -69,6 +70,7 @@ void        xr_debug(int sim_timeouts);                     // test hook: the ne
 void        xr_counters(unsigned* held_frames, unsigned* wait_timeouts);   // frames held (no eye image, a wait timeout or error, no views), swapchain wait timeouts (for the heartbeat)
 bool        xr_take_stuck();   // R8-3: true once after a B5-2 stop (a stuck swapchain): xr_tick counts it as a failed start, so the restart backs off
 void        xr_eye_size(unsigned* w, unsigned* h);          // the eye swapchains' size: the headset's recommended width at 16:9 (0 x 0 while no session)
+bool        xr_srgb();                                      // the swapchains are R8G8B8A8_UNORM_SRGB: the compositor decodes our UNORM bytes before it blends (uidepth's plate)
 void xr_timing(double* wait_ms, double* end_ms);
 const char* xr_stage();                                    // the render thread's current stage name (a string literal; the load profiler reads it)
 bool        xr_take_space_change();                        // true once after the runtime recentred its reference space (the headset's own recentre gesture)           // last frame: xrWaitFrame / xrEndFrame durations                                    // one line for the overlay

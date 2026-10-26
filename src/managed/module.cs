@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 19;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 20;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -487,6 +487,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_prof_report = (delegate* unmanaged[Cdecl]<int, byte*, byte*, void>)req("ffxvr_prof_report"); _fn_lock_release_set = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_lock_release_set"); _fn_lock_release_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_lock_release_status");
             _fn_dream_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_dream_set"); _fn_dream_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_dream_status");   // ABI 18: dream overlay
             _fn_shadow_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_shadow_set"); _fn_shadow_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_status");   // ABI 19: shadow camera
+            _fn_uidepth_set = (delegate* unmanaged[Cdecl]<int, float, float, float, int, void>)req("ffxvr_uidepth_set"); _fn_uidepth_status = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_uidepth_status");   // ABI 20: adaptive UI panel
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -539,6 +540,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_prof_set = null; _fn_prof_mark = null; _fn_prof_phase = null; _fn_prof_report = null; _fn_lock_release_set = null; _fn_lock_release_status = null;
         _fn_dream_set = null; _fn_dream_status = null;
         _fn_shadow_set = null; _fn_shadow_status = null;
+        _fn_uidepth_set = null; _fn_uidepth_status = null;
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -946,6 +948,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "ui_panel":          pb(k, v, ref _ui_on); break;
                 case "ui_distance":       pf(k, v, ref _ui_dist, 0.5f, 4f); break;
                 case "ui_width":          pf(k, v, ref _ui_width, 0.5f, 4f); break;
+                case "ui_adaptive":       pb(k, v, ref _ui_adaptive); break;                          // the UI panel comes in front of near objects (default 1; applies at once)
+                case "ui_adaptive_min":   pf(k, v, ref _ui_adaptive_min, 0.3f, 2f); break;            // its nearest distance (m)
+                case "ui_adaptive_margin": pf(k, v, ref _ui_adaptive_margin, 0.5f, 1f); break;        // the panel goes to the nearest depth times this
+                case "ui_backing":        pf(k, v, ref _ui_backing, 0f, 1f); break;                   // the dark halo behind the UI: opacity, 0 = off
                 case "dream_overlay":     pi(k, v, ref _dream_overlay, 0, 2); break;   // the game's dream filter in the headset: 1 hidden (default), 2 both eyes, 0 on the panel (applies at once)
                 case "pitch_follow":      pf(k, v, ref _xr_pitch_follow, 0f, 1f); break;
                 case "seat_height":       pf(k, v, ref _ovr_up, -5000f, 5000f); break;
@@ -1248,6 +1254,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"ui_panel={(_ui_on ? 1 : 0)}\n" +
             $"ui_distance={_ui_dist.ToString("F2", ci)}\n" +
             $"ui_width={_ui_width.ToString("F2", ci)}\n" +
+            $"ui_adaptive={(_ui_adaptive ? 1 : 0)}\n" +
+            $"ui_adaptive_min={_ui_adaptive_min.ToString("F2", ci)}\n" +
+            $"ui_adaptive_margin={_ui_adaptive_margin.ToString("F2", ci)}\n" +
+            $"ui_backing={_ui_backing.ToString("F2", ci)}\n" +
             $"dream_overlay={_dream_overlay.ToString(ci)}\n" +
             $"pitch_follow={_xr_pitch_follow.ToString("F2", ci)}\n" +
             $"seat_height={_ovr_up.ToString("F0", ci)}\n" +
@@ -1446,6 +1456,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
         ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
         if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
+        if (_ui_on) uidepth_ui();   // adaptive UI panel: ui_adaptive, ui_backing (the rest in Debug > UI panel)
         dream_ui();   // dream overlay: dream_overlay
         bt_ui();
         lp_ui();   // load lock build: load_lock_release
@@ -1551,6 +1562,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (ImGui.TreeNode("UI panel")) {
             ImGui.SliderFloat("distance (m)", ref _ui_dist, 0.5f, 4f);
             ImGui.SliderFloat("width (m)", ref _ui_width, 0.5f, 4f);
+            uidepth_debug_ui();   // adaptive UI panel: ui_adaptive, ui_adaptive_min, ui_adaptive_margin, ui_backing, the projection slot, the status
             if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
             if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + dream_status_text());
             ImGui.TreePop();
@@ -1945,6 +1957,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
         if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
+        uidepth_push();   // adaptive UI panel (every frame, so a change applies at once)
         dream_push();   // dream overlay: dream_overlay (every frame, so a change applies at once)
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)

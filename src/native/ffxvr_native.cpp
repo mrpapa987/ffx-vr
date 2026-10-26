@@ -951,6 +951,21 @@ ID3D11Texture2D* g_eye2_final = nullptr; ID3D11RenderTargetView* g_eye2_final_rt
 uint32_t g_ui_pass_frame = 0;                   // frame in which a UI pass completed
 uint32_t g_ui_draws_frame = 0, g_ui_draws_report = 0;
 uint32_t g_ui_frames_with_pass = 0, g_ui_frames_3d = 0, g_ui_resolves_frame = 0, g_ui_depth_clears_frame = 0; bool g_ui_last_frame_had_pass = false;   // 10 s tallies for the ui: diag line
+// Adaptive UI panel (branch `uidepth`; design-notes "Adaptive UI panel: depth and backing plate"; the passes are with the copy
+// pass, uid_*). Settings from managed every frame (ffxvr_uidepth_set): the adaptive distance on/off, its floor (m) and margin
+// (a factor on the nearest depth), the backing plate's opacity (0 = off), and which projection slot linearises the depth
+// (0 auto: the slot the GPU's VP block is built from, UD-3; 1 the near variant; 2 the main slot).
+bool  g_uid_on = true; float g_uid_min = 0.6f, g_uid_margin = 0.85f, g_uid_backing = 0.35f; int g_uid_proj = 0;
+// The scene camera's depth rows, noted at the frame's first eye-1 upload of a perspective camera (write_camera): [0] the
+// near-variant slot (+128 at base 64: what the scene's VP product is built from), [1] the main slot (+256); each P[10], P[11],
+// P[14], P[15] (row-major, column vectors: clip.z = P10 z + P11, clip.w = P14 z + P15). The override leaves both rows alone.
+float g_uid_pz[2][4] = {}; uint32_t g_uid_pz_frame = 0xFFFFFFFFu;
+// UD-3: which slot the scene's VP block (+192 at base 64) equals P * V of, at an eye-1 upload each frame until one is decided:
+// 0 the near variant, 1 the main slot, -1 not decided yet (sticky: the last decision). Counted per frame for the 10 s line.
+int g_uid_src = -1; uint32_t g_uid_src_frame = 0xFFFFFFFFu; uint32_t g_uid_src_n[2] = {};
+uint32_t g_uid_src_try_frame = 0xFFFFFFFFu; int g_uid_src_tries = 0;   // UD-R-2: at most 16 undecided uploads tested per frame
+/// The slot the depth is linearised with: the setting, or in auto the detected source (the near variant until one is known).
+static inline int uid_slot() { return g_uid_proj == 1 ? 0 : g_uid_proj == 2 ? 1 : (g_uid_src == 1 ? 1 : 0); }
 // Cursor stage C2: the game's two battle cursors are skipped while our 3D markers are what the headset shows. g_c2_on comes
 // from managed (cursor_source=game, hooks live, markers on); g_c2_skip is decided once per frame at begin_frame on the render
 // thread and published with an interlocked store; the detours read it on the game's main thread (ffxvr_cursor_skip).
@@ -1847,6 +1862,31 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
     const float* Pj = reinterpret_cast<const float*>(orig + o_projn);
     const UINT o_proj = base + 192;                     // the main projection (+256 in the common layout)
     unsigned mask = 0;
+    if (g_eye_shift == 0.f && (g_uid_pz_frame != g_frames || g_uid_src_frame != g_frames) && size >= o_proj + 64) {   // uidepth: this frame's depth rows (both slots perspective; a light camera never gets here with shadow_cam 1)
+        const float* Pm = reinterpret_cast<const float*>(orig + o_proj);
+        const bool persp = fabsf(Pj[14] + 1.f) < 1e-3f && fabsf(Pj[15]) < 1e-3f && fabsf(Pm[14] + 1.f) < 1e-3f && fabsf(Pm[15]) < 1e-3f
+                        && fabsf(Pm[0]) > 0.2f && fabsf(Pm[5]) > 0.2f && std::isfinite(Pj[10]) && std::isfinite(Pj[11]) && std::isfinite(Pm[10]) && std::isfinite(Pm[11]);
+        if (persp && g_uid_pz_frame != g_frames) {
+            g_uid_pz[0][0] = Pj[10]; g_uid_pz[0][1] = Pj[11]; g_uid_pz[0][2] = Pj[14]; g_uid_pz[0][3] = Pj[15];
+            g_uid_pz[1][0] = Pm[10]; g_uid_pz[1][1] = Pm[11]; g_uid_pz[1][2] = Pm[14]; g_uid_pz[1][3] = Pm[15];
+            g_uid_pz_frame = g_frames;
+        }
+        if (g_uid_src_try_frame != g_frames) { g_uid_src_try_frame = g_frames; g_uid_src_tries = 0; }
+        if (persp && g_uid_src_frame != g_frames && g_uid_src_tries++ < 16) {   // UD-3: which slot the GPU's VP block is built from (an upload whose block is not a VP product decides nothing); UD-R-2: 16 tries a frame
+            const float* vp = reinterpret_cast<const float*>(orig + o_vp);
+            float an[16], am[16]; mul4(Pj, V, an); mul4(Pm, V, am);
+            if (same4(vp, an) || same4(vp, am)) {
+                // same4's tolerance (1 % of the largest element) cannot tell the two apart: they differ in the z row only (by P11's
+                // difference in element 11). Compare the z rows' residuals directly.
+                float rn = 0.f, rm = 0.f, dab = 0.f;
+                for (int i = 8; i < 12; ++i) { rn += fabsf(vp[i] - an[i]); rm += fabsf(vp[i] - am[i]); dab += fabsf(an[i] - am[i]); }
+                int src = -1;
+                if (dab < 1e-4f) src = 0;                                      // identical z rows: either slot linearises the same
+                else if ((rn < rm ? rn : rm) < 0.25f * dab) src = rn <= rm ? 0 : 1;
+                if (src >= 0) { g_uid_src = src; g_uid_src_frame = g_frames; g_uid_src_n[src]++; }
+            }
+        }
+    }
 
     memcpy(p + o_view, Vn, 64);  mask |= 1;
     memcpy(p + o_pos,  Pn, 12);  mask |= 4;
@@ -4277,7 +4317,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 19;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build)
+constexpr int FFXVR_ABI = 20;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6211,6 +6251,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets_uav(unsigned n, voi
 
 /// Clears mirror to the twin, so eye 2's targets start each pass the same way.
 static void ui_pass_begin();
+static void uid_depth_pass(void* view, unsigned flags, float clear_d);   // uidepth: the depth tiles, at the clear that opens the UI pass (defined with the copy pass)
 static void ui_pass_open() {
     if (g_ui_early_keep) { g_ui_early_keep = false; g_ui_state = UI_PASS; return; }   // resume after an early overlay run
     ui_pass_begin();
@@ -6231,7 +6272,10 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
         if (!depth && texture_of(static_cast<ID3D11View*>(view)) == g_scene_live_tex) { if (g_ui_state == UI_RESOLVED) g_ui_state = UI_IDLE; }   // colour wiped: post ping-pong, not the UI base
         else if (depth && bound == g_scene_live_tex) {
             g_ui_depth_clears_frame++;
-            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && !bt_no_split()) ui_pass_open();   // screen frames keep their UI (subtitles) in the frame; a battle transition window has no UI split (its fade pass has the UI pass's signature)
+            if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && !bt_no_split()) {   // screen frames keep their UI (subtitles) in the frame; a battle transition window has no UI split (its fade pass has the UI pass's signature)
+                uid_depth_pass(view, flags, d);   // uidepth: this frame's scene depth, read before the game's clear wipes it (this hook runs first)
+                ui_pass_open();
+            }
             else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
         }
     }
@@ -6526,6 +6570,605 @@ static bool copy_pass_init() {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Adaptive UI panel and backing plate (branch `uidepth`; design-notes "Adaptive UI panel: depth and backing plate").
+//
+// The UI panel is a head-locked quad composited over the projection layer with no depth: scene geometry nearer than the panel
+// is covered by the text (occlusion: the text is nearer) while its disparity says it is nearer (stereo). Two remedies:
+//  1. Adaptive distance. (a) uid_depth_pass, at the depth-only clear that opens the UI pass (ffxvr_on_clear_twin, called
+//     BEFORE the game's clear, so this frame's scene depth is intact): one pixel-shader pass reads sample 0 of eye 1's MSAA
+//     depth (the game's target, R24G8_TYPELESS with SRV bind, through an SRV of ours) and of eye 2's depth twin, over the
+//     panel's footprint in each eye's image, and writes 64 x 36 R32F: per panel tile, the nearest linear depth in metres (both
+//     eyes, a half tile around each tile, so the other eye's parallax is covered). (b) uid_present, at Present before
+//     xr_frame: a 64 x 36 pass keeps the tiles where the finished UI texture has alpha > k_uid_alpha (their depth; -1 for
+//     the rest), copied into a ring of 3 staging textures and mapped with DO_NOT_WAIT 1-2 frames later (no stall). The CPU
+//     takes the nearest UI tile, aims at min(ui_distance, nearest * margin) (floored at ui_adaptive_min), and follows it:
+//     in fast (tau 100 ms), out slowly (tau 600 ms) after the target has been 6 % + 2 cm further for 300 ms. The width is
+//     scaled by distance / ui_distance, so the panel keeps its angular size. (c) The ImGui layer keeps the settings'.
+//  2. Backing plate (ui_backing > 0): the UI alpha dilated to quarter resolution (max of 4 x 4), blurred (7 taps each way,
+//     sigma 1.5 quarter px: ~6 px at the UI's resolution, ~12 px reach), and composited under the UI as translucent black in
+//     the swapchain copy (ffxvr_copy_pass -> uib_copy), so it costs no full-resolution pass of its own. Where the UI is
+//     opaque nothing changes; where there is no UI nothing is darkened. The layer is submitted UNPREMULTIPLIED; the UI
+//     texture's colour is (by its blend) premultiplied, and the plate keeps exactly the old result over a darkened scene:
+//     a' = a + b (1 - a), rgb' = rgb a / a' (the compositor shows rgb' a' + scene (1 - a') = rgb a + scene (1 - b)(1 - a)).
+// Never in the screen modes (FMV, title), the stereo screen, a battle transition window (no UI split there) or while the
+// dream filter's gate is open; the ImGui layer is never touched. Every pass saves and restores the state it touches, under
+// InEye2 (our hooks ignore it), on the render thread. No game memory is read: only the views the game hands its clear.
+static const int   k_uid_tw = 64, k_uid_th = 36;        // panel tiles (16:9)
+static const float k_uid_alpha = 0.05f;                 // UI alpha above which a tile has UI content
+static const float k_uid_menu_cover = 0.6f;             // UI tile fraction above which the frame is a full-screen menu: no pull-in
+static const float k_uid_far = 1e4f;                    // the tile pass's "no depth" (metres)
+static const float k_uid_tau_in = 0.1f, k_uid_tau_out = 0.6f, k_uid_out_hold = 0.3f;   // s
+static const float k_uib_gain = 2.f;                    // the blurred alpha's gain before the opacity (a text line's halo core reaches ~1)
+static const uint32_t k_uid_gap_frames = 30;            // frames without a 3D panel before the distance snaps back to ui_distance
+
+static const char k_uid_vs_hlsl[] =
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "V vs(uint id : SV_VertexID) { V o; float2 uv = float2((id << 1) & 2, id & 2); o.uv = uv; o.p = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1); return o; }\n";
+#define UID_V "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+// Depth tiles (64 x 36 target): r1 / r2 each eye's panel footprint in depth-texture pixels (x0 y0 w h); pz the depth rows
+// (P10 P11 P14 P15; eye z = (P11 - ndc P15) / (ndc P14 - P10), distance = -z); k (1 / units per metre, width, height, eye 2 on).
+// 8 x 8 samples over the tile and half a tile around it; sample 0 of the MSAA depth; the clear value (1) and 0 are not depth.
+static const char k_uid_depth_hlsl[] = UID_V
+    "Texture2DMS<float> D1 : register(t0); Texture2DMS<float> D2 : register(t1);\n"
+    "cbuffer C : register(b0) { float4 r1; float4 r2; float4 pz; float4 k; };\n"
+    "float lin(float z) { float den = z * pz.z - pz.x; return abs(den) < 1e-12 ? -1.0 : -(pz.y - z * pz.w) / den; }\n"
+    "float tmin(Texture2DMS<float> T, float4 r, float2 t) {\n"
+    "  float m = 1e30;\n"
+    "  [loop] for (int j = 0; j < 8; ++j) { [unroll] for (int i = 0; i < 8; ++i) {\n"
+    "    float2 px = r.xy + (t + float2(i * 0.25 - 0.375, j * 0.25 - 0.375)) / float2(64.0, 36.0) * r.zw;\n"
+    "    if (px.x >= 0 && px.y >= 0 && px.x < k.y && px.y < k.z) {\n"
+    "      float z = T.Load(int2(px), 0);\n"
+    "      if (z > 0 && z < 0.999999) { float d = lin(z); if (d > 0) m = min(m, d); } } } }\n"
+    "  return m; }\n"
+    "float ps(V v) : SV_Target { float2 t = floor(v.p.xy); float m = tmin(D1, r1, t); if (k.w > 0.5) m = min(m, tmin(D2, r2, t)); return m < 1e29 ? m * k.x : 1e4; }\n";
+// UI tiles (64 x 36, R32G32): x = above c.x of max UI alpha (12 x 12 bilinear samples) the tile's depth (c.y: the depth tiles are
+// this frame's, else 1e4 = no depth), otherwise -1; y = the tile's max UI alpha (UD-R-4: what the game's UI alpha reaches).
+static const char k_uid_tiles_hlsl[] = UID_V
+    "Texture2D<float> TA : register(t0); Texture2D U : register(t1); SamplerState S : register(s0);\n"
+    "cbuffer C : register(b0) { float4 c; };\n"
+    "float2 ps(V v) : SV_Target { float2 t = floor(v.p.xy); float a = 0;\n"
+    "  [loop] for (int j = 0; j < 12; ++j) { [unroll] for (int i = 0; i < 12; ++i) {\n"
+    "    a = max(a, U.SampleLevel(S, (t + float2((i + 0.5) / 12.0, (j + 0.5) / 12.0)) / float2(64.0, 36.0), 0).a); } }\n"
+    "  float d = a <= c.x ? -1.0 : (c.y > 0.5 ? TA.Load(int3(t, 0)) : 1e4);\n"
+    "  return float2(d, a); }\n";
+// Backing plate, step 1: the UI alpha at quarter resolution, the max of each 4 x 4 block (a dilation). UD-9: seeded by near-opaque
+// UI only (text, borders, icons), so a translucent window's fill makes no plate of its own. UD-R-4: relative to the session's
+// highest UI alpha M (the game's UI may be PS2-style, opaque = 0.502): none at c.x = 0.55 M, full at 0.9 M (c.y = 1 / 0.35 M).
+static const char k_uid_dilate_hlsl[] = UID_V
+    "Texture2D U : register(t0); cbuffer C : register(b0) { float4 c; };\n"
+    "float ps(V v) : SV_Target { int2 b = int2(v.p.xy) * 4; float a = 0;\n"
+    "  [unroll] for (int j = 0; j < 4; ++j) { [unroll] for (int i = 0; i < 4; ++i) a = max(a, U.Load(int3(b + int2(i, j), 0)).a); }\n"
+    "  return saturate((a - c.x) * c.y); }\n";
+// Step 2 / 3: a 7-tap Gaussian (sigma 1.5) along c.xy; out-of-range loads are 0 (no UI past the edge).
+static const char k_uid_blur_hlsl[] = UID_V
+    "Texture2D<float> Q : register(t0); cbuffer C : register(b0) { float4 c; };\n"
+    "static const float w[4] = { 0.2707, 0.2167, 0.1113, 0.0366 };\n"
+    "float ps(V v) : SV_Target { int2 p = int2(v.p.xy); int2 d = int2(c.xy); float s = Q.Load(int3(p, 0)) * w[0];\n"
+    "  [unroll] for (int k = 1; k < 4; ++k) s += (Q.Load(int3(p + d * k, 0)) + Q.Load(int3(p - d * k, 0))) * w[k];\n"
+    "  return s; }\n";
+// Step 4, in the swapchain copy: the plate b = saturate(blur * c.y) * c.x under the UI (see the block comment for the algebra).
+// UD-1: the UI swapchain is sRGB and the compositor blends in linear, so the colour is rescaled in linear: rgb' = enc(dec(rgb) a / a')
+// keeps dec(rgb') a' = dec(rgb) a exactly (c.z = 1); with a plain UNORM swapchain the bytes are blended as they are (c.z = 0).
+static const char k_uid_backing_hlsl[] = UID_V
+    "Texture2D U : register(t0); Texture2D<float> Q : register(t1); SamplerState S : register(s0); cbuffer C : register(b0) { float4 c; };\n"
+    "float3 dec(float3 x) { x = saturate(x); return lerp(pow((x + 0.055) / 1.055, 2.4), x / 12.92, step(x, 0.04045)); }\n"
+    "float3 enc(float3 x) { x = saturate(x); return lerp(1.055 * pow(x, 1.0 / 2.4) - 0.055, x * 12.92, step(x, 0.0031308)); }\n"
+    "float4 ps(V v) : SV_Target { float4 u = U.Sample(S, v.uv); float b = saturate(Q.Sample(S, v.uv) * c.y) * c.x;\n"
+    "  float a = u.a + b * (1 - u.a); float k = u.a / max(a, 1e-4);\n"
+    "  return float4(c.z > 0.5 ? enc(dec(u.rgb) * k) : u.rgb * k, a); }\n";
+#undef UID_V
+enum { UID_PS_DEPTH = 0, UID_PS_TILES, UID_PS_DILATE, UID_PS_BLUR, UID_PS_BACKING, UID_PS_N };
+
+ID3D11VertexShader* g_uid_vs = nullptr; ID3D11PixelShader* g_uid_ps[UID_PS_N] = {};
+ID3D11Buffer* g_uid_cb = nullptr; ID3D11SamplerState* g_uid_smp = nullptr;
+bool g_uid_tried = false, g_uid_ok = false;
+struct UidTex { ID3D11Texture2D* tex = nullptr; ID3D11RenderTargetView* rtv = nullptr; ID3D11ShaderResourceView* srv = nullptr; UINT w = 0, h = 0; };
+UidTex g_uid_ta, g_uid_tb, g_uib_q[3];                  // depth tiles, UI tiles; the plate's quarter-resolution dilate / blur h / blur v
+struct UidStage { ID3D11Texture2D* tex = nullptr; uint32_t frame = 0; bool pending = false, depth = false; };
+float g_uid_amax = 0.f;                                 // UD-R-4: the highest UI-texture alpha seen this session (tile maxima; reset at headset off)
+const int k_uid_ring = 4;                               // UD-5: 4 slots (a GPU-bound frame queue of 3 never has its slot restarted)
+UidStage g_uid_stage[k_uid_ring]; int g_uid_stage_next = 0;   // the UI-tile readback ring (next = the oldest slot)
+struct UidRead { bool have = false; uint32_t frame = 0; bool depth = false; int n_ui = 0, n_depth = 0; float amax = 0.f; float near1 = k_uid_far, near2 = k_uid_far, cover = 0.f; };
+UidRead g_uid_rb;                                       // the newest readback
+// The depth views: [0] the game's eye-1 depth, [1] its twin (eye 2). Each SRV holds a reference on its texture, so a pointer
+// compare is safe (the texture cannot be freed and another created at its address while we hold it); dropped when the texture
+// changes, when eye 2 has no twin, and when the headset goes off.
+ID3D11Texture2D* g_uid_dtex[2] = {}; ID3D11ShaderResourceView* g_uid_dsrv[2] = {};
+// UD-7: a texture that could not be read, with its description (a new texture at the same address is tried again); cleared at headset off.
+ID3D11Texture2D* g_uid_dbad[2] = {}; D3D11_TEXTURE2D_DESC g_uid_dbad_d[2] = {};
+ID3D11Texture2D* g_uid_utex = nullptr; ID3D11ShaderResourceView* g_uid_usrv = nullptr;   // the UI texture's SRV (g_ui_tex is ours)
+uint32_t g_uid_a_frame = 0xFFFFFFFFu;                   // the frame whose depth tiles are in g_uid_ta
+float g_uid_cur = -1.f, g_uid_target = -1.f, g_uid_near = 0.f, g_uid_ui_d_prev = -1.f;   // the panel distance in use (< 0: ui_distance), its target, the nearest depth behind the UI (m)
+float g_uid_out_t = 0.f; bool g_uid_going_out = false; uint32_t g_uid_gap = 0; int g_uid_state = 0;
+uint32_t g_uid_wait = 0;                                 // UD-5: 3D panel frames in a row without a fresh readback
+// UD-11: a camera cut (g_cut_count, seat view): the first readback of a frame after the cut sets the distance at once (the cut
+// masks the jump, 2-3 frames after it), then the distance holds until k_uid_cut_hold after the cut. No easing across cuts.
+uint32_t g_uid_cut_seen = 0, g_uid_cut_frame = 0; float g_uid_cut_t = 1e9f; bool g_uid_cut_snap = false; uint32_t g_uid_cuts = 0;
+bool g_uid_logged_first = false, g_uid_logged_clear = false, g_uid_logged_vp = false, g_uid_logged_fov = false;   // UD-4 / UD-12: once-per-session lines
+ID3D11Texture2D* g_uib_src_now = nullptr; float g_uib_strength_now = 0.f; bool g_uib_now = false, g_uib_last = false;   // this frame's plate, for the swapchain copy (xr_frame); drawn at the last Present (overlay)
+// GPU time: per slot a disjoint query around the Present-time passes and timestamps 0/1 (depth pass, inside the frame's own
+// span), 2/3/4 (tiles, backing). Read 3 Presents later without flushing.
+struct UidQ { ID3D11Query* dj = nullptr; ID3D11Query* t[5] = {}; bool dj_on = false, a_on = false, b_on = false, back_on = false; };
+UidQ g_uidq[4]; int g_uidq_cur = 0; double g_uid_freq = 0.0; float g_uid_ms[3] = {};   // EMA: depth, tiles, backing
+struct UidStats { uint32_t panel = 0, pulled = 0, noui = 0, menu = 0, nodepth = 0, waiting = 0, stale = 0, cut = 0, back = 0, a_n = 0, t_n = 0, b_n = 0; float amax = 0.f; float dmin = 1e9f, dmax = 0.f, nmin = 1e9f; double dsum = 0, a_ms = 0, t_ms = 0, b_ms = 0; };
+UidStats g_uid_s;
+// Overlay states (ffxvr_uidepth_status [4])
+enum { UID_ST_NONE = 0, UID_ST_OFF, UID_ST_DREAM, UID_ST_WAIT, UID_ST_NOUI, UID_ST_MENU, UID_ST_NODEPTH, UID_ST_CLEAR, UID_ST_FOLLOW, UID_ST_STALE, UID_ST_CUT };
+static const float k_uid_cut_hold = 0.2f;               // s after a camera cut (UD-11)
+static const uint32_t k_uid_stale_frames = 30;          // UD-5: panel frames without a fresh readback before it eases back to ui_distance
+
+static bool uid_init() {
+    if (g_uid_tried) return g_uid_ok;
+    g_uid_tried = true;
+    if (g_device == nullptr) return false;
+    HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+    PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
+    if (!compile) { diag("uidepth: no shader compiler (d3dcompiler_47.dll): the adaptive panel and the backing plate are off"); return false; }
+    auto build = [&](const char* src, size_t n, const char* entry, const char* target, ID3DBlob** out) -> bool {
+        ID3DBlob* err = nullptr; *out = nullptr;
+        const HRESULT hr = compile(src, n, "uidepth", nullptr, nullptr, entry, target, 0, 0, out, &err);
+        if (FAILED(hr)) { diag("uidepth: %s compile failed 0x%08X: %s", target, static_cast<unsigned>(hr), err ? static_cast<const char*>(err->GetBufferPointer()) : ""); if (err) err->Release(); if (*out) (*out)->Release(); *out = nullptr; return false; }
+        if (err) err->Release();
+        return true;
+    };
+    ID3DBlob* b = nullptr;
+    if (!build(k_uid_vs_hlsl, sizeof(k_uid_vs_hlsl) - 1, "vs", "vs_5_0", &b)) return false;
+    HRESULT hr = g_device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_uid_vs); b->Release();
+    if (FAILED(hr)) { g_uid_vs = nullptr; diag("uidepth: vertex shader create failed 0x%08X", static_cast<unsigned>(hr)); return false; }
+    struct Src { const char* s; size_t n; };
+    const Src ps[UID_PS_N] = { { k_uid_depth_hlsl, sizeof(k_uid_depth_hlsl) - 1 }, { k_uid_tiles_hlsl, sizeof(k_uid_tiles_hlsl) - 1 }, { k_uid_dilate_hlsl, sizeof(k_uid_dilate_hlsl) - 1 },
+                               { k_uid_blur_hlsl, sizeof(k_uid_blur_hlsl) - 1 }, { k_uid_backing_hlsl, sizeof(k_uid_backing_hlsl) - 1 } };
+    for (int i = 0; i < UID_PS_N; ++i) {
+        if (!build(ps[i].s, ps[i].n, "ps", "ps_5_0", &b)) return false;
+        hr = g_device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &g_uid_ps[i]); b->Release();
+        if (FAILED(hr)) { g_uid_ps[i] = nullptr; diag("uidepth: pixel shader %d create failed 0x%08X", i, static_cast<unsigned>(hr)); return false; }
+    }
+    D3D11_BUFFER_DESC cd = {}; cd.ByteWidth = 64; cd.Usage = D3D11_USAGE_DYNAMIC; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(g_device->CreateBuffer(&cd, nullptr, &g_uid_cb))) { g_uid_cb = nullptr; diag("uidepth: constant buffer failed"); return false; }
+    D3D11_SAMPLER_DESC sd = {};
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sd.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(g_device->CreateSamplerState(&sd, &g_uid_smp))) { g_uid_smp = nullptr; diag("uidepth: sampler failed"); return false; }
+    const D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, ts = { D3D11_QUERY_TIMESTAMP, 0 };
+    for (UidQ& q : g_uidq) {   // timing only: a failure leaves the slot without queries
+        if (FAILED(g_device->CreateQuery(&dj, &q.dj))) q.dj = nullptr;
+        for (auto& t : q.t) if (FAILED(g_device->CreateQuery(&ts, &t))) t = nullptr;
+    }
+    g_uid_ok = true;
+    diag("uidepth: passes ready (depth tiles %dx%d, UI alpha > %.2f, full-screen menu above %.0f%% of the tiles)", k_uid_tw, k_uid_th, k_uid_alpha, k_uid_menu_cover * 100.f);
+    return true;
+}
+static void uid_tex_release(UidTex& t) { if (t.srv) t.srv->Release(); if (t.rtv) t.rtv->Release(); if (t.tex) t.tex->Release(); t = UidTex{}; }
+static bool uid_tex_ensure(UidTex& t, UINT w, UINT h, DXGI_FORMAT f) {
+    if (t.tex && t.w == w && t.h == h) return true;
+    uid_tex_release(t);
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = f; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &t.tex))) { t.tex = nullptr; return false; }
+    if (FAILED(g_device->CreateRenderTargetView(t.tex, nullptr, &t.rtv))) t.rtv = nullptr;
+    if (FAILED(g_device->CreateShaderResourceView(t.tex, nullptr, &t.srv))) t.srv = nullptr;
+    if (!t.rtv || !t.srv) { uid_tex_release(t); return false; }
+    t.w = w; t.h = h;
+    return true;
+}
+static bool uid_stage_ensure(UidStage& s) {
+    if (s.tex) return true;
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = k_uid_tw; td.Height = k_uid_th; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R32G32_FLOAT; td.SampleDesc.Count = 1;   // UD-R-4: (depth, max alpha)
+    td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(g_device->CreateTexture2D(&td, nullptr, &s.tex))) { s.tex = nullptr; return false; }
+    s.pending = false;
+    return true;
+}
+/// The SRV of a typeless MSAA depth texture (sample 0 is read), made once per texture; null if it cannot be read (logged once).
+static ID3D11ShaderResourceView* uid_depth_srv(int i, ID3D11Texture2D* t) {
+    if (t != nullptr && t == g_uid_dtex[i] && g_uid_dsrv[i]) return g_uid_dsrv[i];
+    if (g_uid_dsrv[i]) { g_uid_dsrv[i]->Release(); g_uid_dsrv[i] = nullptr; }
+    g_uid_dtex[i] = nullptr;
+    if (t == nullptr) return nullptr;
+    D3D11_TEXTURE2D_DESC d; t->GetDesc(&d);
+    if (t == g_uid_dbad[i] && d.Width == g_uid_dbad_d[i].Width && d.Height == g_uid_dbad_d[i].Height && d.Format == g_uid_dbad_d[i].Format
+        && d.SampleDesc.Count == g_uid_dbad_d[i].SampleDesc.Count && d.BindFlags == g_uid_dbad_d[i].BindFlags) return nullptr;   // the same texture that could not be read: not tried again every frame
+    const DXGI_FORMAT f = d.Format == DXGI_FORMAT_R24G8_TYPELESS ? DXGI_FORMAT_R24_UNORM_X8_TYPELESS : d.Format == DXGI_FORMAT_R32_TYPELESS ? DXGI_FORMAT_R32_FLOAT
+                        : d.Format == DXGI_FORMAT_R32G8X24_TYPELESS ? DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS : d.Format == DXGI_FORMAT_R16_TYPELESS ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_UNKNOWN;
+    HRESULT hr = E_FAIL;
+    if (f != DXGI_FORMAT_UNKNOWN && (d.BindFlags & D3D11_BIND_SHADER_RESOURCE) && d.SampleDesc.Count >= 2 && d.ArraySize == 1) {
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd = {}; sd.Format = f; sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DMS;
+        hr = g_device->CreateShaderResourceView(t, &sd, &g_uid_dsrv[i]);
+        if (FAILED(hr)) g_uid_dsrv[i] = nullptr;
+    }
+    if (g_uid_dsrv[i] == nullptr) {
+        if (g_uid_dbad[i] != t || memcmp(&g_uid_dbad_d[i], &d, sizeof(d)) != 0) { g_uid_dbad[i] = t; g_uid_dbad_d[i] = d; diag("uidepth: the %s %p (%ux%u fmt %u samples %u bind 0x%X) cannot be read (hr 0x%08X; needs a typeless MSAA depth with SRV bind)%s",
+                                                     i ? "eye-2 depth twin" : "eye-1 depth target", static_cast<void*>(t), d.Width, d.Height, static_cast<unsigned>(d.Format), d.SampleDesc.Count, d.BindFlags, static_cast<unsigned>(hr),
+                                                     i ? ": eye 1 only" : ": no adaptive distance while it is bound"); }
+        return nullptr;
+    }
+    g_uid_dtex[i] = t;
+    return g_uid_dsrv[i];
+}
+static ID3D11ShaderResourceView* uid_ui_srv(ID3D11Texture2D* t) {
+    if (t != nullptr && t == g_uid_utex && g_uid_usrv) return g_uid_usrv;
+    if (g_uid_usrv) { g_uid_usrv->Release(); g_uid_usrv = nullptr; }
+    g_uid_utex = nullptr;
+    if (t == nullptr || FAILED(g_device->CreateShaderResourceView(t, nullptr, &g_uid_usrv))) { g_uid_usrv = nullptr; return nullptr; }
+    g_uid_utex = t;
+    return g_uid_usrv;
+}
+/// The pipeline state the passes touch (the copy pass's set, plus HS / DS, all viewports, two PS SRVs and PS cb 0).
+struct UidSaved {
+    ID3D11RenderTargetView* rtv[8]; ID3D11DepthStencilView* dsv;
+    UINT nvp; D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE];
+    ID3D11VertexShader* vs; ID3D11PixelShader* ps; ID3D11GeometryShader* gs; ID3D11HullShader* hs; ID3D11DomainShader* dsh;
+    ID3D11ShaderResourceView* srv[2]; ID3D11SamplerState* smp; ID3D11Buffer* cb;
+    ID3D11BlendState* bs; float bf[4]; UINT mask; ID3D11DepthStencilState* dss; UINT ref; ID3D11RasterizerState* rs;
+    ID3D11InputLayout* il; D3D11_PRIMITIVE_TOPOLOGY topo;
+};
+static void uid_save(UidSaved& s) {
+    memset(&s, 0, sizeof(s));
+    g_ctx->OMGetRenderTargets(8, s.rtv, &s.dsv);
+    s.nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE; g_ctx->RSGetViewports(&s.nvp, s.vp);
+    g_ctx->VSGetShader(&s.vs, nullptr, nullptr); g_ctx->PSGetShader(&s.ps, nullptr, nullptr); g_ctx->GSGetShader(&s.gs, nullptr, nullptr);
+    g_ctx->HSGetShader(&s.hs, nullptr, nullptr); g_ctx->DSGetShader(&s.dsh, nullptr, nullptr);
+    g_ctx->PSGetShaderResources(0, 2, s.srv); g_ctx->PSGetSamplers(0, 1, &s.smp); g_ctx->PSGetConstantBuffers(0, 1, &s.cb);
+    g_ctx->OMGetBlendState(&s.bs, s.bf, &s.mask); g_ctx->OMGetDepthStencilState(&s.dss, &s.ref); g_ctx->RSGetState(&s.rs);
+    g_ctx->IAGetInputLayout(&s.il); g_ctx->IAGetPrimitiveTopology(&s.topo);
+}
+/// Under InEye2 (the restore passes the managed detours). Our inputs are unbound before the game's targets come back, so a
+/// depth SRV is never bound while its DSV is.
+static void uid_restore(UidSaved& s) {
+    ID3D11ShaderResourceView* none[2] = {}; g_ctx->PSSetShaderResources(0, 2, none);
+    om_restore_keep(s.rtv, s.dsv);
+    g_ctx->RSSetViewports(s.nvp, s.nvp ? s.vp : nullptr);
+    g_ctx->VSSetShader(s.vs, nullptr, 0); g_ctx->PSSetShader(s.ps, nullptr, 0); g_ctx->GSSetShader(s.gs, nullptr, 0);
+    g_ctx->HSSetShader(s.hs, nullptr, 0); g_ctx->DSSetShader(s.dsh, nullptr, 0);
+    g_ctx->PSSetShaderResources(0, 2, s.srv); g_ctx->PSSetSamplers(0, 1, &s.smp); g_ctx->PSSetConstantBuffers(0, 1, &s.cb);
+    g_ctx->OMSetBlendState(s.bs, s.bf, s.mask); g_ctx->OMSetDepthStencilState(s.dss, s.ref); g_ctx->RSSetState(s.rs);
+    g_ctx->IASetInputLayout(s.il); g_ctx->IASetPrimitiveTopology(s.topo);
+    for (auto* v : s.rtv) if (v) v->Release();
+    if (s.dsv) s.dsv->Release(); if (s.vs) s.vs->Release(); if (s.ps) s.ps->Release(); if (s.gs) s.gs->Release(); if (s.hs) s.hs->Release(); if (s.dsh) s.dsh->Release();
+    for (auto* v : s.srv) if (v) v->Release();
+    if (s.smp) s.smp->Release(); if (s.cb) s.cb->Release(); if (s.bs) s.bs->Release(); if (s.dss) s.dss->Release(); if (s.rs) s.rs->Release(); if (s.il) s.il->Release();
+}
+static void uid_setup() {
+    g_ctx->VSSetShader(g_uid_vs, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->HSSetShader(nullptr, nullptr, 0); g_ctx->DSSetShader(nullptr, nullptr, 0);
+    g_ctx->PSSetSamplers(0, 1, &g_uid_smp); g_ctx->PSSetConstantBuffers(0, 1, &g_uid_cb);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+}
+static bool uid_cb(const float c[16]) {
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (FAILED(g_orig_map(g_ctx, g_uid_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) return false;
+    memcpy(ms.pData, c, 64); g_orig_unmap(g_ctx, g_uid_cb, 0);
+    return true;
+}
+/// One full-target triangle into `rt` with pixel shader `ps` and inputs t0 / t1, unbound again afterwards (an output of one
+/// pass is the next one's input).
+static void uid_draw(ID3D11RenderTargetView* rt, UINT w, UINT h, int ps, ID3D11ShaderResourceView* s0, ID3D11ShaderResourceView* s1) {
+    ID3D11RenderTargetView* rts[1] = { rt };
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
+    g_ctx->PSSetShader(g_uid_ps[ps], nullptr, 0);
+    ID3D11ShaderResourceView* srvs[2] = { s0, s1 }; g_ctx->PSSetShaderResources(0, 2, srvs);
+    g_ctx->Draw(3, 0);
+    ID3D11ShaderResourceView* none[2] = {}; g_ctx->PSSetShaderResources(0, 2, none);
+}
+static void uid_ts(int k) {
+    UidQ& q = g_uidq[g_uidq_cur];
+    if (q.t[k] == nullptr) return;
+    g_ctx->End(q.t[k]);
+    if (k == 1) q.a_on = true; else if (k == 3) q.b_on = true; else if (k == 4) q.back_on = true;
+}
+static float uid_cur() { return (g_uid_cur > 0.f && g_uid_cur <= g_ui_dist) ? g_uid_cur : g_ui_dist; }
+
+/// 1(a). At the depth-only clear that opens the UI pass (before the game's clear): the depth tiles of this frame.
+static void uid_depth_pass(void* view, unsigned flags, float clear_d) {
+    if (!g_uid_on || g_uid_a_frame == g_frames) return;   // once a frame: a second opener (a resolve in between) finds the depth already cleared
+    if (!g_xr_want || !xr_active() || !g_xr_active || !g_ui_enabled || g_ovr_suspend || g_xr_screen_now || g_screen3d_now || bt_no_split() || g_dream_gate) return;
+    if (!g_xr_fov_applied) {   // UD-12: the footprint needs the FOV the eyes were rendered with
+        if (!g_xr_use_fov && !g_uid_logged_fov) { g_uid_logged_fov = true; diag("uidepth: the headset field of view is off (headset_fov=0): no adaptive distance while it is"); }
+        return;
+    }
+    if ((flags & D3D11_CLEAR_DEPTH) && clear_d != 1.f) {   // UD-4: standard Z (far = 1) is what the linearisation assumes
+        if (!g_uid_logged_clear) { g_uid_logged_clear = true; diag("uidepth: the UI pass's depth clear is to %g, not 1 (reversed Z?): no adaptive distance while it is", clear_d); }
+        return;
+    }
+    if (g_uid_pz_frame != g_frames || !(g_ui_dist > 0.05f) || g_ctx == nullptr || g_device == nullptr || !g_uid_tried || !g_uid_ok) return;   // UD-6: never compiles here (xr_tick / uid_present do, at Present)
+    ID3D11Texture2D* dt = texture_of(static_cast<ID3D11View*>(view));   // a key: the game keeps it alive; our SRV adds a reference
+    if (dt == nullptr) return;
+    ID3D11ShaderResourceView* s1 = uid_depth_srv(0, dt);
+    if (s1 == nullptr) return;
+    D3D11_TEXTURE2D_DESC dd; dt->GetDesc(&dd);
+    ID3D11Texture2D* twt = nullptr;
+    { auto it = g_twins.find(dt); if (it != g_twins.end() && it->second.tex && it->second.w == dd.Width && it->second.h == dd.Height && it->second.samples == dd.SampleDesc.Count) twt = it->second.tex; }   // find, never create
+    ID3D11ShaderResourceView* s2 = uid_depth_srv(1, twt);   // null: eye 1 only
+    {   // UD-4: the scene viewport's depth range, logged once; a reversed range (MinDepth > MaxDepth) would invert the depth
+        D3D11_VIEWPORT vp[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {}; UINT nvp = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+        g_ctx->RSGetViewports(&nvp, vp);
+        if (!g_uid_logged_vp) {
+            g_uid_logged_vp = true;
+            diag("uidepth: first depth pass at frame %u: viewport %s%gx%g at %g,%g depth range %g..%g; depth cleared to %g (flags 0x%X); depth %ux%u fmt %u x%u, eye-2 twin %s; depth rows near-variant (%.4f %.4f %.4f %.4f) main (%.4f %.4f %.4f %.4f), VP source %s",
+                 g_frames, nvp ? "" : "(none bound) ", vp[0].Width, vp[0].Height, vp[0].TopLeftX, vp[0].TopLeftY, vp[0].MinDepth, vp[0].MaxDepth, clear_d, flags,
+                 dd.Width, dd.Height, static_cast<unsigned>(dd.Format), dd.SampleDesc.Count, s2 ? "read" : "none",
+                 g_uid_pz[0][0], g_uid_pz[0][1], g_uid_pz[0][2], g_uid_pz[0][3], g_uid_pz[1][0], g_uid_pz[1][1], g_uid_pz[1][2], g_uid_pz[1][3],
+                 g_uid_src == 0 ? "near variant" : g_uid_src == 1 ? "main" : "not decided");
+        }
+        if (nvp > 0 && vp[0].MinDepth > vp[0].MaxDepth) return;
+    }
+    if (!uid_tex_ensure(g_uid_ta, k_uid_tw, k_uid_th, DXGI_FORMAT_R32_FLOAT)) return;
+    // Each eye's panel footprint: the panel is centred on the head's view axis at `cur`, `hw` / `hh` the tangents of its half
+    // size (constant: the width follows the distance), the eye at -+ipd/2 along the head's x (the views are parallel).
+    const float ipd = sqrtf(g_xr_eye_off[0] * g_xr_eye_off[0] + g_xr_eye_off[1] * g_xr_eye_off[1] + g_xr_eye_off[2] * g_xr_eye_off[2]);
+    const float cur = uid_cur(), hw = 0.5f * g_ui_width / g_ui_dist, hh = hw * 9.f / 16.f;
+    float c[16];
+    for (int e = 0; e < 2; ++e) {
+        const XrFovTan& f = g_xr_fov_used[e];
+        if (!(f.r - f.l > 0.1f && f.u - f.d > 0.1f && f.r - f.l < 20.f && f.u - f.d < 20.f)) return;   // also false for NaN
+        const float ex = (e == 0 ? -0.5f : 0.5f) * ipd / cur;
+        const float u0 = (-hw - ex - f.l) / (f.r - f.l), u1 = (hw - ex - f.l) / (f.r - f.l);
+        const float v0 = (f.u - hh) / (f.u - f.d), v1 = (f.u + hh) / (f.u - f.d);
+        c[e * 4 + 0] = u0 * dd.Width; c[e * 4 + 1] = v0 * dd.Height; c[e * 4 + 2] = (u1 - u0) * dd.Width; c[e * 4 + 3] = (v1 - v0) * dd.Height;
+    }
+    const int slot = uid_slot();
+    const float* pz = g_uid_pz[slot];
+    memcpy(c + 8, pz, 16);
+    const float sc = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f);   // units per metre, as build_override_view scales the head and the eyes
+    if (!(sc > 1e-3f)) return;
+    c[12] = 1.f / sc; c[13] = static_cast<float>(dd.Width); c[14] = static_cast<float>(dd.Height); c[15] = s2 ? 1.f : 0.f;
+    UidSaved s; uid_save(s);
+    bool ok = false;
+    {
+        InEye2 guard;
+        uid_ts(0);
+        ok = uid_cb(c);
+        if (ok) { uid_setup(); uid_draw(g_uid_ta.rtv, k_uid_tw, k_uid_th, UID_PS_DEPTH, s1, s2); }
+        uid_ts(1);
+        uid_restore(s);
+    }
+    if (!ok) return;
+    g_uid_a_frame = g_frames;
+    if (g_frame_live) {
+        char t[400];
+        snprintf(t, sizeof(t), "UIDEPTH depth pass (adaptive UI panel): %dx%d tiles from eye 1's depth %p %ux%u fmt %u x%u (sample 0)%s | footprint px eye 1 (%.0f %.0f %.0f x %.0f) eye 2 (%.0f %.0f %.0f x %.0f) | panel at %.2f m | depth row %s %.4f %.4f, %.1f units/m",
+                 k_uid_tw, k_uid_th, static_cast<void*>(dt), dd.Width, dd.Height, static_cast<unsigned>(dd.Format), dd.SampleDesc.Count, s2 ? " and eye 2's twin" : ", no eye-2 twin",
+                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], cur, slot == 1 ? (g_uid_proj == 0 ? "main (auto)" : "main") : (g_uid_proj == 0 ? "near-variant (auto)" : "near-variant"), pz[0], pz[1], sc);
+        std::lock_guard<std::mutex> lock(g_mutex); frame_event(t);
+    }
+}
+
+/// The finished readbacks, oldest first, without waiting; the newest wins.
+static void uid_readback() {
+    for (int k = 0; k < k_uid_ring; ++k) {
+        UidStage& st = g_uid_stage[(g_uid_stage_next + k) % k_uid_ring];
+        if (!st.pending || st.tex == nullptr) continue;
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        const HRESULT hr = g_orig_map(g_ctx, st.tex, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &ms);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) continue;   // UD-R-3: a slot not ready yet never blocks a newer finished one (the newest frame wins below)
+        if (FAILED(hr) || ms.pData == nullptr) { if (SUCCEEDED(hr)) g_orig_unmap(g_ctx, st.tex, 0); st.pending = false; continue; }
+        UidRead r; r.have = true; r.frame = st.frame; r.depth = st.depth;
+        for (int y = 0; y < k_uid_th; ++y) {
+            const float* row = reinterpret_cast<const float*>(static_cast<const uint8_t*>(ms.pData) + static_cast<size_t>(y) * ms.RowPitch);
+            for (int x = 0; x < k_uid_tw; ++x) {
+                const float v = row[2 * x], al = row[2 * x + 1];   // (depth or -1, the tile's max UI alpha)
+                if (al > r.amax && al <= 1.f) r.amax = al;
+                if (!(v >= 0.f)) continue;   // -1 (no UI in the tile), or NaN
+                r.n_ui++;
+                if (v < 0.5f * k_uid_far) { r.n_depth++; if (v < r.near1) { r.near2 = r.near1; r.near1 = v; } else if (v < r.near2) r.near2 = v; }
+            }
+        }
+        g_orig_unmap(g_ctx, st.tex, 0); st.pending = false;
+        r.cover = static_cast<float>(r.n_ui) / static_cast<float>(k_uid_tw * k_uid_th);
+        if (r.amax > g_uid_amax) g_uid_amax = r.amax;           // UD-R-4: the session's highest UI alpha (the plate's reference)
+        if (r.amax > g_uid_s.amax) g_uid_s.amax = r.amax;       // ... and this 10 s window's
+        if (!g_uid_rb.have || static_cast<int32_t>(r.frame - g_uid_rb.frame) >= 0) g_uid_rb = r;
+    }
+}
+
+/// The GPU times of the slot about to be reused (issued 3 Presents ago), then the next slot.
+static void uid_gpu_tick() {
+    g_uidq_cur = (g_uidq_cur + 1) % 4;
+    UidQ& q = g_uidq[g_uidq_cur];
+    auto ts = [&](int k, UINT64& v) { return q.t[k] && g_ctx->GetData(q.t[k], &v, sizeof(v), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK; };
+    auto ema = [](float& e, float v) { e = e <= 0.f ? v : e + (v - e) * 0.1f; };
+    if (q.dj_on && q.dj) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+        if (g_ctx->GetData(q.dj, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency) {
+            g_uid_freq = static_cast<double>(dj.Frequency);
+            UINT64 t2 = 0, t3 = 0, t4 = 0;
+            const bool h2 = ts(2, t2), h3 = q.b_on && ts(3, t3);
+            if (h2 && h3 && t3 >= t2) { const double ms = (t3 - t2) * 1000.0 / g_uid_freq; ema(g_uid_ms[1], static_cast<float>(ms)); g_uid_s.t_ms += ms; g_uid_s.t_n++; }
+            if (q.back_on && h3 && ts(4, t4) && t4 >= t3) { const double ms = (t4 - t3) * 1000.0 / g_uid_freq; ema(g_uid_ms[2], static_cast<float>(ms)); g_uid_s.b_ms += ms; g_uid_s.b_n++; }
+        }
+    }
+    if (q.a_on && g_uid_freq > 0.0) {   // inside the frame's own disjoint span: the frequency of the last good disjoint query
+        UINT64 t0 = 0, t1 = 0;
+        if (ts(0, t0) && ts(1, t1) && t1 >= t0) { const double ms = (t1 - t0) * 1000.0 / g_uid_freq; ema(g_uid_ms[0], static_cast<float>(ms)); g_uid_s.a_ms += ms; g_uid_s.a_n++; }
+    }
+    q.dj_on = q.a_on = q.b_on = q.back_on = false;
+}
+
+/// 3. Every 10 s while the headset is on: the distance's range, how often it was pulled in, why not, and the passes' cost.
+static void uid_diag_tick() {
+    static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
+    if (now < next) return;
+    next = now + 10000;
+    UidStats& s = g_uid_s;
+    if (s.panel || s.back) {
+        const int slot = uid_slot(); const float* pz = g_uid_pz[slot];
+        char nm[32]; if (s.nmin < 1e8f) snprintf(nm, sizeof(nm), "%.2f m", s.nmin); else snprintf(nm, sizeof(nm), "none");
+        diag("uidepth: adaptive %d (min %.2f m, margin %.2f, ui_distance %.2f m) | 3D panel frames %u: distance min %.2f avg %.2f max %.2f m, pulled in %.0f%% (%u frames), nearest scene depth behind the UI %s | frames with no UI pixels %u, a full-screen menu %u, no depth %u, waiting for a readback %u, readbacks stale %u, held after a camera cut %u (cuts %u) | backing %.2f: %u frames, max UI alpha %.3f (session %.3f: halo from %.3f, full at %.3f) | GPU per frame: depth pass %.3f ms (%u), tiles %.3f ms (%u), backing %.3f ms (%u) | depth row %s %s %.4f %.4f (VP block built from: near variant %u frames, main %u), %.1f units/m",
+             g_uid_on ? 1 : 0, g_uid_min, g_uid_margin, g_ui_dist, s.panel, s.panel ? s.dmin : 0.f, s.panel ? static_cast<float>(s.dsum / s.panel) : 0.f, s.dmax, s.panel ? 100.f * s.pulled / s.panel : 0.f, s.pulled,
+             nm, s.noui, s.menu, s.nodepth, s.waiting, s.stale, s.cut, g_uid_cuts, g_uid_backing, s.back,
+             s.amax, g_uid_amax, 0.55f * (g_uid_amax > 0.2f ? g_uid_amax : 1.f), 0.9f * (g_uid_amax > 0.2f ? g_uid_amax : 1.f),
+             s.a_n ? s.a_ms / s.a_n : 0.0, s.a_n, s.t_n ? s.t_ms / s.t_n : 0.0, s.t_n, s.b_n ? s.b_ms / s.b_n : 0.0, s.b_n,
+             slot == 1 ? "main" : "near-variant", g_uid_proj == 0 ? "(auto)" : "(set)", pz[0], pz[1], g_uid_src_n[0], g_uid_src_n[1], g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f));
+    }
+    s = UidStats{}; g_uid_src_n[0] = g_uid_src_n[1] = 0; g_uid_cuts = 0;
+}
+
+/// 1(b)-(c) and 2, at Present before xr_frame: `panel` = this frame submits the 3D UI panel. Sets the panel's distance and
+/// width, and the backing plate the swapchain copy composites.
+static void uid_present(bool panel, XrUiPanel& ui) {
+    const bool dream = g_dream_gate;
+    const float ui_d = g_ui_dist;
+    g_uib_src_now = nullptr; g_uib_now = false;
+    if (g_ctx == nullptr || g_device == nullptr || !(ui_d > 0.05f)) return;
+    if (!g_uid_on || g_frames - g_uid_a_frame > 300) {   // UD-8: no reference on the game's depth (about 130 MB each) while it is not being read
+        for (int i = 0; i < 2; ++i) { if (g_uid_dsrv[i]) g_uid_dsrv[i]->Release(); g_uid_dsrv[i] = nullptr; g_uid_dtex[i] = nullptr; }
+    }
+    if (g_uid_tried && g_uid_ok) uid_readback();   // the oldest finished first (results of frames N-1 / N-2)
+    const bool rb_fresh = g_uid_rb.have && g_frames - g_uid_rb.frame <= 6;
+    // GPU work of this frame (UI tiles; the plate), only for a panel that is shown and only if a feature is on.
+    bool tiles = false, back = false, slot_busy = false; float strength = 0.f; char census[320] = "";
+    if (panel && !dream && g_ui_tex != nullptr && (g_uid_on || g_uid_backing > 0.001f) && uid_init()) {
+        ID3D11ShaderResourceView* us = uid_ui_srv(g_ui_tex);
+        D3D11_TEXTURE2D_DESC ud; g_ui_tex->GetDesc(&ud);
+        const bool depth_now = g_uid_on && g_uid_a_frame + 1 == g_frames && g_uid_ta.srv != nullptr;   // the depth tiles of the frame just rendered (g_frames was bumped at this Present)
+        const float cover = rb_fresh ? g_uid_rb.cover : 0.f;
+        const float fade = cover <= 0.5f ? 1.f : cover >= 0.8f ? 0.f : (0.8f - cover) / 0.3f;   // a full-screen menu gets no plate
+        strength = g_uid_backing * fade;
+        const bool known_empty = rb_fresh && g_uid_rb.n_ui == 0;                                // skip the plate on frames known to have no UI pixels
+        const UINT qw = (ud.Width + 3) / 4, qh = (ud.Height + 3) / 4;
+        bool want_back = strength > 0.001f && !known_empty;
+        if (want_back) for (UidTex& q : g_uib_q) if (!uid_tex_ensure(q, qw, qh, DXGI_FORMAT_R8_UNORM)) want_back = false;
+        UidStage& st = g_uid_stage[g_uid_stage_next];
+        slot_busy = st.pending && g_frames - st.frame <= 30;   // UD-5: never restart a copy still in flight (one 30 frames old is taken as lost)
+        const bool tiles_ok = !slot_busy && uid_tex_ensure(g_uid_tb, k_uid_tw, k_uid_th, DXGI_FORMAT_R32G32_FLOAT) && uid_stage_ensure(st);
+        if (us && (tiles_ok || want_back)) {
+            UidSaved s; uid_save(s);
+            {
+                InEye2 guard;
+                UidQ& q = g_uidq[g_uidq_cur];
+                if (q.dj) { g_ctx->Begin(q.dj); q.dj_on = true; }
+                uid_ts(2);
+                uid_setup();
+                const float ct[16] = { k_uid_alpha, depth_now ? 1.f : 0.f };
+                if (tiles_ok && uid_cb(ct)) {
+                    uid_draw(g_uid_tb.rtv, k_uid_tw, k_uid_th, UID_PS_TILES, depth_now ? g_uid_ta.srv : nullptr, us);
+                    g_ctx->CopyResource(st.tex, g_uid_tb.tex);
+                    st.pending = true; st.frame = g_frames; st.depth = depth_now;
+                    g_uid_stage_next = (g_uid_stage_next + 1) % k_uid_ring;
+                    tiles = true;
+                }
+                uid_ts(3);
+                if (want_back) {
+                    const float ref = g_uid_amax > 0.2f ? g_uid_amax : 1.f;   // UD-R-4: relative to the session's highest UI alpha (1 until one is seen)
+                    const float cd[16] = { 0.55f * ref, 1.f / (0.35f * ref) }, ch[16] = { 1.f, 0.f }, cv[16] = { 0.f, 1.f };
+                    if (uid_cb(cd)) uid_draw(g_uib_q[0].rtv, qw, qh, UID_PS_DILATE, us, nullptr);
+                    if (uid_cb(ch)) { uid_draw(g_uib_q[1].rtv, qw, qh, UID_PS_BLUR, g_uib_q[0].srv, nullptr);
+                        if (uid_cb(cv)) { uid_draw(g_uib_q[2].rtv, qw, qh, UID_PS_BLUR, g_uib_q[1].srv, nullptr); back = true; } }
+                    uid_ts(4);
+                }
+                if (q.dj) g_ctx->End(q.dj);
+                uid_restore(s);
+            }
+            if (back) { g_uib_src_now = g_ui_tex; g_uib_strength_now = strength; g_uib_now = true; g_uid_s.back++; }
+        }
+        if (g_frame_live)
+            snprintf(census, sizeof(census), "UIDEPTH present passes: UI tiles %dx%d (alpha > %.2f, depth %s)%s | backing plate %s (opacity %.2f x menu fade %.2f, quarter %ux%u, %s, composited in the swapchain copy)",
+                     k_uid_tw, k_uid_th, k_uid_alpha, depth_now ? "this frame's" : "none", tiles ? "" : slot_busy ? " NOT RUN (readback slot in flight)" : " NOT RUN",
+                     back ? "on" : "off", g_uid_backing, fade, qw, qh, xr_srgb() ? "sRGB swapchain: linear rescale" : "UNORM swapchain");
+    }
+    g_uib_last = back;
+    // UD-11: a camera cut (seat view) since the last Present.
+    if (g_cut_count != g_uid_cut_seen) { g_uid_cut_seen = g_cut_count; g_uid_cut_frame = g_frames; g_uid_cut_t = 0.f; g_uid_cut_snap = true; g_uid_cuts++; }
+    else if (g_uid_cut_t < 1e8f) g_uid_cut_t += g_dt;
+    // The distance.
+    if (g_uid_cur < 0.f) g_uid_cur = ui_d;
+    if (g_uid_ui_d_prev > 0.f && fabsf(g_uid_cur - g_uid_ui_d_prev) < 0.003f) g_uid_cur = ui_d;   // at rest: the ui_distance slider moves it at once
+    g_uid_ui_d_prev = ui_d;
+    const float lo = g_uid_min < ui_d ? g_uid_min : ui_d;
+    float target = ui_d; int st = UID_ST_NONE; bool follow = true;
+    if (!panel) {   // no 3D panel this frame: hold for a short gap (a frame without the UI pass mid-dialogue), then back to ui_distance
+        if (++g_uid_gap > k_uid_gap_frames) { g_uid_cur = ui_d; g_uid_going_out = false; g_uid_out_t = 0.f; }
+        follow = false;
+    }
+    else if (!g_uid_on || dream) { g_uid_gap = 0; g_uid_cur = ui_d; g_uid_going_out = false; g_uid_out_t = 0.f; follow = false; st = dream ? UID_ST_DREAM : UID_ST_OFF; }
+    else {
+        g_uid_gap = 0;
+        if (rb_fresh) g_uid_wait = 0; else g_uid_wait++;
+        if (!rb_fresh && g_uid_wait <= k_uid_stale_frames) { st = UID_ST_WAIT; follow = false; }   // hold until the first readback (or a short break in them)
+        else if (!rb_fresh) st = UID_ST_STALE;                                                     // UD-5: readbacks stopped: back to ui_distance
+        else if (g_uid_rb.n_ui == 0) st = UID_ST_NOUI;
+        else if (g_uid_rb.cover > k_uid_menu_cover) st = UID_ST_MENU;
+        else if (!g_uid_rb.depth) st = UID_ST_NODEPTH;
+        else {
+            const float nd = g_uid_rb.n_depth >= 2 ? g_uid_rb.near2 : g_uid_rb.near1;   // the second nearest tile: one stray tile does not pull the panel in
+            if (g_uid_rb.n_depth == 0 || !(nd < 0.5f * k_uid_far)) st = UID_ST_CLEAR;
+            else { g_uid_near = nd; target = nd * g_uid_margin; target = target < lo ? lo : target > ui_d ? ui_d : target; st = UID_ST_FOLLOW;
+                   if (nd < g_uid_s.nmin) g_uid_s.nmin = nd; }
+        }
+        if (st != UID_ST_FOLLOW && st != UID_ST_WAIT) g_uid_near = 0.f;
+        // UD-11: across a cut, no easing. The first readback of a frame after the cut decides the distance at once (masked by the
+        // cut); until k_uid_cut_hold after the cut the distance then holds. With no such readback by then, normal following resumes.
+        if (g_uid_cut_t < k_uid_cut_hold) {
+            const bool post = rb_fresh && static_cast<int32_t>(g_uid_rb.frame - g_uid_cut_frame) >= 0 && st != UID_ST_WAIT;
+            if (g_uid_cut_snap && post) { g_uid_cur = target; g_uid_cut_snap = false; g_uid_going_out = false; g_uid_out_t = 0.f; }
+            follow = false; g_uid_s.cut++;
+            if (st != UID_ST_WAIT) st = UID_ST_CUT;
+        }
+        else g_uid_cut_snap = false;
+    }
+    if (follow) {
+        float& c = g_uid_cur; const float dt = g_dt;
+        if (target < c - 0.005f) { c += (target - c) * (1.f - expf(-dt / k_uid_tau_in)); g_uid_going_out = false; g_uid_out_t = 0.f; }
+        else if (target > c + 0.005f) {
+            if (!g_uid_going_out) {   // hysteresis: further by 6 % + 2 cm for 300 ms before it moves out
+                if (target > c * 1.06f + 0.02f) g_uid_out_t += dt; else g_uid_out_t = 0.f;
+                if (g_uid_out_t >= k_uid_out_hold) g_uid_going_out = true;
+            }
+            if (g_uid_going_out) c += (target - c) * (1.f - expf(-dt / k_uid_tau_out));
+        }
+        else { g_uid_going_out = false; g_uid_out_t = 0.f; }
+        if (fabsf(target - c) < 0.003f) c = target;
+    }
+    if (g_uid_cur > ui_d) g_uid_cur = ui_d;
+    if (g_uid_cur < lo) g_uid_cur = lo;
+    g_uid_target = target; g_uid_state = st;
+    ui.dist = g_uid_cur; ui.width = g_ui_width * g_uid_cur / ui_d;   // the same angular size at any distance
+    if (g_uid_cur > 0.f && g_uid_cur < ui_d) { ui.im_dist = g_uid_cur; ui.im_width = g_ui_width * g_uid_cur / ui_d; }   // UD-10 / UD-R-1: the ImGui layer (0.95 x this) stays in front of a pulled-in panel, same angular size; keyed on the held distance, so it does not jump on frames without a UI pass
+    if (panel && g_uid_on && !dream) {
+        UidStats& s = g_uid_s; s.panel++; s.dsum += g_uid_cur;
+        if (g_uid_cur < s.dmin) s.dmin = g_uid_cur;
+        if (g_uid_cur > s.dmax) s.dmax = g_uid_cur;
+        if (g_uid_cur < ui_d - 0.01f) s.pulled++;
+        if (st == UID_ST_NOUI) s.noui++; else if (st == UID_ST_MENU) s.menu++; else if (st == UID_ST_NODEPTH) s.nodepth++; else if (st == UID_ST_WAIT) s.waiting++; else if (st == UID_ST_STALE) s.stale++;
+    }
+    if (census[0]) {   // the census tag, with the distance just decided
+        char t[400]; snprintf(t, sizeof(t), "%s | panel %.2f m (target %.2f, nearest %.2f m, state %d, depth row %s)", census, g_uid_cur, g_uid_target, g_uid_near, g_uid_state, uid_slot() == 1 ? "main" : "near-variant");
+        std::lock_guard<std::mutex> lock(g_mutex); frame_event(t);
+    }
+    if (g_uid_tried && g_uid_ok) uid_gpu_tick();
+    uid_diag_tick();
+}
+/// 2. The swapchain copy of the UI panel with the plate under it (ffxvr_copy_pass, inside xr_frame). False: the plain copy runs.
+static bool uib_copy(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h) {
+    if (!g_uid_ok || !g_uib_now || g_uib_q[2].srv == nullptr) return false;
+    ID3D11ShaderResourceView* us = uid_ui_srv(src);
+    if (us == nullptr) return false;
+    const float c[16] = { g_uib_strength_now, k_uib_gain, xr_srgb() ? 1.f : 0.f };   // UD-1: rescale in linear for an sRGB swapchain
+    UidSaved s; uid_save(s);
+    bool ok = false;
+    {
+        InEye2 guard;
+        uid_setup();
+        ok = uid_cb(c);
+        if (ok) uid_draw(dst, w, h, UID_PS_BACKING, us, g_uib_q[2].srv);
+        uid_restore(s);
+    }
+    return ok;
+}
+/// The headset is off (xr_tick's early return; render thread): our references on the game's depth go, the state resets.
+static void uid_headset_off() {
+    for (int i = 0; i < 2; ++i) { if (g_uid_dsrv[i]) g_uid_dsrv[i]->Release(); g_uid_dsrv[i] = nullptr; g_uid_dtex[i] = nullptr; }
+    for (UidStage& st : g_uid_stage) st.pending = false;
+    g_uid_rb = UidRead{}; g_uid_cur = -1.f; g_uid_target = -1.f; g_uid_near = 0.f; g_uid_going_out = false; g_uid_out_t = 0.f; g_uid_gap = 0; g_uid_state = UID_ST_NONE;
+    g_uid_wait = 0; g_uid_cut_t = 1e9f; g_uid_cut_snap = false; g_uid_cut_seen = g_cut_count;
+    g_uid_dbad[0] = g_uid_dbad[1] = nullptr;   // UD-7
+    g_uid_amax = 0.f;                          // UD-R-4
+    g_uib_src_now = nullptr; g_uib_now = false; g_uib_last = false;
+}
+
 static std::map<ID3D11Texture2D*, ID3D11ShaderResourceView*> g_plain_srvs;   // per source texture
 static uint32_t g_plain_srvs_count() { return (uint32_t)g_plain_srvs.size(); }
 static void g_plain_srvs_forget(ID3D11Texture2D* t) { auto it = g_plain_srvs.find(t); if (it != g_plain_srvs.end()) { if (it->second) it->second->Release(); g_plain_srvs.erase(it); } }
@@ -6567,6 +7210,7 @@ static ID3D11ShaderResourceView* opaque_copy(int slot, ID3D11Texture2D* src) {
 /// and restoring the pipeline state it touches. Also used for the headset.
 bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, bool keep_alpha) {
     if (src == nullptr || dst == nullptr || g_device == nullptr || g_ctx == nullptr) return false;
+    if (keep_alpha && g_uib_now && src == g_uib_src_now && uib_copy(src, dst, w, h)) return true;   // uidepth: the UI panel with its backing plate (this frame's)
     if (!copy_pass_init()) return false;
     ID3D11ShaderResourceView* in = nullptr;
     auto it = g_plain_srvs.find(src);
@@ -7265,6 +7909,32 @@ extern "C" __declspec(dllexport) void ffxvr_blend_restore() {
 extern "C" __declspec(dllexport) uint32_t ffxvr_scene_draws() { return g_scene_draws_last; }
 extern "C" __declspec(dllexport) void ffxvr_ui_set(int on, float dist, float width) { g_ui_enabled = on != 0; g_ui_dist = dist; g_ui_width = width; }
 extern "C" __declspec(dllexport) int  ffxvr_ui_draws() { return static_cast<int>(g_ui_draws_report); }
+/// ABI 20 (uidepth): the adaptive UI panel (on/off, its floor in metres, the margin on the nearest depth), the backing plate's
+/// opacity (0 = off) and the projection slot the depth is linearised with (0 auto: the slot the VP block is built from; 1 the
+/// near variant; 2 main; Debug). Managed, every frame.
+extern "C" __declspec(dllexport) void ffxvr_uidepth_set(int adaptive, float min_m, float margin, float backing, int proj) {
+    g_uid_on = adaptive != 0;
+    g_uid_min = !(min_m >= 0.3f) ? 0.3f : min_m > 2.f ? 2.f : min_m;          // NaN -> the floor
+    g_uid_margin = !(margin >= 0.5f) ? 0.5f : margin > 1.f ? 1.f : margin;
+    g_uid_backing = !(backing >= 0.f) ? 0.f : backing > 1.f ? 1.f : backing;
+    g_uid_proj = (proj == 1 || proj == 2) ? proj : 0;
+}
+/// ABI 20: for the overlay. out[0] the panel distance in use (m), [1] its target (m), [2] the nearest scene depth behind the UI
+/// (m; 0 none), [3] the UI tile fraction, [4] the state (0 no 3D panel, 1 adaptive off, 2 dream filter, 3 waiting for a
+/// readback, 4 no UI pixels, 5 a full-screen menu, 6 no depth this frame, 7 nothing nearer than the panel, 8 following the
+/// depth), [5]-[7] GPU ms (depth pass, UI tiles, backing; averages), [8] the backing plate was drawn last frame, [9] the
+/// readback's age (frames; -1 none), [10]/[11] the depth row in use (P10, P11), [12] the passes (1 ready, -1 failed, 0 not yet),
+/// [13] the slot in use (0 near variant, 1 main), [14] the detected VP source (-1 not decided, 0 near variant, 1 main); states
+/// 9 (readbacks stopped: back to the set distance) and 10 (holding after a camera cut) were added with the review (UD-5, UD-11).
+/// Returns how many values exist (15).
+extern "C" __declspec(dllexport) int ffxvr_uidepth_status(float* out, int n) {
+    const float v[15] = { g_uid_cur > 0.f ? g_uid_cur : g_ui_dist, g_uid_target > 0.f ? g_uid_target : g_ui_dist, g_uid_near, g_uid_rb.have ? g_uid_rb.cover : 0.f,
+                          static_cast<float>(g_uid_state), g_uid_ms[0], g_uid_ms[1], g_uid_ms[2], g_uib_last ? 1.f : 0.f,
+                          g_uid_rb.have ? static_cast<float>(g_frames - g_uid_rb.frame) : -1.f, g_uid_pz[uid_slot()][0], g_uid_pz[uid_slot()][1],
+                          !g_uid_tried ? 0.f : g_uid_ok ? 1.f : -1.f, static_cast<float>(uid_slot()), static_cast<float>(g_uid_src) };
+    if (out != nullptr) for (int i = 0; i < n && i < 15; ++i) out[i] = v[i];
+    return 15;
+}
 extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = on != 0; }
 /// Re-use the game's pointer sprites at the markers (needs the pointer hiding to capture them); returns sprites drawn since the last call.
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
@@ -7792,7 +8462,8 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
     return 9;
 }
 static void xr_tick() {
-    if (!g_xr_want) { dream_headset_off(); return; }
+    if (!g_xr_want) { dream_headset_off(); uid_headset_off(); return; }
+    if (!g_uid_tried && (g_uid_on || g_uid_backing > 0.001f)) uid_init();   // UD-6: the shaders compile here at Present, at headset start, not inside the game's frame
     lowres_check();
     detect_cut();
     bt_tick();                                   // battle transition phases (before anything this tick decides from them)
@@ -7809,7 +8480,7 @@ static void xr_tick() {
     // it, and the UI goes on its own panel.
     ID3D11Texture2D* e1 = nullptr;
     ID3D11Texture2D* e2 = nullptr;
-    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width, nullptr };
+    XrUiPanel ui = { nullptr, g_ui_dist, g_ui_width, nullptr, g_ui_dist, g_ui_width };   // uidepth sets dist / width below; im_dist / im_width stay the settings'
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
     // The ImGui layer: what Fahrenheit drew after our hook last Present.
     g_imgui_draws_last = g_imgui_draws_frame; g_imgui_draws_frame = 0;
@@ -7896,6 +8567,9 @@ static void xr_tick() {
     screen.on = g_xr_screen_now || g_screen3d_now; screen.width = g_xr_screen_width;
     screen.stereo = g_screen3d_now && e2 != nullptr; screen.eye2 = screen.stereo ? e2 : nullptr;
     memcpy(screen.q, g_xr_screen_q, sizeof(screen.q)); memcpy(screen.p, g_xr_screen_p, sizeof(screen.p));
+    // uidepth: the panel's distance / width and its backing plate, for a frame that submits the 3D UI panel (xr_frame shows it
+    // only with a base layer that is not a screen; a held base keeps the held quad).
+    uid_present(ui.tex != nullptr && !screen.on && e1 != nullptr, ui);
     {
         // The runtime composites on the game's own device context inside
         // these calls (Virtual Desktop binds its 2496x2688 eye textures and
@@ -7913,6 +8587,7 @@ static void xr_tick() {
         xr_hold_uncapped(g_bt_frozen);
         LARGE_INTEGER ta, tb; QueryPerformanceCounter(&ta);
         xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
+        g_uib_src_now = nullptr; g_uib_now = false;   // uidepth: the plate belongs to this frame's UI copy only
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
         if (g_bt_frozen && !g_bt_want_freeze) { xr_pin(false, nullptr); xr_hold_uncapped(false); g_bt_frozen = false; g_bt_hold = false; }
     }

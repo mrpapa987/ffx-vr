@@ -330,6 +330,7 @@ void xr_debug(int sim_timeouts) { if (sim_timeouts > 0) g_sim_timeouts += sim_ti
 bool xr_take_stuck() { const bool v = g_stuck_stop; g_stuck_stop = false; return v; }
 void xr_counters(unsigned* held_frames, unsigned* wait_timeouts) { if (held_frames) *held_frames = g_held_frames; if (wait_timeouts) *wait_timeouts = g_wait_timeouts; }   // held: base-layer frames (quads held alone are in the diag log)
 void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
+bool xr_srgb() { return g_sc_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; }
 
 void xr_stop() {
     if (g_session != XR_NULL_HANDLE) {
@@ -679,7 +680,8 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         const bool base = ok || held;
         XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
         layer.space = g_space; layer.viewCount = 2; layer.views = pv;
-        // The UI panel: head-locked (VIEW space), alpha-blended over the scene.
+        // The UI panel: head-locked (VIEW space), alpha-blended over the scene. Its distance and width are the host's (the adaptive
+        // panel moves it in front of near geometry and scales the width with the distance); the texture may carry the backing plate.
         XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_ui = false;
         const bool ui_src = base && !use_screen && ui != nullptr && ui->tex != nullptr;
@@ -712,8 +714,8 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             imq.subImage.imageRect.offset = { 0, 0 };
             imq.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[4].w), static_cast<int32_t>(g_eye[4].h) };
             imq.pose.orientation = { 0, 0, 0, 1 };
-            imq.pose.position = { 0, 0, -(ui->dist * 0.95f) };
-            imq.size = { ui->width * 0.95f, ui->width * 0.95f * 9.f / 16.f };
+            imq.pose.position = { 0, 0, -(ui->im_dist * 0.95f) };   // uidepth: the settings' distance, not the UI panel's adaptive one
+            imq.size = { ui->im_width * 0.95f, ui->im_width * 0.95f * 9.f / 16.f };
             g_held.have_imgui = true; g_held.imgui_age = 0; g_held.imq = imq;
         }
         else if (im_src && g_held.have_imgui && g_held.imgui_age < k_hold_max && g_eye[4].ever_released) {   // R8b: its own wait timed out
