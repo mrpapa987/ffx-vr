@@ -31,8 +31,9 @@ namespace FFXVR;
 //   over either; admission while a 129 MB block is free below 2 GB (the game's transient 128 MB pool growth) and, per
 //   cluster, only while that transient block is down for its whole load (HC-T-1: residue in it would keep the game from
 //   freeing it); release all when the block is gone with the transient block down; at most 260 held.
-// - Off (hd_cluster_cache=0, the default for the first A/B): nothing is admitted, and anything still held is released at the
-//   next map free. The diagnostics (eligible paths, the HDC: line per map free) run either way.
+// - Off (hd_cluster_cache=0, the default): nothing is admitted, and anything still held is released at the next map free. The
+//   diagnostics (sample paths, the HDC: line per map free with its address-space walks) run with the cache on, or with
+//   diag_load=1 (loads build; before it they ran either way).
 public sealed unsafe partial class FFXVRModule {
 
     private bool _hd_cluster_cache = false;    // ini hd_cluster_cache (admission at once; releases at the next map free)
@@ -224,6 +225,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>HC-7: a spread of sample paths with their verdict, for the render thread to log with their fios form. Every
     /// 64th path, plus the first few .dds.phyre the filter rejects (so a wrong directory filter is visible). Loading thread.</summary>
     private void hc_sample(byte* p, int el) {
+        if (!_hd_cluster_cache && !_diag_load) return;   // loads build: the sample lines only with the cache or diag_load on
         int tick = System.Threading.Interlocked.Increment(ref _hc_samp_tick) - 1;
         bool reject_dds = el == 0 && hc_ends_dds(p);
         if ((tick & 63) != 0 && !(reject_dds && System.Threading.Volatile.Read(ref _hc_samp_w) < 4)) return;
@@ -321,6 +323,22 @@ public sealed unsafe partial class FFXVRModule {
         if (mine && _hc_p_valid) { rel = _hc_p_release; zone = _hc_p_zone; mode = _hc_p_mode; label = _hc_p_label; }
         else { rel = true; zone = -1; mode = 1; label = "ZONE (area change, save load, title or event map)"; }
         _hc_p_valid = false;
+        // Loads build: with the cache off, nothing held and diag_load off, the measurement (two address-space walks, the manager
+        // pool copy) and the HDC: line are skipped. Only the pool's base / high are kept (the settled test's input). The full
+        // path runs again at the first map free with the cache on; its caps stay 0 until then, so nothing is admitted before it.
+        if (!_hd_cluster_cache && !_diag_load) {
+            hc_held(out int n0, out _);
+            if (n0 == 0) {
+                System.Threading.Volatile.Write(ref _hc_stamp_now, _hc_stamp_now + 1);
+                long res0 = FhUtil.get_at<uint>(0x153CD44);   // the game pool's reserved size (a game global, always mapped)
+                if (_hc_res_base < 0 || res0 < _hc_res_base) System.Threading.Volatile.Write(ref _hc_res_base, res0);
+                if (_hc_res_hw < 0 || res0 > _hc_res_hw) _hc_res_hw = res0;
+                _hc_cap_kb = 0; _hc_vcap_mb = 0; _hc_mode = mode; _hc_zone = zone;
+                _hc_held_n = 0; _hc_held_kb = 0; _hc_held_vram_mb = 0; _hc_orphan_n = 0;
+                _hc_reason = "the cache is off: nothing held (map frees not measured with diag_load=0)";
+                return;
+            }
+        }
         int tid = Environment.CurrentManagedThreadId;
         bool on_main = tid != _ld_render_mtid && (_ld_main_tid == 0 || tid == _ld_main_tid);   // HC-5 / HC-R-5: never the render thread; the main thread as captured once at 0x909A20
         int stamp = _hc_stamp_now + 1; System.Threading.Volatile.Write(ref _hc_stamp_now, stamp);
@@ -443,7 +461,8 @@ public sealed unsafe partial class FFXVRModule {
             act = "; BRAKE requested (admission closed now, release at the next map free)";
         }
         else if (!pass) act = "; not armed yet (no cache-off baseline): no brake";
-        d7_log(I($"HDC: settled after the way back{(timeout ? " (60 s timeout)" : "")}: reserved {res >> 20} MB (base {b >> 20} MB) {(pass ? "PASS" : "above base")}, held {n}{act}"));
+        if (_hd_cluster_cache || _diag_load || n > 0 || act.Length > 0)   // loads build: with the cache off and nothing new, no line per battle
+            d7_log(I($"HDC: settled after the way back{(timeout ? " (60 s timeout)" : "")}: reserved {res >> 20} MB (base {b >> 20} MB) {(pass ? "PASS" : "above base")}, held {n}{act}"));
     }
     /// <summary>HC-1 / HC-3: stop admitting for the rest of the session, once, with a reason.</summary>
     private void hc_disable(string reason) { if (_hc_disabled) return; _hc_disabled = true; _hc_off_reason = reason; }

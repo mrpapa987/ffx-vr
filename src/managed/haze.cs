@@ -8,14 +8,16 @@ namespace FFXVR;
 // "reflection") in one eye. The native helper now gives those draws eye 2's pixel-shader data (ffxvr_native.cpp: haze_match,
 // haze_ps_upload); this side owns the setting and the overlay rows.
 //
-//   heat_haze (ini and overlay, applies at the next frame; default 1):
-//     1 = fixed per eye: the haze draws get eye 2's pixel-shader camera data;
+//   heat_haze (ini and overlay, applies at the next frame; default 0 since the loads build):
 //     0 = off in the headset: the haze draws are skipped while the headset shows the 3D view (the monitor, which shows eye 1,
 //         loses them too then); the virtual screen, the stereo screen and flat mode keep them;
-//     2 = as before this build (for an A/B comparison).
+//     1 = fixed per eye (experimental: in testing it did not fix the Luca torches): the haze draws get eye 2's pixel-shader
+//         camera data;
+//     2 = as before the haze build (for an A/B comparison).
+//   The 10 s "haze:" line is written in modes 1 and 2 only (the test modes).
 public sealed unsafe partial class FFXVRModule {
 
-    private int _heat_haze = 1;                                            // ini heat_haze: 1 fixed per eye (default), 0 off in the headset, 2 as before
+    private int _heat_haze = 0;                                            // ini heat_haze: 0 off in the headset (default since the loads build), 1 fixed per eye (experimental), 2 as before
     private delegate* unmanaged[Cdecl]<int, void> _fn_haze_set;            // ABI 22
     private delegate* unmanaged[Cdecl]<int*, int, int> _fn_haze_status;    // ABI 22: (out, n) -> count of values
 
@@ -58,8 +60,8 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>The main window's row (in the View block, after the shadow row).</summary>
     private void haze_ui() {
         ImGui.Text("heat haze over fire:"); ImGui.SameLine();
-        ImGui.RadioButton("fixed per eye##haze", ref _heat_haze, 1); ImGui.SameLine();
         ImGui.RadioButton("off in the headset##haze", ref _heat_haze, 0); ImGui.SameLine();
+        ImGui.RadioButton("fixed per eye (experimental)##haze", ref _heat_haze, 1); ImGui.SameLine();
         ImGui.RadioButton("as before##haze", ref _heat_haze, 2);
         if (_xr_want && _fn_haze_status != null) { ImGui.SameLine(); ImGui.TextDisabled(haze_live_text()); }
     }
@@ -68,11 +70,12 @@ public sealed unsafe partial class FFXVRModule {
     private void haze_debug_ui() {
         ImGui.TextWrapped("Torches and fire spells draw a shimmer that samples a copy of the frame. Eye 2 used eye 1's screen position for it, "
                         + "so the flame showed a grey patch of the scene beside it in one eye. Off in the headset hides the shimmer while the headset "
-                        + "shows the 3D view, on the monitor too; the fire itself stays.");
-        ImGui.RadioButton("fixed per eye (default)##hazedbg", ref _heat_haze, 1); ImGui.SameLine();
-        ImGui.RadioButton("off in the headset##hazedbg", ref _heat_haze, 0); ImGui.SameLine();
+                        + "shows the 3D view, on the monitor too; the fire itself stays. Fixed per eye is experimental: in testing it did not fix "
+                        + "the Luca torches.");
+        ImGui.RadioButton("off in the headset (default)##hazedbg", ref _heat_haze, 0); ImGui.SameLine();
+        ImGui.RadioButton("fixed per eye (experimental)##hazedbg", ref _heat_haze, 1); ImGui.SameLine();
         ImGui.RadioButton("as before (A/B)##hazedbg", ref _heat_haze, 2);
         if (_fn_haze_status != null) ImGui.TextDisabled(haze_status_text());
-        ImGui.TextDisabled("ffxvr_diag.log: 'haze:' every 10 s while haze draws are seen; Frame census: HAZE lines");
+        ImGui.TextDisabled("ffxvr_diag.log: 'haze:' every 10 s while haze draws are seen (modes 1 and 2 only); Frame census: HAZE lines");
     }
 }

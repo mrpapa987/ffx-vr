@@ -8,7 +8,8 @@ namespace FFXVR;
 // the candidates the game draws (its own mask, recorded only when the game itself calls its draw, under its own gates), at
 // the game's own anchors (optpos[Chr+0xDF9]; the turn pointer's optpos[1] - 2), with the 30 Hz correction (expected ~0).
 // cursor_source=legacy: the old memory-based markers (BtlWindow sel_chrs / cur_chr_id), hide list and pointer rule, unchanged.
-// Without the hooks (diag_build7=0 at launch) the game source cannot work: it falls back to legacy and says so.
+// Without the hooks the game source cannot work: it falls back to legacy and says so. They are queued at launch when
+// cursor_source=game (the default) or diag_build7=1 (loads build: no longer only with diag_build7).
 public sealed unsafe partial class FFXVRModule {
 
     private bool  _cursor_game_cfg = true;   // ini cursor_source: game (true) / legacy (false)
@@ -33,7 +34,7 @@ public sealed unsafe partial class FFXVRModule {
     private static bool c2_is_default(float[] e) { foreach (float[] x in hide_list_cursor_defaults()) if (x[0] == e[0] && x[1] == e[1] && x[2] == e[2] && x[3] == e[3] && x[4] == e[4] && x[5] == e[5]) return true; return false; }
 
     /// <summary>Once per frame, before the markers are built: is the game source in use? It needs the hooks (queued at launch,
-    /// which diag_build7=0 prevents) and must not have been found dead.</summary>
+    /// with cursor_source=game or diag_build7=1) and must not have been found dead.</summary>
     private void c2_decide() {
         // C2-5: both hooks must have been queued (one() said "queued"). With only one of them the game source would leave that
         // cursor unmarked and unhidden, so both cursors fall back to legacy (the safer choice: one consistent source).
@@ -55,7 +56,7 @@ public sealed unsafe partial class FFXVRModule {
         _c2_active = _cursor_game_cfg && hooks && !_c2_dead;
         _c2_status = !_cursor_game_cfg ? "legacy (cursor_source=legacy)"
                    : _c2_active ? "game (the game's own cursor hooks)"
-                   : _fn_cursor_skip == null || (!_h7_tgt_ok && !_h7_turn_ok) ? "legacy: the cursor hooks are not installed (diag_build7=0 at launch, or the native helper is missing)"
+                   : _fn_cursor_skip == null || (!_h7_tgt_ok && !_h7_turn_ok) ? "legacy: the cursor hooks are not installed (cursor_source was legacy and diag_build7=0 at launch: they hook at the next launch; or the native helper is missing)"
                    : !hooks ? $"legacy for both cursors: only the {(_h7_tgt_ok ? "target" : "turn")} pointer hook is installed (see core.log)"
                    : $"legacy for both cursors: the {_c2_dead_why} hook is installed but never called (see core.log)";
         if (was != _c2_active) _hide_list_dirty = true;   // the two default cursor entries come and go with the source

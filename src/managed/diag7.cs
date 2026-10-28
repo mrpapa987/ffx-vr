@@ -5,15 +5,18 @@ namespace FFXVR;
 // Build 7: battle-cursor and engine diagnostics, LOG ONLY (design-notes "Build 7: battle-cursor and engine diagnostics
 // (log only)"; research SYNTHESIS.md stage C1 and section 6). Nothing here changes what the game or the headset shows:
 // every hooked game function is always called, and the only drawing is the opt-in "show cursor anchors" dots on the
-// monitor (Debug > Build 7). The ini switch diag_build7 (default 1) gates all of it; 0 = no game function is hooked at
-// the next launch, the native watchdog and XInputSetState hook stay off, and nothing below runs.
+// monitor (Debug > Build 7). The ini switch diag_build7 (default 0 since the loads build) gates the logging, the native stall
+// watchdog and the XInputSetState hook's log (the hook itself also follows haptics). The four game-function hooks belong to
+// the features that use them (loads build): the target and turn pointers to cursor_source=game (C2), the job join to
+// smooth_anchor, the backbuffer resize (build 9's invalidation signal) to nothing, it is always installed; each is also
+// installed with diag_build7=1. All at launch.
 //
 // Threads: the four game-function detours run on the game's MAIN thread (the job join, the battle-UI draw, the resize).
 // They only copy values into two-slot seqlocks and count; no strings, no logging, no D3D. The render thread
 // (Present, diag7_present) reads the snapshots and writes the log lines into ffxvr_diag.log through ffxvr_diag_line.
 public sealed unsafe partial class FFXVRModule {
 
-    private bool   _diag7 = true;                 // ini diag_build7
+    private bool   _diag7 = false;                // ini diag_build7 (default 0 since the loads build: the logs; the hooks follow their features)
     private string _d7_status = "not set up";
     private int    _d7_native_on = 0;             // what ffxvr_diag7_set was last told
     private delegate* unmanaged[Cdecl]<int, void> _fn_diag7_set;
@@ -72,24 +75,31 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>At module init (Fahrenheit queues hooks added here and applies them after every module has initialised;
     /// it refuses a late hook on an already-hooked function). Needs the native helper for the guarded reads and the log.</summary>
     private void diag7_init() {
-        if (!_diag7) { _d7_status = "off (ffxvr.ini diag_build7=0): no game function hooked"; _logger.Info("build 7 diagnostics: " + _d7_status); return; }
         if (!_native_ok || _fn_safe_read == null || _fn_diag7_set == null) { _d7_status = "off (the native helper did not load)"; _logger.Info("build 7 diagnostics: " + _d7_status); return; }
-        _fn_diag7_set(1); _d7_native_on = 1;
-        _h7_tgt = h7_tgt; _h7_turn = h7_turn; _h7_join = h7_join; _h7_rsz = h7_rsz;
-        new FhCallLocation("FFX.exe", k7_tgt).try_resolve(out _a7_tgt);   new FhCallLocation("FFX.exe", k7_turn).try_resolve(out _a7_turn);
-        new FhCallLocation("FFX.exe", k7_join).try_resolve(out _a7_join); new FhCallLocation("FFX.exe", k7_rsz).try_resolve(out _a7_rsz);
+        // Loads build: each hook under the feature that needs it (and all of them with diag_build7=1), decided at launch
+        bool want_cur = _diag7 || _cursor_game_cfg, want_join = _diag7 || _smooth_anchor;
+        if (_diag7) { _fn_diag7_set(1); _d7_native_on = 1; }
+        _h7_rsz = h7_rsz; new FhCallLocation("FFX.exe", k7_rsz).try_resolve(out _a7_rsz);
+        if (want_cur) { _h7_tgt = h7_tgt; _h7_turn = h7_turn; new FhCallLocation("FFX.exe", k7_tgt).try_resolve(out _a7_tgt); new FhCallLocation("FFX.exe", k7_turn).try_resolve(out _a7_turn); }
+        if (want_join) { _h7_join = h7_join; new FhCallLocation("FFX.exe", k7_join).try_resolve(out _a7_join); }
         string one(string name, nint addr, Func<bool> f) {
             if (addr == 0) { _logger.Error($"build 7 diagnostics: hook {name}: FFX.exe not found"); return name + " NOT RESOLVED"; }
             try { bool ok = f(); if (ok) _d7_last_ok = true; _logger.Info($"build 7 diagnostics: hook {name} {(ok ? "queued" : "REFUSED")}"); return name + (ok ? " queued" : " REFUSED"); }
             catch (Exception e) { _logger.Error($"build 7 diagnostics: hook {name}: {e}"); return name + " FAILED (" + e.GetType().Name + ")"; }
         }
-        // The join is queued last: Fahrenheit applies queued hooks in order, and the join is the one the main thread calls from
-        // the first frame on, so once it is live no other insertion of ours is left in commit().
-        _d7_last_ok = false; string a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!)); _h7_tgt_ok = _d7_last_ok;
-        _d7_last_ok = false; string b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!)); _h7_turn_ok = _d7_last_ok;
+        // The join is queued last of these four: Fahrenheit applies queued hooks in order, and the join is the one the main thread
+        // calls from the first frame on. (Since LD-7 the load hooks follow it in the queue, so it is no longer our last insertion
+        // in commit(); since the loads build the resize hook is queued whatever diag_build7 says, ahead of the join and the load
+        // hooks: a commit failure there would drop those too, which leaves the lock release unarmed, the safe direction. The
+        // status text and core.log show it.)
+        string a = "target pointer off (cursor_source=legacy and diag_build7=0 at launch)", b = "turn pointer off (the same)", c = "job join off (smooth_anchor=0 and diag_build7=0 at launch)";
+        if (want_cur) {
+            _d7_last_ok = false; a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!)); _h7_tgt_ok = _d7_last_ok;
+            _d7_last_ok = false; b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!)); _h7_turn_ok = _d7_last_ok;
+        }
         string d = one("backbuffer resize 0x199210", _a7_rsz, () => new FhCallHandle<d7_resize>(new FhCallLocation((void*)_a7_rsz)).hook(this, _h7_rsz!));
-        _d7_last_ok = false; string c = one("job join 0x644B30", _a7_join, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_join)).hook(this, _h7_join!)); _h7_join_ok = _d7_last_ok;   // the smooth anchor needs it
-        _d7_status = $"hooks: {a}, {b}, {d}, {c}. \"queued\" is not \"installed\": Fahrenheit applies them after init (a MinHook failure is in core.log; a success is logged only at Debug level). The proof is each hook's \"called for the first time\" line in ffxvr_diag.log (the target and turn pointers only in a battle)";
+        if (want_join) { _d7_last_ok = false; c = one("job join 0x644B30", _a7_join, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_join)).hook(this, _h7_join!)); _h7_join_ok = _d7_last_ok; }   // the smooth anchor needs it; queued last
+        _d7_status = $"{(_diag7 ? "logging on" : "logging off (diag_build7=0)")}; hooks: {a}, {b}, {d}, {c}. \"queued\" is not \"installed\": Fahrenheit applies them after init (a MinHook failure is in core.log; a success is logged only at Debug level). The proof is each hook's \"called for the first time\" line in ffxvr_diag.log with diag_build7=1 (the target and turn pointers only in a battle)";
     }
 
     private static T? d7_chain<T>(nint addr, T h) where T : Delegate => new FhCallHandle<T>(new FhCallLocation((void*)addr)).chain_from(h).fnptr;
@@ -429,7 +439,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Text($"calls: target pointer {_d7_tgt_calls_total}, turn pointer {_d7_turn_calls_total}, job join {_d7_join_calls_total} (post-join {_d7_join_post_total}), resize {_d7_rsz_calls}; record faults {_d7_main_faults}");
         ImGui.Checkbox("show cursor anchors (monitor)", ref _d7_dots);
         ImGui.SameLine(); ImGui.TextDisabled("magenta: the game's anchor through the game camera; yellow ring: where the game put it; cyan: the turn triangle's anchor");
-        ImGui.TextDisabled("Lines in ffxvr_diag.log: cursor:, timing:, pan-scan:, stall, xinput set:, backbuffer:, resize. To switch it all off: diag_build7=0 in ffxvr.ini, then restart the game.");
+        ImGui.TextDisabled("Lines in ffxvr_diag.log (diag_build7=1): cursor:, timing:, pan-scan:, stall, xinput set:, backbuffer:, resize. The logging and the stall watchdog follow the ini at once; the game-function hooks follow cursor_source / smooth_anchor (or diag_build7) at launch.");
         ImGui.TreePop();
     }
 }

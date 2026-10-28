@@ -826,6 +826,7 @@ bool  g_backdrop_room = false;          // last frame had painted-backdrop draws
 float g_xr_screen_width = 2.5f, g_xr_screen_dist = 2.5f, g_xr_screen_dist_placed = -1.f;
 uint32_t g_cam_uploads_frame = 0;       // perspective camera buffers seen this frame
 uint32_t g_cam3d_uploads_frame = 0;     // ... of which real cameras (not the title/intro near-2D projection)
+uint32_t g_cam3d_total = 0;             // the same, never reset (ffxvr_load_info: a frame with a real 3D camera, in flat mode too)
 // Shadow camera (research shadows-one-eye.md, fix A; design-notes "Character shadows: the light camera"). The ShadowManager
 // draws each character from straight above into its own tile of a 4096x4096 8x8 atlas. Those caster uploads carry the
 // light's view at the view slot, the light's ORTHOGRAPHIC projection in the near-variant slot (+128) and the scene's
@@ -3722,7 +3723,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         // (3D or screen) reads these, and a suspended override must still count.
         g_cam_uploads_frame++;
         const float* mp = reinterpret_cast<const float*>(p + base + 192);     // main projection: |P[0]| <= 0.2 is the intro's near-2D camera
-        if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) g_cam3d_uploads_frame++;
+        if (fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f) { g_cam3d_uploads_frame++; g_cam3d_total++; }   // _total: never reset (the loads build's load: lines; xr_tick resets the per-frame one only with the headset)
     }
     if (g_ovr_suspend) return src;              // the frame goes to the virtual screen: the game's own camera
     if (base == 0 && !g_have_PV) return src;    // no camera, and no known product this frame to look for: nothing to do
@@ -4339,7 +4340,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 22;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build)
+constexpr int FFXVR_ABI = 24;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5400,11 +5401,13 @@ static int dream_rule(int idx, const char** tag) {
 // product-only buffer). maybe_override patches that buffer for eye 1 and stores its eye-2 image in the ring like any other, but
 // ffxvr_eye2_begin uploaded eye-2 images into VS slots only: eye 2 placed the quads with its own camera and computed the UV with
 // eye 1's (about 240 px off at 960 wide: the "reflection" inside the flame). heat_haze:
-//   1 (default): for draws matching the signature (haze_match), eye2_begin also uploads the eye-2 image of every PS-bound
-//     constant buffer that has one this frame and is not bound in a VS slot (those are already uploaded); eye2_end restores eye 1's;
-//   0: those draws are skipped (not drawn in eye 1, no eye-2 pass) while the headset shows 3D; screen frames and flat mode draw them;
+//   1 (experimental; it did not fix the Luca torches in testing): for draws matching the signature (haze_match), eye2_begin also
+//     uploads the eye-2 image of every PS-bound constant buffer that has one this frame and is not bound in a VS slot (those are
+//     already uploaded); eye2_end restores eye 1's;
+//   0 (default since the loads build): those draws are skipped (not drawn in eye 1, no eye-2 pass) while the headset shows 3D;
+//     screen frames and flat mode draw them;
 //   2: as before this build (no PS uploads, no skips): the A/B baseline.
-int      g_heat_haze = 1, g_heat_haze_req = 1;          // _req: the export; applied at Present (haze_tick)
+int      g_heat_haze = 0, g_heat_haze_req = 0;          // _req: the export; applied at Present (haze_tick). Default 0 (loads build): off in the headset
 bool     g_haze_now = false;                            // set by ffxvr_on_draw for a draw matching the signature, read by eye2_begin
 EyeImage*     g_eye2_ps_slots[14] = {};                 // PS-slot images uploaded for the current eye-2 draw (heat_haze 1)
 ID3D11Buffer* g_eye2_ps_cb[14] = {};                    // ... the buffer each went into, AddRef'd until eye2_end's restore
@@ -5660,7 +5663,7 @@ static void haze_tick() {
     if (now < next) return;
     next = now + 10000;
     const HazeWin& w = g_haze_w;
-    if (w.match || w.skip || w.other || w.nearmiss) {
+    if (g_heat_haze != 0 && (w.match || w.skip || w.other || w.nearmiss)) {   // loads build: a diagnostic of the test modes 1 / 2; the default 0 writes no 10 s line
         char t[800];
         snprintf(t, sizeof(t), "haze: mode %d | matched %u draws (shader pairs %d) | PS uploads %u (no PS image %u, PS buffer = VS buffer %u, size mismatch %u) | skipped %u | rejected by rule: not product %u, blend/z-write %u, no screen copy %u, samples the glass-break capture %u | camera-kind near misses (census frames only) %u | stale ring entries dropped %u | other eye-2 draws with a PS-only image %u of %u sampled (images differ %u)%s%s",
                  g_heat_haze, w.match, g_haze_pairs_n, w.up, w.noimg, w.same, w.sizebad, w.skip, w.r3, w.r4, w.r5, w.bt, w.nearmiss, w.stale, w.other, w.probed, w.other_diff,
@@ -5669,8 +5672,9 @@ static void haze_tick() {
     }
     g_haze_w = {}; g_haze_pairs_n = 0; g_haze_other_first[0] = 0;
 }
-/// heat_haze: 1 PS images per eye on haze draws (default), 0 skipped in the headset's 3D view, 2 as before. Managed pushes it every
-/// frame; it takes effect at the next Present.
+/// heat_haze: 0 skipped in the headset's 3D view (the default since the loads build), 1 PS images per eye on haze draws
+/// (experimental: it did not fix the Luca torches in testing), 2 as before. Managed pushes it every frame; it takes effect at the
+/// next Present.
 extern "C" __declspec(dllexport) void ffxvr_haze_set(int mode) { g_heat_haze_req = (mode == 0 || mode == 2) ? mode : 1; }
 /// out: [0] heat_haze in effect, [1] matching draws last frame, [2] PS uploads last frame, [3] skipped last frame, then the session:
 /// [4] matches, [5] PS uploads, [6] no PS image, [7] PS buffer = VS buffer, [8] other draws with a PS-only image, [9] of sampled,
@@ -9160,12 +9164,23 @@ extern "C" __declspec(dllexport) int ffxvr_hook_calls() {
 //    formatting, the log write) runs with nothing suspended, into fixed static buffers. Memory is read with RPM (stacks)
 //    or plain reads of ranges checked once with range_readable (FFX.exe's .text, the lock object): Fahrenheit's stage-0
 //    debugger makes any access violation fatal, even inside __try.
-// 2. The lock release (ini load_lock_release, live, never saved: every launch starts at 0; managed ffxvr_lock_release_set
-//    every frame): 1 = around our xrWaitFrame, nothing else (LL-1: a release around the game's Present call would leave
-//    the immediate context unserialised against the main thread's lock holders: removed). Only while a battle load phase is open, only when this thread owns the lock exactly once (owner == our tid, count == 1),
-//    and only when someone waits for it or a loadPCluster is in progress. The game's own release (0x4319D0) and acquire
-//    (0x431840) are called, so the waiter count, the event and the owner / count words stay the game's; the lock is taken
-//    back before control returns to the game, which then sees exactly the state it had (owner us, count 1).
+// 2. The lock release (ini load_lock_release, live; saved; managed ffxvr_lock_release_set every frame), always around our
+//    xrWaitFrame and nothing else (LL-1: a release around the game's Present call would leave the immediate context
+//    unserialised against the main thread's lock holders: removed). Load phases (ffxvr_prof_phase: 1 battle entry, 2 battle
+//    way back, 3 an area or event map load, 4 a load from the title; load_diag.cs / load_lines.cs open and end them, at most
+//    60 s each). Modes (loads review LD2-1):
+//      0 off;
+//      1 battle loads (the default): phases 1 and 2 only, the tested case;
+//      2 all loads (a test mode): also phases 3 and 4 (load_lines.cs ends them at the first frame with the new map's camera,
+//        LD2-3), and a loadPCluster call outside any phase, but only while the game's main thread is blocked in the loader's
+//        wait-all 0x76C490 (ffxvr_prof_mark bit 2, LD2-2): the main thread was blocked at the release. It narrows the
+//        exposure but does not remove it: the wait-all can return inside the same window (the loader finishes thanks to
+//        the release) and the main thread can then take the lock mid-list; counted as kind 0's MAIN looks.
+//    Only when this thread owns the lock exactly once (owner == our tid, count == 1), and only when someone waits for it or
+//    a loadPCluster is in progress. The game's own release (0x4319D0) and
+//    acquire (0x431840) are called, so the waiter count, the event and the owner / count words stay the game's; the lock is
+//    taken back before control returns to the game, which then sees exactly the state it had (owner us, count 1). The
+//    releases are counted per load kind (ffxvr_load_info, the load: lines, the overlay).
 // ---------------------------------------------------------------------------
 
 // The Phyre render-interface lock (0x4315E0 init, 0x431850 acquire, 0x4319D0 release; checked against the disassembly).
@@ -9183,13 +9198,14 @@ static constexpr uintptr_t k_ril_lock = 0x894EE4, k_ril_acq = 0x31840, k_ril_rel
 
 // -- shared state (written by the managed side's threads, read by the watcher and the render thread) -------------------
 static volatile LONG  g_pf_mode = 0;           // 0 off, 1 the loader, 2 the loader + the render thread while the loader waits
-static volatile LONG  g_pf_phase = 0;          // 0 none, 1 battle entry, 2 way back (also arms the lock release)
+static volatile LONG  g_pf_phase = 0;          // 0 none, 1 battle entry, 2 way back, 3 area / event map load, 4 load from the title (arms the lock release; the profiler aggregates 3 and 4 with "outside battle loads")
 static volatile DWORD g_pf_phase_t = 0;        // GetTickCount at the phase's start (a phase older than 60 s is ignored, LL-8)
 static volatile LONG  g_pf_in = 0;             // the loader thread is inside an outermost loadPCluster
 static volatile DWORD g_pf_loader_tid = 0, g_pf_main_tid = 0;   // the loading thread (last non-main marker), the main thread (its own marks)
 static LONGLONG       g_pf_mark_q = 0;         // the loader's last mark-in (QPC; loader thread only)
 static volatile LONG  g_pf_win_n[3] = {}, g_pf_win_ms_sum[3] = {}, g_pf_win_ms_max[3] = {};   // loadPCluster windows per phase kind (ms)
-static volatile LONG  g_lr_mode = 0;           // load_lock_release: 0 off, 1 around our xrWaitFrame
+static volatile LONG  g_lr_mode = 0;           // load_lock_release: 0 off, 1 battle loads, 2 all loads (test)
+static volatile LONG  g_pf_main_wait = 0;      // LD2-2: the game's main thread is blocked in the loader's wait-all 0x76C490 (managed hl_wait, ffxvr_prof_mark bit 2)
 static volatile LONG  g_lr_open = 0;           // the render thread has released the lock and not yet taken it back
 static volatile DWORD g_lr_open_tick = 0;      // GetTickCount when it was released (LL-7: the watcher logs a re-acquire stuck for 1 s)
 static volatile LONG  g_lr_open_seq = 0;       // one per release
@@ -9199,6 +9215,26 @@ static HANDLE g_pf_thread = nullptr, g_pf_stop = nullptr;   // the watcher (crea
 
 struct LrStats { uint32_t n_wait, with_waiters, contended, by_loader, by_main, by_other, skip_owner, skip_count, skip_idle, bad, bins[4]; double reacq_ms, reacq_max, open_ms; };   // bins: re-acquire <= 1, 1-5, 5-11, > 11 ms (LL-15)
 static LrStats g_lr_st = {}, g_lr_total = {};  // render thread only: since the last prof block / the session
+// Loads build: the load kinds (the phase value; 0 = no load phase open, a loadPCluster call alone) and the session's releases
+// per kind, never reset (render thread only; ffxvr_load_info hands them to the managed load: lines, which take differences).
+enum : int { LK_STREAM = 0, LK_ENTRY = 1, LK_BACK = 2, LK_FIELD = 3, LK_TITLE = 4, LK_N = 5 };
+struct LrSess { uint32_t n, cont, late, bad; double reacq_ms, reacq_max; uint32_t kind_n[LK_N], kind_cont[LK_N], kind_late[LK_N], kind_by[LK_N][3]; };   // kind_by: the holder seen at the re-acquire (loader, main, other)
+static LrSess g_lr_sess = {};
+static volatile int g_lr_kind_open = LK_STREAM;   // the kind the open release was armed by (render thread writes it before g_lr_open; the watcher reads it)
+static volatile LONG g_lr_win_ticks[LK_N][4] = {};   // LD2-4: the watcher's ~1 ms looks at the lock's owner while our window is open, per kind: loader, main, other, free
+/// LD2-R-1: could a release open now (lr_release_begin's arming, without the owner checks)? The watcher looks at the owner
+/// about every 1 ms only then (or while a window is open); else it keeps its 20 ms idle rate.
+static bool lr_may_arm() {
+    if (g_lr_open != 0) return true;
+    const LONG m = g_lr_mode, ph = g_pf_phase;
+    if (m < 1) return false;
+    const bool live = ph >= 1 && ph < LK_N && GetTickCount() - g_pf_phase_t < k_pf_phase_max_ms;
+    if (live && (ph == LK_ENTRY || ph == LK_BACK)) return true;
+    return m >= 2 && (live || (g_pf_in != 0 && g_pf_main_wait > 0));
+}
+/// The lock holder's class for the release counters: 1 loader, 2 main, 3 other, 0 none. The main thread is tested first
+/// (LD2-6: before the first battle a main-thread loadPCluster could have been taken for the loader).
+static int lr_cls(DWORD o) { return o == 0 ? 0 : (o == g_main_tid || o == g_pf_main_tid) ? 2 : o == g_pf_loader_tid ? 1 : 3; }
 
 static double pf_qpc_ms() { static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f); LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
 static bool pf_phase_live() { const LONG p = g_pf_phase; return p != 0 && GetTickCount() - g_pf_phase_t < k_pf_phase_max_ms; }
@@ -9230,12 +9266,19 @@ static void ril_init() {
 static int lr_release_begin() {
     if (!g_ril_ok || g_lr_disabled || g_lr_mode < 1) return 0;
     const DWORD me = GetCurrentThreadId();
-    if (me != g_render_tid || g_lr_open != 0 || !pf_phase_live()) return 0;   // the render thread only; only in a battle load
+    if (me != g_render_tid || g_lr_open != 0) return 0;          // the render thread only
+    const LONG ph = g_pf_phase;
+    const bool live = ph >= 1 && ph < LK_N && GetTickCount() - g_pf_phase_t < k_pf_phase_max_ms;
+    const bool phase = live && (ph == LK_ENTRY || ph == LK_BACK || g_lr_mode >= 2);   // LD2-1: phases 3 / 4 only in mode 2
+    const bool in_load = g_pf_in != 0;
+    const bool stream = !phase && in_load && g_lr_mode >= 2 && g_pf_main_wait > 0;    // LD2-2: a loadPCluster alone, mode 2, the main thread blocked in the wait-all at the release (a point-in-time check)
+    if (!phase && !stream) return 0;                             // no armed load: nothing to gain (not counted: every frame on the field)
     PhyreRil* L = g_ril;
     if (L->owner != me) { g_lr_st.skip_owner++; return 0; }      // not held by us here (should not happen inside a list)
     if (L->count != 1) { g_lr_st.skip_count++; return 0; }       // held more than once: an inner holder is still active, never released
     const LONG w = L->waiters;
-    if (w <= 0 && g_pf_in == 0) { g_lr_st.skip_idle++; return 0; }   // nobody waits and no load is in progress: nothing to gain
+    if (w <= 0 && !in_load) { g_lr_st.skip_idle++; return 0; }   // nobody waits and no cluster load in progress: nothing to gain
+    g_lr_kind_open = phase ? static_cast<int>(ph) : LK_STREAM;
     if (w > 0) g_lr_st.with_waiters++;
     g_lr_open_tick = GetTickCount(); InterlockedIncrement(&g_lr_open_seq);
     InterlockedExchange(&g_lr_open, 1);
@@ -9243,7 +9286,7 @@ static int lr_release_begin() {
     if (L->owner == me) {                                        // LL-9: the release did not take effect (count was above 1 after all): keep it, stop
         InterlockedExchange(&g_lr_open, 0);
         g_ril_acq(L);                                            // back to the count we found
-        g_lr_st.bad++; g_lr_disabled = true;
+        g_lr_st.bad++; g_lr_sess.bad++; g_lr_disabled = true;
         snprintf(g_lr_disabled_why, sizeof(g_lr_disabled_why), "the release left the owner unchanged (count %ld): the lock was held more than once", static_cast<long>(L->count));
         diag("load lock: RELEASE DISABLED for the session: %s", g_lr_disabled_why);
         return 0;
@@ -9262,13 +9305,18 @@ static void lr_release_end(int y, double t_released) {
     const double ra = t2 - t1;
     g_lr_st.open_ms += t1 - t_released; g_lr_st.reacq_ms += ra; if (ra > g_lr_st.reacq_max) g_lr_st.reacq_max = ra;
     g_lr_st.bins[ra <= 1.0 ? 0 : ra <= 5.0 ? 1 : ra <= 11.0 ? 2 : 3]++;
+    LrSess& S = g_lr_sess; const int lk = g_lr_kind_open >= 0 && g_lr_kind_open < LK_N ? g_lr_kind_open : LK_STREAM;   // loads build: per kind, the session
+    S.n++; S.kind_n[lk]++; S.reacq_ms += ra; if (ra > S.reacq_max) S.reacq_max = ra;
+    if (ra > 11.0) { S.late++; S.kind_late[lk]++; }              // a late VR frame (the bins' last one)
     if (o != 0 || ra > 0.2) {
-        g_lr_st.contended++;
-        if (o != 0 && o == g_pf_loader_tid) g_lr_st.by_loader++; else if (o != 0 && (o == g_main_tid || o == g_pf_main_tid)) g_lr_st.by_main++; else if (o != 0) g_lr_st.by_other++;
+        g_lr_st.contended++; S.cont++; S.kind_cont[lk]++;
+        const int c = lr_cls(o);                                 // LD2-6: main first
+        if (c == 1) g_lr_st.by_loader++; else if (c == 2) g_lr_st.by_main++; else if (c == 3) g_lr_st.by_other++;
+        if (c >= 1) S.kind_by[lk][c - 1]++;                      // LD2-4: per kind
     }
     const DWORD me = GetCurrentThreadId();
     if (L->owner != me || L->count != 1) {                       // must never happen: repair to the game's state (owner us, count 1), then stop for the session
-        g_lr_st.bad++; g_lr_disabled = true;
+        g_lr_st.bad++; S.bad++; g_lr_disabled = true;
         snprintf(g_lr_disabled_why, sizeof(g_lr_disabled_why), "after a re-acquire the lock read owner %lu count %ld (expected %lu, 1)", static_cast<unsigned long>(L->owner), static_cast<long>(L->count), static_cast<unsigned long>(me));
         for (int k = 0; k < 64 && L->owner == me && L->count > 1; ++k) g_ril_rel(L);   // LL-9: extra holds would keep it held after the list's own release
         diag("load lock: RELEASE DISABLED for the session: %s", g_lr_disabled_why);
@@ -9430,7 +9478,7 @@ static bool pf_sample(PfStk& s, uint32_t* buf, SIZE_T cap, bool render, PfSample
     }
     return true;
 }
-static int pf_owner_cls(DWORD o) { return o == 0 ? 4 : o == g_render_tid ? 0 : o == g_pf_loader_tid ? 1 : (o == g_main_tid || o == g_pf_main_tid) ? 2 : 3; }
+static int pf_owner_cls(DWORD o) { return o == 0 ? 4 : o == g_render_tid ? 0 : (o == g_main_tid || o == g_pf_main_tid) ? 2 : o == g_pf_loader_tid ? 1 : 3; }   // LD2-6: main before loader
 static void pf_top_add(PfAgg& a, uint32_t fh, int mod) {
     const uint16_t m = static_cast<uint16_t>(mod < 0 ? 0xFFFF : mod);
     uint32_t h = (fh * 2654435761u) ^ (m * 40503u);
@@ -9501,14 +9549,20 @@ static int pf_classify_render(const PfSample& s) {
 /// Once per window: the holder's tid and its innermost FFX return addresses (two short suspensions: the first finds its
 /// stack range, the second copies it), on one log line.
 static LONG g_pf_stuck_seq = 0;
+static int g_pf_stuck_n = 0;   // lines written for the current window (LD2-8: one at 1 s, one more at 5 s)
 static void pf_check_stuck() {
-    if (g_lr_open == 0 || GetTickCount() - g_lr_open_tick < 1000u) return;
-    const LONG seq = g_lr_open_seq; if (seq == g_pf_stuck_seq) return;
-    g_pf_stuck_seq = seq;
+    if (g_lr_open == 0) return;
+    const DWORD age = GetTickCount() - g_lr_open_tick;
+    if (age < 1000u) return;
+    const LONG seq = g_lr_open_seq;
+    if (seq != g_pf_stuck_seq) { g_pf_stuck_seq = seq; g_pf_stuck_n = 0; }
+    if (g_pf_stuck_n >= 2 || (g_pf_stuck_n == 1 && age < 5000u)) return;
+    const bool second = g_pf_stuck_n == 1; g_pf_stuck_n++;
     const DWORD o = g_ril != nullptr ? g_ril->owner : 0;
-    char line[512]; int len = 0; const int cap = static_cast<int>(sizeof(line)); char* out = line;
+    char line[640]; int len = 0; const int cap = static_cast<int>(sizeof(line)); char* out = line;
     #define PF_L(...) do { if (len < cap) { const int k_ = snprintf(out + len, static_cast<size_t>(cap - len), __VA_ARGS__); if (k_ > 0) len = (len + k_ < cap) ? len + k_ : cap - 1; } } while (0)
-    PF_L("load lock: the render thread has waited %lu ms to take the lock back; holder tid %lu (%s, %ld waiting)", static_cast<unsigned long>(GetTickCount() - g_lr_open_tick), static_cast<unsigned long>(o),
+    PF_L("load lock: the render thread has waited %lu ms to take the lock back%s; holder tid %lu (%s, %ld waiting)", static_cast<unsigned long>(age),
+         second ? " (STILL waiting after 5 s)" : " (still waiting; a slow load can do this: a hang only if an xr: STALL ... 'lock re-acquire' line follows)", static_cast<unsigned long>(o),
          k_pf_oname[pf_owner_cls(o)], g_ril != nullptr ? static_cast<long>(g_ril->waiters) : -1L);
     if (g_pf_mod_n == 0) pf_mods_build();   // LL-R-2: the sampler may never have run (diag_load_prof=0); nothing is suspended here
     if (o != 0 && o != GetCurrentThreadId()) {
@@ -9662,9 +9716,14 @@ static DWORD WINAPI pf_watch(LPVOID) {
             else { CancelWaitableTimer(timer); armed = false; }
         }
         DWORD w;
+        const bool may = lr_may_arm();   // LD2-4 / LD2-R-1: a release can open (or is open): look at the owner about every 1 ms
         if (act && armed) { HANDLE hs[2] = { g_pf_stop, timer }; w = WaitForMultipleObjects(2, hs, FALSE, 50); }
-        else w = WaitForSingleObject(g_pf_stop, act ? 1 : 20);
+        else w = WaitForSingleObject(g_pf_stop, act || may ? 1 : 20);
         if (w == WAIT_OBJECT_0) break;
+        if (g_lr_open != 0 && g_ril != nullptr) {   // LD2-4: who holds the lock inside our window, per kind (plain reads of the checked lock object)
+            const int k = g_lr_kind_open, c = lr_cls(g_ril->owner);
+            if (k >= 0 && k < LK_N) InterlockedIncrement(&g_lr_win_ticks[k][c == 0 ? 3 : c - 1]);
+        }
         pf_service(true);
         pf_check_stuck();   // LL-7
         const LONG ph = g_pf_phase;
@@ -9705,11 +9764,17 @@ extern "C" __declspec(dllexport) void ffxvr_prof_set(int mode) {
     if (m > 0) pf_start("diag_load_prof");
 }
 /// The loader's outermost loadPCluster (managed hl_pcl): bit 0 = in (1 before the original, 0 after it, in a finally),
-/// bit 1 = the call is on the game's main thread (not sampled; it names the main thread for the owner table).
+/// bit 1 = the call is on the game's main thread (not sampled; it names the main thread for the owner table; managed also
+/// sends a bare bit 1 from the map free, LD2-6); bit 2 = the main thread enters (bit 0 = 1) or leaves the loader's blocking
+/// wait-all (LD2-2: arms mode 2's loadPCluster-alone release).
 extern "C" __declspec(dllexport) void ffxvr_prof_mark(int flags) {
     const DWORD t = GetCurrentThreadId();
+    if (flags & 4) {   // LD2-2: bit 2 = the main thread's blocking wait-all (bit 0: 1 entering, 0 left)
+        if (flags & 1) InterlockedIncrement(&g_pf_main_wait); else if (g_pf_main_wait > 0) InterlockedDecrement(&g_pf_main_wait);
+        return;
+    }
     if (flags & 2) { if (g_pf_main_tid != t) g_pf_main_tid = t; return; }
-    if (t == g_render_tid) return;
+    if (t == g_render_tid || t == g_pf_main_tid || t == g_main_tid) return;   // LD2-6: the main thread is never the loader
     if (g_pf_loader_tid != t) InterlockedExchange(reinterpret_cast<volatile LONG*>(&g_pf_loader_tid), static_cast<LONG>(t));
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const LONG ph = g_pf_phase; const int wi = ph >= 0 && ph <= 2 ? ph : 0;
@@ -9721,9 +9786,11 @@ extern "C" __declspec(dllexport) void ffxvr_prof_mark(int flags) {
     InterlockedExchangeAdd(&g_pf_win_ms_sum[wi], d);
     for (LONG m = g_pf_win_ms_max[wi]; d > m; m = g_pf_win_ms_max[wi]) if (InterlockedCompareExchange(&g_pf_win_ms_max[wi], d, m) == m) break;
 }
-/// The battle load phase (managed, any thread): v > 0 opens phase v (1 entry, 2 way back); -v ends phase v if it is the
-/// current one; 0 ends any. The phase also arms the lock release.
+/// The load phase (managed, any thread): v > 0 opens phase v (1 battle entry, 2 battle way back, 3 an area or event map load,
+/// 4 a load from the title; a newer phase replaces an open one); -v ends phase v if it is the current one; 0 ends any. The
+/// phase also arms the lock release. A value above 4 is ignored.
 extern "C" __declspec(dllexport) void ffxvr_prof_phase(int v) {
+    if (v >= LK_N || v <= -LK_N) return;
     if (v > 0) { g_pf_phase_t = GetTickCount(); InterlockedExchange(&g_pf_phase, v); }
     else if (v < 0) InterlockedCompareExchange(&g_pf_phase, 0, -v);
     else InterlockedExchange(&g_pf_phase, 0);
@@ -9744,26 +9811,55 @@ extern "C" __declspec(dllexport) void ffxvr_prof_report(int phase, const char* l
     InterlockedIncrement(&g_pf_req_w);
     if (g_pf_thread == nullptr) pf_service(false);   // no watcher: the render thread formats and writes (or keeps it for the next frame)
 }
-/// load_lock_release (render thread, every frame from push_all): 0 off, 1 around our xrWaitFrame (anything else is 0:
-/// LL-1). Returns 1 while the release can work.
+/// load_lock_release (render thread, every frame from push_all): 0 off, 1 battle loads, 2 all loads (test; anything else is
+/// 0: LL-1). Returns 1 while the release can work.
 extern "C" __declspec(dllexport) int ffxvr_lock_release_set(int mode) {
     ril_init();
-    const LONG m = mode == 1 ? 1 : 0;
-    if (m == 1) pf_start("load_lock_release=1: the stuck re-acquire check (LL-7) runs whenever the release is on");   // LL-R-2
-    if (g_lr_mode != m) { InterlockedExchange(&g_lr_mode, m); diag("load lock: load_lock_release=%ld%s", static_cast<long>(m), g_ril_ok ? "" : " (unavailable: the lock signature did not match)"); }
+    const LONG m = mode == 1 || mode == 2 ? mode : 0;
+    if (m >= 1) pf_start("load_lock_release on: the stuck re-acquire check (LL-7) runs whenever the release is on");   // LL-R-2
+    if (g_lr_mode != m) { InterlockedExchange(&g_lr_mode, m); diag("load lock: load_lock_release=%ld (%s)%s", static_cast<long>(m), m == 2 ? "all loads, test" : m == 1 ? "battle loads" : "off", g_ril_ok ? "" : " (unavailable: the lock signature did not match)"); }
     return g_ril_ok && !g_lr_disabled ? 1 : 0;
 }
 /// The overlay's line (render thread). Returns the mode.
 extern "C" __declspec(dllexport) int ffxvr_lock_release_status(char* buf, int n) {
     if (buf != nullptr && n > 0) {
-        const LrStats& t = g_lr_total;
-        snprintf(buf, static_cast<size_t>(n), "%s%s | this session: %u releases at xrWaitFrame, %u contended re-acquires (max %.1f ms) | now: %s | profiler %s",
-                 g_ril_ok ? "lock signature ok" : g_ril_why, g_lr_disabled ? " | DISABLED for the session (reason at the end)" : "", t.n_wait + g_lr_st.n_wait, t.contended + g_lr_st.contended,
-                 g_lr_st.reacq_max > t.reacq_max ? g_lr_st.reacq_max : t.reacq_max, pf_phase_live() ? (g_pf_phase == 1 ? "battle entry" : "way back") : "no battle load",
+        static const char* const ph_name[LK_N] = { "?", "battle entry", "battle way back", "area / event map load", "load from the title" };
+        const LrSess& S = g_lr_sess; const LONG ph = g_pf_phase;
+        snprintf(buf, static_cast<size_t>(n), "%s%s | mode %ld | this session: %u releases at xrWaitFrame (battle entry %u, way back %u, area / event map %u, from the title %u, a loadPCluster alone %u), %u contended re-acquires (max %.1f ms; %u over 11 ms) | now: %s%s | profiler %s",
+                 g_ril_ok ? "lock signature ok" : g_ril_why, g_lr_disabled ? " | DISABLED for the session (reason at the end)" : "", static_cast<long>(g_lr_mode), S.n, S.kind_n[LK_ENTRY], S.kind_n[LK_BACK], S.kind_n[LK_FIELD], S.kind_n[LK_TITLE], S.kind_n[LK_STREAM],
+                 S.cont, S.reacq_max, S.late, pf_phase_live() && ph >= 1 && ph < LK_N ? ph_name[ph] : "no load phase", g_pf_in != 0 ? ", a loadPCluster in progress" : "",
                  g_pf_thread == nullptr ? "off" : g_pf_mode == 0 ? "idle (diag_load_prof=0)" : "on");
         if (g_lr_disabled) { const size_t l = strlen(buf); snprintf(buf + l, static_cast<size_t>(n) - l, " (%s)", g_lr_disabled_why); }
     }
     return static_cast<int>(g_lr_mode);
+}
+/// Loads build (render thread, once per Present from managed ld_present): what the load: lines need. out: [0] real 3D camera
+/// uploads so far (never reset: a difference > 0 between two Presents means a 3D frame), [1] the scene-pass draws of the frame
+/// being presented (managed calls this inside Present, before begin_frame moves the count to g_scene_draws),
+/// [2] a hash of the game's last view matrix (a camera change), [3] the lock release can act now (load_lock_release=1, the
+/// signature matched, not disabled), then the session's releases: [4] all, [5] contended re-acquires, [6] re-acquires over
+/// 11 ms (late VR frames), [7] re-acquire time in all (microseconds), [8] the longest re-acquire (microseconds), [9] bad,
+/// [10..14] releases per kind (0 a loadPCluster alone, 1 battle entry, 2 way back, 3 area / event map, 4 from the title),
+/// [15..19] contended per kind, [20..24] over 11 ms per kind; LD2-4: [25 + 3k + j] the holder seen at kind k's contended
+/// re-acquires (j: 0 loader, 1 main, 2 other), [40 + 4k + j] the watcher's ~1 ms looks at the owner while kind k's window was
+/// open (j: 0 loader, 1 main, 2 other, 3 free). [3] is the mode when the release can act (1 battle loads, 2 all loads), else 0.
+/// Returns the number of values (60); fills at most n.
+extern "C" __declspec(dllexport) int ffxvr_load_info(int* out, int n) {
+    uint32_t h = 2166136261u;   // FNV-1a over the view rows (our own copy: no game memory)
+    const uint8_t* vb = reinterpret_cast<const uint8_t*>(g_cam_last_view);
+    for (size_t i = 0; i < sizeof(g_cam_last_view); ++i) { h ^= vb[i]; h *= 16777619u; }
+    const LrSess& S = g_lr_sess;
+    auto us = [](double ms) { const double u = ms * 1000.0; return u >= 2147483647.0 ? 2147483647 : u <= 0.0 ? 0 : static_cast<int>(u); };
+    int v[10 + 3 * LK_N + 3 * LK_N + 4 * LK_N] = { static_cast<int>(g_cam3d_total), static_cast<int>(g_scene_live_draws), static_cast<int>(h), (g_ril_ok && !g_lr_disabled) ? static_cast<int>(g_lr_mode) : 0,
+                             static_cast<int>(S.n), static_cast<int>(S.cont), static_cast<int>(S.late), us(S.reacq_ms), us(S.reacq_max), static_cast<int>(S.bad) };
+    for (int k = 0; k < LK_N; ++k) {
+        v[10 + k] = static_cast<int>(S.kind_n[k]); v[10 + LK_N + k] = static_cast<int>(S.kind_cont[k]); v[10 + 2 * LK_N + k] = static_cast<int>(S.kind_late[k]);
+        for (int j = 0; j < 3; ++j) v[10 + 3 * LK_N + 3 * k + j] = static_cast<int>(S.kind_by[k][j]);
+        for (int j = 0; j < 4; ++j) v[10 + 6 * LK_N + 4 * k + j] = static_cast<int>(g_lr_win_ticks[k][j]);
+    }
+    const int cnt = static_cast<int>(sizeof(v) / sizeof(v[0]));
+    if (out != nullptr) for (int i = 0; i < n && i < cnt; ++i) out[i] = v[i];
+    return cnt;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {

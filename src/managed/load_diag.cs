@@ -7,12 +7,17 @@ namespace FFXVR;
 // Part C, whose corrections are applied; the review build-load-review.md checked the first nine prologues, conventions
 // and threads against the disassembly).
 //
-// diag_load (default 1; hooks at the next launch): per battle, the phases of the way in and the way back, timed with QPC,
-// one summary line each in ffxvr_diag.log ("load: battle N ..."), with the HD cluster loads split into open / read / parse
-// / GPU create and the pool bytes of the misses, the chr cache's entries in use, the game pool's reserved / committed
-// counters and the address space (total free, largest free block, largest free block below 2 GB), plus the native
-// low-2 GB reservation report ("va:" lines) at each battle start and end and at a zone change. The HD cluster cache
-// (hd_cache.cs) rides on these hooks. battle_cache_models (the chr-flush skip) is retired: its ini key is read and ignored.
+// The load hooks below are installed at launch when any feature that needs them is on then (loads build): diag_load_lines
+// (default 1: the load: lines, load_lines.cs), load_lock_release (default 1: its load phases and loadPCluster windows),
+// hd_cluster_cache (default 0: its acquire and releases ride on them) or diag_load. Per battle, the phases of the way in and the
+// way back, timed with QPC, one summary line each in ffxvr_diag.log ("load: battle N ..."), with the HD cluster loads split
+// into open / read / parse / GPU create and the pool bytes of the misses; load_lines.cs adds the area / event / save / title
+// loads, the Present tracker and the lock release's counts. diag_load (default 0 since the loads build; at once for the
+// lines, the hooks follow the features above) adds the expensive parts: the chr cache's entries in use (100 guarded reads a
+// sample), the game pool's reserved / committed counters and the address space (a VirtualQuery walk of the whole space:
+// total free, largest free block, largest free block below 2 GB) at each battle start and end, the wait-all callers' stack
+// walks, the HD cache's HDC: line per map free with the cache off, plus the native low-2 GB reservation report ("va:" lines,
+// with diag_va_log). battle_cache_models (the chr-flush skip) is retired: its ini key is read and ignored.
 //
 // Hooks (FhUtil offsets; every original always runs exactly once; recording never throws):
 //   0x381590 battle teardown        cdecl void()            (main)   the way back starts (only when battle_state != 0)
@@ -44,7 +49,7 @@ namespace FFXVR;
 // encounter, 2 = script battle request 0x781C90) at 0x78107E. Sg_MainLoop's entry is never touched.
 public sealed unsafe partial class FFXVRModule {
 
-    private bool _diag_load = true;            // ini diag_load (hooks at the next launch)
+    private bool _diag_load = false;           // ini diag_load (loads build: default 0; the expensive parts of the load lines, at once)
     private string _ld_status = "not set up";
     private bool _ld_queued, _ld_hooked, _ld_any;   // the nine core hooks all queued (the HD cache needs them) / at least one (the summary lines run with what is there, LD-8)
     private bool _ld_open_q, _ld_read_q, _ld_gpu_q, _ld_bytes_q;   // HC-11: which segment hooks queued (for the expected-mask line); _ld_bytes_q = both pool hooks
@@ -134,7 +139,11 @@ public sealed unsafe partial class FFXVRModule {
     private void ld_init() {
         if (_ld_queued) return;
         _ld_queued = true;
-        if (!_diag_load) { _ld_status = "off (ffxvr.ini diag_load=0): no load-timing hook; the HD cluster cache needs them too"; _hc_status = "off (diag_load=0)"; _logger.Info("load diagnostics: " + _ld_status); return; }
+        // Loads build: the hooks belong to the features that need them, not to diag_load (which only adds the expensive parts)
+        if (!(_diag_load_lines || _load_lock_release != 0 || _hd_cluster_cache || _diag_load)) {
+            _ld_status = "off: no load hook (diag_load_lines, load_lock_release, hd_cluster_cache and diag_load were all 0 at launch; the hooks follow them at the next launch)";
+            _hc_status = "off (no load hooks: one of diag_load_lines, load_lock_release, hd_cluster_cache at launch)"; _logger.Info("load diagnostics: " + _ld_status); return;
+        }
         if (!_native_ok || _fn_safe_read == null || _fn_diag_line == null) { _ld_status = "off (the native helper did not load)"; _hc_status = "off (no native helper)"; _logger.Info("load diagnostics: " + _ld_status); return; }
         _hl_teardown = hl_teardown; _hl_mapload = hl_mapload; _hl_mapfree = hl_mapfree; _hl_build = hl_build; _hl_flush = hl_flush;
         _hl_wait = hl_wait; _hl_model = hl_model; _hl_motion = hl_motion; _hl_pcl = hl_pcl;
@@ -231,7 +240,7 @@ public sealed unsafe partial class FFXVRModule {
     }
     private int hl_mapload(int kind, int map, int p3) {
         dl_iii o = System.Threading.Volatile.Read(ref _ol_mapload) ?? d7_resolve_main(ref _ol_mapload, _al_mapload, _hl_mapload!);
-        try { seen(2); if (_ld_main_tid == 0) _ld_main_tid = Environment.CurrentManagedThreadId; ld_map_request(kind, map); } catch { _ld_faults++; _hc_p_valid = false; }   // HC-R-5: the main thread id is captured once, here (0x909A20's only callers: the battle state code and MAPREG)
+        try { seen(2); ld_note_main(); ld_map_request(kind, map); } catch { _ld_faults++; _hc_p_valid = false; }   // HC-R-5: the main thread id (0x909A20's only callers: the battle state code and MAPREG); LD2-6: also at the map free
         _ld_depth_map++;
         int r;
         try { r = o(kind, map, p3); } finally { _ld_depth_map--; _hc_p_valid = false; }   // its map free has used it (or there was none)
@@ -239,16 +248,17 @@ public sealed unsafe partial class FFXVRModule {
     }
     private int hl_mapfree() {
         dl_v o = System.Threading.Volatile.Read(ref _ol_mapfree) ?? d7_resolve_main(ref _ol_mapfree, _al_mapfree, _hl_mapfree!);
-        long t0 = now(); bool mine = _ld_depth_map > 0;
-        try { seen(4); if (mine) { int fill = ld_cache_fill(out _ld_locked); if (_ld_cur_entry) _ld_fill_in0 = fill; else _ld_fill_out0 = fill; } } catch { _ld_faults++; }
+        long t0 = now(); bool mine = _ld_depth_map > 0, opened = false;
+        try { seen(4); ld_note_main(); if (mine && _diag_load) { int fill = ld_cache_fill(out _ld_locked); if (_ld_cur_entry) _ld_fill_in0 = fill; else _ld_fill_out0 = fill; } } catch { _ld_faults++; }
+        if (!mine) { try { opened = fl_request(t0); } catch { _ld_faults++; } }   // loads build: an area / event map / save / title load starts here (load_lines.cs)
         _ld_depth_free++;
         int r;
-        try { r = o(); } finally { _ld_depth_free--; }
+        try { r = o(); } finally { _ld_depth_free--; if (opened) vw(ref _fl_t_free_done, now()); }
         long dt = now() - t0; lt_add(LT.free_n, 1); lt_add(LT.free_t, dt);
         long t1 = now();
         try { hc_after_free(mine); } catch { _ld_faults++; }   // the HD cache: releases (after its own render flush), budget, the HDC: line
         lt_add(LT.hc_t, now() - t1);
-        if (mine) { try { int fill = ld_cache_fill(out _ld_locked); if (_ld_cur_entry) { vw(ref _ld_t_free_in, dt); _ld_fill_in1 = fill; } else { vw(ref _ld_t_free_out, dt); _ld_fill_out1 = fill; } } catch { _ld_faults++; } }
+        if (mine) { try { int fill = _diag_load ? ld_cache_fill(out _ld_locked) : -1; if (_ld_cur_entry) { vw(ref _ld_t_free_in, dt); _ld_fill_in1 = fill; } else { vw(ref _ld_t_free_out, dt); _ld_fill_out1 = fill; } } catch { _ld_faults++; } }
         return r;
     }
     private int hl_build() {
@@ -273,11 +283,13 @@ public sealed unsafe partial class FFXVRModule {
         int ctx = 0; long t0 = now(); uint c0 = 0, c1 = 0;
         try {
             seen(32); ctx = ld_wait_begin(t0);   // HC-R-5: the wait-all has ~25 callers; it no longer names the main thread
-            var gc = _fn_game_callers; if (gc != null) { uint* cs = stackalloc uint[2]; int n = gc(cs, 2); if (n > 0) c0 = cs[0]; if (n > 1) c1 = cs[1]; }   // the caller (and its caller), as Ghidra VAs; 0 = the walk did not reach FFX.exe
+            var gc = _fn_game_callers; if (gc != null && _diag_load) { uint* cs = stackalloc uint[2]; int n = gc(cs, 2); if (n > 0) c0 = cs[0]; if (n > 1) c1 = cs[1]; }   // the caller (and its caller), as Ghidra VAs; 0 = the walk did not reach FFX.exe (or diag_load off: no walk)
         } catch { _ld_faults++; }
         if (ctx == 1) _ld_in_start_wait = true;   // LD-4: the render thread's "ended before live" timer waits for this
+        int mt = ld_main_tid(); bool mw = mt != 0 && Environment.CurrentManagedThreadId == mt;   // LD2-2: the main thread blocked here arms mode 2's loadPCluster-alone release
+        if (mw) lp_wait_mark(1);
         int r;
-        try { r = o(mode); } finally { if (ctx == 1) { vw(ref _ld_t_wait_end, now()); _ld_in_start_wait = false; } }
+        try { r = o(mode); } finally { if (ctx == 1) { vw(ref _ld_t_wait_end, now()); _ld_in_start_wait = false; } if (mw) lp_wait_mark(0); }
         try { long dt = now() - t0; lt_add(LT.wait_n, 1); lt_add(LT.wait_t, dt); int i = _ld_wn; _ld_wctx[i & 15] = ctx; _ld_wtick[i & 15] = dt; _ld_wcall[(i & 15) * 2] = c0; _ld_wcall[(i & 15) * 2 + 1] = c1; _ld_wn = i + 1; if (ctx == 1) vw(ref _ld_t_start_wait, dt); } catch { _ld_faults++; }
         return r;
     }
@@ -299,7 +311,7 @@ public sealed unsafe partial class FFXVRModule {
         seen(256);
         bool outer = t_hc_depth == 0;                // a load nested inside a load belongs to the outer one's window
         if (outer) { try { hc_win_open(); } catch { _ld_faults++; } }
-        bool on_main = outer && _ld_main_tid != 0 && Environment.CurrentManagedThreadId == _ld_main_tid;
+        int mt = ld_main_tid(); bool on_main = outer && mt != 0 && Environment.CurrentManagedThreadId == mt;   // LD2-6: known from the first map free (the title's load), else the job join's
         if (outer) lp_mark(on_main, 1);              // load lock build: the native profiler's window (and the lock release's "a load is in progress")
         long t0 = now();
         t_hc_depth++;
@@ -308,7 +320,7 @@ public sealed unsafe partial class FFXVRModule {
         long dt = now() - t0;
         try {
             lt_add(LT.pcl_n, 1); lt_add(LT.pcl_t, dt);
-            if (Environment.CurrentManagedThreadId == _ld_main_tid) lt_add(LT.pcl_main_n, 1);
+            if (mt != 0 && Environment.CurrentManagedThreadId == mt) lt_add(LT.pcl_main_n, 1);
             if (dt * 10000 < System.Diagnostics.Stopwatch.Frequency) lt_add(LT.pcl_fast_n, 1);   // < 0.1 ms: a ClusterManager hit (no I/O)
             if (outer) hc_after_load(o, self, path, r, dt);   // the segments; the cache's acquire (one more call of o, a hit)
         } catch { _ld_faults++; }
@@ -361,6 +373,15 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     // -- main-thread helpers --------------------------------------------------------------------------------------------------
+    /// <summary>LD2-6: the game's main thread, captured at the first map load or map free (both run only there; the boot's title
+    /// load frees a map long before the first battle), and named to the native side once (its lock classes and loader marks).</summary>
+    private void ld_note_main() {
+        if (_ld_main_tid != 0) return;
+        _ld_main_tid = Environment.CurrentManagedThreadId;
+        lp_mark(true, 0);   // ffxvr_prof_mark(2): g_pf_main_tid
+    }
+    /// <summary>The main thread's managed id: ours, else the job join's (build 7), else 0 (unknown yet).</summary>
+    private int ld_main_tid() => _ld_main_tid != 0 ? _ld_main_tid : _d7_join_mtid;
     /// <summary>The blocking wait's context: 1 = MsBattleExe's (battle_state 0 and a pending request: the battle starts here),
     /// 2 = the teardown's, 3 = inside a map load, else 10 + battle_state.</summary>
     private int ld_wait_begin(long t0) {
@@ -373,7 +394,7 @@ public sealed unsafe partial class FFXVRModule {
             vw(ref _ld_t_start, t0); vw(ref _ld_t_start_wait, 0); vw(ref _ld_t_wait_end, 0);
             ld_reset_in();
             lt_snap(_lt_base_in); _ld_wn_in = _ld_wn;
-            string? va = null; try { va = ld_memory(); } catch { _ld_faults++; }   // main thread, before the wait blocks (not the render thread's transition frames)
+            string? va = null; if (_diag_load) { try { va = ld_memory(); } catch { _ld_faults++; } }   // main thread, before the wait blocks (not the render thread's transition frames); diag_load only
             System.Threading.Volatile.Write(ref _ld_va_in_main, va);
             lp_phase(1);   // load lock build: the entry phase (profiler samples, the lock release armed) until the entry's load: line
             _ld_start_seq++;
@@ -428,12 +449,13 @@ public sealed unsafe partial class FFXVRModule {
     }
     private void ld_present_inner() {
         hc_present();   // the HD cache's HDC: lines (one per map free, written on the main thread)
+        long t = now(), f = System.Diagnostics.Stopwatch.Frequency;
+        li_present(t);  // loads build (load_lines.cs): the Present tracker, the lock release's counts, the area / event / save / title loads
         if (_ld_va_late > 0 && --_ld_va_late == 0) ld_va_in_late(false);   // BT-8
         if (!_ld_checked_waitptr) {   // the loader's function table at 0x2310C40: +8 must be the wait we hooked (MsBattleExe calls [0x2310C48])
             nint fp = FhUtil.get_at<nint>(0x1F10C48);
             if (fp != 0) { _ld_checked_waitptr = true; d7_log(I($"load diagnostics: loader wait-all pointer [0x2310C48] = 0x{(long)fp:X} (hooked 0x{(long)_al_wait:X}): {(fp == _al_wait ? "match" : "MISMATCH: the battle-start and teardown waits will not be seen")}")); }
         }
-        long t = now(), f = System.Diagnostics.Stopwatch.Frequency;
         sbyte bst = FhUtil.get_at<sbyte>(0xD2A8E0);
         int ss = _ld_start_seq, ts = _ld_tear_seq;
         if (_ld_phase == 0 && ts != _ld_seen_tear) { _ld_seen_tear = ts; lp_phase(-2); }   // LL-8: a teardown with no way back to follow (the battle ended before live): its phase ends
@@ -444,29 +466,34 @@ public sealed unsafe partial class FFXVRModule {
                 _ld_rkind = by_wait ? _ld_kind : 0;   // LD-3: the render thread keeps its own copy and never writes the main thread's
                 if (!by_wait) { _ld_rstart = t; lt_snap(_lt_base_in); _ld_wn_in = _ld_wn; lp_phase(1); } else _ld_rstart = vr(ref _ld_t_start);   // load lock build: a start not seen in the wait opens the entry phase here
                 _ld_phase = 1; _ld_battle_n++; Array.Clear(_ld_t_state); _ld_countdown = 0;
+                trk_reset(ref _trk_in, t, _li_frame_prev); Array.Copy(_li_now, _li_in, k_li_n);   // loads build: the entry's Presents and lock releases
                 _ld_fill_peak = _ld_fill_live = _ld_fill_tear = -1; _ld_table_full = false; _ld_fill_tick = 0;
                 _ld_field_name = map_name(); _ld_field_id = FhUtil.get_at<short>(0xD2CA94);
                 string? va = by_wait ? System.Threading.Volatile.Read(ref _ld_va_in_main) : null;   // the main thread's walk (ld_wait_begin)
                 System.Threading.Volatile.Write(ref _ld_va_in_main, null);
-                _ld_va_in_defer = va == null; _ld_va_late = 0;
+                _ld_va_in_defer = _diag_load && va == null; _ld_va_late = 0;   // loads build: the address-space walk only with diag_load
                 _ld_va_why = by_wait ? "the main thread's walk at the start failed" : "the start was not seen in the wait";
-                _ld_va_in = va ?? I($"(put off: {_ld_va_why}; logged on its own line 30 Presents after live)");
+                _ld_va_in = va ?? (_diag_load ? I($"(put off: {_ld_va_why}; logged on its own line 30 Presents after live)") : "");
                 if (bt_active()) _ld_va_rep_defer = true;   // the glass break is on screen: the ntdll report (opt-in) waits for live
                 else { _ld_va_rep_defer = false; va_report(I($"battle {_ld_battle_n} start")); }   // the low-2 GB reservations since the last report, by caller
             }
         }
         if (_ld_phase == 1 || _ld_phase == 2) {   // LD-2: the table during the battle (sampled every 30 Presents, and at live / teardown)
-            if (++_ld_fill_tick >= 30) { _ld_fill_tick = 0; ld_sample_fill(); }
+            if (_diag_load && ++_ld_fill_tick >= 30) { _ld_fill_tick = 0; ld_sample_fill(); }   // diag_load only (100 guarded reads)
         }
         if (_ld_phase == 1) {
             if (bst >= 0 && bst < 64 && _ld_t_state[bst] == 0) _ld_t_state[bst] = t;
             if (FhUtil.get_at<byte>(0xD2A918) != 0) _ld_countdown = Math.Max(_ld_countdown, FhUtil.get_at<byte>(0xD2A919));
             long we = vr(ref _ld_t_wait_end), since = Math.Max(_ld_rstart, we);
-            if (bst == 1) { _ld_t_live = t; _ld_fill_live = ld_sample_fill(); ld_log_in(); _ld_phase = 2; _ld_seen_tear = ts; if (_ld_va_in_defer || _ld_va_rep_defer) _ld_va_late = 30; }   // BT-8: not on the release frame
+            if (bst == 1) { _ld_t_live = t; _ld_fill_live = _diag_load ? ld_sample_fill() : -1; ld_log_in(); _ld_phase = 2; _ld_seen_tear = ts; if (_ld_va_in_defer || _ld_va_rep_defer) _ld_va_late = 30; }   // BT-8: not on the release frame
             else if (bst == 0 && !_ld_in_start_wait && t - since > f) { ld_va_in_late(true); ld_log_in(); _ld_phase = 0; }   // no transition on screen: at once, into the line   // ended before it went live (LD-4: never during the start wait, and counted from its end)
         }
         else if (_ld_phase == 2) {
-            if (ts != _ld_seen_tear) { _ld_seen_tear = ts; _ld_phase = 3; _ld_idle_frames = 0; _ld_fill_tear = ld_sample_fill(); _ld_va_out = ld_memory(); va_report(I($"battle {_ld_battle_n} end")); }
+            if (ts != _ld_seen_tear) {
+                _ld_seen_tear = ts; _ld_phase = 3; _ld_idle_frames = 0;
+                trk_reset(ref _trk_out, t, _li_frame_prev); Array.Copy(_li_now, _li_out, k_li_n);   // loads build: the way back's Presents and lock releases
+                _ld_fill_tear = _diag_load ? ld_sample_fill() : -1; _ld_va_out = _diag_load ? ld_memory() : ""; va_report(I($"battle {_ld_battle_n} end"));
+            }
             else if (bst == 0 && t - _ld_t_live > 2 * f) _ld_phase = 0;   // over without a teardown seen (no way-back line)
         }
         else if (_ld_phase == 3) {
@@ -514,14 +541,16 @@ public sealed unsafe partial class FFXVRModule {
             int c = _ld_wctx[i & 15];
             string name = c == 1 ? "MsBattleExe" : c == 2 ? "teardown" : c == 3 ? "map load" : I($"state {c - 10}");
             uint c0 = _ld_wcall[(i & 15) * 2], c1 = _ld_wcall[(i & 15) * 2 + 1];
-            sb.Append(sb.Length == 0 ? "" : ", ").Append(I($"{name} {ms(_ld_wtick[i & 15]):F0} (from 0x{c0:X}{(c1 != 0 ? I($" < 0x{c1:X}") : "")})"));
+            sb.Append(sb.Length == 0 ? "" : ", ").Append(I($"{name} {ms(_ld_wtick[i & 15]):F0}")).Append(c0 != 0 ? I($" (from 0x{c0:X}{(c1 != 0 ? I($" < 0x{c1:X}") : "")})") : "");   // the callers only with diag_load (a stack walk per wait)
         }
         if (to - from > 6) sb.Append(I($", +{to - from - 6} more"));
         return sb.ToString();
     }
     private long tst(int s) => s >= 0 && s < 64 ? _ld_t_state[s] : 0;
     private void ld_log_in() {
-        if (!_ld_seen_logged) { _ld_seen_logged = true; int exp = 0x1FF | (_ld_open_q ? 0x200 : 0) | (_ld_read_q ? 0x400 : 0) | (_ld_gpu_q ? 0x800 : 0) | (_ld_bytes_q ? 0x3000 : 0) | (_pr_q ? 0xC000 : 0); d7_log(I($"load diagnostics: hooks seen working so far 0x{seen_mask:X} of the queued 0x{exp:X} (1 teardown, 2 map load, 4 map free, 8 build, 16 flush, 32 wait, 64 model, 128 motion, 256 loadPCluster, 512 open, 1024 read, 2048 post fixups, 4096 pool alloc, 8192 pool free, 16384 texture section, 32768 texture create)")); }
+        _trk_in.on = false;
+        if (!(_diag_load_lines || _diag_load) || _fn_diag_line == null) { lp_report(1, I($"battle {_ld_battle_n} entry"), _lt_base_in); return; }   // loads build: no line, but the entry phase still ends
+        if (_diag_load && !_ld_seen_logged) { _ld_seen_logged = true; int exp = 0x1FF | (_ld_open_q ? 0x200 : 0) | (_ld_read_q ? 0x400 : 0) | (_ld_gpu_q ? 0x800 : 0) | (_ld_bytes_q ? 0x3000 : 0) | (_pr_q ? 0xC000 : 0); d7_log(I($"load diagnostics: hooks seen working so far 0x{seen_mask:X} of the queued 0x{exp:X} (1 teardown, 2 map load, 4 map free, 8 build, 16 flush, 32 wait, 64 model, 128 motion, 256 loadPCluster, 512 open, 1024 read, 2048 post fixups, 4096 pool alloc, 8192 pool free, 16384 texture section, 32768 texture create)")); }
         long t0 = _ld_rstart, live = _ld_t_live != 0 && _ld_phase == 1 && FhUtil.get_at<sbyte>(0xD2A8E0) == 1 ? _ld_t_live : now();
         long mq = vr(ref _ld_t_mapreq), req = mq != 0 && mq > t0 ? mq : 0, s10 = tst(10);
         double total = ms(live - t0), a = req != 0 ? ms(req - t0) : s10 != 0 ? ms(s10 - t0) : 0, b = req != 0 ? ms(vr(ref _ld_t_free_in)) : 0;
@@ -530,7 +559,9 @@ public sealed unsafe partial class FFXVRModule {
         string flush = req != 0 ? I($"{ms(d_in(LT.flush_t)):F0} ms") : "no map load";
         d7_log(I($"load: battle {_ld_battle_n} ({kind}) in {_ld_field_name} (field map {_ld_field_id}, battle map {FhUtil.get_at<short>(0xD2C254) & 0x3FF}): total {total:F0} ms = to the map load {a:F0} (start wait {ms(vr(ref _ld_t_start_wait)):F0}) + field free {b:F0} (chr flush {flush}) + map load {c:F0} + models {d:F0} ({d_in(LT.model_n)} model / {d_in(LT.motion_n)} motion loads, {ms(d_in(LT.model_t) + d_in(LT.motion_t)):F0} ms on the main thread)")
              + " | " + ld_hd(_lt_base_in) + I($" | blocking waits {ms(d_in(LT.wait_t)):F0} ms ({d_in(LT.wait_n)}: {ld_waits(_ld_wn_in)})")
-             + I($" | states: 4 {st_ms(4, t0)} 5 {st_ms(5, t0)} 7 {st_ms(7, t0)} 9 {st_ms(9, t0)} 0x22 {st_ms(0x22, t0)} 10 {st_ms(10, t0)} live {ms(live - t0):F0}{(_ld_countdown > 0 ? I($" | countdown 0x112A919 up to {_ld_countdown} ticks") : "")} | chr cache {fill(_ld_fill_in0)}->{fill(_ld_fill_in1)} entries in use at the field free ({_ld_locked} locked; of 100), {fill(_ld_fill_live)} at live | at the start: {_ld_va_in}"));
+             + I($" | states: 4 {st_ms(4, t0)} 5 {st_ms(5, t0)} 7 {st_ms(7, t0)} 9 {st_ms(9, t0)} 0x22 {st_ms(0x22, t0)} 10 {st_ms(10, t0)} live {ms(live - t0):F0}{(_ld_countdown > 0 ? I($" | countdown 0x112A919 up to {_ld_countdown} ticks") : "")}")
+             + " | " + trk_text(_trk_in, now()) + " | " + li_lock_text(_li_in, 1)   // loads build
+             + (_diag_load ? I($" | chr cache {fill(_ld_fill_in0)}->{fill(_ld_fill_in1)} entries in use at the field free ({_ld_locked} locked; of 100), {fill(_ld_fill_live)} at live | at the start: {_ld_va_in}") : ""));
         lp_report(1, I($"battle {_ld_battle_n} entry ({_ld_field_name}, battle map {FhUtil.get_at<short>(0xD2C254) & 0x3FF})"), _lt_base_in);   // load lock build: the prof block, then the entry phase ends
     }
     /// <summary>The HD cluster part of a summary line, since `b` (the battle start's or the teardown's baseline): the loads,
@@ -549,13 +580,18 @@ public sealed unsafe partial class FFXVRModule {
     private string st_ms(int s, long t0) => tst(s) != 0 ? I($"+{ms(tst(s) - t0):F0}") : "-";
     private static string fill(int n) => n < 0 ? "?" : n.ToString(System.Globalization.CultureInfo.InvariantCulture);
     private void ld_log_out(long t, string note) {
+        _trk_out.on = false;
         int ts = _ld_tear_seq; long t0 = vr(ref _ld_t_tear); if (t0 == 0 || ts == _ld_logged_tear) { lp_phase(-2); return; }   // LL-8: no way-back line, but the phase ends
         _ld_logged_tear = ts;   // LD-6: the render thread keeps its own "logged" mark instead of zeroing a main-thread field
+        if (!(_diag_load_lines || _diag_load) || _fn_diag_line == null) { lp_report(2, I($"battle {_ld_battle_n} way back"), _lt_base_out); return; }   // loads build: no line, but the way-back phase still ends
         long req = vr(ref _ld_t_retreq), bld = vr(ref _ld_t_retbuild);
         double total = ms(t - t0), a = req != 0 ? ms(req - t0) : 0, b = req != 0 ? ms(vr(ref _ld_t_free_out)) : 0, c = req != 0 ? ms(t - req) - b : 0;
         string flush = req == 0 ? "no field reload (battle map = field map?)" : I($"{ms(d_out(LT.flush_t)):F0} ms");
         d7_log(I($"load: battle {_ld_battle_n} way back: total {total:F0} ms = teardown {ms(d_out(LT.teardown_t)):F0} + to the field reload {a:F0} + battle-map free {b:F0} (chr flush {flush}) + reload to idle {c:F0} (build at {(bld != 0 ? I($"+{ms(bld - t0):F0}") : "-")}; {d_out(LT.model_n)} model / {d_out(LT.motion_n)} motion loads)")
-             + " | " + ld_hd(_lt_base_out) + I($" | blocking waits {ms(d_out(LT.wait_t)):F0} ms ({d_out(LT.wait_n)}: {ld_waits(_ld_wn_out)}) | chr cache: peak in battle {fill(_ld_fill_peak)}{(_ld_table_full ? " (TABLE FULL seen)" : "")}, {fill(_ld_fill_tear)} at the teardown, {fill(_ld_fill_out0)}->{fill(_ld_fill_out1)} at the battle-map free | at the end: {_ld_va_out} {note}"));
+             + " | " + ld_hd(_lt_base_out) + I($" | blocking waits {ms(d_out(LT.wait_t)):F0} ms ({d_out(LT.wait_n)}: {ld_waits(_ld_wn_out)})")
+             + " | " + trk_text(_trk_out, t) + " | " + li_lock_text(_li_out, 2)   // loads build
+             + (_diag_load ? I($" | chr cache: peak in battle {fill(_ld_fill_peak)}{(_ld_table_full ? " (TABLE FULL seen)" : "")}, {fill(_ld_fill_tear)} at the teardown, {fill(_ld_fill_out0)}->{fill(_ld_fill_out1)} at the battle-map free | at the end: {_ld_va_out}") : "")
+             + (note.Length > 0 ? " " + note : ""));
         lp_report(2, I($"battle {_ld_battle_n} way back{(note.Length > 0 ? " " + note : "")}"), _lt_base_out);   // load lock build: the prof block, then the way-back phase ends
     }
 }

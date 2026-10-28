@@ -8,13 +8,18 @@ namespace FFXVR;
 // xrWaitFrame included. The native helper does the work (ffxvr_native.cpp, "Load lock build"); this side owns the settings,
 // the phase and window marks, the two exact probes and the prof block's managed line.
 //
-//   diag_load_prof (ini, default 2 in this test build; the probes hook at the next launch, the sampler follows the ini at
+//   diag_load_prof (ini, default 0 since the loads build; the probes hook at the next launch, the sampler follows the ini at
 //     once): 0 off, 1 the native sampler on the loader thread, 2 also the render thread while the loader waits for the
-//     lock. One "prof:" block after each "load:" line. Needs diag_load=1 (its hooks give the phases and windows).
-//   load_lock_release (ini and overlay, live, never saved: every launch starts at 0): 0 off, 1 the render thread gives the
-//     lock up around our xrWaitFrame. Only while a battle load phase is open, only when the render thread holds the lock
-//     exactly once, and it is taken back before the game runs again. (LL-1: there is no mode 2: releasing over the game's
-//     Present would leave the immediate context unserialised against the main thread's lock holders.)
+//     lock. One "prof:" block after each battle "load:" line (none with 0). Needs the load hooks (load_diag.cs: they give
+//     the phases and windows).
+//   load_lock_release (ini and overlay, live; saved since the loads build): the render thread gives the lock up around our
+//     xrWaitFrame while a load is in progress, only when it holds the lock exactly once, and takes it back before the game
+//     runs again. 0 off; 1 battle loads, the entry and the way back (the default: the tested case); 2 all loads, a test mode
+//     (review LD2-1): also area / event map changes and loads from the title until their first new-camera frame, and a
+//     loadPCluster call alone while the main thread is blocked in the loader's wait-all (load_lines.cs). Mode 2 is offered
+//     in Debug > Battle loading only and is never saved (LD2-R-3): it is written as 1, and a 2 read at launch becomes 1, so
+//     every launch is back on the tested mode; a hand edit while the game runs still applies at once. (LL-1's old mode 2, a
+//     release over the game's Present, is a different thing and stays deleted.)
 //
 // Probes (FhUtil offsets; queued after every other load hook, as Fahrenheit's commit stops at the first failing one):
 //   0x065AB0 the texture section     thiscall int(this, stream, a, b), ret 0xC  (loader; only caller 0x57C07E via the
@@ -28,8 +33,8 @@ namespace FFXVR;
 // 0x861160 are not touched.
 public sealed unsafe partial class FFXVRModule {
 
-    private int  _diag_load_prof = 2;          // ini diag_load_prof: 0 off, 1 loader, 2 loader + render thread (on for this test build)
-    private int  _load_lock_release = 0;       // ini load_lock_release: 0 off, 1 around our xrWaitFrame (live; LL-2: not saved, 0 at every launch)
+    private int  _diag_load_prof = 0;          // ini diag_load_prof: 0 off (default since the loads build), 1 loader, 2 loader + render thread
+    private int  _load_lock_release = 1;       // ini load_lock_release: 0 off, 1 battle loads (default), 2 all loads (test); live, saved
     private bool _pr_q;                        // the two probes were queued at launch (diag_load_prof != 0 then)
     private string _pr_status = "not set up";
     private delegate* unmanaged[Cdecl]<int, void> _fn_prof_set, _fn_prof_mark, _fn_prof_phase;
@@ -108,11 +113,12 @@ public sealed unsafe partial class FFXVRModule {
     // -- phases, windows and the report ---------------------------------------------------------------------------------------
     private void lp_phase(int v) { var f = _fn_prof_phase; if (f != null) f(v); }
     private void lp_mark(bool main, int inside) { var f = _fn_prof_mark; if (f != null) f(inside | (main ? 2 : 0)); }
+    private void lp_wait_mark(int on) { var f = _fn_prof_mark; if (f != null) f(4 | on); }   // LD2-2: the main thread enters (1) / leaves (0) the loader's wait-all
     /// <summary>Render thread, right after a "load:" line: the native prof block (sampler, lock, the lock release) with the
     /// probe line, then the phase ends.</summary>
     private void lp_report(int phase, string label, long[] b) {
         var f = _fn_prof_report;
-        if (f != null) {
+        if (f != null && _diag_load_prof > 0) {   // loads build: the prof block is the profiler's output; none with diag_load_prof=0
             string extra = lp_probe_line(b);
             int nl = Math.Min(label.Length, 150), ne = Math.Min(extra.Length, 3000);
             byte* lb = stackalloc byte[nl + 1]; byte* eb = stackalloc byte[ne + 1];
@@ -142,7 +148,7 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>From push_all, every frame (render thread): both settings to the native side.</summary>
     private void lp_push() {
-        var ps = _fn_prof_set; if (ps != null) ps(_diag_load ? _diag_load_prof : 0);   // without diag_load's hooks there is no phase or window to sample
+        var ps = _fn_prof_set; if (ps != null) ps(_ld_any ? _diag_load_prof : 0);   // without the load hooks there is no phase or window to sample
         var ls = _fn_lock_release_set; if (ls != null) ls(_load_lock_release);
     }
     private string lp_status_text() {
@@ -152,17 +158,27 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>The main window's row (after the battle transition's).</summary>
     private void lp_ui() {
-        ImGui.Text("battle loads, engine lock (load_lock_release):"); ImGui.SameLine();
+        ImGui.Text("loads, engine lock (load_lock_release):"); ImGui.SameLine();
         ImGui.RadioButton("off##llr", ref _load_lock_release, 0); ImGui.SameLine();
-        ImGui.RadioButton("released while waiting for the headset (test)##llr", ref _load_lock_release, 1);
-        ImGui.TextDisabled("  not saved: every launch starts off" + (_diag_load ? "" : " | needs diag_load=1 (its hooks open the battle load phases)") + (_fn_lock_release_status != null ? " | " + lp_status_text() : ""));
+        ImGui.RadioButton("battle loads (default)##llr", ref _load_lock_release, 1);
+        if (_load_lock_release == 2) { ImGui.SameLine(); ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped("all loads (test) is on: set in Debug > Battle loading, not saved (the next launch is back on battle loads)"); ImGui.PopStyleColor(1); }
+        string sess = li_session_text();
+        ImGui.TextDisabled("  released while waiting for the headset; " + (_load_lock_release == 2 ? "all loads (test): battle entries and way backs, area / event map changes, save loads, the title's load, cluster loads the main thread waits for" : "battle entries and way backs")
+                         + (_ld_any ? "" : " | the load hooks are not installed (they follow diag_load_lines / load_lock_release / hd_cluster_cache at launch): no load is seen")
+                         + (_fn_lock_release_status != null ? " | " + lp_status_text() : "") + (sess.Length > 0 ? " | " + sess : ""));
     }
     /// <summary>Debug > Battle loading: the profiler's switch.</summary>
     private void lp_debug_ui() {
+        // LD2-R-3: the test mode lives here, away from the main window's default, and is never saved
+        ImGui.Text("engine lock (load_lock_release):"); ImGui.SameLine();
+        ImGui.RadioButton("off##llrd", ref _load_lock_release, 0); ImGui.SameLine();
+        ImGui.RadioButton("battle loads (default)##llrd", ref _load_lock_release, 1); ImGui.SameLine();
+        ImGui.RadioButton("all loads (test)##llrd", ref _load_lock_release, 2);
+        ImGui.TextDisabled("  all loads (test) also releases the lock during area / event map changes, save loads and the title's load, and for cluster loads the main thread waits for. Not saved: it is written as battle loads, and every launch is back on battle loads.");
         ImGui.Text("load profiler (diag_load_prof): one \"prof:\" block after each \"load:\" line"); ImGui.SameLine();
         ImGui.RadioButton("off##dlp", ref _diag_load_prof, 0); ImGui.SameLine();
         ImGui.RadioButton("loader thread##dlp", ref _diag_load_prof, 1); ImGui.SameLine();
         ImGui.RadioButton("+ render thread##dlp", ref _diag_load_prof, 2);
-        ImGui.TextDisabled($"  the sampler follows this at once; the two exact probes (0x465AB0, 0x58FC20) hook at launch: {(_diag_load ? _pr_status : "off (diag_load=0: no phase, no window, no probe)")}");
+        ImGui.TextDisabled($"  the sampler follows this at once; the two exact probes (0x465AB0, 0x58FC20) hook at launch: {(_ld_any ? _pr_status : "off (no load hooks: no phase, no window, no probe)")}");
     }
 }

@@ -12,13 +12,14 @@ namespace FFXVR;
 //     the field breaks apart world-locked where it was; after the shards the pinned last frame is held (no 30-frame cap)
 //     over the game's load black until the battle is live. 1 = head-locked: no UI split and the mode held only (the glass
 //     shows, following the head). 0 = the old behaviour (the native phases still run for the bt: lines).
-//   diag_transition (ini, default 1 in this test build): one "bt:" line per Present inside a transition window in
-//     ffxvr_diag.log (capped at 900 a window, 6000 a session), plus the phase changes and one summary per window (those
-//     are always logged).
+//   diag_transition (ini, default 0 since the loads build): one "bt:" line per Present inside a transition window in
+//     ffxvr_diag.log (capped at 900 a window, 6000 a session) and the first shatter's frame census, plus the phase changes
+//     and one summary per window (those are always logged). The transition itself (native bt_tick, memory polls and D3D-level
+//     detection) never depends on it.
 public sealed unsafe partial class FFXVRModule {
 
     private int  _battle_transition = 2;       // ini battle_transition: 0 old, 1 head-locked, 2 frozen world
-    private bool _diag_transition = true;      // ini diag_transition: the per-frame bt: lines
+    private bool _diag_transition = false;     // ini diag_transition: the per-frame bt: lines (default 0 since the loads build)
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_bt_set;          // (mode | 0x100 on a user view action, diag); ABI 16
     private bool _bt_user_ev;                  // a user view action this frame (hotkeys, gestures, overlay): an open transition window ends at once
     private static readonly ImGuiKey[] k_bt_view_keys = {

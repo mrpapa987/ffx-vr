@@ -34,7 +34,7 @@ public sealed unsafe partial class FFXVRModule {
         _sa_used = false;
         string why;
         if (!_smooth_anchor) why = "off (smooth_anchor=0): the 30 Hz logic position, as before";
-        else if (!_h7_join_ok) why = "unavailable: the job-join hook is not installed (diag_build7=0 at launch, or the hook failed); the 30 Hz logic position";
+        else if (!_h7_join_ok) why = "unavailable: the job-join hook is not installed (smooth_anchor was 0 and diag_build7=0 at launch: it hooks at the next launch; or the hook failed); the 30 Hz logic position";
         else if (_r7j_seq == 0 || _r7j.valid == 0) why = "waiting for a snapshot (the 30 Hz logic position meanwhile)";
         else if (_r7j.actor != act) why = "the followed actor just changed (the 30 Hz logic position for a frame)";
         else if (_r7j.flags != 0) why = (_r7j.flags & 1) != 0 ? "attached actor (riding / carried): the 30 Hz logic position" : "script matrix (+0x10C): the 30 Hz logic position";
