@@ -2887,3 +2887,66 @@ written 0). The flush gate is the protection, as the review had accepted; withou
 gate is never overridden (an extra always yields to the main thread). The post-mortem, with the
 alternatives weighed and the presenter-thread end state (B2) recommended, is research/stickrep-postmortem.md
 in the session scratchpad; its substance is summarised here.
+
+## TODO, next big item: the presenter thread (B2) — the long-term fix for stick-turn ghosting (29 Oct 2026)
+
+**Status.** Parked by the owner: the stick reprojection shipped in aa650ec (the ring-wait design, A) is "a
+significant improvement, but not a full fix". The reason it cannot be a full fix is structural: an extra frame
+is only delivered when the game's render thread happens to be idle in its ring wait, the game's lock is free and
+the flush gate is clear, so some display slots are still missed, and during loads the lock re-takes cost up to
+155 ms. Head turning never ghosts because the runtime reprojects the head pose on *every* refresh; the design
+below puts stick yaw on that same path on every refresh, which is what the owner's constraint asks for.
+
+**The owner's constraint, restated.** Head motion never ghosts; only right-stick rotation does. Any design must
+leave head handling untouched and make stick turning as clean as head turning (not just better than today).
+Tested headset settings: VD 120 Hz, SSW Disabled, game V-Sync off.
+
+**What was tried and why it is not the end state** (full post-mortem: the "Session 1 of stickrep" sections above):
+- A (current): re-send the last frame from the render thread's ring wait. Works; delivery is phase-dependent.
+- B1 (a submit thread on the game's device): needs the context's multithread protection on *before* the detours
+  are installed (SR-X2 shows why it is otherwise fatal), keeps the GPU fence coupling, breaks under VDXR's
+  application-device quirk. Rejected.
+- fps=120 in FFX-60fps: not feasible at 4K (gpu 10-13 ms/frame); any missed frame brings the double image back.
+- VD SSW Always: image-based smear, not the head path; useful only as a side-by-side reference.
+
+**B2, the recommended end state: a presenter thread with its own D3D11 device.**
+The OpenXR session is created on a device we own; the presenter thread owns xrWaitFrame / xrBeginFrame /
+xrSyncActions / xrLocateViews / xrEndFrame entirely and runs them at the display rate. The game's render thread
+never calls OpenXR and VDXR never touches the game's context, so the ring-wait patch, the flush gate, the lock
+juggling, MT protection and the InEye2-around-runtime-calls all go away; the only shared state is a mailbox.
+VDXR itself already does this cross-device handoff on this machine (its own submission device), so the sharing
+path is proven on this GPU and runtime. Cost: one extra copy of each eye per game frame (~0.1 ms GPU), one fence
+per frame; the render thread gets its Present wait back. Effort estimate: a few days.
+
+**Spec for the implementer (B2)**
+1. Session on our device: `D3D11CreateDevice` on the game's adapter LUID (DXGI from the game's device),
+   `XrGraphicsBindingD3D11KHR` bound to it. `xr_create` / `xr_stop` unchanged otherwise.
+2. Shared frame set `SrShared`: per logical image (eye 1, eye 2, screen, screen R, UI, ImGui) a texture on our
+   device (`MISC_SHARED_NTHANDLE`, exact swapchain format), opened on the game's device; one `ID3D11Fence` created
+   on our device (`D3D11_FENCE_FLAG_SHARED`), opened on the game's (`OpenSharedFence`). Two sets, ping-pong, so a
+   copy never overwrites the image the presenter is re-sending.
+3. Game side (`xr_tick`, Present hook, render thread): choose the set not in use, `CopyResource` / stretch-copy
+   the sources into it under `InEye2` (the current `submit_set`/`submit_eye` sources), `Signal(fence, ++n)` on
+   the game's context, publish `SrPublish{n, set, layers wanted, poses used, FOV used, screen/ui/imgui quads,
+   SrFrame record}` by pointer swap (`InterlockedExchangePointer`). Never block.
+4. Presenter thread (above-normal priority, MMCSS "Games"): loop `xrWaitFrame` -> take the latest `SrPublish`;
+   if `n` is new: `Wait(fence, n)` on our context, acquire + copy + release the swapchain images, remember the
+   layers; else re-send the remembered layers with `rotate_pose(sr_rotation(display_time))` and the quads as
+   `xr_extra_frame` does (quads dropped after 150 ms without a fresh frame, zero layers after 30 s, as now).
+   `xrEndFrame`, `xrBeginFrame`, `xrSyncActions`, `xrLocateViews(display_time)`; publish
+   `SrSlot{display_time, period, views[2], fov[2], input}` by pointer swap.
+5. Render thread at `ffxvr_begin_frame`: `xr_apply_poses(latest SrSlot)`; yaw clock `turn_advance(T)` with `T` =
+   the slot this frame will land on (`display_time + k*period`, `k` from `now + c_est` against the slot grid).
+6. Remove: the 0x616060 patch, `sr_wait_list_or`, the flush gate hooks, `sr_mt_init`, the Phyre lock
+   take/release in extras, `InEye2` around `xr_frame` (keep it around our own copies).
+7. Keep: the yaw clock, `sr_rotation`, the epoch rules, the pin, the hold rules, the sr: line (from the presenter).
+8. Shutdown: `ffxvr_shutdown` sets exiting, joins the presenter (bounded), then `xr_stop`, then releases the set.
+9. Diagnostics: per 10 s, slots fresh / extra / skipped-by-runtime (from `predictedDisplayTime` gaps), fence wait
+   time, presenter CPU per slot, yaw per extra, `late fresh` (a fresh frame published after its slot).
+Risks and their guards: device-loss / shutdown ordering (stop the presenter before `xr_stop`, before the game
+device is torn down; `g_sr_exiting` and the in-flight count exist); sRGB / typeless format matching across devices
+(create the shared textures with the exact swapchain format, as `ensure_copy` does); the fence needs
+`ID3D11Device5` (Windows 10 1703+; VDXR already requires it on this machine).
+
+**Expected result when done:** every display slot gets a frame; stick turning indistinguishable from head
+turning; no black loading screens; the `sr:` line shows extras ~= slots - fresh with 0 skipped-by-us.
