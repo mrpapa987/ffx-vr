@@ -160,6 +160,7 @@ public sealed unsafe partial class FFXVRModule {
     private void h7_join() {
         d7_void o = System.Threading.Volatile.Read(ref _o7_join) ?? d7_resolve_main(ref _o7_join, _a7_join, _h7_join!);
         o();
+        if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Debug: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
         if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
     }
     private void h7_rsz(nint self, int w, int h) {

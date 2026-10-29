@@ -4,6 +4,7 @@
 // next frame should be rendered from. Everything it needs from the rest of
 // the native helper comes through XrHost, so this file stays standalone.
 #pragma once
+#include <cstdint>
 #include <d3d11.h>
 
 struct XrHost {
@@ -14,6 +15,9 @@ struct XrHost {
     bool (*copy)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int mode);   // stretch copy. mode 0: alpha forced to 1; 1: alpha kept (the UI panel); 2: the ImGui layer, premultiplied (saveui)
     int  (*wait_begin)();                                   // load lock build: right before xrWaitFrame (may give up the game's render lock); null = none
     void (*wait_end)(int token);                            // right after xrWaitFrame returns, on every path, with wait_begin's result (takes the lock back)
+    int  (*extra_wait_begin)();                             // stickrep: the same pair for an extra frame's xrWaitFrame (xr_extra_frame): gives up the game's
+    void (*extra_wait_end)(int token);                      //   render lock the extra took for its xrEndFrame and takes it back for xrBeginFrame / sync / locate
+    bool (*extra_abort)();                                  // SR-1: true = the game is exiting: an extra frame stops before its next OpenXR call (null = never)
 };
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space
@@ -24,7 +28,24 @@ struct XrFrameOut {
     bool      have_views;                                   // false: render as usual, nothing is submitted this frame
     XrPoseOut view[2];                                      // left / right eye as located for the frame about to render
     XrFovTan  fov[2];                                       // the headset's field of view per eye
+    // stickrep (display-rate stick reprojection): the pacing facts of this call's xrEndFrame / xrWaitFrame / xrBeginFrame
+    bool      began;                                        // a frame is open after this call (xrWaitFrame and xrBeginFrame succeeded)
+    bool      should_render;                                // the begun frame's shouldRender
+    int64_t   display_time;                                 // its predictedDisplayTime (XrTime, ns); 0 when nothing was begun
+    int64_t   period_ns;                                    // its predictedDisplayPeriod
+    double    wait_ms;                                      // the time spent in xrWaitFrame
+    bool      wait_blocked;                                 // wait_ms >= 0.5: VDXR held the wait to its running start (the phase anchor)
+    double    t_wait_return_ms;                             // QPC ms when xrWaitFrame returned
+    bool      ended;                                        // this call ended a frame (xrEndFrame was called)
+    bool      base_fresh;                                   // ... with a fresh base layer (new eye images): the image held from now on
+    bool      base_sent;                                    // ... with a base layer at all (fresh or held); false: zero layers went out
+    uint32_t  skipped_slots;                                // display slots between the previous begun frame and this one: round(dT / period) - 1
+    double    end_ms, locate_ms;                            // time in xrEndFrame; in xrBeginFrame + xrSyncActions + xrLocateViews
 };
+
+/// stickrep: the rigid rotation an extra frame applies to the held projection layer's two poses, in the LOCAL space:
+/// orientation' = q * orientation, position' = pivot + q * (position - pivot). Computed by the native side (3.3 of the spec).
+struct XrExtraRot { bool on; float q[4]; float pivot[3]; };
 
 /// The virtual screen: a flat panel in the reference space showing eye 1's
 /// image, used for frames that are not 3D (title, menus, loading, FMV).
@@ -93,3 +114,19 @@ void        xr_hold_uncapped(bool on);                     // the held base laye
 /// previous call, then waits for the next frame and returns its poses and
 /// the headset's field of view in `next`.
 void        xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, const XrUiPanel* ui, XrFrameOut* next);
+
+/// stickrep: an extra frame between two game frames (render thread, from the ring wait, never inside a command list).
+/// Ends the open frame with the layers the last xr_frame call sent, re-referencing the swapchain images that call
+/// released (no acquire, no copy): the base layer (projection or screen) rotated by `rot` when it is on (never a screen
+/// or a pinned base); the UI panel and the ImGui quad as they were sent, only with `quads`. `zero`: zero layers. Then
+/// xrWaitFrame (between the host's extra_wait_begin / extra_wait_end) -> xrBeginFrame -> xrSyncActions -> xrLocateViews,
+/// as xr_frame's tail. Returns false when nothing was called (no running session, no open frame, shouldRender false,
+/// nothing to send); `next` then says began = false.
+bool        xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* next);
+bool        xr_extra_possible(bool zero);                  // an extra would be sent now (the same tests as xr_extra_frame; zero: a zero-layer one)
+bool        xr_frame_open();                               // a frame is begun and not yet ended
+bool        xr_running();                                  // the session is running (between xrBeginSession and the stop)
+/// The display: the last predictedDisplayPeriod (ms), the runtime's refresh rate (Hz; XR_FB_display_refresh_rate, else
+/// 1000 / the shortest period seen; 0 unknown) and whether the period is about twice the refresh period (VD's SSW).
+void        xr_display(double* period_ms, double* refresh_hz, bool* half_rate);
+bool        xr_now_xrtime(int64_t* t);                     // the current XrTime (XR_KHR_win32_convert_performance_counter_time); false without it

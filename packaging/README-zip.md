@@ -107,9 +107,13 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
 
 ### Virtual Desktop settings
 
-- **Refresh rate: 72 Hz or 120 Hz.** Avoid 90 Hz: 60 fps doesn't divide into it.
-- **SSW (Synchronous Spacewarp): Disabled or Auto**, not "Always". Forced spacewarp causes
-  ghosting when you turn with the stick.
+- **Refresh rate: 120 Hz** (72 Hz also works). Avoid 90 Hz: 60 fps doesn't divide into it.
+- **SSW (Synchronous Spacewarp): Disabled**, not "Always" (Auto is not tested with this build).
+  The mod fills the refreshes between game frames itself, turned with the stick, so stick turns
+  should be as smooth as head turns ("smooth stick turns at the headset rate" in the overlay, on by
+  default; the `sr:` lines in `ffxvr_diag.log` show what it does).
+- Set the game's **V-Sync off** (the headset paces the frames).
+- **Quit through the game's menu**, not by closing the window.
 - Play **seated**.
 
 ### Controls
@@ -120,7 +124,7 @@ the overlay). A normal gamepad works too.
 | Action | Controllers | Keyboard |
 |---|---|---|
 | Recentre the view | Hold the **Meta** button | **Home** |
-| Turn | Right stick (smooth or snap, in the overlay) | Numpad 1 / 3 |
+| Turn | Right stick: smooth turning, at the turn speed set in the overlay (there is no snap turning) | Numpad 1 / 3 |
 | Change view: first person, third person, diorama | **Right grip + right stick click** | **End** |
 | Reset the view (third person / diorama) | **Left grip + left stick click** | |
 | Battle: look through the next party member | **Left grip + right stick click** | **Insert** |
@@ -171,8 +175,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | The game starts flat, nothing in the headset | Was Virtual Desktop connected *before* launch? Is **Headset** ticked in the F8 overlay? Does `install-mod.ps1` show VDXR as the 32-bit OpenXR runtime? |
 | Fahrenheit doesn't start at all | Not as administrator. Is Fahrenheit a version that supports the current game (section 2)? Check `logs\run-*.txt`. |
 | No F8 overlay | The mod didn't load: re-run `install-mod.ps1` and check the .NET x86 runtime. |
-| Black for a few seconds at some scene changes | Known: the game is loading and the headset has nothing new to show. A fix is planned. |
-| Ghosting when turning with the stick | Virtual Desktop refresh rate and SSW, above. If the game drops below the refresh rate, try `game-settings.ps1 -Profile vr`. |
+| Black for a few seconds at some scene changes | The headset should now keep showing the last picture (head-tracked) while the game loads. If it still goes black, send the logs: the `sr:` lines in `ffxvr_diag.log` say why. |
+| Ghosting when turning with the stick | Is "smooth stick turns at the headset rate" ticked in the F8 overlay (under the turn speed)? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, try `game-settings.ps1 -Profile vr`. |
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit (and maybe FFX VR) update. |
 

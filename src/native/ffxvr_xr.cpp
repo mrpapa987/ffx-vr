@@ -9,6 +9,20 @@
 #include <d3d11.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+// stickrep: XR_FB_display_refresh_rate came after the OpenXR 1.0.10 headers the repo builds with (_ext/openxr). Declare the
+// parts we use when the headers lack them; the values are the registry's (extension 102: enum base 1000101000).
+#ifndef XR_FB_display_refresh_rate
+#define XR_FB_display_refresh_rate 1
+#define XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME "XR_FB_display_refresh_rate"
+#define XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB (static_cast<XrStructureType>(1000101000))
+typedef struct XrEventDataDisplayRefreshRateChangedFB {
+    XrStructureType type;
+    const void* XR_MAY_ALIAS next;
+    float fromDisplayRefreshRate;
+    float toDisplayRefreshRate;
+} XrEventDataDisplayRefreshRateChangedFB;
+typedef XrResult (XRAPI_PTR *PFN_xrGetDisplayRefreshRateFB)(XrSession session, float* displayRefreshRate);
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -58,6 +72,8 @@ XRFN(xrStringToPath) XRFN(xrPathToString) XRFN(xrCreateActionSet) XRFN(xrDestroy
 XRFN(xrSuggestInteractionProfileBindings) XRFN(xrAttachSessionActionSets) XRFN(xrCreateActionSpace) XRFN(xrSyncActions)
 XRFN(xrGetActionStateBoolean) XRFN(xrGetActionStateFloat) XRFN(xrGetActionStateVector2f) XRFN(xrGetActionStatePose)
 XRFN(xrLocateSpace) XRFN(xrApplyHapticFeedback) XRFN(xrStopHapticFeedback) XRFN(xrGetCurrentInteractionProfile)
+// stickrep: optional, enabled only when the runtime lists the extension (VDXR 1.0.10 lists both)
+XRFN(xrEnumerateInstanceExtensionProperties) XRFN(xrGetDisplayRefreshRateFB) XRFN(xrConvertWin32PerformanceCounterToTimeKHR)
 #undef XRFN
 
 XrInstance   g_instance = XR_NULL_HANDLE;
@@ -117,6 +133,16 @@ constexpr float kIpdMin = 0.04f, kIpdMax = 0.09f, kIpdDefault = 0.063f;
 bool g_have_last_pos = false, g_pos_lost = false; XrVector3f g_last_head = {}; float g_last_ipd = kIpdDefault;
 XrSpace g_view_space = XR_NULL_HANDLE;           // head-locked space for the UI panel
 DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
+// stickrep: what the last xr_frame's xrEndFrame sent besides the base layer (the extra frames re-send exactly that), the
+// display period, and a frame whose xrWaitFrame succeeded but whose xrBeginFrame failed (VDXR then blocks the next
+// xrWaitFrame until a Begin: the next call retries the Begin instead of waiting again).
+struct LastSent { bool base = false, have_ui = false, have_imgui = false; XrCompositionLayerQuad uiq = {}, imq = {}; };
+LastSent g_last_sent;
+bool g_waited_unbegun = false; XrFrameState g_unbegun_fs = { XR_TYPE_FRAME_STATE };
+XrTime g_last_begun_T = 0;                         // the display time of the last begun frame (skipped-slot count)
+XrDuration g_period = 0, g_period_logged = -1, g_period_min = 0;
+float g_refresh_hz = 0.f;                          // XR_FB_display_refresh_rate (0: unknown)
+bool g_half_rate = false; uint32_t g_period_lines = 0;
 
 const char* res_str(XrResult r);                 // below
 
@@ -358,6 +384,9 @@ void xr_stop() {
     g_state = XR_SESSION_STATE_UNKNOWN; g_render_views_valid = false; g_running = false;
     g_held = HeldBase{}; g_have_last_pos = false; g_pos_lost = false; g_last_ipd = kIpdDefault; g_sim_timeouts = 0; g_sc_stuck = -1;
     g_pin = false; g_hold_uncapped = false;   // battle transition: nothing pinned across a stop
+    g_frame_open = false; g_last_sent = LastSent{}; g_waited_unbegun = false; g_last_begun_T = 0;   // stickrep
+    g_period = 0; g_period_logged = -1; g_period_min = 0; g_refresh_hz = 0.f; g_half_rate = false;
+    p_xrGetDisplayRefreshRateFB = nullptr; p_xrConvertWin32PerformanceCounterToTimeKHR = nullptr;   // instance functions: gone with the instance
     set_status("off");
     stage("stopped");
     if (g_watchdog) {
@@ -386,15 +415,48 @@ bool xr_start(const XrHost& host) {
     }
     if (!load(p_xrCreateInstance, "xrCreateInstance", XR_NULL_HANDLE)) { set_status("no xrCreateInstance"); return false; }
 
-    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+    // stickrep: two optional extensions, each only if the runtime lists it: the display refresh rate (the period line's
+    // "runtime refresh", VD's SSW half rate) and QPC <-> XrTime (the photon latency on the sr: line). Without them the
+    // diagnostics infer or leave out those numbers; nothing else depends on them.
+    const char* exts[3] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, nullptr, nullptr }; uint32_t next_ext = 1;
+    {
+        PFN_xrVoidFunction f = nullptr;
+        if (XR_SUCCEEDED(p_gipa(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &f)) && f) {
+            p_xrEnumerateInstanceExtensionProperties = reinterpret_cast<PFN_xrEnumerateInstanceExtensionProperties>(f);
+            uint32_t ne = 0;
+            if (XR_SUCCEEDED(p_xrEnumerateInstanceExtensionProperties(nullptr, 0, &ne, nullptr)) && ne > 0 && ne < 1024) {
+                std::vector<XrExtensionProperties> ev(ne, { XR_TYPE_EXTENSION_PROPERTIES });
+                if (XR_SUCCEEDED(p_xrEnumerateInstanceExtensionProperties(nullptr, ne, &ne, ev.data())))
+                    for (uint32_t i = 0; i < ne && i < ev.size(); ++i) {
+                        if (strcmp(ev[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0) exts[next_ext++] = XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME;
+                        else if (strcmp(ev[i].extensionName, XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0) exts[next_ext++] = XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME;
+                        if (next_ext >= 3) break;
+                    }
+            }
+        }
+    }
     XrInstanceCreateInfo ici = { XR_TYPE_INSTANCE_CREATE_INFO };
     strncpy_s(ici.applicationInfo.applicationName, "FFX VR", _TRUNCATE);
     ici.applicationInfo.applicationVersion = 1;
     strncpy_s(ici.applicationInfo.engineName, "ffxvr", _TRUNCATE);
     ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
-    ici.enabledExtensionCount = 1; ici.enabledExtensionNames = exts;
+    ici.enabledExtensionCount = next_ext; ici.enabledExtensionNames = exts;
     XrResult r = p_xrCreateInstance(&ici, &g_instance);
+    if (XR_FAILED(r) && next_ext > 1) {   // an optional extension refused: retry with D3D11 alone (the configuration of every build before)
+        g_h.diag("xr: xrCreateInstance with %u optional extension(s) failed (%s): retrying with D3D11 alone", next_ext - 1, res_str(r));
+        g_instance = XR_NULL_HANDLE; next_ext = 1; ici.enabledExtensionCount = 1;
+        r = p_xrCreateInstance(&ici, &g_instance);
+    }
     if (XR_FAILED(r)) { g_instance = XR_NULL_HANDLE; return fail("xrCreateInstance (is SteamVR set as the OpenXR runtime, and 32-bit support present?)", r); }
+    for (uint32_t i = 1; i < next_ext; ++i) {
+        PFN_xrVoidFunction f = nullptr;
+        if (strcmp(exts[i], XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0 && XR_SUCCEEDED(p_gipa(g_instance, "xrGetDisplayRefreshRateFB", &f)) && f)
+            p_xrGetDisplayRefreshRateFB = reinterpret_cast<PFN_xrGetDisplayRefreshRateFB>(f);
+        else if (strcmp(exts[i], XR_KHR_WIN32_CONVERT_PERFORMANCE_COUNTER_TIME_EXTENSION_NAME) == 0 && XR_SUCCEEDED(p_gipa(g_instance, "xrConvertWin32PerformanceCounterToTimeKHR", &f)) && f)
+            p_xrConvertWin32PerformanceCounterToTimeKHR = reinterpret_cast<PFN_xrConvertWin32PerformanceCounterToTimeKHR>(f);
+    }
+    g_h.diag("xr: optional extensions: display refresh rate %s, QPC time conversion %s", p_xrGetDisplayRefreshRateFB ? "on" : "not available",
+             p_xrConvertWin32PerformanceCounterToTimeKHR ? "on" : "not available");
 
 #define L(n) if (!load(p_##n, #n, g_instance)) { xr_stop(); return false; }
     L(xrDestroyInstance) L(xrGetInstanceProperties) L(xrGetSystem) L(xrGetSystemProperties) L(xrCreateSession) L(xrDestroySession)
@@ -487,6 +549,11 @@ bool xr_start(const XrHost& host) {
         }
         g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : "screen right", i, e.w, e.h, n);
     }
+    if (p_xrGetDisplayRefreshRateFB) {   // stickrep: the refresh rate (the session's; VDXR answers with VD's setting)
+        float hz = 0.f;
+        if (XR_SUCCEEDED(p_xrGetDisplayRefreshRateFB(g_session, &hz)) && hz > 1.f && hz < 1000.f) g_refresh_hz = hz;
+        g_h.diag("xr: display refresh rate %.1f Hz (XR_FB_display_refresh_rate)", g_refresh_hz);
+    }
     set_status("session created, waiting for the runtime");
     g_h.diag("xr: session created");
     stage("session created");
@@ -508,13 +575,19 @@ void poll_events() {
             g_state = sc->state;
             g_h.diag("xr: session state %d", static_cast<int>(g_state));
             if (g_state == XR_SESSION_STATE_READY) {
+                if (g_waited_unbegun) {   // SR-7b: VDXR keeps its frame counters across a stop (only xrCreateSession resets them): a waited, unbegun frame would block the next xrWaitFrame for good
+                    g_h.diag("xr: session READY with a frame waited but not begun: stopping the session (the start back-off recreates it)");
+                    xr_stop(); return;
+                }
                 XrSessionBeginInfo bi = { XR_TYPE_SESSION_BEGIN_INFO }; bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                 XrResult r = p_xrBeginSession(g_session, &bi);
                 if (XR_SUCCEEDED(r)) { g_running = true; set_status("running"); } else fail("xrBeginSession", r);
+                g_last_begun_T = 0; g_last_sent = LastSent{};   // stickrep: a new frame loop (g_waited_unbegun is false here: SR-7b above)
             }
             else if (g_state == XR_SESSION_STATE_STOPPING) {
                 if (g_frame_open) { XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO }; end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE; p_xrEndFrame(g_session, &end); g_frame_open = false; }
                 p_xrEndSession(g_session); g_running = false; g_render_views_valid = false; g_held = HeldBase{}; g_pin = false; set_status("stopped by the runtime");   // no held layer (or pin) across a stop
+                g_last_begun_T = 0; g_last_sent = LastSent{};   // stickrep: nothing re-sent across a stop (a pending Begin is kept: SR-7b at READY)
             }
             else if (g_state == XR_SESSION_STATE_LOSS_PENDING || g_state == XR_SESSION_STATE_EXITING) {
                 xr_stop(); return;
@@ -529,8 +602,15 @@ void poll_events() {
             auto* rc = reinterpret_cast<XrEventDataReferenceSpaceChangePending*>(&ev);
             if (rc->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) {
                 g_space_changed = true; g_held = HeldBase{}; g_have_last_pos = false; g_pin = false;   // held layers / a held head position / pinned poses belong to the old space
+                g_last_sent.base = false;   // stickrep: no extra re-sends the old space's base (the head-locked quads may stay)
                 g_h.diag("xr: LOCAL space recentred by the runtime");
             }
+        }
+        else if (ev.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) {   // stickrep: VD's refresh rate changed
+            auto* rr = reinterpret_cast<XrEventDataDisplayRefreshRateChangedFB*>(&ev);
+            g_h.diag("xr: display refresh rate %.1f -> %.1f Hz", rr->fromDisplayRefreshRate, rr->toDisplayRefreshRate);
+            if (rr->toDisplayRefreshRate > 1.f && rr->toDisplayRefreshRate < 1000.f) g_refresh_hz = rr->toDisplayRefreshRate;
+            g_period_min = 0;   // the inferred base period restarts
         }
         ev = { XR_TYPE_EVENT_DATA_BUFFER };
     }
@@ -602,12 +682,162 @@ XrVector3f right_axis(const XrQuaternionf& q) {
     return { 1.f - 2.f * (q.y * q.y + q.z * q.z), 2.f * (q.x * q.y + q.w * q.z), 2.f * (q.x * q.z - q.w * q.y) };
 }
 
+// stickrep: the display period, logged at the first wait and on every change (capped), with VD's SSW half rate named.
+void period_note(XrDuration p) {
+    if (p <= 0) return;
+    g_period = p;
+    if (g_period_min == 0 || p < g_period_min) g_period_min = p;
+    const double ms = p / 1e6;
+    const double base_ms = g_refresh_hz > 1.f ? 1000.0 / g_refresh_hz : g_period_min / 1e6;   // the refresh period (inferred: the shortest period seen)
+    g_half_rate = base_ms > 0.0 && ms > 1.8 * base_ms && ms < 2.2 * base_ms;
+    if (p == g_period_logged) return;
+    g_period_logged = p;
+    if (++g_period_lines > 100) { if (g_period_lines == 101) g_h.diag("xr: display period changes: more than 100, no longer logged (the sr: line keeps reporting it)"); return; }
+    char rr[48];
+    if (g_refresh_hz > 1.f) snprintf(rr, sizeof(rr), "runtime refresh %.1f Hz", g_refresh_hz); else snprintf(rr, sizeof(rr), "runtime refresh unknown");
+    g_h.diag("xr: display period %.2f ms (%.1f Hz; %s)%s", ms, 1000.0 / ms, rr, g_half_rate ? "; half rate: VD spacewarp (SSW) active" : "");
+}
+
+/// xr_frame's tail, shared with the extra frames: xrWaitFrame (the host may give up the game's lock around it), xrBeginFrame,
+/// xrSyncActions, xrLocateViews at the predicted display time; the views go to `next`. A Begin that failed after a
+/// successful Wait is retried by the next call without waiting again (VDXR's next xrWaitFrame would block until a Begin).
+void wait_begin_locate(XrFrameOut* next, bool extra) {
+    XrFrameState fs = { XR_TYPE_FRAME_STATE };
+    XrResult r = XR_SUCCESS;
+    bool retried = false;
+    if (g_waited_unbegun) {
+        fs = g_unbegun_fs; g_waited_unbegun = false; retried = true;
+        next->t_wait_return_ms = qpc_ms(); next->wait_ms = 0.0; next->wait_blocked = false;
+        g_h.diag("xr: retrying xrBeginFrame for the frame already waited");
+    }
+    else {
+        if (extra && g_h.extra_abort && g_h.extra_abort()) { stage("game"); return; }   // SR-1: exiting: the frame stays ended, nothing begun (xr_stop needs nothing more)
+        stage(extra ? "sr: xrWaitFrame" : "xrWaitFrame");
+        XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
+        const int lk = extra ? (g_h.extra_wait_begin ? g_h.extra_wait_begin() : 0)
+                             : (g_h.wait_begin ? g_h.wait_begin() : 0);   // load lock build / stickrep: may give up the game's lock for the wait
+        const double t_wait0 = qpc_ms();
+        r = p_xrWaitFrame(g_session, &fwi, &fs);
+        const double t_wait1 = qpc_ms();
+        if (!extra) g_t_wait_ms = t_wait1 - t_wait0;   // the wait alone (the perf: line's Present wait); taking the lock back is timed by the host
+        next->wait_ms = t_wait1 - t_wait0; next->wait_blocked = next->wait_ms >= 0.5; next->t_wait_return_ms = t_wait1;
+        if (lk) stage("lock re-acquire");      // LL-4: a hang here is ours (the game's lock), not the runtime's xrWaitFrame
+        if (extra) { if (g_h.extra_wait_end) g_h.extra_wait_end(lk); }
+        else if (g_h.wait_end) g_h.wait_end(lk);   // every path: the lock is ours again before anything else runs
+        if (XR_FAILED(r)) { fail("xrWaitFrame", r); stage("game"); return; }
+    }
+    if (extra && g_h.extra_abort && g_h.extra_abort()) { g_waited_unbegun = true; g_unbegun_fs = fs; stage("game"); return; }   // SR-1: exiting after the wait (xr_stop destroys the session)
+    stage(extra ? "sr: xrBeginFrame" : "xrBeginFrame");
+    const double t_b0 = qpc_ms();
+    XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
+    r = p_xrBeginFrame(g_session, &fbi);
+    if (XR_FAILED(r)) {
+        fail("xrBeginFrame", r);
+        // SR-7a: a retried Begin that the runtime refuses for the call order has no Wait pending after all (VDXR returns
+        // XR_ERROR_CALL_ORDER_INVALID when nothing was waited): the next call waits again instead of retrying for ever.
+        if (retried && r == XR_ERROR_CALL_ORDER_INVALID) { g_waited_unbegun = false; g_h.diag("xr: the retried xrBeginFrame was refused for the call order: the next frame waits again"); }
+        else { g_waited_unbegun = true; g_unbegun_fs = fs; }
+        stage("game"); return;
+    }
+    g_frame_open = true;
+    g_render_time = fs.predictedDisplayTime;
+    g_should_render = fs.shouldRender == XR_TRUE;
+    period_note(fs.predictedDisplayPeriod);
+    next->began = true; next->should_render = g_should_render; next->display_time = g_render_time; next->period_ns = fs.predictedDisplayPeriod;
+    if (g_last_begun_T > 0 && fs.predictedDisplayPeriod > 0 && g_render_time > g_last_begun_T) {
+        const long k = lround(static_cast<double>(g_render_time - g_last_begun_T) / static_cast<double>(fs.predictedDisplayPeriod)) - 1;
+        next->skipped_slots = k > 0 ? static_cast<uint32_t>(k > 1000 ? 1000 : k) : 0u;
+    }
+    g_last_begun_T = g_render_time;
+    stage(extra ? "sr: xrSyncActions" : "xrSyncActions");
+    input_sync(g_render_time);
+
+    XrViewLocateInfo vli = { XR_TYPE_VIEW_LOCATE_INFO };
+    vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = g_render_time; vli.space = g_space;
+    XrViewState vs = { XR_TYPE_VIEW_STATE };
+    XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+    uint32_t n = 0;
+    stage(extra ? "sr: locate" : "xrLocateViews");
+    r = p_xrLocateViews(g_session, &vli, &vs, 2, &n, views);
+    const bool valid = XR_SUCCEEDED(r) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+    g_render_views_valid = valid;
+    next->locate_ms = qpc_ms() - t_b0;
+    stage("game");
+    if (!valid) return;
+    // R41: with position tracking lost, hold the last valid head centre and keep the eyes apart (they used to
+    // collapse to the origin: zero eye separation, the world jumping).
+    const bool pos_ok = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+    if (pos_ok) {
+        const XrVector3f a = views[0].pose.position, b = views[1].pose.position;
+        g_last_head = { 0.5f * (a.x + b.x), 0.5f * (a.y + b.y), 0.5f * (a.z + b.z) }; g_have_last_pos = true;
+        const float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z, ipd = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (ipd >= kIpdMin && ipd <= kIpdMax) g_last_ipd = ipd;
+        if (g_pos_lost) { g_pos_lost = false; g_h.diag("xr: position tracking back"); }
+    }
+    else {
+        if (!g_pos_lost) { g_pos_lost = true; g_h.diag("xr: position tracking lost: holding the head at (%.2f %.2f %.2f), eye separation %.3f m", g_have_last_pos ? g_last_head.x : 0.f, g_have_last_pos ? g_last_head.y : 0.f, g_have_last_pos ? g_last_head.z : 0.f, g_last_ipd); }
+        const XrVector3f c = g_have_last_pos ? g_last_head : XrVector3f{ 0.f, 0.f, 0.f };
+        for (int i = 0; i < 2; ++i) {
+            const XrVector3f rx = right_axis(views[i].pose.orientation); const float h = (i == 0 ? -0.5f : 0.5f) * g_last_ipd;
+            views[i].pose.position = { c.x + rx.x * h, c.y + rx.y * h, c.z + rx.z * h };
+        }
+    }
+    memcpy(g_render_views, views, sizeof(views));
+    next->have_views = true;
+    for (int i = 0; i < 2; ++i) {
+        next->view[i].q[0] = views[i].pose.orientation.x; next->view[i].q[1] = views[i].pose.orientation.y;
+        next->view[i].q[2] = views[i].pose.orientation.z; next->view[i].q[3] = views[i].pose.orientation.w;
+        next->view[i].p[0] = views[i].pose.position.x;   // valid, or held by R41 above
+        next->view[i].p[1] = views[i].pose.position.y;
+        next->view[i].p[2] = views[i].pose.position.z;
+        next->fov[i].l = tanf(views[i].fov.angleLeft); next->fov[i].r = tanf(views[i].fov.angleRight);
+        next->fov[i].u = tanf(views[i].fov.angleUp);   next->fov[i].d = tanf(views[i].fov.angleDown);
+    }
+}
+
+// stickrep helpers (the native side computes the rotation; this file only applies it to the held poses)
+void q_mul(const float a[4], const float b[4], float o[4]) {   // o = a * b (x, y, z, w)
+    o[0] = a[3]*b[0] + a[0]*b[3] + a[1]*b[2] - a[2]*b[1];
+    o[1] = a[3]*b[1] - a[0]*b[2] + a[1]*b[3] + a[2]*b[0];
+    o[2] = a[3]*b[2] + a[0]*b[1] - a[1]*b[0] + a[2]*b[3];
+    o[3] = a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2];
+}
+void q_rot(const float q[4], const float v[3], float o[3]) {   // o = q v q*
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float M[9] = { 1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y),
+                         2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x),
+                         2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y) };
+    for (int i = 0; i < 3; ++i) o[i] = M[i*3+0]*v[0] + M[i*3+1]*v[1] + M[i*3+2]*v[2];
+}
+/// The held pose turned about the pivot: orientation' = q * orientation, position' = pivot + q (position - pivot). The
+/// orientation is renormalised: VDXR refuses a layer whose pose is not normalised (XR_ERROR_POSE_INVALID).
+XrPosef rotate_pose(const XrPosef& in, const XrExtraRot& rot) {
+    const float o[4] = { in.orientation.x, in.orientation.y, in.orientation.z, in.orientation.w };
+    float qo[4]; q_mul(rot.q, o, qo);
+    const float len = sqrtf(qo[0]*qo[0] + qo[1]*qo[1] + qo[2]*qo[2] + qo[3]*qo[3]);
+    if (!(len > 0.5f && len < 1.5f)) return in;                                   // a bad rotation (never expected): the pose as rendered
+    XrPosef out;
+    out.orientation = { qo[0] / len, qo[1] / len, qo[2] / len, qo[3] / len };
+    const float d[3] = { in.position.x - rot.pivot[0], in.position.y - rot.pivot[1], in.position.z - rot.pivot[2] };
+    float rd[3]; q_rot(rot.q, d, rd);
+    out.position = { rot.pivot[0] + rd[0], rot.pivot[1] + rd[1], rot.pivot[2] + rd[2] };
+    return out;
+}
+/// An extra frame has a base layer to send: the last xr_frame sent one (fresh or held), it is still held, and its
+/// swapchain images have been released at least once (R8b's test).
+bool extra_base_ready() {
+    if (!g_last_sent.base || !g_held.have) return false;
+    return g_held.use_screen ? (g_eye[2].ever_released && (!g_held.stereo || g_eye[5].ever_released)) : (g_eye[0].ever_released && g_eye[1].ever_released);
+}
+
 } // namespace
 
 const char* xr_stage() { return const_cast<const char*>(g_stage); }
 
 void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[2], const XrScreen* screen, const XrUiPanel* ui, XrFrameOut* next) {
-    if (next) next->have_views = false;
+    XrFrameOut dummy;
+    if (next == nullptr) next = &dummy;
+    *next = XrFrameOut{};                          // have_views false, began false, ...
     if (!xr_active()) return;
     stage("poll events");
     poll_events();
@@ -753,6 +983,11 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         g_t_end_ms = qpc_ms() - t_end0;
         g_frame_open = false;
         if (XR_FAILED(r)) fail("xrEndFrame", r);
+        // stickrep: what went out, for the extra frames until the next call (they re-send exactly this)
+        g_last_sent.base = base; g_last_sent.have_ui = base && have_ui; g_last_sent.have_imgui = base && have_imgui;
+        if (have_ui) g_last_sent.uiq = uiq;
+        if (have_imgui) g_last_sent.imq = imq;
+        next->ended = true; next->base_fresh = ok; next->base_sent = base; next->end_ms = g_t_end_ms;
         if (g_sc_stuck >= 0) {   // B5-2: a swapchain that keeps failing hard (not timing out) never recovers by itself: restart the session
             const int stuck = g_sc_stuck;
             g_h.diag("xr: swapchain %d stuck (%u hard errors in a row): stopping the session; the start back-off restarts it", stuck, k_hard_fail_max);
@@ -763,69 +998,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         }
     }
 
-    // Wait for the next frame and locate the eyes for it.
-    stage("xrWaitFrame");
-    XrFrameWaitInfo fwi = { XR_TYPE_FRAME_WAIT_INFO };
-    XrFrameState fs = { XR_TYPE_FRAME_STATE };
-    const int lk = g_h.wait_begin ? g_h.wait_begin() : 0;   // load lock build (load_lock_release, default off): may give up the game's lock for the wait
-    const double t_wait0 = qpc_ms();
-    XrResult r = p_xrWaitFrame(g_session, &fwi, &fs);
-    g_t_wait_ms = qpc_ms() - t_wait0;   // the wait alone; taking the lock back is timed by the host (the prof block)
-    if (lk) stage("lock re-acquire");      // LL-4: a hang here is ours (the game's lock), not the runtime's xrWaitFrame
-    if (g_h.wait_end) g_h.wait_end(lk);   // every path: the lock is ours again before anything else runs
-    if (XR_FAILED(r)) { fail("xrWaitFrame", r); stage("game"); return; }
-    stage("xrBeginFrame");
-    XrFrameBeginInfo fbi = { XR_TYPE_FRAME_BEGIN_INFO };
-    r = p_xrBeginFrame(g_session, &fbi);
-    if (XR_FAILED(r) ) { fail("xrBeginFrame", r); stage("game"); return; }
-    g_frame_open = true;
-    g_render_time = fs.predictedDisplayTime;
-    g_should_render = fs.shouldRender == XR_TRUE;
-    stage("xrSyncActions");
-    input_sync(g_render_time);
-
-    XrViewLocateInfo vli = { XR_TYPE_VIEW_LOCATE_INFO };
-    vli.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO; vli.displayTime = g_render_time; vli.space = g_space;
-    XrViewState vs = { XR_TYPE_VIEW_STATE };
-    XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
-    uint32_t n = 0;
-    stage("xrLocateViews");
-    r = p_xrLocateViews(g_session, &vli, &vs, 2, &n, views);
-    const bool valid = XR_SUCCEEDED(r) && n == 2 && (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
-    g_render_views_valid = valid;
-    stage("game");
-    if (!valid) return;
-    // R41: with position tracking lost, hold the last valid head centre and keep the eyes apart (they used to
-    // collapse to the origin: zero eye separation, the world jumping).
-    const bool pos_ok = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
-    if (pos_ok) {
-        const XrVector3f a = views[0].pose.position, b = views[1].pose.position;
-        g_last_head = { 0.5f * (a.x + b.x), 0.5f * (a.y + b.y), 0.5f * (a.z + b.z) }; g_have_last_pos = true;
-        const float dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z, ipd = sqrtf(dx*dx + dy*dy + dz*dz);
-        if (ipd >= kIpdMin && ipd <= kIpdMax) g_last_ipd = ipd;
-        if (g_pos_lost) { g_pos_lost = false; g_h.diag("xr: position tracking back"); }
-    }
-    else {
-        if (!g_pos_lost) { g_pos_lost = true; g_h.diag("xr: position tracking lost: holding the head at (%.2f %.2f %.2f), eye separation %.3f m", g_have_last_pos ? g_last_head.x : 0.f, g_have_last_pos ? g_last_head.y : 0.f, g_have_last_pos ? g_last_head.z : 0.f, g_last_ipd); }
-        const XrVector3f c = g_have_last_pos ? g_last_head : XrVector3f{ 0.f, 0.f, 0.f };
-        for (int i = 0; i < 2; ++i) {
-            const XrVector3f rx = right_axis(views[i].pose.orientation); const float h = (i == 0 ? -0.5f : 0.5f) * g_last_ipd;
-            views[i].pose.position = { c.x + rx.x * h, c.y + rx.y * h, c.z + rx.z * h };
-        }
-    }
-    memcpy(g_render_views, views, sizeof(views));
-    if (next) {
-        next->have_views = true;
-        for (int i = 0; i < 2; ++i) {
-            next->view[i].q[0] = views[i].pose.orientation.x; next->view[i].q[1] = views[i].pose.orientation.y;
-            next->view[i].q[2] = views[i].pose.orientation.z; next->view[i].q[3] = views[i].pose.orientation.w;
-            next->view[i].p[0] = views[i].pose.position.x;   // valid, or held by R41 above
-            next->view[i].p[1] = views[i].pose.position.y;
-            next->view[i].p[2] = views[i].pose.position.z;
-            next->fov[i].l = tanf(views[i].fov.angleLeft); next->fov[i].r = tanf(views[i].fov.angleRight);
-            next->fov[i].u = tanf(views[i].fov.angleUp);   next->fov[i].d = tanf(views[i].fov.angleDown);
-        }
-    }
+    wait_begin_locate(next, false);   // xrWaitFrame -> xrBeginFrame -> xrSyncActions -> xrLocateViews (shared with the extra frames)
 }
 
 void xr_input_get(XrInput* out) { if (out) *out = g_input; }
@@ -866,3 +1039,71 @@ bool xr_pin(bool on, const XrFovTan used[2]) {
 }
 bool xr_pinned() { return g_pin; }
 void xr_hold_uncapped(bool on) { g_hold_uncapped = on; }
+
+// ---------------------------------------------------------------- stickrep: the extra frames
+bool xr_frame_open() { return g_session != XR_NULL_HANDLE && g_running && g_frame_open; }
+bool xr_running() { return g_session != XR_NULL_HANDLE && g_running; }
+bool xr_extra_possible(bool zero) {
+    if (!xr_frame_open() || g_waited_unbegun || !g_should_render) return false;
+    return zero || extra_base_ready();
+}
+void xr_display(double* period_ms, double* refresh_hz, bool* half_rate) {
+    if (period_ms) *period_ms = g_period / 1e6;
+    if (refresh_hz) *refresh_hz = g_refresh_hz > 1.f ? g_refresh_hz : (g_period_min > 0 ? 1e9 / static_cast<double>(g_period_min) : 0.0);
+    if (half_rate) *half_rate = g_half_rate;
+}
+bool xr_now_xrtime(int64_t* t) {
+    if (t == nullptr || g_instance == XR_NULL_HANDLE || p_xrConvertWin32PerformanceCounterToTimeKHR == nullptr) return false;
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    XrTime x = 0;
+    if (XR_FAILED(p_xrConvertWin32PerformanceCounterToTimeKHR(g_instance, &c, &x))) return false;
+    *t = x; return true;
+}
+bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* next) {
+    XrFrameOut dummy;
+    if (next == nullptr) next = &dummy;
+    *next = XrFrameOut{};
+    if (!xr_frame_open() || g_waited_unbegun) return false;
+    stage("sr: poll events");
+    poll_events();                                                   // may stop the session (it then ends the open frame itself)
+    if (!xr_frame_open() || !g_should_render) { stage("game"); return false; }
+    const bool base = !zero && extra_base_ready();
+    if (!base && !zero) { stage("game"); return false; }             // nothing to show: the slot is left to the runtime (it repeats the last frame)
+    // The layers: exactly what the last xr_frame sent (the base from g_held, which is that frame's base whether it went out
+    // fresh or held; the quads from g_last_sent), the images being the swapchains' last released ones (no acquire, no copy).
+    XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
+    XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD }, quad_r = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
+    const XrCompositionLayerBaseHeader* layers[4] = { nullptr, nullptr, nullptr, nullptr };
+    uint32_t nl = 0;
+    if (base) {
+        if (g_held.use_screen) {                                    // the virtual / stereo screen: re-sent unrotated (world-locked in the room)
+            quad = g_held.quad; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad);
+            if (g_held.stereo) { quad_r = g_held.quad_r; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad_r); }
+        }
+        else {
+            pv[0] = g_held.pv[0]; pv[1] = g_held.pv[1];             // the poses (and field of view) those images were rendered with
+            if (rot != nullptr && rot->on && !g_pin) { pv[0].pose = rotate_pose(pv[0].pose, *rot); pv[1].pose = rotate_pose(pv[1].pose, *rot); }   // a pinned base (glass break) never turns
+            layer.space = g_space; layer.viewCount = 2; layer.views = pv;
+            layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
+        }
+        if (quads && g_last_sent.have_ui && !g_held.use_screen && g_eye[3].ever_released) { uiq = g_last_sent.uiq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&uiq); }   // head-locked: unchanged
+        // the ImGui quad: head-locked only within `quads`; on the screen (Fahrenheit's save screen, world-locked) always, so a save that
+        // stalls the main thread does not make the menu vanish from the screen (SR-8)
+        if (g_last_sent.have_imgui && g_eye[4].ever_released && (quads || g_last_sent.imq.space == g_space)) { imq = g_last_sent.imq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&imq); }
+    }
+    XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
+    end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    end.layerCount = nl; end.layers = nl ? layers : nullptr;
+    if (g_h.extra_abort && g_h.extra_abort()) { stage("game"); return false; }   // SR-1: exiting: no call at all (the frame stays open for xr_stop to end)
+    stage("sr: xrEndFrame");
+    const double t_end0 = qpc_ms();
+    const XrResult r = p_xrEndFrame(g_session, &end);
+    next->end_ms = qpc_ms() - t_end0;
+    g_frame_open = false;
+    next->ended = true; next->base_sent = nl > 0;
+    if (XR_FAILED(r)) fail("xrEndFrame (extra frame)", r);
+    wait_begin_locate(next, true);
+    return true;
+}

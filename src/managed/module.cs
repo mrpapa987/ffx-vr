@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 24;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 25;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -63,7 +63,6 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private float _xr_pitch_follow = 0.85f;
     private delegate* unmanaged[Cdecl]<int, int, int, float, float, void> _fn_cuts_set;
     private delegate* unmanaged[Cdecl]<int, int, float, float, int, void> _fn_turn_set;
-    private delegate* unmanaged[Cdecl]<float, void> _fn_turn;
     private delegate* unmanaged[Cdecl]<uint> _fn_turn_count;
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_perf_status;
     private delegate* unmanaged[Cdecl]<int, void> _fn_noimg_set;
@@ -337,6 +336,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_haptics_set != null) _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);   // before ffxvr_init, which installs the XInputSetState hook only if haptics or build 7 are on
         diag7_init();   // build 7 (log only): game-function hooks must be queued here, at init (diag7.cs)
         ld_init();      // load diagnostics (load_diag.cs): queued after build 7's hooks (the job join included), so a failure here cannot take them with it (LD-7)
+        sr_init();      // stickrep (stickrep.cs): the flush gate's two hooks, queued last of all ours (Fahrenheit's commit stops at the first failing insertion)
         return true;
     }
 
@@ -388,7 +388,6 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_xr_pitch_follow");
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
-            _fn_turn         = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_turn");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
             _fn_noimg_set    = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_noimg_set");
@@ -503,6 +502,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_uidepth_set = (delegate* unmanaged[Cdecl]<int, float, float, float, int, void>)req("ffxvr_uidepth_set"); _fn_uidepth_status = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_uidepth_status");   // ABI 20: adaptive UI panel
             _fn_haze_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_haze_set"); _fn_haze_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_haze_status");   // ABI 22: heat haze
             _fn_load_info = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_load_info");   // ABI 23: loads build (the load: lines, the lock release per load kind); 24: 60 values
+            _fn_sr_set = (delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void>)req("ffxvr_sr_set"); _fn_sr_gate = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_sr_gate");   // ABI 25: stickrep
+            _fn_sr_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_sr_status"); _fn_turn_keys = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_turn_keys");
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -530,7 +531,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_get_camera = null; _fn_camera_reads = null; _fn_slot0_count = null; _fn_camera_changes = null; _fn_counter = null; _fn_on_draw = null;
         _fn_draw_ctx = null; _fn_draw_args = null; _fn_eye2_begin = null; _fn_eye2_end = null; _fn_stereo_set = null; _fn_xr_set = null;
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
-        _fn_turn_set = null; _fn_turn = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
+        _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
@@ -559,6 +560,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_imgui_status = null;   // ABI 21 (saveui; _fn_imgui_layer_set is cleared above)
         _fn_haze_set = null; _fn_haze_status = null;   // ABI 22 (heat haze)
         _fn_load_info = null;   // ABI 23 (loads)
+        _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -989,6 +991,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
                 case "turn_rate":         pf(k, v, ref _turn_rate, 10f, 360f); break;
                 case "turn_blink":        pb(k, v, ref _turn_blink); break;
+                case "stick_reproject":   pe(k, v, ref _stick_reproject, 0, 1, 2); break;          // stickrep: 0 off, 1 first person + seat (default), 2 also third person + diorama (at once)
+                case "stick_reproject_margin_ms": pf(k, v, ref _sr_margin_ms, 0.5f, 6f); break;    // stickrep: the extra frame's lead on the slot's deadline
+                case "stick_reproject_predict": pb(k, v, ref _sr_predict); break;                  // stickrep: an extra first when a game frame cannot make the open slot
+                case "stick_overscan":    pf(k, v, ref _stick_overscan, 0f, 4f); break;            // stickrep: degrees per side the rendered view is widened (default 0)
+                case "keepalive":         pb(k, v, ref _keepalive); break;                         // stickrep: the loading keepalive alone, unturned (with stick_reproject=0)
+                case "keepalive_mt_protect": { bool ignored = false; pb(k, v, ref ignored); } break;   // SR-X2: accepted, ignored (never on: see sr_mt_init)
                 case "move_remap":        pb(k, v, ref _move_remap); break;
                 case "move_invert":       pb(k, v, ref _move_invert); break;
                 case "fp_actor": {   // FP-1: a comma list of model names, best first; the old single default "c101" becomes the new list
@@ -1328,6 +1336,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
             $"turn_rate={_turn_rate.ToString("F0", ci)}\n" +
             $"turn_blink={(_turn_blink ? 1 : 0)}\n" +
+            $"stick_reproject={_stick_reproject.ToString(ci)}\n" +
+            $"stick_reproject_margin_ms={_sr_margin_ms.ToString("0.0", ci)}\n" +
+            $"stick_reproject_predict={(_sr_predict ? 1 : 0)}\n" +
+            $"stick_overscan={_stick_overscan.ToString("0.0", ci)}\n" +
+            $"keepalive={(_keepalive ? 1 : 0)}\n" +
+            $"keepalive_mt_protect=0\n" +   // SR-X2: never on
             $"move_remap={(_move_remap ? 1 : 0)}\n" +
             $"move_invert={(_move_invert ? 1 : 0)}\n" +
             $"fp_actor={_fp_actor}\n" +
@@ -1480,6 +1494,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("right stick", ref _turn_stick); ImGui.SameLine();
         ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
         ImGui.SameLine(); ImGui.TextDisabled("Numpad 1/3: turn left/right");
+        sr_ui();       // stickrep: stick_reproject (the turn drawn at the headset's rate)
         ImGui.Checkbox("left stick follows where I look (first person)", ref _move_remap); ImGui.SameLine();
         ImGui.Checkbox("invert", ref _move_invert);
         if (_fn_move_status != null) {
@@ -1646,6 +1661,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         if (ImGui.TreeNode("Heat haze (the shimmer over fire)")) {
             haze_debug_ui();
+            ImGui.TreePop();
+        }
+        if (ImGui.TreeNode("Stick reprojection and the loading keepalive")) {
+            sr_debug_ui();
             ImGui.TreePop();
         }
 
@@ -1940,6 +1959,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// <summary>Every key, once per frame, whether the window is open or not. F8, F9-F11 always work; the rest are
     /// ignored while a text box has the keyboard (typing "2,3" with the numpad must not move the camera).</summary>
     private void handle_hotkeys() {
+        _turn_key_dir = 0;   // stickrep: set below unless a text field has the keyboard
         if (ImGui.IsKeyPressed(ImGuiKey.F8)) { _window_open = !_window_open; _window_open_forced = false; }   // the player's own choice is saved again
         if (ImGui.IsKeyPressed(ImGuiKey.F10)) _slowmo_on = !_slowmo_on;
         if (ImGui.IsKeyPressed(ImGuiKey.F11)) _hover_mode = (_hover_mode + 1) % 3;
@@ -1965,11 +1985,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (ImGui.IsKeyDown(ImGuiKey.Keypad7))        _ovr_up      -= move;
         if (ImGui.IsKeyPressed(ImGuiKey.Keypad5))     { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; if (_fn_gesture_reset != null) _fn_gesture_reset(); if (_fn_motion_log != null) _fn_motion_log(180); }
         _ovr_pitch = Math.Clamp(_ovr_pitch, -89f, 89f);
-        if (_fn_turn != null) {
-            float step = _turn_rate * dt;
-            if (ImGui.IsKeyDown(ImGuiKey.Keypad1)) _fn_turn(-step);
-            if (ImGui.IsKeyDown(ImGuiKey.Keypad3)) _fn_turn(step);
-        }
+        // Numpad 1 / 3: native integrates them like the stick (time-based; on the display clock with stick_reproject, so the
+        // extra frames turn with them too); sent every frame by sr_push (ffxvr_turn_keys). The native ffxvr_turn export stays (unused here).
+        _turn_key_dir = (ImGui.IsKeyDown(ImGuiKey.Keypad3) ? 1 : 0) - (ImGui.IsKeyDown(ImGuiKey.Keypad1) ? 1 : 0);
     }
 
     /// <summary>The only call of ffxvr_gesture_poll (it reads and clears): grab state for the overlay, and the chords.</summary>
@@ -2055,6 +2073,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)
         haze_push();     // heat haze: heat_haze (every frame; applied at the next Present)
+        sr_push();       // stickrep: stick_reproject and its Debug knobs, the turn keys (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle
         push_hands();
@@ -2597,6 +2616,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         diag7_resolve();   // build 7 (B7-1): the game-function detours' originals, before try_install_hooks adds our late hooks
         ld_resolve();      // load diagnostics: the same, for their detours
+        sr_resolve();      // stickrep: the same, for the flush gate's two detours
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready && _diag_actors) actors_auto_log();   // LD2-8: diag_actors (default 0)

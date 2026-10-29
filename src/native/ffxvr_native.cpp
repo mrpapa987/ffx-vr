@@ -363,7 +363,13 @@ ID3D11Buffer* g_imgui_cb = nullptr;   // ImGui's constant buffer: the one bound 
 bool  g_first_draw_pending = false;   // set by the hook; cleared by that first draw
 float g_ipd          = 6.0f;          // lateral offset between eyes, world units (chars ~20 tall)
 float g_eye_shift    = 0.f;           // applied by build_override_view along the camera's right axis
-bool  g_in_eye2      = false;         // re-entrancy guard: our own GPU work, and everything inside the OpenXR runtime
+// Re-entrancy guard: our own GPU work, and everything inside the OpenXR runtime. PER THREAD (SR-X1): before the stickrep
+// build every guarded section ran inside the Present hook, when the game's main thread uploads nothing; the extra frames
+// run in the render thread's ring wait between command lists, while the main thread IS uploading the next frame's
+// constant buffers. A process-wide guard blinded maybe_override to those uploads for the extra's whole xrWaitFrame (up
+// to a display period, 60-120 times a second): no camera counted, no override, no eye-2 image, the view stuck on the
+// virtual screen for the session. The guard only ever meant "this thread is inside our own work".
+thread_local bool g_in_eye2 = false;
 struct InEye2 {                        // scoped: sets the guard, restores the previous value (nesting-safe)
     bool prev; InEye2() : prev(g_in_eye2) { g_in_eye2 = true; } ~InEye2() { g_in_eye2 = prev; }
 };
@@ -600,10 +606,29 @@ constexpr float k_dt_min = 0.001f, k_dt_max = 0.05f;   // clamp: slow motion and
 bool  g_dt_measured = false;                   // once true, the managed dt passed to ffxvr_cuts_set is ignored
 
 // Turning: the right stick (XInput, read directly) and the turn keys rotate
-// the latched heading, in first person and in the seat alike. Snap turns are
-// a fixed angle per flick (with a blink); smooth turns are degrees per second.
+// the latched heading, in first person and in the seat alike. Smooth turns only (degrees per second); turn_mode, turn_snap
+// and turn_blink are still pushed by managed but have no effect (snap turning was removed before the baseline).
 bool  g_turn_stick = true; int g_turn_mode = 0; float g_turn_snap = 30.f, g_turn_rate = 90.f; bool g_turn_blink = true;
 uint32_t g_turn_count = 0;
+// stickrep (display-rate stick reprojection; the "Stick reprojection" block near the end of this file): the stick yaw on
+// the display clock, and what the held image was rendered with, so the extra frames can turn it by the yaw added since.
+double   g_turn_accum = 0.0;      // rad: the sum of every heading change turn_by made (stick, keys, ffxvr_turn); + = yaw up = a left turn
+int64_t  g_turn_T = 0;            // XrTime the stick integration has reached (0: restart at the next frame)
+float    g_turn_key = 0.f;        // Numpad 1 / 3: -1 / 0 / +1 (ffxvr_turn_keys, every frame)
+bool     g_turn_frozen = false;   // an extra frame's hold reached delta_max: no more turning until the next fresh frame
+uint32_t g_sr_epoch = 0;          // bumped at every discontinuity of the heading (latch resets and re-latches, recentre, mode change, pin)
+int      g_sr_mode = 1;           // stick_reproject: 0 off, 1 first person + seat, 2 also third person + diorama
+float    g_sr_overscan_deg = 0.f; // stick_overscan: the rendered field of view widened by this much per side (horizontal)
+struct SrFrame {                  // one rendered frame's heading: build_override_view at the frame's first eye-1 3D upload
+    bool valid, live; int mode; float seat_yaw, seat_pitch, pivot_ref[3], ref_q[4], ref_p[3]; double accum; uint32_t epoch;
+};
+SrFrame  g_sr_rec = {};           // this frame's, until the next Present
+SrFrame  g_sr_img = {};           // the image the headset holds now (g_sr_rec of the last fresh base layer)
+volatile LONG g_sr_exiting = 0;   // ffxvr_shutdown: the ring wait stops making extra frames at once (another thread is stopping the session)
+volatile LONG g_sr_in_extra = 0;  // SR-1: extra frames in flight (sr_extra); ffxvr_shutdown waits for 0 (at most 100 ms) before xr_stop
+double   g_sr_fresh_accum = 0.0; // SR-6: g_turn_accum at the last fresh base layer (the extra frames' yaw bound when the held image is not a live view)
+uint32_t g_sr_clears = 0;         // the game's clears (ffxvr_on_clear outside InEye2): the ring wait's "next frame has started" test
+double   g_sr_rate_extras = 0.0;  // extra frames per second over the last 10 s (the perf: line, the overlay)
 
 // Movement remap: in first person the game still maps the left stick against
 // its own camera, so the stick is rotated by (view heading - game camera
@@ -1113,6 +1138,7 @@ static void xr_apply_poses(const XrFrameOut& f) {
         g_xr_ref_q[0] = 0; g_xr_ref_q[1] = sinf(a * 0.5f); g_xr_ref_q[2] = 0; g_xr_ref_q[3] = cosf(a * 0.5f);
         memcpy(g_xr_ref_p, g_xr_raw_p, sizeof(g_xr_ref_p));
         g_xr_recenter_pending = false;
+        g_sr_epoch++;                     // stickrep: a held image's heading belongs to the old reference
         g_xr_screen_dist_placed = -1.f;   // re-place the screen below
         g_imgui_menu_pose = false; g_imgui_menu_place = false;   // saveui: an open menu follows the re-placed screen (it now faces the user too)
     }
@@ -1526,8 +1552,8 @@ static void diag7_frame() {
 /// Turn the current heading by `deg` (positive = right).
 static void turn_by(float deg) {
     const float d = -deg * 0.0174533f;                   // yaw about +y: positive turns left
-    if (g_fp_mode != 0) { if (g_fp_yaw_latched) g_fp_yaw += d; }
-    else if (g_seat_latched) g_seat_yaw += d;
+    if (g_fp_mode != 0) { if (g_fp_yaw_latched) { g_fp_yaw += d; g_turn_accum += d; } }
+    else if (g_seat_latched) { g_seat_yaw += d; g_turn_accum += d; }   // stickrep: the accumulator moves with the heading only
     g_turn_count++;
 }
 
@@ -1578,11 +1604,47 @@ static float right_stick_x() {
     return 0.f;
 }
 
-/// Per frame: stick turning.
+/// Per frame: stick turning (stick_reproject=0, or no running session: the legacy clock, the Present interval).
 static void turn_tick() {
+    if (g_turn_key != 0.f) turn_by(g_turn_key * g_turn_rate * g_dt);   // Numpad 1 / 3: what managed's per-frame ffxvr_turn(rate * dt) did
     if (!g_turn_stick) return;
     const float x = right_stick_x();
     if (x != 0.f) turn_by(x * fabsf(x) * g_turn_rate * g_dt);   // smooth, with a gentle curve near centre
+}
+
+double g_sr_ft_ms = 16.7;   // stickrep: the game's frame time, smoothed (delta_max)
+/// stickrep: how far an extra frame may turn the held image (spec 2.8): max(3 deg, 2.5 x the turn speed x the game frame time).
+static float sr_delta_max_rad() { return fmaxf(3.f, 2.5f * g_turn_rate * static_cast<float>(g_sr_ft_ms) * 0.001f) * 0.0174533f; }
+/// stickrep (stick_reproject > 0): the stick and the keys integrated against the predicted display time. Called after
+/// every xrBeginFrame on the render thread, between command lists only (xr_tick after xr_frame; every extra frame), with
+/// the display time of the frame just begun: the yaw a frame is rendered (or reprojected) with is the yaw at the moment
+/// it is shown. The turn speed is the same deg/s; only the clock changed (display time instead of Present intervals).
+/// In an extra frame the yaw stops delta_max past the held image (g_turn_frozen, cleared by the next fresh frame): a held
+/// frame is never turned into black, and the view does not jump when frames come back. SR-6: also when the held image is
+/// not a live 3D view (a screen, a backdrop room, an unlatched seat), against the accumulator at the last fresh frame.
+static void turn_advance(int64_t T, bool extra) {
+    const bool keys = g_turn_key != 0.f;
+    if (T <= 0) return;
+    if (!g_turn_stick && !keys) { g_turn_T = T; return; }
+    if (g_turn_T == 0 || T <= g_turn_T) { if (T > g_turn_T) g_turn_T = T; return; }
+    const double dt = fmin(static_cast<double>(T - g_turn_T) * 1e-9, static_cast<double>(k_dt_max));
+    g_turn_T = T;
+    if (g_turn_frozen || g_bt_frozen) return;
+    float x = (g_turn_stick ? right_stick_x() : 0.f) + g_turn_key;
+    x = x < -1.f ? -1.f : x > 1.f ? 1.f : x;
+    if (x == 0.f) return;
+    float deg = x * fabsf(x) * g_turn_rate * static_cast<float>(dt);   // turn_tick's curve
+    if (extra) {   // SR-6: in every hold (a live 3D view, a screen, a backdrop room, a seat not latched yet), bounded by the last fresh frame
+        const double ref = (g_sr_img.valid && g_sr_img.live) ? g_sr_img.accum : g_sr_fresh_accum;
+        const double dm = sr_delta_max_rad(), want = g_turn_accum - deg * 0.0174533;   // the accumulator after this step
+        const double lo = ref - dm, hi = ref + dm;
+        if (want < lo || want > hi) {
+            const double to = want < lo ? fmin(lo, g_turn_accum) : fmax(hi, g_turn_accum);   // up to the limit, never back (already past it: no step)
+            deg = static_cast<float>((g_turn_accum - to) / 0.0174533);
+            g_turn_frozen = true;
+        }
+    }
+    if (deg != 0.f) turn_by(deg);
 }
 
 /// advance = this call moves the per-frame filters on (once per frame: write_camera's first eye-1 3D upload). Every
@@ -1619,6 +1681,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float f[3] = { -R[6], 0.f, -R[8] };
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
+            g_sr_epoch++;                               // stickrep: a new heading, not a stick turn
         }
         if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
@@ -1707,7 +1770,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float live_yaw = atan2f(-f[0], -f[2]);
             const float af[3] = { -Rb[6], -Rb[7], -Rb[8] };
             const float live_pitch = asinf(fmaxf(-1.f, fminf(1.f, af[1]))) * fmaxf(0.f, fminf(1.f, g_xr_pitch_follow));
-            if (!g_seat_latched || fp) { g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode >= 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's
+            if (!g_seat_latched || fp) { if (!g_seat_latched && !fp) g_sr_epoch++; g_seat_yaw = live_yaw; g_seat_pitch = (g_fp_mode >= 2) ? g_gest_pitch : live_pitch; g_seat_latched = true; }   // first person / diorama: the fp heading owns the yaw; the diorama's pitch is the tilt gesture's (stickrep: a seat re-latch is a new heading)
             else if (g_follow_pans && advance) {
                 // slew the latched yaw toward the live one, rate-limited (once per frame: an honest deg/s)
                 float d = live_yaw - g_seat_yaw;
@@ -1757,6 +1820,21 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     float mv[3] = { 0.f, 0.f, 0.f };
     if (g_fp_mode == 0)      { for (int i = 0; i < 3; ++i) mv[i] = g_ovr_move[i] + g_gest_move[i]; }   // authored seat: numpad + grab
     else if (g_fp_mode >= 2) { for (int i = 0; i < 3; ++i) mv[i] = g_gest_move[i]; }                  // diorama / third person: the grab offset from the player
+    if (primary && xr && advance) {
+        // stickrep: what this frame's image is rendered with (spec 3.3). The world-to-reference map is r = (Rb (w - P) - mv') / sc
+        // with mv' = (mv0, mv1, -mv2); a stick turn changes Rb(yaw, pitch) to Rb(yaw + d, pitch), which moves every reference
+        // position by s' = Q (s - c) + c, Q = Rb1 Rb0^T, c = -mv' / sc (the turn pivot). "live": the stick drives this view's
+        // heading (the seat frame below is built from g_seat_yaw / g_seat_pitch, which a stick turn moves).
+        SrFrame& s = g_sr_rec;
+        s.valid = true; s.mode = g_fp_mode;
+        s.live = g_xr_rotate && g_xr_seat && !g_ovr_suspend && !g_backdrop_room && (g_fp_mode == 0 ? (!fp && g_seat_latched) : (fp && g_fp_yaw_latched));
+        s.seat_yaw = g_seat_yaw; s.seat_pitch = g_seat_pitch;
+        const float scp = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f);
+        const float isc = scp > 1e-6f ? 1.f / scp : 0.f;
+        s.pivot_ref[0] = -mv[0] * isc; s.pivot_ref[1] = -mv[1] * isc; s.pivot_ref[2] = mv[2] * isc;
+        memcpy(s.ref_q, g_xr_ref_q, sizeof(s.ref_q)); memcpy(s.ref_p, g_xr_ref_p, sizeof(s.ref_p));
+        s.accum = g_turn_accum; s.epoch = g_sr_epoch;
+    }
     for (int i = 0; i < 3; ++i)
         Pn[i] = P[i] + Rm[0*3+i]*mv[0] + Rn[0*3+i]*lateral + Rm[1*3+i]*mv[1] - Rm[2*3+i]*mv[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
@@ -2376,7 +2454,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float 
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
-    if (!g_in_eye2) { if (g_overlay_phase) gpu_timing_start_span(); g_overlay_phase = false; }
+    if (!g_in_eye2) { if (g_overlay_phase) gpu_timing_start_span(); g_overlay_phase = false; g_sr_clears++; }
     if (!g_frame_live) return;
     char a[96]; describe_view(static_cast<ID3D11View*>(view), a, sizeof(a));
     char t[160];
@@ -4340,7 +4418,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 24;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review)
+constexpr int FFXVR_ABI = 25;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -4793,6 +4871,13 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 // invokes inside its Present hook. That gives us a true frame boundary, so a
 // capture can span exactly one frame instead of whatever happened to come next.
 static void xr_tick();
+static void sr_after_frame(const XrFrameOut& out);   // stickrep (the block near the end of this file)
+static void sr_present();
+static void sr_begin_frame_mark();
+static int  sr_extra_wait_begin();
+static void sr_extra_wait_end(int token);
+static bool sr_extra_abort();
+static void sr_headset_off();
 // ---------------------------------------------------------------- housekeeping / perf
 /// Every few hundred frames: drop twins of textures the game stopped
 /// rendering into (area changes free and recreate them; the twin of a
@@ -4944,17 +5029,18 @@ static void perf_tick() {
         char lc_extra[96] = "";   // shadow camera: only what is not zero
         if (g_lc_tilted_total || g_lc_self_hidden_report)
             snprintf(lc_extra, sizeof(lc_extra), ", not straight down %u this session, own shadow hidden %u", g_lc_tilted_total, g_lc_self_hidden_report);
-        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u",
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u | sr extras %.0f/s",
              g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
-             g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow);
+             g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
         g_ui_verts_read = g_ui_trunc = g_ui_start_nonzero = g_ui_start_bail = g_ui_base_nonzero = g_skip_overflow = 0;   // R39/R48: since the last perf: line
     }
 }
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    sr_begin_frame_mark();          // stickrep: this list's start-to-Present time (c_est), a late fresh frame
     diag7_frame();                  // build 7: Present time for the stall watchdog, its "ended" line, rumble changes
     pf_render_frame();              // load lock build: a prof block waiting for the log (only before the profiler's watcher exists)
     {   // the frame time every filter uses (stick turn, follow pans, auto depth): measured here, whatever the overlay does
@@ -8136,6 +8222,8 @@ static void leave_xr_state() {
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
     g_fp_anchor_valid = false; g_seat_latched = false; g_fp_yaw_latched = false;
+    g_sr_epoch++; g_sr_img.valid = false; g_sr_rec.valid = false; g_turn_T = 0; g_turn_frozen = false;   // stickrep: nothing held across a headset stop
+    sr_headset_off();   // stickrep: the pacing anchor and the open-frame record (SR-12: psi does not survive a session)
     g_lowres = false;   // no stale low-resolution line when the headset comes back on
     g_imgui_menu_prev = false; g_imgui_menu_place = false; g_imgui_menu_pose = false;   // saveui: a menu open at the next start is a new opening
     g_hap[0] = g_hap[1] = HapHand{};   // the session is gone: nothing to stop
@@ -8151,7 +8239,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_want) return 1;
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
-    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end };
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
     if (g_xr_want) {
         if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
@@ -8162,7 +8250,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_fails == 2 || g_xr_fails % 60 == 0) diag("xr: start failed %u times (last: %s); retrying every %d s without logging", g_xr_fails, xr_status(), g_xr_fails < 3 ? 2 : 5);
     return 0;
 }
-extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; bt_user("Home (recentre)"); }   // in a battle transition window a recentre ends the window (bt_tick)
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("Home (recentre)"); }   // in a battle transition window a recentre ends the window (bt_tick)
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
@@ -8248,7 +8336,7 @@ extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, flo
 }
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
-    if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; }
+    if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; g_sr_epoch++; }
     const int mode_before = g_fp_mode;
     g_fp_mode = mode; g_fp_eye_h = eye_h; g_fp_follow_dist = follow_dist; g_fp_follow_h = follow_h; g_fp_hide_body = hide_body != 0; g_fp_hide_radius = hide_radius;
     if (mode != mode_before) { view_defaults(mode); g_fp_anchor_valid = false; }   // the grab offset means something different per mode: start each mode from its default
@@ -8358,10 +8446,17 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() {
+    InterlockedExchange(&g_sr_exiting, 1);   // stickrep: no extra frame from the render thread's ring wait from here on
     bt_exit_flush();   // BT-4 / BT-R-4: the kept bt: lines first, and the buffer is taken for good (the render thread may still present)
     pf_shutdown();     // load lock build: the profiler's watcher stops (its last block written); the lock release needs no teardown
     if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
     InterlockedExchange(&g_va_on, 0);   // the reservation log: nothing recorded during exit (the patch stays: the DLL is never unloaded)
+    {   // SR-1: an extra frame already past its checks finishes (or stops at its next OpenXR call) before the session goes away
+        int waited = 0;
+        while (g_sr_in_extra != 0 && waited < 100) { Sleep(1); ++waited; }
+        if (g_sr_in_extra != 0) diag("sr: exit: an extra frame was still in flight after 100 ms: stopping the session anyway");
+        else if (waited > 0) diag("sr: exit: waited %d ms for an extra frame to finish", waited);
+    }
     if (g_xr_want) { xr_stop(); leave_xr_state(); }
 }
 /// The overlay's low-resolution line: 1 and the text while the headset is on and the game renders below its per-eye size.
@@ -8424,7 +8519,7 @@ static void detect_cut() {
         const float ang = acosf(dot) * 57.2958f;
         if ((dist > 40.f || ang > 25.f) && g_fp_mode == 0) {
             g_cut_count++;
-            g_seat_latched = false;
+            g_seat_latched = false; g_sr_epoch++;   // stickrep: a cut is not a stick turn
             if (g_cut_recentre && !g_screen3d_now && !g_xr_screen_now) g_xr_recenter_pending = true;   // a recentre also moves the screen: not on screen cuts
             if (g_cut_blink) g_blink_frames = 6;
             if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg", g_cut_count, dist, ang);
@@ -8887,7 +8982,8 @@ static void xr_tick() {
     detect_cut();
     bt_tick();                                   // battle transition phases (before anything this tick decides from them)
     dream_tick();                                // the dream filter's flag (after bt_tick; ffxvr_on_draw reads the gate this frame)
-    if (!g_bt_frozen) turn_tick();               // frozen world: no stick turning while the view is pinned...
+    const bool sr_clock = g_sr_mode > 0 && xr_running();   // stickrep: the stick on the display clock (turn_advance after xr_frame below)
+    if (!g_bt_frozen) { if (!sr_clock) { turn_tick(); g_turn_T = 0; } }   // frozen world: no stick turning while the view is pinned...
     else if (g_turn_stick && right_stick_x() != 0.f) bt_user("stick turning");   // ... a push ends the window instead (the player is never locked out)
     if (!g_stereo || !g_ovr_enabled) {           // the headset needs the override and both eyes, whatever the overlay says
         static bool said = false;
@@ -9080,7 +9176,7 @@ static void xr_tick() {
         // views located at the last xr_frame, the pose the override keeps from now on) and released after the submit of the
         // last frame rendered frozen; in between the held base may be re-sent with no frame cap.
         if (g_bt_want_freeze && !g_bt_frozen) {
-            if (xr_pin(true, used)) { g_bt_frozen = true; g_bt_was_frozen = true; }
+            if (xr_pin(true, used)) { g_bt_frozen = true; g_bt_was_frozen = true; g_sr_epoch++; }   // stickrep: a pinned base never turns
             else { g_bt_want_freeze = false; g_bt_hold = false; bt_add("bt: frame %u: no pin (no located views): this window is head-locked", g_frames); }
         }
         xr_hold_uncapped(g_bt_frozen);
@@ -9088,15 +9184,17 @@ static void xr_tick() {
         xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
         g_uib_src_now = nullptr; g_uib_now = false;   // uidepth: the plate belongs to this frame's UI copy only
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
-        if (g_bt_frozen && !g_bt_want_freeze) { xr_pin(false, nullptr); xr_hold_uncapped(false); g_bt_frozen = false; g_bt_hold = false; }
+        if (g_bt_frozen && !g_bt_want_freeze) { xr_pin(false, nullptr); xr_hold_uncapped(false); g_bt_frozen = false; g_bt_hold = false; g_sr_epoch++; }
     }
+    sr_after_frame(out);                           // stickrep: the held image's heading record, the pacing facts of this frame
     bt_frame_line(ui_frame, bt_e1src);
     if (!g_bt_frozen) xr_apply_poses(out);         // frozen: the override keeps the head pose the pin was taken with (eye poses, IPD offset, FOV)
     motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
     xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
+    if (sr_clock && out.began) turn_advance(out.display_time, false);   // stickrep: the yaw at the display time of the frame about to render (the stick as synced at this wait)
     haptics_tick();   // rumble to haptics (render thread: every xrApplyHapticFeedback stays here, next to xrSyncActions)
-    if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; bt_user("the headset's recentre"); diag("xr: recentre (headset gesture)"); }   // same as Home
+    if (xr_take_space_change()) { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("the headset's recentre"); diag("xr: recentre (headset gesture)"); }   // same as Home
     {   // frozen world: no world grab or chords; a new grip or stick click ends the window, and the next frame's gesture_tick acts on it
         static bool s_any_prev = false;
         const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
@@ -9107,8 +9205,15 @@ static void xr_tick() {
     if (g_bt_frozen) { g_vrpad_suppress = false; g_gest_active = false; g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false; }
     else gesture_tick();
     // What the next frame renders with.
-    if (g_xr_active && g_xr_use_fov) { g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1]; }
+    if (g_xr_active && g_xr_use_fov) {
+        g_xr_fov_used[0] = g_xr_fov[0]; g_xr_fov_used[1] = g_xr_fov[1];
+        if (g_sr_overscan_deg > 0.f && g_sr_mode > 0) {   // stickrep: stick_overscan widens the rendered view sideways (the extra frames turn it; it is submitted with this FOV)
+            const float a = g_sr_overscan_deg * 0.0174533f;
+            for (int e = 0; e < 2; ++e) { g_xr_fov_used[e].l = tanf(atanf(g_xr_fov_used[e].l) - a); g_xr_fov_used[e].r = tanf(atanf(g_xr_fov_used[e].r) + a); }
+        }
+    }
     else { g_xr_fov_used[0] = g_xr_fov_used[1] = XrFovTan{ -tx, tx, ty, -ty }; }
+    sr_present();                                  // stickrep: arming, the sr: line, the hold episode line
     const ULONGLONG now_ms = GetTickCount64();
     if (!xr_active()) {   // the session went away (the runtime stopped it): back to flat
         leave_xr_state();
@@ -9860,6 +9965,616 @@ extern "C" __declspec(dllexport) int ffxvr_load_info(int* out, int n) {
     const int cnt = static_cast<int>(sizeof(v) / sizeof(v[0]));
     if (out != nullptr) for (int i = 0; i < n && i < cnt; ++i) out[i] = v[i];
     return cnt;
+}
+
+// ---------------------------------------------------------------------------
+// Stick reprojection (stickrep build; research stick-reproject.md, design-notes "Stick reprojection: extra frames at the
+// headset rate (branch `stickrep`)"). It is also the loading keepalive (research vr-opportunities.md section 1).
+//
+// The game draws about 60 frames a second; the headset refreshes at 72-120. A refresh without a new game frame used to
+// re-show the last one, which the runtime reprojects for the head only, so a stick turn moved in steps and was seen twice
+// at 120 Hz (the double image). Now the render thread's idle wait between command lists (the ring wait: the call at
+// 0x616060 in the render loop 0x616010, FhUtil 0x216060, `call 0x4302A0`, PEvent::wait INFINITE) is ours (rt_ring_wait).
+// When a display slot's deadline comes and no new game frame has started, it ends the open OpenXR frame itself (an
+// "extra frame", xr_extra_frame): the layers the last Present sent, re-referencing the swapchain images that Present
+// released (no acquire, no copy), with the projection layer's two poses turned about the world-vertical axis through the
+// turn pivot by the stick yaw added since that image was rendered (sr_rotation); then xrWaitFrame -> xrBeginFrame ->
+// sync -> locate for the next slot, on this same thread. The stick yaw is integrated against the predicted display time
+// (turn_advance), so every refresh, fresh or extra, shows yaw(t_display).
+//
+// Threads and pacing (spec 2.2, 3.4, 3.5):
+//  - Everything runs on the render thread: the extras in the ring wait, between command lists; xr_frame (the Present
+//    path) inside the Present list. They never overlap, and each keeps OpenXR's order, one call at a time: an extra ends
+//    the frame the last Present (or extra) began, then waits and begins the next; the next Present ends that one. One
+//    xrWaitFrame per display slot, never two waits or two begins in a row (a Begin that failed after its Wait is retried
+//    without a second Wait: ffxvr_xr.cpp wait_begin_locate).
+//  - Never inside a frame: no extra once the next frame has started (a camera upload, a draw or a clear after the Present
+//    list), so a multi-list frame never sees its poses or yaw change halfway (sr_mid_frame).
+//  - A queued list is never delayed: the ring event is checked with a zero timeout first, and again before every extra. A
+//    list that arrives during an extra waits at most for that extra's xrWaitFrame (VDXR's running start: about the margin).
+//  - The game's render-interface lock (0xC94EE4, the one the interpreter holds for every list) is taken around the
+//    extra's xrEndFrame (a try with the game's own protocol: never a wait; busy = retry, then skip the slot), given up
+//    around its xrWaitFrame, and taken back (the game's acquire) for xrBeginFrame, sync and locate: VDXR touches the
+//    immediate context in Begin and End (GPU timer queries, a fence Signal).
+//  - The flush gate: a full flush 0x615EA0 (a managed pre-hook, main thread) hands the immediate context to the main thread
+//    until the next kick 0x615210 (a managed post-hook); no extra while it is set, unless it has been set for 250 ms and
+//    the immediate context's multithread protection is on (the backstop: keepalive_mt_protect, at headset start). The
+//    flush's own list can only run after an extra in progress has returned, so the main thread never uses the context
+//    during one.
+//  - The deadline locks onto VDXR's wait timing: VDXR releases a blocking xrWaitFrame at its running start, 2 ms before the
+//    slot. The open frame's deadline is its wait's return + one period - the margin (stick_reproject_margin_ms); for a
+//    wait that returned at once (late), the phase of the last blocking wait plus whole periods. A slot whose deadline
+//    passed by more than the margin (a late wake-up, a busy lock, the gate, a frame already drawing) is skipped, never
+//    filled late (the runtime repeats the last frame there, as before this build).
+//  - Predictive (stick_reproject_predict): a list that arrives too late for the open slot (now + c_est > deadline) gets
+//    the extra first, so that slot is not lost; c_est is the 90th percentile of a Present list's start-to-Present time.
+//
+// Memory reads: the call site and its neighbours (range_readable first), the game's lock object (ril_init checked it),
+// the PEvent's handle (the same read as the game's 0x4302A0). Fahrenheit's stage-0 debugger makes any fault fatal.
+// ---------------------------------------------------------------------------
+
+static float g_sr_margin_ms = 2.5f, g_sr_inject_deg = 0.f;
+static bool  g_sr_predict = true, g_sr_keepalive = false, g_sr_mt_want = true, g_sr_gate_hooks = false;
+static constexpr double k_sr_quad_ms = 150.0;      // the head-locked quads stop after this long without a Present (a load: a stale menu is worse than none)
+static constexpr double k_sr_zero_ms = 30000.0;    // a hold longer than this sends zero layers (a runtime that dislikes long re-sends)
+static constexpr DWORD  k_sr_gate_ms = 250;        // the flush gate is overridden after this long, with multithread protection only
+static constexpr uintptr_t k_sr_loop = 0x216010, k_sr_site = 0x216060, k_sr_wait = 0x302A0;   // FhUtil offsets (the exe is DYNAMIC_BASE)
+static constexpr double k_sr_inf = 1e300;
+
+// -- the flush gate (managed hooks on the game's main thread: ffxvr_sr_gate) -------------------------------------------
+static volatile LONG  g_sr_gate = 0;               // 1: a full flush ran and no kick since (the main thread owns the immediate context)
+static volatile DWORD g_sr_gate_tick = 0;          // GetTickCount at the flush
+static volatile LONG  g_sr_gate_seen = 0;          // bit 0 a flush, bit 1 a kick seen: the hooks are in
+static volatile LONG  g_sr_flushes = 0, g_sr_kicks = 0;
+static volatile LONGLONG g_sr_kick_qpc = 0;        // QPC of the last kick / flush: when a list became ready (the list start delay)
+static volatile DWORD g_sr_gate_tid = 0;           // SR-10: the thread that flushed: only its own next kick clears the gate
+static volatile DWORD g_sr_flush_other_tid = 0;    // SR-10: a flush from a thread that is not the game's main thread (logged once, at Present)
+
+// -- arming --------------------------------------------------------------------------------------------------------------
+static bool   g_sr_patch_tried = false, g_sr_patched = false;
+static char   g_sr_patch_why[192] = "not tried yet (the headset has not started with stick_reproject or keepalive on)";
+static HANDLE g_sr_timer = nullptr; static bool g_sr_timer_tried = false, g_sr_timer_hires = false;
+static bool   g_sr_mt_tried = false, g_sr_mt_on = false;
+static HWND   g_sr_hwnd = nullptr; static ULONGLONG g_sr_hwnd_next = 0; static bool g_sr_window_gone = false;   // the game's window (SR-1: the window-close path)
+
+// -- pacing (render thread) ----------------------------------------------------------------------------------------------
+struct SrPace { bool open = false, blocked = false, psi_ok = false; double w = 0.0, P = 0.0, psi = 0.0; int skip_k = 0; int64_t T = 0; };
+static SrPace g_sr_pace;                           // the open frame: its wait's return w (QPC ms), period P, whether the wait blocked; psi = the last blocking wait's return
+static double g_sr_present_ms = 0.0, g_sr_last_fresh_ms = 0.0, g_sr_list_t0 = 0.0, g_sr_x_t0 = 0.0, g_sr_x_t1 = 0.0;
+static bool   g_sr_present_pending = false, g_sr_episode = false, g_sr_lock_held = false;
+static int    g_sr_draws_base = 0; static uint32_t g_sr_clears_base = 0, g_sr_cams_base = 0;
+static float  g_sr_c_ring[120] = {}; static int g_sr_c_n = 0, g_sr_c_i = 0, g_sr_c_new = 0; static double g_sr_c_est = 4.0;
+static uint32_t g_sr_ep_extras = 0, g_sr_ep_lost_lock = 0, g_sr_ep_lost_gate = 0, g_sr_ep_lost_mid = 0, g_sr_ep_lost_late = 0;   // SR-5: per hold, the slots lost and why
+static double g_sr_ep_yaw_max = 0.0; static bool g_sr_ep_frozen = false, g_sr_ep_quads_dropped = false;
+static bool   g_sr_first_list_pending = false; static double g_sr_frame_t0 = 0.0;   // SR-3: the first list after a Present starts the frame's clock (c_est)
+static float  g_sr_cl_ring[120] = {}; static int g_sr_cl_n = 0, g_sr_cl_i = 0; static double g_sr_c_last = 0.0;   // ... the old measure (the last list's span), for comparison
+static double g_sr_lock_t0 = 0.0;                  // SR-4: when the extra took the game's lock (its hold time)
+static double g_sr_last_end_ms = 0.0, g_sr_last_wait_ms = 0.0;   // SR-R-1: the last extra's xrEndFrame / xrWaitFrame (the slow-extra line)
+
+// -- statistics (the sr: line every 10 s) ----------------------------------------------------------------------------------
+struct SrStats {
+    uint32_t fresh, late, extras, predictive, skipped, skip_ours, rot, clamped, lock_busy, gate_skips, gate_over, mid_skips, zero, fails, lat_n, jit_n, delay_n, pw_n, spins, slow;
+    double yaw_sum, yaw_max, cpu_sum, cpu_max, end_sum, wait_sum, loc_sum, reacq_max, delay_sum, delay_max, lat_sum, jit_sum, pw_sum, pw_max, hold_sum, hold_max, slow_max;
+};
+static SrStats g_sr_s = {};
+static ULONGLONG g_sr_line_t = 0;
+static double g_sr_rate_skipped = 0.0, g_sr_rate_yaw = 0.0, g_sr_rate_delay_max = 0.0;
+static uint32_t g_sr_total_extras = 0;
+
+static double sr_ms() { return pf_qpc_ms(); }
+static double sr_qpc_to_ms(LONGLONG q) { static LARGE_INTEGER f = {}; if (!f.QuadPart) QueryPerformanceFrequency(&f); return f.QuadPart ? q * 1000.0 / f.QuadPart : 0.0; }
+
+/// Main-thread hooks (managed stickrep.cs): 1 = a full flush 0x615EA0 begins (before the original queues its list),
+/// 2 = a kick 0x615210 returned (the context is the render thread's again; SR-10: only the flushing thread's own kick
+/// clears the gate). Interlocked stores only.
+extern "C" __declspec(dllexport) void ffxvr_sr_gate(int ev) {
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    const DWORD me = GetCurrentThreadId();
+    if (ev == 1) {
+        g_sr_gate_tick = GetTickCount(); g_sr_gate_tid = me; InterlockedExchange(&g_sr_gate, 1); InterlockedOr(&g_sr_gate_seen, 1); InterlockedIncrement(&g_sr_flushes);
+        if (g_main_tid != 0 && me != g_main_tid && g_sr_flush_other_tid == 0) g_sr_flush_other_tid = me;
+    }
+    else if (ev == 2) {
+        if (g_sr_gate != 0 && g_sr_gate_tid != 0 && me != g_sr_gate_tid) { InterlockedOr(&g_sr_gate_seen, 2); InterlockedIncrement(&g_sr_kicks); }   // SR-10: another thread's kick: the flusher may still drive the context
+        else { InterlockedExchange(&g_sr_gate, 0); InterlockedOr(&g_sr_gate_seen, 2); InterlockedIncrement(&g_sr_kicks); }
+    }
+    else return;
+    InterlockedExchange64(&g_sr_kick_qpc, c.QuadPart);
+}
+/// Every frame from managed push_all (render thread): stick_reproject 0/1/2, stick_reproject_margin_ms, stick_reproject_predict,
+/// stick_overscan, keepalive, keepalive_mt_protect (applied once, at the session's first headset start), whether the gate hooks were queued, and the
+/// Debug direction test (degrees added as a right turn on every extra frame).
+extern "C" __declspec(dllexport) void ffxvr_sr_set(int mode, float margin_ms, int predict, float overscan_deg, int keepalive, int mt_protect, int gate_hooks, float inject_deg) {
+    const int m = mode < 0 ? 0 : mode > 2 ? 2 : mode;
+    if (m != g_sr_mode) {
+        diag("sr: stick_reproject=%d (%s)", m, m == 2 ? "first person, seat, third person and diorama" : m == 1 ? "first person and seat" : "off: one frame per Present, the stick on the Present clock");
+        g_sr_epoch++; g_turn_T = 0;
+    }
+    g_sr_mode = m;
+    g_sr_margin_ms = std::isfinite(margin_ms) ? fmaxf(0.5f, fminf(6.f, margin_ms)) : 2.5f;
+    g_sr_predict = predict != 0;
+    g_sr_overscan_deg = std::isfinite(overscan_deg) ? fmaxf(0.f, fminf(4.f, overscan_deg)) : 0.f;
+    if ((keepalive != 0) != g_sr_keepalive) diag("sr: keepalive=%d", keepalive != 0 ? 1 : 0);
+    g_sr_keepalive = keepalive != 0; g_sr_mt_want = mt_protect != 0; g_sr_gate_hooks = gate_hooks != 0;
+    g_sr_inject_deg = std::isfinite(inject_deg) ? fmaxf(-10.f, fminf(10.f, inject_deg)) : 0.f;
+}
+/// Numpad 1 / 3, every frame from managed (-1 left, 0, +1 right): integrated natively like the stick (turn_tick / turn_advance).
+extern "C" __declspec(dllexport) void ffxvr_turn_keys(int dir) {
+    g_turn_key = dir < 0 ? -1.f : dir > 0 ? 1.f : 0.f;
+    if (dir != 0) bt_user("a turn key");
+}
+
+// -- arming: the call-site patch, the timer, the multithread backstop (render thread, at Present) -----------------------
+static int __fastcall rt_ring_wait(void* ev);
+static void sr_patch() {
+    g_sr_patch_tried = true;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const uintptr_t loop = b + k_sr_loop, site = b + k_sr_site, wait = b + k_sr_wait;
+    // The bytes, against FFX.exe (re/dis_full.txt): the render loop's prologue, the two instructions before the call (lea ecx,
+    // [esi+0x18] = &entry.ready; mov [ebx+0x150],eax), the one after it (mov eax,[ebx+0xC]), the call's target and its body.
+    static const uint8_t k_loop_b[] = { 0x55, 0x8B, 0xEC, 0x83, 0xEC, 0x08, 0x53, 0x56, 0x8B, 0xD9 };   // push ebp; mov ebp,esp; sub esp,8; push ebx; push esi; mov ebx,ecx
+    static const uint8_t k_pre[]    = { 0x8D, 0x4E, 0x18, 0x89, 0x83, 0x50, 0x01, 0x00, 0x00 };
+    static const uint8_t k_post[]   = { 0x8B, 0x43, 0x0C };
+    static const uint8_t k_wait_b[] = { 0x6A, 0xFF, 0xFF, 0x31, 0xFF, 0x15 };                           // push -1; push [ecx]; call [WaitForSingleObject]
+    if (!range_readable(reinterpret_cast<const void*>(loop), (site + 8) - loop) || !range_readable(reinterpret_cast<const void*>(wait), sizeof(k_wait_b))) {
+        snprintf(g_sr_patch_why, sizeof(g_sr_patch_why), "the render loop FFX+0x%X is not readable", static_cast<unsigned>(k_sr_loop)); diag("sr: %s: off", g_sr_patch_why); return;
+    }
+    const uint8_t* sp = reinterpret_cast<const uint8_t*>(site);
+    int32_t rel = 0; memcpy(&rel, sp + 1, 4);
+    const bool ok_bytes = memcmp(reinterpret_cast<const void*>(loop), k_loop_b, sizeof(k_loop_b)) == 0 && memcmp(sp - sizeof(k_pre), k_pre, sizeof(k_pre)) == 0
+                       && memcmp(sp + 5, k_post, sizeof(k_post)) == 0 && memcmp(reinterpret_cast<const void*>(wait), k_wait_b, sizeof(k_wait_b)) == 0;
+    const bool ok_call = sp[0] == 0xE8 && site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) == wait;
+    if (!ok_bytes || !ok_call || (site & 7) != 0) {
+        snprintf(g_sr_patch_why, sizeof(g_sr_patch_why), "call site not as expected (%s)", !ok_call ? "the call at FFX+0x216060 does not go to FFX+0x302A0: another mod?" : !ok_bytes ? "the bytes around it differ: another game version?" : "not 8-byte aligned");
+        diag("sr: %s, off", g_sr_patch_why); return;
+    }
+    LONGLONG oldq = 0; memcpy(&oldq, sp, 8);
+    uint8_t nb[8]; memcpy(nb, sp, 8);
+    const int32_t nrel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&rt_ring_wait) - (site + 5));
+    nb[0] = 0xE8; memcpy(nb + 1, &nrel, 4);                       // the other three bytes of the qword stay as they are
+    LONGLONG newq = 0; memcpy(&newq, nb, 8);
+    DWORD prot = 0, tmp = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(site), 8, PAGE_EXECUTE_READWRITE, &prot)) {
+        snprintf(g_sr_patch_why, sizeof(g_sr_patch_why), "VirtualProtect failed (%lu)", GetLastError()); diag("sr: %s, off", g_sr_patch_why); return;
+    }
+    // One aligned 8-byte compare-exchange: the render thread runs this instruction every list, and cannot see it torn (it is
+    // in our Present hook now, not at the call, in any case).
+    const LONGLONG prev = InterlockedCompareExchange64(reinterpret_cast<volatile LONGLONG*>(site), newq, oldq);
+    VirtualProtect(reinterpret_cast<void*>(site), 8, prot, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 8);
+    if (prev != oldq) { snprintf(g_sr_patch_why, sizeof(g_sr_patch_why), "the call site changed while patching"); diag("sr: %s, off", g_sr_patch_why); return; }
+    g_sr_patched = true;
+    snprintf(g_sr_patch_why, sizeof(g_sr_patch_why), "patched");
+    diag("sr: ring wait FFX+0x216060 patched (call 0x4302A0 -> the stickrep ring wait; never unpatched: stick_reproject=0 and keepalive=0 disarm it)");
+}
+/// SR-9: only while the flush gate is free (no main-thread context call can be in progress); the interface is released at
+/// once (the protection is the device's).
+/// SR-X2 (the stickrep session 1 post-mortem): NEVER turned on. SetMultithreadProtected(TRUE) makes the D3D11 runtime route
+/// the context's hot entry points (Draw*, UpdateSubresource, the clears, copies, resolves, OMSetRenderTargets) through a
+/// different, locking set of function bodies. Fahrenheit's detours are inline patches on the bodies read from the vtable
+/// once at init, so from that frame on they see ~1% of the game's draws and none of its camera uploads (the owner's
+/// native-log counters: DrawIndexed 14,092 vs 1,047,878 and UpdateSubresource 1,266 vs 3,497,937 for a session). The game
+/// renders normally; the mod goes blind: no camera -> "2D" -> the virtual screen for the session, no eye copies, no save
+/// screen. The flush gate (SR-9/10) is the whole protection; it was designed as the primary mechanism and the review
+/// accepted it as sufficient. This is kept only to report the context's state once.
+static void sr_mt_init() {
+    if (g_ctx == nullptr || g_sr_gate != 0) return;   // tried again at the next Present
+    g_sr_mt_tried = true;
+    ID3D11Multithread* mt = nullptr;
+    if (SUCCEEDED(g_ctx->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt))) && mt != nullptr) {
+        const BOOL was = mt->GetMultithreadProtected();
+        mt->Release();
+        g_sr_mt_on = was != FALSE;
+        diag("sr: the immediate context's multithread protection is %s and is left alone (SR-X2: turning it on re-routes the context's entry points past the detours; the flush gate is the protection)", was ? "already on" : "off");
+    }
+    else diag("sr: ID3D11Multithread not available (the flush gate alone; it is never overridden)");
+}
+/// SR-1: the game's window (the largest visible unowned top-level window of this process), so an extra never runs once it
+/// is gone (a window close that tears the device down without the game's render-thread stop).
+static BOOL CALLBACK sr_find_window_cb(HWND h, LPARAM lp) {
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || GetWindow(h, GW_OWNER) != nullptr) return TRUE;
+    char cls[32] = ""; if (GetClassNameA(h, cls, sizeof(cls)) > 0 && strcmp(cls, "ConsoleWindowClass") == 0) return TRUE;   // a console is never the game's
+    RECT r = {}; if (!GetClientRect(h, &r)) return TRUE;
+    auto* best = reinterpret_cast<std::pair<HWND, LONG>*>(lp);
+    const LONG area = (r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) { best->first = h; best->second = area; }
+    return TRUE;
+}
+static void sr_find_window() {
+    if (g_sr_hwnd != nullptr) return;
+    const ULONGLONG now = GetTickCount64(); if (now < g_sr_hwnd_next) return;
+    g_sr_hwnd_next = now + 1000;
+    std::pair<HWND, LONG> best(nullptr, 0);
+    EnumWindows(sr_find_window_cb, reinterpret_cast<LPARAM>(&best));
+    if (best.first != nullptr) { g_sr_hwnd = best.first; diag("sr: the game's window 0x%p (an extra frame never runs once it is gone)", static_cast<void*>(g_sr_hwnd)); }
+}
+/// SR-1: an extra frame stops before its next OpenXR call (XrHost extra_abort; also tested before every extra).
+/// SR-R-2: the window found at arming may be recreated by the game (or may not have been the game's): when it is gone, look
+/// again, and latch "gone" only when this process has no visible top-level window left.
+static bool sr_window_gone() {
+    if (g_sr_window_gone) return true;
+    if (g_sr_hwnd == nullptr || IsWindow(g_sr_hwnd)) return false;
+    const HWND old = g_sr_hwnd;
+    g_sr_hwnd = nullptr; g_sr_hwnd_next = 0; sr_find_window();
+    if (g_sr_hwnd != nullptr) { diag("sr: the window 0x%p is gone; the game's window is now 0x%p", static_cast<void*>(old), static_cast<void*>(g_sr_hwnd)); return false; }
+    g_sr_window_gone = true; diag("sr: the game's window is gone (no visible window of the game left): no more extra frames");
+    return true;
+}
+static bool sr_extra_abort() { return g_sr_exiting != 0 || sr_window_gone(); }
+static void sr_arm() {
+    ril_init();
+    if (!g_sr_patch_tried) sr_patch();
+    if (!g_sr_timer_tried) {
+        g_sr_timer_tried = true;
+        g_sr_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        g_sr_timer_hires = g_sr_timer != nullptr;
+        if (g_sr_timer == nullptr) g_sr_timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);   // before Windows 10 1803: the system timer's resolution
+        diag("sr: deadline timer: %s", g_sr_timer_hires ? "high resolution" : g_sr_timer ? "standard (no high-resolution timer: wake-ups may be late, slots skipped)" : "NONE (CreateWaitableTimer failed): off");
+    }
+    if (g_sr_mt_want && !g_sr_mt_tried) sr_mt_init();
+    sr_find_window();
+}
+/// Why the extra frames are not running ("" when they are); the render thread (the ring wait, the overlay).
+static const char* sr_not_armed_why() {
+    if (g_sr_mode == 0 && !g_sr_keepalive) return "off (stick_reproject=0, keepalive=0)";
+    if (g_sr_exiting) return "the game is exiting";
+    if (g_sr_window_gone) return "the game's window is gone";
+    if (!g_sr_gate_hooks) return "the flush gate hooks are not installed (stick_reproject and keepalive were both 0 at launch, or the hooks were refused: see core.log); restart the game";
+    if ((g_sr_gate_seen & 2) == 0) return "waiting for the gate hook's first call";
+    if (!g_xr_want || !xr_active()) return "the headset is off";
+    if (!g_sr_patch_tried) return "waiting for the headset's first frame";
+    if (!g_sr_patched) return g_sr_patch_why;
+    if (!g_ril_ok) return g_ril_why;
+    if (g_sr_timer == nullptr) return "no deadline timer";
+    if (!xr_running()) return "the OpenXR session is not running";
+    if (g_frames == 0) return "no frame yet";
+    return "";
+}
+static bool sr_armed() {
+    return (g_sr_mode > 0 || g_sr_keepalive) && g_sr_exiting == 0 && !sr_window_gone() && g_sr_gate_hooks && (g_sr_gate_seen & 2) != 0 && g_sr_patched && g_ril_ok && g_sr_timer != nullptr
+        && g_xr_want && xr_running() && g_frames > 0 && GetCurrentThreadId() == g_render_tid;
+}
+
+// -- pacing ----------------------------------------------------------------------------------------------------------------
+/// The open frame's deadline by the display slots: its wait's return + one period - the margin when the wait blocked (VDXR
+/// released it at the running start, 2 ms before its slot); else (it returned at once: late) the next slot after it by the
+/// phase of the last blocking wait; plus the slots already skipped.
+static double sr_slot_deadline() {
+    const SrPace& p = g_sr_pace;
+    if (!p.open || !(p.P > 0.5)) return k_sr_inf;
+    double d;
+    if (p.blocked) d = p.w + p.P - g_sr_margin_ms;
+    else if (p.psi_ok && p.w >= p.psi && p.w - p.psi < 2000.0) {
+        // The slot this frame opens: the grid point B = psi + 2 + j P at or after w when w is within VDXR's 2 ms running
+        // start before it (the async thread was still waiting); else the one before w (it was already idle: SR-12).
+        double j = ceil((p.w - (p.psi + 2.0)) / p.P - 1e-9); if (j < 0.0) j = 0.0;
+        if (p.psi + 2.0 + j * p.P - p.w > 2.0 && j >= 1.0) j -= 1.0;
+        d = p.psi + (j + 1.0) * p.P - g_sr_margin_ms;
+    }
+    else d = p.w + p.P - g_sr_margin_ms;
+    return d + p.skip_k * p.P;
+}
+/// keepalive alone (stick_reproject=0): the first extra after max(25 ms, 1.6 game frames) without a Present (vr-opportunities
+/// 1.4), then at the slot deadlines until the next Present. Every skipped slot moves the deadline one period on (SR-2).
+static double sr_deadline() {
+    if (g_sr_mode == 0 && !g_sr_episode) {
+        if (!g_sr_pace.open) return k_sr_inf;
+        return g_sr_present_ms + fmax(25.0, 1.6 * g_sr_ft_ms) + g_sr_pace.skip_k * fmax(g_sr_pace.P, 8.0);   // SR-2: a skipped slot moves it on too
+    }
+    return sr_slot_deadline();
+}
+/// The next frame has started on the render thread: a camera upload, a draw or a clear since the Present list ended
+/// (counted against the snapshot the first ring wait after a Present takes: ImGui's draws after our hook belong to that list).
+static bool sr_mid_frame() { return g_draw_in_frame != g_sr_draws_base || g_sr_clears != g_sr_clears_base || g_cam_uploads_frame != g_sr_cams_base; }
+/// 0: an extra may run now; 1: the next frame has started; 2: the flush gate (the main thread owns the context).
+static int sr_block_reason() {
+    if (sr_mid_frame()) return 1;
+    if (g_sr_gate != 0 && !(g_sr_mt_on && GetTickCount() - g_sr_gate_tick > k_sr_gate_ms)) return 2;
+    return 0;
+}
+/// Records a frame's xrBeginFrame (Present or extra): the open frame's pacing, the phase anchor, the photon latency.
+static void sr_note_begin(const XrFrameOut& out) {
+    g_sr_s.skipped += out.skipped_slots;
+    if (!out.began) { g_sr_pace.open = xr_frame_open(); return; }
+    SrPace& p = g_sr_pace;
+    const double P = out.period_ns / 1e6;
+    if (out.wait_blocked) {
+        if (p.psi_ok && P > 0.5) {
+            const double n = floor((out.t_wait_return_ms - p.psi) / P + 0.5);
+            if (n >= 1.0 && n < 240.0) { g_sr_s.jit_sum += fabs(out.t_wait_return_ms - (p.psi + n * P)); g_sr_s.jit_n++; }
+        }
+        p.psi = out.t_wait_return_ms; p.psi_ok = true;
+    }
+    p.open = true; p.blocked = out.wait_blocked; p.w = out.t_wait_return_ms; p.P = P; p.skip_k = 0; p.T = out.display_time;
+    int64_t xn = 0;
+    if (xr_now_xrtime(&xn) && out.display_time > xn) { g_sr_s.lat_sum += (out.display_time - xn) / 1e6; g_sr_s.lat_n++; }
+}
+
+// -- the rotation (spec 3.3) -----------------------------------------------------------------------------------------------
+static void sr_mat_to_quat(const float m[9], float q[4]) {   // the inverse of quat_to_mat (row-major R(q))
+    const float tr = m[0] + m[4] + m[8];
+    if (tr > 0.f) { const float s = sqrtf(tr + 1.f) * 2.f; q[3] = 0.25f * s; q[0] = (m[7] - m[5]) / s; q[1] = (m[2] - m[6]) / s; q[2] = (m[3] - m[1]) / s; }
+    else if (m[0] > m[4] && m[0] > m[8]) { const float s = sqrtf(1.f + m[0] - m[4] - m[8]) * 2.f; q[3] = (m[7] - m[5]) / s; q[0] = 0.25f * s; q[1] = (m[1] + m[3]) / s; q[2] = (m[2] + m[6]) / s; }
+    else if (m[4] > m[8]) { const float s = sqrtf(1.f + m[4] - m[0] - m[8]) * 2.f; q[3] = (m[2] - m[6]) / s; q[0] = (m[1] + m[3]) / s; q[1] = 0.25f * s; q[2] = (m[5] + m[7]) / s; }
+    else { const float s = sqrtf(1.f + m[8] - m[0] - m[4]) * 2.f; q[3] = (m[3] - m[1]) / s; q[0] = (m[2] + m[6]) / s; q[1] = (m[5] + m[7]) / s; q[2] = 0.25f * s; }
+}
+/// The held image turned to the yaw now: d = the stick yaw added since it was rendered (at most delta_max), Q = Rb(yaw + d,
+/// pitch) Rb(yaw, pitch)^T in the reference frame (about world up, which is tilted in the reference frame when the seat or
+/// the orbit views pitch), moved to LOCAL with the image's reference (ref_q, ref_p), about the image's turn pivot. Off
+/// (plain hold) for: stick_reproject=0, an image the stick does not drive (screens, the stereo screen, a backdrop room, no
+/// latched heading), another heading epoch (a cut, a recentre, a mode change, the pin), the battle transition's frozen
+/// world, third person and the diorama below stick_reproject=2.
+static XrExtraRot sr_rotation(float* deg_out, bool* clamped) {
+    XrExtraRot r = {}; r.q[3] = 1.f; *deg_out = 0.f; *clamped = false;
+    if (g_sr_mode == 0) return r;
+    const SrFrame& im = g_sr_img;
+    if (!im.valid || !im.live || im.epoch != g_sr_epoch || g_bt_frozen || xr_pinned() || g_fp_mode != im.mode) return r;
+    if ((im.mode == 2 || im.mode == 3) && g_sr_mode < 2) return r;
+    double d = g_turn_accum - im.accum;
+    const double dm = sr_delta_max_rad();
+    if (d > dm) { d = dm; *clamped = true; } else if (d < -dm) { d = -dm; *clamped = true; }
+    d -= static_cast<double>(g_sr_inject_deg) * 0.0174533;   // Debug: as if the stick had turned right by that much more
+    if (fabs(d) < 1e-7) return r;
+    float Rb0[9], Rb1[9], Q[9];
+    seat_frame(im.seat_yaw, im.seat_pitch, Rb0); seat_frame(im.seat_yaw + static_cast<float>(d), im.seat_pitch, Rb1);
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) Q[i*3+j] = Rb1[i*3+0] * Rb0[j*3+0] + Rb1[i*3+1] * Rb0[j*3+1] + Rb1[i*3+2] * Rb0[j*3+2];   // Rb1 Rb0^T
+    float qQ[4]; sr_mat_to_quat(Q, qQ);
+    const float rinv[4] = { -im.ref_q[0], -im.ref_q[1], -im.ref_q[2], im.ref_q[3] };
+    float t[4]; quat_mul(im.ref_q, qQ, t); quat_mul(t, rinv, r.q);   // Q_L = ref_q Q ref_q^-1
+    const float len = sqrtf(r.q[0]*r.q[0] + r.q[1]*r.q[1] + r.q[2]*r.q[2] + r.q[3]*r.q[3]);
+    if (!(len > 0.5f && len < 1.5f)) { r.q[0] = r.q[1] = r.q[2] = 0.f; r.q[3] = 1.f; return r; }
+    for (float& c : r.q) c /= len;
+    float off[3]; quat_rotate(im.ref_q, im.pivot_ref, off);          // c_L = ref_p + ref_q c
+    for (int k = 0; k < 3; ++k) r.pivot[k] = im.ref_p[k] + off[k];
+    r.on = true; *deg_out = static_cast<float>(d * 57.29578);
+    return r;
+}
+
+// -- the extra frame -------------------------------------------------------------------------------------------------------
+/// XrHost callbacks around the extra's xrWaitFrame (ffxvr_xr.cpp wait_begin_locate): the game's lock is given up for the
+/// wait and taken back with the game's own acquire (it waits for a holder; a list arriving meanwhile waits for the same lock).
+static int sr_extra_wait_begin() {
+    if (!g_sr_lock_held || !g_ril_ok) return 0;
+    g_ril_rel(g_ril); g_sr_lock_held = false;
+    return 1;
+}
+static void sr_extra_wait_end(int token) {
+    if (!token) return;
+    const double t0 = sr_ms();
+    g_ril_acq(g_ril); g_sr_lock_held = true;
+    const double ra = sr_ms() - t0; if (ra > g_sr_s.reacq_max) g_sr_s.reacq_max = ra;
+}
+/// One extra frame (render thread, the ring wait). 1 sent, 0 the game's lock is busy (retry), -1 nothing could be sent.
+static int sr_extra_inner(double t0) {
+    PhyreRil* L = g_ril; const DWORD me = GetCurrentThreadId();
+    if (L->owner == me) return -1;                                 // never expected between lists
+    if (InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&L->owner), static_cast<LONG>(me), 0) != 0) return 0;   // the game's protocol (0x431850): owner 0 -> us, then the count
+    L->count = L->count + 1;                                       // 0 -> 1 (only the owner writes it)
+    g_sr_lock_held = true; g_sr_lock_t0 = sr_ms();
+    const bool gate_over = g_sr_gate != 0;
+    if (g_sr_mode > 0 && g_sr_pace.skip_k > 0 && g_sr_pace.P > 0.5)   // slots were skipped: this extra is shown that many periods after its frame's display time
+        turn_advance(g_sr_pace.T + static_cast<int64_t>(g_sr_pace.skip_k * g_sr_pace.P * 1e6), true);
+    float deg = 0.f; bool clamped = false;
+    const XrExtraRot rot = sr_rotation(&deg, &clamped);
+    const bool quads = t0 - g_sr_present_ms < k_sr_quad_ms;
+    const bool zero = t0 - g_sr_last_fresh_ms > k_sr_zero_ms;
+    XrFrameOut out; bool ran;
+    { InEye2 guard; ran = xr_extra_frame(&rot, quads, zero, &out); }   // the runtime's context calls must not be seen by our hooks (as at xr_tick's xr_frame)
+    if (g_sr_lock_held) { g_ril_rel(L); g_sr_lock_held = false; }
+    const double t1 = sr_ms();
+    {   // SR-4: how long the extra held the game's lock (End, then Begin / sync / locate; not the wait)
+        const double hold = (t1 - g_sr_lock_t0) - out.wait_ms;
+        if (hold >= 0.0) { g_sr_s.hold_sum += hold; if (hold > g_sr_s.hold_max) g_sr_s.hold_max = hold; }
+    }
+    g_sr_x_t0 = t0; g_sr_x_t1 = t1;
+    if (!ran) return -1;
+    g_sr_episode = true;
+    sr_note_begin(out);
+    if (out.began) {
+        if (!g_bt_frozen) xr_apply_poses(out);                     // the next game frame renders with this slot's head pose
+        xr_input_get(&g_vrpad); if (g_vrpad.ready) g_vrpad_packet++;
+        if (g_sr_mode > 0) turn_advance(out.display_time, true);   // ... and this slot's stick yaw (gestures and haptics stay at the game rate)
+    }
+    else g_sr_s.fails++;
+    SrStats& S = g_sr_s;
+    S.extras++; g_sr_total_extras++; g_sr_ep_extras++;
+    const double cpu = (t1 - t0) - out.wait_ms;
+    S.cpu_sum += cpu; if (cpu > S.cpu_max) S.cpu_max = cpu;
+    S.end_sum += out.end_ms; S.wait_sum += out.wait_ms; S.loc_sum += out.locate_ms; g_sr_last_end_ms = out.end_ms; g_sr_last_wait_ms = out.wait_ms;
+    if (rot.on) { const double a = fabs(deg); S.yaw_sum += a; if (a > S.yaw_max) S.yaw_max = a; if (a > 0.01) S.rot++; if (a > g_sr_ep_yaw_max) g_sr_ep_yaw_max = a; }
+    if (clamped || g_turn_frozen) { if (clamped) S.clamped++; g_sr_ep_frozen = true; }
+    if (gate_over) S.gate_over++;
+    if (zero) S.zero++;
+    if (!quads) g_sr_ep_quads_dropped = true;
+    return 1;
+}
+/// SR-1: the in-flight count around every extra frame; ffxvr_shutdown waits for it (at most 100 ms) before xr_stop, and an
+/// extra that sees the exit flag (or the window gone) here, or before any of its OpenXR calls, stops.
+static int sr_extra(double t0) {
+    InterlockedIncrement(&g_sr_in_extra);
+    const int r = sr_extra_abort() ? -1 : sr_extra_inner(t0);
+    InterlockedDecrement(&g_sr_in_extra);
+    return r;
+}
+/// SR-12: a new session starts without the old phase anchor.
+static void sr_headset_off() { g_sr_pace = SrPace{}; g_sr_first_list_pending = false; g_sr_frame_t0 = 0.0; }
+/// A list arrived (its event consumed): with stick_reproject_predict, an extra first when the list cannot make the open slot.
+static void sr_on_list(double now) {
+    if (!g_sr_predict || g_sr_mode == 0 || !sr_armed() || !xr_extra_possible(false) || sr_block_reason() != 0) return;
+    const double d = sr_deadline();
+    if (!(d < k_sr_inf) || now + g_sr_c_est <= d || now > d + g_sr_margin_ms) return;
+    if (sr_extra(now) == 1) g_sr_s.predictive++;
+}
+/// A list starts: the delay an extra added to it (the list's kick fell inside the extra, or the extra was the predictive one).
+static void rw_list(double now) {
+    const LONGLONG kq = InterlockedCompareExchange64(&g_sr_kick_qpc, 0, 0);
+    if (g_sr_x_t1 > 0.0 && kq != 0) {
+        const double km = sr_qpc_to_ms(kq);
+        if (km <= g_sr_x_t1) {
+            const double dl = now - fmax(km, g_sr_x_t0);
+            if (dl >= 0.0 && dl < 1000.0) { g_sr_s.delay_sum += dl; g_sr_s.delay_n++; if (dl > g_sr_s.delay_max) g_sr_s.delay_max = dl; }
+        }
+    }
+    g_sr_x_t1 = 0.0;
+    g_sr_list_t0 = now;
+    if (g_sr_first_list_pending) { g_sr_first_list_pending = false; g_sr_frame_t0 = now; }   // SR-3: the frame's first list (c_est)
+}
+/// Waits for the list or `ms` (the deadline timer). True: the list (its event consumed).
+static bool sr_wait_list_or(HANDLE h, double ms) {
+    LARGE_INTEGER due; due.QuadPart = -static_cast<LONGLONG>((ms > 0.0 ? ms : 0.0) * 10000.0);
+    if (due.QuadPart >= 0) due.QuadPart = -1;
+    if (!SetWaitableTimer(g_sr_timer, &due, 0, nullptr, nullptr, FALSE)) {
+        const DWORD r = WaitForSingleObject(h, ms <= 0.0 ? 0 : static_cast<DWORD>(ceil(ms)));
+        if (r == WAIT_TIMEOUT) return false;
+        if (r != WAIT_OBJECT_0) WaitForSingleObject(h, INFINITE);
+        return true;
+    }
+    const HANDLE hs[2] = { h, g_sr_timer };
+    const DWORD r = WaitForMultipleObjects(2, hs, FALSE, INFINITE);
+    if (r == WAIT_OBJECT_0) { CancelWaitableTimer(g_sr_timer); return true; }
+    if (r == WAIT_OBJECT_0 + 1) return false;
+    WaitForSingleObject(h, INFINITE);                              // a wait error: the game's own wait
+    return true;
+}
+/// The ring wait (replaces `call 0x4302A0` at 0x616060). __fastcall: ECX = &entry.ready (a PEvent: its first member is the
+/// event HANDLE); returns 0 like 0x4302A0; ebx / esi / edi / ebp are preserved by the compiler (the loop keeps ebx and esi).
+static int __fastcall rt_ring_wait(void* ev) {
+    const HANDLE h = *static_cast<HANDLE*>(ev);
+    const bool rt = g_render_tid != 0 && GetCurrentThreadId() == g_render_tid;
+    if (rt && g_sr_present_pending) { g_sr_present_pending = false; g_sr_first_list_pending = true; g_sr_draws_base = g_draw_in_frame; g_sr_clears_base = g_sr_clears; g_sr_cams_base = g_cam_uploads_frame; }
+    if (!rt || !sr_armed()) { WaitForSingleObject(h, INFINITE); if (rt) rw_list(sr_ms()); return 0; }   // off: the game's wait
+    if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) { rw_list(sr_ms()); return 0; }                      // a list is queued: never insert anything
+    bool got = false;                  // the list's event was consumed (every exit below must have it: the interpreter runs the entry next)
+    int blocked = 0;                   // why the open slot is still waiting: 2 the flush gate, 3 the game's lock busy
+    int spins = 0;                     // SR-2: passes in a row that did not wait (a skip, a sent extra); a spin falls back to the game's wait
+    double spin_t0 = 0.0;
+    for (;;) {
+        if (got || !sr_armed() || !xr_extra_possible(false)) break;                                        // nothing to hold, no open frame: the game's wait below
+        const double now = sr_ms(), d = sr_deadline();
+        if (!(d < k_sr_inf)) break;
+        if (++spins == 1) spin_t0 = now;
+        if (spins > 32 || now - spin_t0 > 20.0) {                                                           // SR-2: a short, bounded run of passes without a wait
+            g_sr_s.spins++;
+            static uint32_t spin_logs = 0;
+            if (spin_logs++ < 20) diag("sr: the ring wait passed %d times without waiting (%.1f ms; deadline %.1f ms from now, skip %d, mode %d): the game's wait for this list", spins, now - spin_t0, d - now, g_sr_pace.skip_k, g_sr_mode);
+            break;
+        }
+        double due = d;
+        if (now >= d) {
+            if (now > d + g_sr_margin_ms) {                                                                 // past VDXR's running start: this slot is lost, never filled late
+                const double P = g_sr_pace.P > 0.5 ? g_sr_pace.P : 8.0;                                    // every slot already past at once (SR-2: one pass, not one per slot)
+                const double kd = floor((now - d - g_sr_margin_ms) / P) + 1.0;                                // SR-R-6: clamped before the cast
+                const int k = static_cast<int>(kd < 1.0 ? 1.0 : kd > 100000.0 ? 100000.0 : kd);
+                const uint32_t uk = static_cast<uint32_t>(k);
+                if (blocked == 2) { g_sr_s.gate_skips += uk; g_sr_ep_lost_gate += uk; } else if (blocked == 3) { g_sr_s.lock_busy += uk; g_sr_ep_lost_lock += uk; } else { g_sr_s.skip_ours += uk; g_sr_ep_lost_late += uk; }
+                blocked = 0; g_sr_pace.skip_k += k;
+                continue;
+            }
+            if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) { got = true; sr_on_list(now); break; }        // the list first
+            const int why = sr_block_reason();
+            if (why == 1) { g_sr_s.mid_skips++; g_sr_ep_lost_mid++; blocked = 0; g_sr_pace.skip_k++; continue; }   // the next frame has started: the slot is the game's (the runtime repeats the last frame)
+            if (why == 2) { blocked = 2; due = now + 2.0; }                                                  // the main thread owns the context: look again in 2 ms
+            else {
+                const int r = sr_extra(now);
+                if (r == 0) { blocked = 3; due = now + 0.5; }                                              // the game's lock is busy (a try, never a wait): again shortly
+                else if (r < 0) break;                                                                       // nothing could be sent
+                else {                                                                                       // sent: on to the next slot
+                    // SR-R-1: an extra waits (its xrWaitFrame, the lock re-take), so it ends a spin run; the cap only bounds
+                    // the skip and mid-frame paths, the only ones that loop without waiting. A slow extra is logged on its own.
+                    const double xd = sr_ms() - now;
+                    if (xd > 20.0) { g_sr_s.slow++; if (xd > g_sr_s.slow_max) g_sr_s.slow_max = xd; static uint32_t slow_logs = 0; if (slow_logs++ < 20) diag("sr: a slow extra frame: %.1f ms (end %.1f, wait %.1f, lock re-take max so far %.1f ms)", xd, g_sr_last_end_ms, g_sr_last_wait_ms, g_sr_s.reacq_max); }
+                    blocked = 0; spins = 0; continue;
+                }
+            }
+        }
+        spins = 0;
+        if (sr_wait_list_or(h, due - sr_ms())) { got = true; sr_on_list(sr_ms()); }
+    }
+    if (!got) WaitForSingleObject(h, INFINITE);                                                              // the game's own wait
+    rw_list(sr_ms());
+    return 0;
+}
+
+// -- per Present (render thread) --------------------------------------------------------------------------------------------
+/// At the top of ffxvr_begin_frame: the list's start-to-Present time (c_est), a fresh frame after its deadline (late).
+static void sr_begin_frame_mark() {
+    if (!g_sr_patched) return;
+    const double now = sr_ms();
+    g_sr_present_pending = true;
+    // SR-3: c_est = the frame's first list (the first after the last Present) to this Present: what the predictive rule needs
+    // at a frame's first list. The old measure (the Present list's own span) is kept for comparison on the sr: line.
+    auto p90 = [](const float* ring, int n) { float tmp[120]; memcpy(tmp, ring, sizeof(float) * n); const int k = (n * 9) / 10; std::nth_element(tmp, tmp + k, tmp + n); return static_cast<double>(tmp[k < n ? k : n - 1]); };
+    const double c = g_sr_frame_t0 > 0.0 ? now - g_sr_frame_t0 : -1.0, cl = g_sr_list_t0 > 0.0 ? now - g_sr_list_t0 : -1.0;
+    g_sr_frame_t0 = 0.0;
+    if (c >= 0.0 && c < 200.0) {
+        g_sr_c_ring[g_sr_c_i] = static_cast<float>(c); g_sr_c_i = (g_sr_c_i + 1) % 120; if (g_sr_c_n < 120) g_sr_c_n++;
+        if (cl >= 0.0 && cl < 200.0) { g_sr_cl_ring[g_sr_cl_i] = static_cast<float>(cl); g_sr_cl_i = (g_sr_cl_i + 1) % 120; if (g_sr_cl_n < 120) g_sr_cl_n++; }
+        if (++g_sr_c_new >= 30) { g_sr_c_new = 0; g_sr_c_est = p90(g_sr_c_ring, g_sr_c_n); if (g_sr_cl_n > 0) g_sr_c_last = p90(g_sr_cl_ring, g_sr_cl_n); }
+    }
+    if ((g_sr_mode > 0 || g_sr_keepalive) && g_sr_pace.open) { const double d = sr_slot_deadline(); if (d < k_sr_inf && now > d) g_sr_s.late++; }
+}
+/// After xr_frame in xr_tick: the held image's record (a fresh base layer went out), the pacing facts.
+static void sr_after_frame(const XrFrameOut& out) {
+    if (out.base_fresh) {
+        if (g_sr_rec.valid) g_sr_img = g_sr_rec; else g_sr_img = SrFrame{};   // no 3D view built this frame (a screen frame): nothing to turn
+        g_sr_last_fresh_ms = sr_ms(); g_turn_frozen = false; g_sr_fresh_accum = g_turn_accum;   // SR-6: the hold bound's reference
+    }
+    g_sr_rec.valid = false;
+    if (out.ended) g_sr_s.fresh++;
+    if (out.began) { g_sr_s.pw_sum += out.wait_ms; g_sr_s.pw_n++; if (out.wait_ms > g_sr_s.pw_max) g_sr_s.pw_max = out.wait_ms; }   // SR-4: the Present's own xrWaitFrame (inside the Present list, the game's lock held unless the load lock release opened)
+    sr_note_begin(out);
+}
+/// At the end of xr_tick: arming, the frame time, the hold episode line, the sr: line every 10 s.
+static void sr_present() {
+    const double now = sr_ms();
+    const bool want = g_sr_mode > 0 || g_sr_keepalive;
+    if (g_sr_present_ms > 0.0) {
+        const double ft = now - g_sr_present_ms;
+        if (ft > 1.0 && ft < 100.0) g_sr_ft_ms += (ft - g_sr_ft_ms) * 0.05;
+        if (ft >= 100.0 && (g_sr_ep_extras > 0 || g_sr_ep_lost_lock + g_sr_ep_lost_gate + g_sr_ep_lost_mid + g_sr_ep_lost_late > 0))   // SR-5: per hold (a load), the slots lost and why
+            diag("sr: hold %.2f s, %u extras, slots lost: %u to the game's lock, %u to the flush gate, %u mid-frame, %u late; yaw %s (max %.1f deg), quads %s", ft / 1000.0, g_sr_ep_extras,
+                 g_sr_ep_lost_lock, g_sr_ep_lost_gate, g_sr_ep_lost_mid, g_sr_ep_lost_late, g_sr_ep_frozen ? "frozen at delta_max" : "not frozen", g_sr_ep_yaw_max,
+                 g_sr_ep_quads_dropped ? "dropped after 150 ms (the save screen's kept)" : "kept");
+    }
+    g_sr_ep_extras = 0; g_sr_ep_lost_lock = g_sr_ep_lost_gate = g_sr_ep_lost_mid = g_sr_ep_lost_late = 0; g_sr_ep_yaw_max = 0.0; g_sr_ep_frozen = false; g_sr_ep_quads_dropped = false;
+    if (g_sr_flush_other_tid != 0) { static bool said = false; if (!said) { said = true; diag("sr: a full flush from thread %lu, not the game's main thread %lu: the gate is cleared only by that thread's own kick (SR-10)", static_cast<unsigned long>(g_sr_flush_other_tid), static_cast<unsigned long>(g_main_tid)); } }
+    g_sr_present_ms = now; g_sr_episode = false;
+    if (want && g_xr_want && xr_active()) sr_arm();
+    const ULONGLONG tn = GetTickCount64();
+    if (g_sr_line_t == 0) g_sr_line_t = tn;
+    if (tn - g_sr_line_t < 10000) return;
+    const double secs = (tn - g_sr_line_t) / 1000.0; g_sr_line_t = tn;
+    SrStats& S = g_sr_s;
+    g_sr_rate_extras = S.extras / secs; g_sr_rate_skipped = S.skipped / secs;
+    g_sr_rate_yaw = S.rot ? S.yaw_sum / S.rot : 0.0; g_sr_rate_delay_max = S.delay_max;
+    if (want && g_xr_want && xr_active()) {
+        double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
+        const char* why = sr_not_armed_why();
+        const uint32_t ne = S.extras ? S.extras : 1;
+        diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
+             "yaw per extra avg %.2f max %.2f deg (rotating %u%%, clamped %u) | extra cpu avg %.2f max %.2f ms (end %.2f, wait %.2f, begin+locate %.2f), lock busy %u, re-acquire max %.1f ms, gate skips %u (overridden %u) | "
+             "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s",
+             secs, g_sr_mode, g_sr_keepalive ? " + keepalive" : "", *why ? " (NOT ACTIVE)" : "", pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? ", half rate: VD spacewarp (SSW) active" : "",
+             S.fresh + S.extras + S.skipped, S.fresh, S.late, S.extras, S.extras / secs, S.predictive, S.zero, S.fails, S.skipped, S.skip_ours, S.mid_skips,
+             S.rot ? S.yaw_sum / S.rot : 0.0, S.yaw_max, S.extras ? (100u * S.rot) / S.extras : 0u, S.clamped,
+             S.cpu_sum / ne, S.cpu_max, S.end_sum / ne, S.wait_sum / ne, S.loc_sum / ne, S.lock_busy, S.reacq_max, S.gate_skips, S.gate_over,
+             S.delay_n ? S.delay_sum / S.delay_n : 0.0, S.delay_max, S.delay_n, S.pw_n ? S.pw_sum / S.pw_n : 0.0, S.pw_max, S.hold_sum / ne, S.hold_max,
+             g_sr_c_est, g_sr_c_last, S.jit_n ? S.jit_sum / S.jit_n : 0.0, S.lat_n ? S.lat_sum / S.lat_n : 0.0, S.spins, S.slow, S.slow_max,
+             *why ? " | not active: " : "", why);
+    }
+    g_sr_s = SrStats{};
+}
+/// The overlay's line (render thread): 1 while the extra frames run.
+extern "C" __declspec(dllexport) int ffxvr_sr_status(char* buf, int n) {
+    if (buf == nullptr || n <= 0) return 0;   // a 0 size would hit the CRT's invalid-parameter handler
+    const char* why = sr_not_armed_why();
+    double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
+    if (*why) { _snprintf_s(buf, static_cast<size_t>(n), _TRUNCATE, "not active: %s", why); return 0; }
+    _snprintf_s(buf, static_cast<size_t>(n), _TRUNCATE, "on: %.0f extra frames/s, %.1f missed slots/s, display period %.2f ms (%.0f Hz)%s | yaw per extra %.2f deg, list start delay max %.1f ms | gate %s, multithread protection %s, timer %s",
+                g_sr_rate_extras, g_sr_rate_skipped, pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? " HALF RATE (VD's SSW is on: no extras needed)" : "", g_sr_rate_yaw, g_sr_rate_delay_max,
+                g_sr_gate ? "main thread" : "free", g_sr_mt_on ? "on" : "off", g_sr_timer_hires ? "high resolution" : "standard");
+    return 1;
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {

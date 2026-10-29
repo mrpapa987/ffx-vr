@@ -1172,6 +1172,9 @@ re-submitting the last frame at display rate with a pose that carries the
 interpolated yaw - a submit thread, rotation only; walking cannot be
 smoothed without drawing faster.
 
+(Changed in the stickrep build, 28 Oct 2026: snap turning no longer exists, and the stick turn is now re-submitted at the
+display rate from the render thread's ring wait, rotation only, as described here; see "Stick reprojection" at the end.)
+
 ## Black screen during scene transitions; presenter thread (22 Oct 2026, design only)
 
 Reported: some transitions show black for a few seconds - a random battle
@@ -2717,3 +2720,170 @@ of the same byte (the frustum and distance culls, see the code patches) are not
 counted; bits 0x02 and 0x10, the game's other persistent script hides, are (FP-H1). While the eyes are on a hidden listed model the table is rescanned every
 frame, so the visible one is taken at once and the field model comes back when the
 event model leaves.
+
+## Stick reprojection: extra frames at the headset rate (branch `stickrep`)
+
+Reported: stick turns ghost (a double image) while head turns are clean. Research `stick-reproject.md` (28 Oct) confirmed
+the cause: one OpenXR frame per game Present (about 59.5/s), the stick yaw integrated once per Present and baked into the
+camera, so every refresh without a new game frame re-shows the last one, which VD reprojects for the head only. At 120 Hz
+every image is seen twice. Code: native "Stick reprojection" block (end of `ffxvr_native.cpp`), `turn_advance` and the
+`SrFrame` record (near `turn_by` / in `build_override_view`), `ffxvr_xr.cpp` (`wait_begin_locate`, `xr_extra_frame`),
+managed `stickrep.cs` (new).
+
+- **Extra frames.** The render loop's idle wait between command lists (0x616060, FhUtil 0x216060: `call 0x4302A0`,
+  PEvent::wait INFINITE) is patched once, at headset start, to `rt_ring_wait` (a `__fastcall` replacement, ECX = the
+  PEvent, returns 0; an aligned 8-byte compare-exchange after checking the render loop's prologue, the instructions around
+  the call, the call's target and the target's body against FFX.exe; never unpatched, disarmed by the settings). While no
+  list is queued, it waits on {the ring event, a high-resolution waitable timer}; at the open frame's deadline it sends an
+  **extra frame**: xrEndFrame with exactly the layers the last Present sent (the base from R8b's `g_held`, the UI panel and
+  the ImGui quad from `g_last_sent`), re-referencing the swapchain images that Present released (no acquire, no copy:
+  VDXR resubmits an unchanged image without a copy), then xrWaitFrame -> xrBeginFrame -> xrSyncActions -> xrLocateViews
+  (`wait_begin_locate`, shared with `xr_frame`), `xr_apply_poses`, the controller state. The next game frame renders with
+  that slot's head pose and yaw; the next Present ends the frame the extra began.
+- **The rotation.** The projection layer's two poses are turned by the stick yaw added since the held image was rendered:
+  `d = g_turn_accum - img.accum` (every heading change `turn_by` makes is accumulated), `Q = Rb(yaw + d, pitch) Rb(yaw,
+  pitch)^T` (the seat frame, `seat_frame`), moved to LOCAL with the image's reference (`Q_L = ref_q Q ref_q^-1`), about the
+  image's turn pivot `c_L = ref_p + ref_q (-mv'/sc)` (the reference origin in first person and the seat; the player in third
+  person and the diorama). `orientation' = Q_L orientation`, `position' = c_L + Q_L (position - c_L)`, renormalised. A
+  host-side test (20000 random yaw / pitch / head / reference / offset cases) confirms the sign and the axis: far points land
+  where a fresh render puts them (0.003 deg, float), and exactly for every distance when the pivot is the eye.
+  `SrFrame` is captured in `build_override_view` at the frame's first eye-1 3D camera upload (`advance`), and becomes the
+  held image's record at a Present whose base went out fresh. **Off** (a plain hold, unturned) for: screens, the stereo
+  screen, the save screen, a backdrop room, frames with no latched heading, the glass-break pin (`xr_pinned` /
+  `g_bt_frozen`), another heading epoch (`g_sr_epoch`: latch resets and re-latches, cuts, recentres, mode changes, the
+  pin taken or released, the headset stopping), third person and the diorama below `stick_reproject=2`.
+- **The yaw on the display clock.** With `stick_reproject` > 0 the stick and the Numpad keys (now `ffxvr_turn_keys`, -1 /
+  0 / +1 every frame, instead of managed's per-frame `ffxvr_turn(rate * dt)`) are integrated by `turn_advance(T)` after
+  every xrBeginFrame (xr_tick after `xr_frame`, and every extra) against the predicted display time T: `dt = T - T_prev`
+  (at most 50 ms), the same `x |x| rate` curve and deg/s, so the tuned turn speed is unchanged. In an extra the yaw stops
+  `delta_max = max(3 deg, 2.5 x rate x the game frame time)` past the held image (`g_turn_frozen`, cleared by the next
+  fresh frame): during a load the view turns at most a few degrees and then stays, and does not jump when frames return.
+  With `stick_reproject=0`, or without a running session, `turn_tick` uses the Present interval as before.
+- **Threads and pacing.** Everything is on the render thread: the extras in the ring wait, between lists; `xr_frame` in
+  the Present list. One OpenXR call at a time, always End -> Wait -> Begin, one Wait per slot; a Begin that fails after its
+  Wait is retried by the next call without a second Wait (VDXR would block that Wait for good). No extra once the next
+  frame has started (a draw, a clear or a camera upload after the Present list: counters snapshotted at the first ring wait
+  after a Present, so ImGui's draws in the Present list do not count). A queued list is never delayed: the ring event is
+  checked with a zero timeout first and before every extra. The game's render-interface lock (0xC94EE4) is taken around
+  the extra's xrEndFrame with a try (the game's own protocol: compare-exchange the owner, then the count; busy = retry in
+  0.5 ms, then skip the slot), given up around its xrWaitFrame, and taken back with the game's acquire for Begin / sync /
+  locate. **The flush gate:** managed pre-hooks the full flush 0x615EA0 (gate set) and post-hooks the kick 0x615210 (gate
+  cleared), both on the main thread, queued last of all our hooks after their prologues were checked with guarded reads;
+  originals resolved as B7-1 (render thread before our late insertions, else the detour itself via `d7_resolve_main`). No
+  extra while the gate is set, unless for 250 ms with the immediate context's multithread protection on (the backstop,
+  `keepalive_mt_protect`, `SetMultithreadProtected(TRUE)` at headset start; no Enter/Leave around VDXR's calls: a VDXR
+  configured to submit on the app's device would deadlock on it). **The deadline** locks onto VDXR's wait: a blocking
+  xrWaitFrame returns at VDXR's running start, 2 ms before the slot, so the open frame's deadline is `w + P - margin` (w its
+  wait's return, P `predictedDisplayPeriod`, margin `stick_reproject_margin_ms`, 2.5); a wait that returned at once (late)
+  takes the next slot by the phase of the last blocking wait. A slot whose deadline passed by more than the margin (a late
+  wake-up, the gate, a busy lock, a frame already drawing) is skipped, never filled late; an extra after skipped slots
+  advances the yaw to its real display slot. **Predictive:** a list that arrives too late for the open slot (now + c_est >
+  deadline; c_est = the 90th percentile of a Present list's start-to-Present time) gets the extra first.
+- **Layers.** Head-locked quads (the UI panel, the ImGui layer) and the save screen's world-locked ImGui quad are re-sent as
+  the last Present sent them, for 150 ms after the last Present (a load then shows the bare frame: a stale menu is worse);
+  screens are held unturned; zero layers after 30 s without a fresh frame (a runtime that dislikes long re-sends). If the
+  last Present sent no base (R8b's 30-frame cap, a mode change), no extra is sent. shouldRender false: no extras.
+- **The loading keepalive** is the same path: the extras go on while the game stalls between frames, head-tracked,
+  turned at most `delta_max`. `keepalive=1` with `stick_reproject=0` sends unturned extras only after max(25 ms, 1.6 game
+  frames) without a Present, then at the slot deadlines until the next Present.
+- **Settings.** `stick_reproject` 0 off / **1 first person + seat (default)** / 2 also third person + diorama (main window,
+  under the turn speed: "smooth stick turns at the headset rate" with "first person + seat / all views"); Debug >
+  "Stick reprojection and the loading keepalive": `stick_reproject_margin_ms` (0.5-6, 2.5), `stick_reproject_predict` (1),
+  `stick_overscan` (0-4 deg per side, 0: widens `g_xr_fov_used` sideways, the FOV the frame is rendered and submitted
+  with), `keepalive` (0), `keepalive_mt_protect` (1, applied once at the session's first headset start), the direction test (+5 deg right on every extra,
+  not saved), "stall the main thread 3 s" (a Sleep in the job-join detour). The flush gate hooks are installed at launch
+  when `stick_reproject` or `keepalive` is on.
+- **Diagnostics.** `xr: display period 8.33 ms (120.0 Hz; runtime refresh 120.0 Hz)` at the first wait and every change,
+  with `; half rate: VD spacewarp (SSW) active` when the period is about twice the refresh period (XR_FB_display_refresh_rate
+  and XR_KHR_win32_convert_performance_counter_time are enabled when VDXR lists them; xrCreateInstance falls back to D3D11
+  alone). Every 10 s with the headset on: `sr: 10 s | mode 1 | period ... | slots N: fresh F (late L), extras E = x/s
+  (predictive, zero-layer, failed), skipped S (by us: past the deadline, mid-frame) | yaw per extra avg / max deg
+  (rotating %, clamped) | extra cpu avg / max ms (end, wait, begin+locate), lock busy, re-acquire max, gate skips
+  (overridden) | list start delay avg / max (n lists) | c_est | phase jitter | photon latency | copies 0`, plus `not active:
+  <why>` when it is not running. `sr: hold 1.42 s, 171 extras, yaw frozen at delta_max (max 3.1 deg), quads dropped after
+  150 ms` for a gap of 100 ms or more between Presents. The `perf:` line ends with `| sr extras N/s`; the overlay row
+  shows extras/s, missed slots/s and the period.
+- **ABI 25:** + `ffxvr_sr_set`, `ffxvr_sr_gate`, `ffxvr_sr_status`, `ffxvr_turn_keys` (`ffxvr_turn` stays exported).
+- **Risks.** Pacing against VD's closed-source compositor (the deadline is inferred from VDXR's running start: watch
+  skipped and late); a list delayed by an extra's xrWaitFrame (the list start delay; FFX-60fps's PERF-002 step-down); an
+  immediate-context user the gate does not see (MT protection is the backstop); VDXR's xrEndFrame now also runs from the
+  ring wait while the game's lock is held by us; third person / diorama at level 2 are approximate (the player double-images,
+  the table slides); a load that stalls mid-frame (a frame that has started drawing) still goes black.
+
+### Review fixes (stickrep, SR-1 .. SR-14)
+
+- **Default 1, a deviation from the spec** (3.1 asked for 0 in the first test build): the in-session A/B needs the flush
+  gate hooks, which are installed only when the feature is on at launch. Unticking it in the overlay is today's behaviour.
+- **SR-1, exit.** `sr_extra` counts itself in flight (`g_sr_in_extra`) and backs out when `g_sr_exiting` is set; the XrHost
+  `extra_abort` callback stops an extra before its xrEndFrame, its xrWaitFrame and its xrBeginFrame. `ffxvr_shutdown` (the
+  ExitProcess detour) sets the flag, then waits up to 100 ms (1 ms sleeps) for no extra in flight before `xr_stop`. The
+  window-close path: the game's window (the largest visible unowned top-level window of the process, found at arming) is
+  checked with `IsWindow` before every extra and at each of its OpenXR calls; once it is gone no extra runs.
+- **SR-2, the keepalive-only spin.** The keepalive threshold moves on with every skipped slot (`+ skip_k max(P, 8 ms)`); a
+  deadline passed by several slots is skipped in one pass (`skip_k += k`, every lost slot counted); a run of more than 32
+  passes or 20 ms without a wait falls back to the game's wait for that list and logs `sr: the ring wait passed N times
+  without waiting ...` (at most 20 lines).
+- **SR-3, c_est** is measured from the frame's first list (the first list after a Present) to the Present; the old measure
+  (the Present list's own span) is on the sr: line as "last list" for comparison.
+- **SR-4, the Present's wait.** With extras running, the frame open at a Present was begun by an extra, so the Present's
+  xrWaitFrame blocks to VDXR's next running start (2-8 ms at 120 Hz) inside the Present list, with the game's lock held
+  and ahead of the 1/1 present semaphore. Not changed now; the sr: line shows `Present wait avg / max` and the extras'
+  `lock hold avg / max`, and the owner test asks for V-Sync off and watches the `perf:` wait and FFX-60fps's PERF-002.
+  Cheap mitigation, documented only: run the load lock build's release (`lr_release_begin`'s own gates: the render thread,
+  owner us, count 1) around that wait whenever extras are armed, not only in armed load phases; it would drop the hold but
+  carries LL-6's mid-list main-thread exposure to every frame. The structural fix for later: when extras are armed, the
+  Present only ends the frame, and the ring wait runs the Wait / Begin with nothing held before the next list.
+- **SR-5.** Each `sr: hold` line says how many slots the hold lost to the game's lock, the flush gate, a started frame and a
+  late wake-up. The try-lock is not a registered waiter; if the lock count is high in loads, the options are an untried
+  lock-free send under multithread protection or the game's own (blocking) acquire.
+- **SR-6.** The extra frames' yaw bound (delta_max) applies in every hold: against the held image's record when it is a
+  live view, else against the accumulator at the last fresh frame (a screen, a backdrop room, a seat not latched yet).
+- **SR-7.** A retried Begin refused with `XR_ERROR_CALL_ORDER_INVALID` clears the pending flag (the next call waits); a
+  session that reaches READY with a frame waited but not begun is stopped (VDXR keeps its frame counters across a stop;
+  the start back-off recreates the session). STOPPING no longer clears the flag.
+- **SR-8.** The save screen's world-locked ImGui quad is re-sent in extras whatever the 150 ms quad rule says.
+- **SR-9.** Multithread protection is switched on only while the flush gate is free, and the `ID3D11Multithread` interface
+  is released at once. The owner test has an A/B with `keepalive_mt_protect=0`.
+- **SR-10.** The flushing thread is recorded; only its own next kick clears the gate. A flush from a thread that is not the
+  game's main thread is logged once.
+- **SR-12.** For a wait that returned at once, the open frame's slot is the grid point at or after the wait's return only
+  within VDXR's 2 ms running start before it, else the one before; the phase anchor is dropped when the headset stops.
+- **SR-11, SR-13:** no change (the VD bitrate question is in the test plan; `g_in_eye2` stays process-wide: only the gate
+  override window could expose it, and VDXR's extra End issues no call we hook).
+- **Re-review (SR-R-1, SR-R-2, SR-R-6).** A sent extra ends a spin run (it waited in xrWaitFrame and the lock re-take), so
+  the 32-pass / 20 ms cap bounds only the skip and mid-frame paths; an extra over 20 ms is logged on its own (`sr: a slow
+  extra frame: ...`, the sr: line's `slow extras`) and the loop carries on. When the window found at arming is gone, the
+  search runs again (consoles excluded); "gone" latches only when the game has no visible top-level window left. The
+  catch-up skip count is clamped before its integer cast. SR-R-3 / 4 / 5 wait for the owner's logs.
+
+### Session 1 of stickrep (29 Oct 2026): the headset stuck on the virtual screen (SR-X1)
+
+The first session with 7603645 showed the game flat on the virtual screen from the start, with the
+save screen missing. The log: every frame "mode -> SCREEN", `camera uploads 0`, `draws 0 eye2 0`, and
+eye 2 "no image 16923, ok 0" while the draw hooks counted 14,000 DrawIndexed calls and the view matrix
+changed every frame. Cause: `g_in_eye2` was a process-wide global. Every guarded section used to run
+inside the Present hook, when the main thread uploads nothing; the extra frames run in the render
+thread's ring wait, between command lists, exactly while the main thread uploads the next frame's
+constant buffers. With the guard set for the whole of each extra (its xrWaitFrame blocks up to a
+display period, 60-120 times a second), `maybe_override`'s `if (g_in_eye2) return src;` dropped most
+camera uploads: no 3D camera counted, the screen decision never flipped back, no override, no eye-2
+images. Fix: the guard is `thread_local`; it only ever meant "this thread is inside our own work".
+Also seen: extras during the Luca load took 50-130 ms waiting to re-take the game's lock from the
+loader (the SR-5 cost); no hang.
+
+### Session 1 of stickrep, the real cause (29 Oct 2026): multithread protection hid the game from the mod (SR-X2)
+
+The per-thread guard (SR-X1) was correct but not the cause. The decisive evidence is the native log's
+session counters: in the broken runs the detours saw DrawIndexed 14,092 and UpdateSubresource 1,266;
+in the working run (the same build, `stick_reproject=0 keepalive_mt_protect=0`) 1,047,878 and 3,497,937.
+The game rendered normally the whole time; the mod saw about 1% of its draws and none of its camera
+uploads, and the few it saw were the second before `sr_arm`. Cause: `SetMultithreadProtected(TRUE)`
+on the immediate context (the "backstop", SR-9) makes the D3D11 runtime route the context's hot entry
+points through a different, locking set of function bodies; Fahrenheit's inline detours sit on the
+bodies read from the vtable at init, so the game's calls no longer passed through them. No camera ->
+"2D" -> the virtual screen for the session, no eye copies, no save screen. Fixed by never turning the
+protection on (`sr_mt_init` only reports the state; `keepalive_mt_protect` is read and ignored,
+written 0). The flush gate is the protection, as the review had accepted; without MT protection the
+gate is never overridden (an extra always yields to the main thread). The post-mortem, with the
+alternatives weighed and the presenter-thread end state (B2) recommended, is research/stickrep-postmortem.md
+in the session scratchpad; its substance is summarised here.
