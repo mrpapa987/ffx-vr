@@ -1043,6 +1043,7 @@ int  g_bt_mode = 2; bool g_bt_diag = true;      // ffxvr_bt_set (managed, every 
 int  g_bt_phase = BT_IDLE;
 bool g_bt_encounter = false;                    // the window came from the battle trigger / the transition handle (pin, freeze and hold allowed)
 bool g_bt_want_freeze = false, g_bt_frozen = false;   // decided by bt_tick / in effect (the xr pin taken); the edges are applied around xr_frame
+static bool g_bt_freeze_wait = false;           // BT-H-2: a mode 2 encounter window that may freeze, waiting for its first BrokenScreen signal
 bool g_bt_hold = false;                         // AFTER in mode 2: the eye image is withheld, so xr_frame re-sends the pinned last frame
 bool g_bt_screen_pin = false, g_bt_s3_pin = false;   // the screen modes at the window's start, held through it
 bool g_bt_h_seen = false, g_bt_recentre = false;
@@ -8230,7 +8231,7 @@ static void leave_xr_state() {
     const bool rt = g_render_tid != 0 && GetCurrentThreadId() == g_render_tid;   // BT-R-4: the bt state is the render thread's
     if (rt) { if (g_bt_phase != BT_IDLE) bt_end("the headset is off"); else bt_flush(); }   // its summary, flushed (BT-4)
     else if (g_bt_phase != BT_IDLE) diag("bt: frame %u: a window was still open at exit (phase %d: 1 armed, 2 shatter, 3 after)", g_frames, g_bt_phase);
-    g_bt_phase = BT_IDLE; g_bt_want_freeze = g_bt_frozen = g_bt_hold = false; g_bt_recentre = false; g_bt_cap_tex = nullptr;   // xr_stop dropped the pin
+    g_bt_phase = BT_IDLE; g_bt_want_freeze = g_bt_frozen = g_bt_hold = g_bt_freeze_wait = false; g_bt_recentre = false; g_bt_cap_tex = nullptr;   // xr_stop dropped the pin
     diag("xr: headset off, VR-only state reset");
 }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
@@ -8598,6 +8599,8 @@ static void haptics_tick() {
 //                     shard draw (ffxvr_on_draw), or +5.
 //   ARMED -> IDLE     no transition: battle_state left 0 with no handle ever seen; trigger, state and handle all 0 for 20
 //                     Presents (BT-1: an encounter cleared by 0x781530, or MsBattleExe's early return); 180 Presents and 3 s.
+//                     BT-H-1: the battle live (battle_state 1 or 2 with a 3D camera, 2 frames) with the handle still set, in
+//                     an encounter window that went through the load chain and saw no BrokenScreen signal (a haze type).
 //   SHATTER -> AFTER  6 quiet Presents in a row (handle 0, +5 clear, no shard draw: the render thread lags the main thread),
 //                     once a battle is under way (handle seen or state != 0). Not an encounter window: straight to IDLE. The
 //                     20-Present "cleared" rule applies here too while no handle was ever seen.
@@ -8608,8 +8611,9 @@ static void haptics_tick() {
 //                     dropped only ends the freeze: the window goes on head-locked (no UI split, the mode held).
 // After a window, a new one opens only once every signal has been seen clear (a stuck byte cannot keep the UI split off).
 // Inside a window (mode >= 1): no UI split, the screen mode held, the headset's FOV submitted for frames without a camera.
-// Mode 2 encounter windows that start in 3D also freeze the override's head pose (xr_apply_poses, turn_tick and the grab are
-// skipped) and pin the submit poses (xr_pin), and in AFTER withhold the eye image so the pinned last frame is re-sent, with
+// Mode 2 encounter windows that start in 3D also freeze the override's head pose (BT-H-2: at once when opened by
+// battle_trigger 1, else from the first BrokenScreen signal; xr_apply_poses, turn_tick and the grab are skipped) and pin
+// the submit poses (xr_pin), and in AFTER withhold the eye image so the pinned last frame is re-sent, with
 // no frame cap, over the game's load black until the battle is live.
 struct BtRead { int8_t bst; uint8_t trig, bs4, bs5; uint32_t h, bs; };
 static BtRead   g_bt_r = {};
@@ -8628,13 +8632,17 @@ static double   g_bt_gap = 0, g_bt_gap_max = 0, g_bt_gap_sum = 0;   // Present-t
 static unsigned g_bt_held0 = 0;                                      // xr's held-frame counter at the window start
 static uint32_t g_bt_live_s = 0, g_bt_cam_s = 0, g_bt_dclr_s = 0, g_bt_caps_s = 0, g_bt_shards_s = 0, g_bt_late_s = 0;   // the frame just finished (bt_tick runs before xr_tick's resets)
 static bool     g_bt_line_due = false;
+static bool     g_bt_bs_seen = false;      // BT-H-1: this window saw a BrokenScreen signal (+4 / +5, a capture adopted or a shard draw): a glass break
+static bool     g_bt_load_seen = false;    // BT-H-1 (N2): this window saw the load chain (battle_state 4..0x16)
+static int      g_bt_st = -999, g_bt_st_open = -999;   // screen_transition [0x112A9D5] (s8; -999 = not readable): now / at the window's open
 static bool     g_bt_rearm_block = false;   // after a window: no new one until every signal has been seen clear (a stuck byte cannot keep the UI split off)
 static uint32_t g_bt_lines_win = 0, g_bt_lines_all = 0, g_bt_after_lines = 0, g_bt_dropped = 0;
 static const uint32_t k_bt_lines_win = 900, k_bt_lines_all = 12000;  // per-frame lines: per window, per session (BT-10; AFTER is thinned too)
 static char     g_bt_buf[65536]; static size_t g_bt_len = 0;         // bt: lines, written at phase changes, at a window's end and when 3/4 full (BT-5)
 static bool     g_bt_flush_failed = false;                           // BT-4: the log was busy; the batch is kept and retried
 static char     g_bt_summary[1024] = "none yet";
-static char     g_bt_why[160] = "";
+static char     g_bt_why[256] = "";
+static const char* bt_st_str(int st, char* b, size_t n) { if (st == -999) snprintf(b, n, "not readable"); else snprintf(b, n, "%d", st); return b; }
 static const char* const k_bt_names[4] = { "idle", "armed", "shatter", "after" };
 
 // BT-R-4: g_bt_buf / g_bt_len have one user at a time. The render thread does all the bt work; the exit flush
@@ -8682,7 +8690,7 @@ static void bt_set_phase(int ph, const char* why) {
     }
     bt_flush();
 }
-static void bt_begin(bool encounter, const char* why) {
+static void bt_begin(bool encounter, bool trig, const char* why) {
     g_bt_win_n++; g_bt_t0 = GetTickCount64(); g_bt_phase_t = g_bt_t0; g_bt_win_frame = g_frames;
     for (int i = 0; i < 4; ++i) g_bt_t_ph[i] = 0;
     g_bt_t_free = 0; g_bt_bst_first_shard = g_bt_bst_last_shard = g_bt_bst_shatter_end = -99; g_bt_shard_frames = 0;
@@ -8690,18 +8698,31 @@ static void bt_begin(bool encounter, const char* why) {
     g_bt_quiet = g_bt_clear_n = g_bt_live_n = 0; g_bt_capf = g_bt_capf2 = 0; g_bt_cap_logged = false; g_bt_was_frozen = false;
     g_bt_m_rule = g_bt_m_slot = g_bt_m_cam = g_bt_m_nodsv = 0; g_bt_cap_other = 0; g_bt_other_logged = false;
     g_bt_cap_done = false; g_bt_real_seen = g_bt_detail_want = g_bt_detail_done = g_bt_detail_logged = false; g_bt_detail[0] = 0; g_bt_user_why = nullptr;
-    g_bt_last_real_t = 0; g_bt_capsz_logged = false;
+    g_bt_last_real_t = 0; g_bt_capsz_logged = false; g_bt_bs_seen = g_bt_load_seen = false; g_bt_st_open = g_bt_st;
     unsigned wt = 0; xr_counters(&g_bt_held0, &wt);
     g_bt_encounter = encounter; g_bt_h_seen = g_bt_r.h != 0; g_bt_recentre = false; g_bt_hold = false;
     g_bt_cap_tex = (g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h)) ? g_bt_cap_cand : nullptr;   // BT-2: the capture drawn in the frame just finished, before the window opened (BT-S-2: of the right size)
     if (g_bt_cap_tex) { g_bt_capt_w = g_bt_cap_w; g_bt_capt_h = g_bt_cap_h; g_bt_capt_s = g_bt_cap_samples; }
     g_bt_cap_adopted = g_bt_cap_tex;
     g_bt_screen_pin = g_xr_screen_now; g_bt_s3_pin = g_screen3d_now;
-    g_bt_want_freeze = g_bt_mode == 2 && encounter && g_xr_active && !g_xr_screen_now && !g_screen3d_now;
-    bt_add("bt: window %u opens (%s; %s; mode %d = %s%s; the view is %s)", g_bt_win_n, why, encounter ? "encounter" : "another BrokenScreen use",
+    // BT-H-2: the effect type follows screen_transition [0x112A9D5] (0x7829B0: -1 none, 1..3 types 1/3, else types 0/2), which
+    // a script request (0x781C90, battle_trigger 2) writes from the script; trigger-vs-handle is only a proxy for it. A window
+    // opened by battle_trigger 1 at state 0 (the random path, a glass break in every logged case) freezes at once, as before:
+    // the capture copies the previous frame, which must already be rendered with the pinned pose. A window opened on the
+    // handle alone (a script request: the Luca haze, but a script may also ask for a glass type) freezes only at its first
+    // BrokenScreen signal (bt_tick, before this frame's submit), so a haze keeps the live head pose. Known limits: a scripted
+    // glass break then freezes at its capture frame (one frame of head motion after the captured image); a trigger-opened
+    // haze (an encounter with screen_transition 1..3) still freezes for the whole haze. screen_transition is only logged
+    // (window open line, summary) until the logs confirm the mapping.
+    const bool can_freeze = g_bt_mode == 2 && encounter && g_xr_active && !g_xr_screen_now && !g_screen3d_now;
+    g_bt_want_freeze = can_freeze && trig;
+    g_bt_freeze_wait = can_freeze && !trig;
+    char stb[16];
+    bt_add("bt: window %u opens (%s; %s; mode %d = %s%s; the view is %s; screen_transition %s, trig %u)", g_bt_win_n, why, encounter ? "encounter" : "another BrokenScreen use",
            g_bt_mode, g_bt_mode == 2 ? "frozen world" : g_bt_mode == 1 ? "head-locked" : "old behaviour, diagnostics only",
-           (g_bt_mode == 2 && !g_bt_want_freeze) ? (encounter ? ": no freeze, the view is not the tracked 3D view" : ": no freeze outside an encounter") : "",
-           g_xr_screen_now ? "the virtual screen" : g_screen3d_now ? "the stereo screen" : "3D");
+           g_bt_mode != 2 || g_bt_want_freeze ? "" : g_bt_freeze_wait ? ": the freeze waits for a BrokenScreen signal (opened on the handle alone: a glass break shows one, a script battle's haze does not)"
+                              : encounter ? ": no freeze, the view is not the tracked 3D view" : ": no freeze outside an encounter",
+           g_xr_screen_now ? "the virtual screen" : g_screen3d_now ? "the stereo screen" : "3D", bt_st_str(g_bt_st_open, stb, sizeof(stb)), static_cast<unsigned>(g_bt_r.trig));
     g_bt_phase = BT_IDLE; bt_set_phase(BT_ARMED, why);
 }
 static void bt_end(const char* why) {
@@ -8713,14 +8734,15 @@ static void bt_end(const char* why) {
     char cap[160] = "no capture draw seen";
     if (g_bt_cap_adopted) snprintf(cap, sizeof(cap), "capture %ux%u x%u (candidate frames %u, %u with 2+ matches, %u with another target, ignored)", g_bt_capt_w, g_bt_capt_h, g_bt_capt_s, g_bt_capf, g_bt_capf2, g_bt_cap_other);
     else if (g_bt_capf) snprintf(cap, sizeof(cap), "no capture adopted (%u candidate frames)", g_bt_capf);
-    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
-             why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : "", g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
+    char stb[16];
+    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s, screen_transition %s at the open): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
+             why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : g_bt_freeze_wait ? ", no freeze: no BrokenScreen signal" : "", bt_st_str(g_bt_st_open, stb, sizeof(stb)), g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
              g_bt_bst_first_shard, g_bt_bst_last_shard, g_bt_bst_shatter_end, g_bt_t_ph[BT_AFTER], fr, g_frames - g_bt_win_frame, held - g_bt_held0, g_bt_gap_max, cap,
              g_bt_m_rule, g_bt_m_slot, g_bt_m_cam, g_bt_m_nodsv, g_bt_dropped ? " (some bt: lines were dropped: the log stayed busy)" : "");
     bt_add("bt: frame %u: %s -> idle: %s", g_frames, k_bt_names[g_bt_phase & 3], why);
     bt_add("bt: %s; Present gaps over 50 ms add up to %.0f ms", g_bt_summary, g_bt_gap_sum);
     g_bt_phase = BT_IDLE; g_bt_phase_t = now; g_bt_phase_frame = g_frames;
-    g_bt_want_freeze = false; g_bt_hold = false; g_bt_recentre = false; g_bt_cap_tex = nullptr; g_bt_cap_done = true; g_bt_user_why = nullptr;   // the pin is released after this frame's submit (xr_tick)
+    g_bt_want_freeze = g_bt_freeze_wait = false; g_bt_hold = false; g_bt_recentre = false; g_bt_cap_tex = nullptr; g_bt_cap_done = true; g_bt_user_why = nullptr;   // the pin is released after this frame's submit (xr_tick)
     g_bt_rearm_block = true;
     bt_flush();
 }
@@ -8749,6 +8771,9 @@ static void bt_tick() {
         const bool sz = r.bs >= 0x10000u && wd_read(static_cast<uintptr_t>(r.bs) + 0x6C, wh, 8) && wh[0] >= 16 && wh[0] <= 16384 && wh[1] >= 16 && wh[1] <= 16384;
         g_bt_capsz_w = sz ? wh[0] : 0; g_bt_capsz_h = sz ? wh[1] : 0;
     }
+    {   // screen_transition [0x112A9D5] (s8, the guarded read as above): logged only (BT-H-2 / S1); not part of ok
+        int8_t st = 0; g_bt_st = wd_read(base + 0xD2A9D5, &st, 1) ? static_cast<int>(st) : -999;
+    }
     g_bt_r = r;
     if (!ok) { if (g_bt_phase != BT_IDLE) bt_end("the game's battle state is not readable"); return; }
     const uint32_t f = g_frames;
@@ -8757,7 +8782,7 @@ static void bt_tick() {
         const bool trig = r.trig == 1 && r.bst == 0;
         if (!trig && r.h == 0 && !sig_bs) { if (g_bt_rearm_block) { g_bt_rearm_block = false; bt_add("bt: frame %u: every signal clear: armed for the next transition", f); bt_flush(); } return; }
         if (g_bt_rearm_block) return;   // the window that just ended (a cancel, a timeout) left a signal set: wait for it to clear
-        bt_begin(trig || r.h != 0, trig ? "battle_trigger 1 at battle_state 0" : r.h != 0 ? "the transition handle is set" : r.bs5 ? "BrokenScreen active" : "BrokenScreen capture requested");
+        bt_begin(trig || r.h != 0, trig, trig ? "battle_trigger 1 at battle_state 0" : r.h != 0 ? "the transition handle is set" : r.bs5 ? "BrokenScreen active" : "BrokenScreen capture requested");
     }
     g_bt_line_due = true;
     if (!g_bt_capsz_logged) {
@@ -8766,6 +8791,16 @@ static void bt_tick() {
         else bt_add("bt: frame %u: the BrokenScreen capture target's size is not readable (singleton +0x6C/+0x70): the first candidate is adopted, as before", f);
     }
     if (g_bt_cap_adopted == nullptr && g_bt_cap_tex != nullptr) g_bt_cap_adopted = g_bt_cap_tex;   // adopted in ffxvr_on_draw this frame
+    if (!g_bt_bs_seen && (sig_bs || g_bt_cap_adopted != nullptr || g_bt_shards_s > 0)) g_bt_bs_seen = true;   // BT-H-1: a glass break under way
+    if (r.bst >= 4 && r.bst <= 0x16) g_bt_load_seen = true;   // BT-H-1 (N2): the load chain (the haze windows open at state 4)
+    if (g_bt_freeze_wait && (g_bt_bs_seen || g_bt_mode != 2)) {   // BT-H-2: freeze only for a glass break (taken before this frame's submit, xr_tick)
+        g_bt_freeze_wait = false;
+        if (g_bt_mode == 2) {
+            g_bt_want_freeze = true;
+            bt_add("bt: frame %u: the freeze starts: a BrokenScreen signal (%s) %u frames into the window", f,
+                   r.bs5 ? "BrokenScreen active" : r.bs4 ? "capture requested" : g_bt_shards_s ? "a shard draw" : "the capture adopted", f - g_bt_win_frame);
+        }
+    }
     if (g_bt_caps_s) {   // BT-6: the capture target, once per window (the bind-time size cache: nothing is dereferenced)
         g_bt_capf++; if (g_bt_caps_s >= 2) g_bt_capf2++;
         if (g_bt_cap_cand == g_bt_cap_adopted) {
@@ -8804,9 +8839,17 @@ static void bt_tick() {
     const uint32_t in_ph = f - g_bt_phase_frame;
     const bool nothing = !g_bt_h_seen && !sig_bs;   // an encounter window with no handle and no effect byte seen so far
     const bool running = bt_running_state(r.bst);
-    g_bt_live_n = (g_bt_encounter && running && r.h == 0 && g_bt_cam_s > 0) ? g_bt_live_n + 1 : 0;   // BT-3
+    // BT-H-1: a script battle's non-glass transition (the Luca haze: handle kind 10, no BrokenScreen) keeps the handle set for
+    // ~1.5 s of the live battle (state 1, its UI drawn, doubled while no_split holds); armed with no BrokenScreen signal ever
+    // seen, after the load chain and in battle (1 / 2, not the end states), don't wait for it. Shatter / after and any glass
+    // break keep h == 0. A capture candidate of another size (BT-S-2: not the capture) does not count against it.
+    const bool h_free = r.h != 0 && g_bt_phase == BT_ARMED && !g_bt_bs_seen && g_bt_load_seen && !(g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h))
+                     && g_bt_shards_s == 0 && (r.bst == 1 || r.bst == 2);
+    g_bt_live_n = (g_bt_encounter && running && (r.h == 0 || h_free) && g_bt_cam_s > 0) ? g_bt_live_n + 1 : 0;   // BT-3
     if (g_bt_live_n >= 2) {   // BT-S-3: in every phase (armed included): a frozen pose never reaches a live battle
-        snprintf(g_bt_why, sizeof(g_bt_why), "the battle is live in the %s phase (battle_state %d with a 3D camera, 2 frames)", k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst));
+        char hs[112] = "";
+        if (r.h != 0) snprintf(hs, sizeof(hs), "; the transition handle %08X still set, no BrokenScreen signal: a transition without a glass break", r.h);
+        snprintf(g_bt_why, sizeof(g_bt_why), "the battle is live in the %s phase (battle_state %d with a 3D camera, 2 frames%s)", k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst), hs);
         bt_end(g_bt_why); return;
     }
     switch (g_bt_phase) {
