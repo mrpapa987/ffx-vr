@@ -41,10 +41,12 @@ labels, `.bak`; Fahrenheit and FFX-60fps (separate projects, own licences and re
 README sends players to them). The README puts the HD texture pack last, as an optional
 "later" step: most players won't start with it.
 
-The catch for zip players today: no Fahrenheit *release* works with the 1 Oct 2026 game
-patch, so they still need to build Fahrenheit (INSTALL-ALPHA.md steps 1-4) until the crew
-ships alpha12 or later. Bundling our Fahrenheit build would be allowed for the LGPL code but
-not for its assets folder (section 2); ask the crew before doing anything like that.
+Fahrenheit for zip players (resolved, Oct 2026): the official release v1.0.0-alpha12 works with
+the 1 Oct 2026 game patch, so players download its zip from the Fahrenheit releases page and
+extract it into `<game>\fahrenheit\` (README-zip section 2); nobody has to build Fahrenheit. The
+README names the tested release and commit from `tools/paths.ps1` (`{FAHRENHEIT_RELEASE}`,
+`{FAHRENHEIT_COMMIT}`), and `install-mod.ps1` shows the version it finds. Bundling a Fahrenheit
+build would still be allowed for the LGPL code but not for its assets folder (section 2).
 
 The source release is the repo itself at the tag. The repo must stay free
 of: game files of any kind (VBF contents, `.phyre`, shaders, textures,
@@ -61,7 +63,7 @@ bulk dumps).
 | Component | Licence | In the zip? | Obligation |
 |---|---|---|---|
 | Fahrenheit (framework we run in; `Fahrenheit.Core` etc.) | LGPL-3.0-or-later; its `assets` folder is NOT free (forks of Fahrenheit only) | **No** - users install Fahrenheit themselves | Our module links against it as a "work that uses the library": we may use any licence; must not bundle their assets; credit + link. Do not redistribute a Fahrenheit build (the assets clause makes a bundled copy questionable). |
-| Fahrenheit SDK (`Fahrenheit.Sdk/1.0.0-alpha12`, the build-time package) | part of Fahrenheit | No | none beyond the above |
+| Fahrenheit SDK (`Fahrenheit.Sdk`, the build-time package, from nuget.org; version = `$FfxvrFhVersion` in `tools/paths.ps1`) | part of Fahrenheit | No | none beyond the above |
 | OpenXR loader + headers (Khronos, NuGet `OpenXR.Loader` / `OpenXR.Headers`) | Apache-2.0 | **Yes** (`openxr_loader.dll`) | ship the Apache-2.0 text and the package's NOTICE in THIRD-PARTY-NOTICES; state that the DLL is unmodified |
 | Dear ImGui / Hexa.NET.ImGui | MIT | No - we call Fahrenheit's copy | credit only |
 | Direct3D 11, DXGI, D3DCompiler, XInput, PSAPI | Windows system libraries | No | none |
@@ -88,17 +90,17 @@ one, add `LICENSE`, put the SPDX id in `ffxvr.csproj`
 header comment in the two `.cpp`/`.h` files. Note in the README that the
 mod contains no game assets and that the game must be bought.
 
-## 4. The Fahrenheit dependency problem
+## 4. The Fahrenheit dependency
 
-The mod is built against Fahrenheit `main` (the alpha11 release does not
-work; setup.md says so) with `Fahrenheit.Sdk/1.0.0-alpha12`. A user cannot
-download a matching Fahrenheit. Options, in order of preference:
-1. Ask the Fahrenheit crew whether a release is coming that includes what
-   we need (stage-0 stub debugger, the file loader, the battle structs);
-   once it exists, build against it and state the version.
-2. Until then: pin the exact Fahrenheit commit in `docs/setup.md` and the
-   release notes, and ship `tools/build-fahrenheit-full.ps1` as the
-   supported route ("build Fahrenheit from commit X"). Painful but honest.
+Built and tested against the official Fahrenheit release **v1.0.0-alpha12** (commit 7e85839;
+the version and commit live in `tools/paths.ps1`, `ffxvr.csproj`'s SDK version must equal it,
+build-mod checks). The SDK and the `fahrenheit` package come from nuget.org only
+(`src/managed/nuget.config`, into `_ext/nuget`), and build-mod logs where each came from. Until
+alpha13, our module turns Fahrenheit's ImGui DPI font scaling off itself (FH-1, design-notes
+"Fahrenheit port"). Options, then and now:
+1. Build against an official release and state its version: done (alpha12).
+2. Pin a main commit and have users build Fahrenheit (`tools/build-fahrenheit-full.ps1`): now only
+   the route for trying alpha13-dev code before its release.
 3. Not an option: bundling our own Fahrenheit build (assets clause above).
 
 Also record the exact FFX-60fps commit the mod was tested with, and the
@@ -117,6 +119,26 @@ game version (Steam build id).
 - [ ] `git ls-files` audit for anything that should not be public (paths with the user's name in docs? the `Tidus - HP` folder name appears in docs - fine, it is just a name)
 - [ ] GitHub: repo description, topics (ffx, vr, openxr, fahrenheit, quest), issues enabled, a release template
 - [ ] Nexus / Reddit posts link to the GitHub release, never to a rehost
+- [ ] ImGui text is a printf format (Hexa passes `ImGui.Text*`'s string as the format): a stray `%` prints garbage or kills
+  the game. Before every release this must print nothing (Git Bash or WSL, from the repo root); fix a hit with `%%`:
+  ```
+  grep -noE 'ImGui\.(Text|TextWrapped|TextDisabled|TextColored|BulletText|LabelText|SetTooltip|SetItemTooltip)\(("([^"\\]|\\.)*"|[^";])*' src/managed/*.cs | grep -E '[^%]%[^%]|%$'
+  grep -nE '^\s*(\+|"|\$")' src/managed/*.cs | grep -vE 'ImGui\.' | grep -E '[^%]%[^%]|%$'
+  ```
+  The first checks each call up to its `;` (so a slider's `"%.1f"` later on the line is not a hit), the second the
+  continuation lines of a call split over several lines (review any hit by hand: a log line is fine).
+  **The rule:** every **non-literal** argument of `ImGui.Text*` / `SetTooltip` goes through `esc()` (diag7.cs): fields,
+  helper return values (our own status helpers included: a string built elsewhere is invisible to the two greps above, as
+  uidepth's "UI on NN% of the panel" was), native, file and game strings, exception messages, paths. The only exemption is
+  an interpolated string whose holes are numbers or our own literal ternaries. Slider/drag formats (`"%.1f"`) are formats
+  on purpose; widget labels are not formatted.
+  A third, catch-all command lists every string literal with a lone `%` anywhere in the managed code:
+  ```
+  grep -nE '"[^"]*[^%]%[^%]|"%[^%.]' src/managed/*.cs | grep -vE '^\S+:\s*//' | grep -vE '"%\.[0-9]+f[^"]*"'
+  ```
+  Known hits, all fine (Oct 2026, branch fhport): `diag7.cs` `esc()` itself; `hd_cache.cs` `closed (vram use ... % of ...)`
+  (a log line); `module.cs` `(i % 9) % 4` in "reset calibration" (a modulo); `uidepth.cs` `UI on ...% of the panel`
+  (shown through `esc()`). Any other line needs a look.
 
 ## 6. Open questions
 

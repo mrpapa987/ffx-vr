@@ -1,9 +1,10 @@
 # build-fahrenheit-full.ps1
 #
-# Full source build of Fahrenheit: both the managed (.NET) components AND the
-# native stage0/stage1 loaders. This is what we need, because the loaders changed
-# after release alpha11 (commits #306 and #342) and the alpha11 loaders are not
-# compatible with current managed code.
+# Builds Fahrenheit from source (the managed components and the native stage0/stage1 loaders), by
+# default at the release FFX VR is tested with ($FfxvrFhCommit in tools\paths.ps1, tag
+# v1.0.0-alpha12). Players and most developers don't need this: install the official release zip
+# with  tools\install-fahrenheit.ps1 -Zip <zip>  (INSTALL-ALPHA step 4). Use this for another
+# commit (-Commit, -Latest), or when the release zip is not an option.
 #
 # Requires: Visual Studio Build Tools 2026 with the C++ workload, and vcpkg
 # integration enabled once via:   vcpkg integrate install
@@ -13,17 +14,18 @@
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\build-fahrenheit-full.ps1     (from the repository folder)
-#   ... -Latest            build the newest main instead of the tested commit
-#   ... -Commit <hash>     build a specific commit
+#   ... -Latest            build the newest main instead of the tested release (untested with FFX VR)
+#   ... -Commit <hash|tag> build a specific commit or tag, e.g. -Commit v1.0.0-alpha12
 # Then tools\install-fahrenheit.ps1 copies the result into the game folder.
 
 param(
-    [string]$Commit = 'ecb6702abdc4573011163b22d943e9ef6761ca5c',   # tested with FFX VR (15 Oct 2026, "Save manager revision for alpha12")
+    [string]$Commit = '',      # empty: the tested release, $FfxvrFhCommit in tools\paths.ps1
     [switch]$Latest
 )
 $ErrorActionPreference = 'Continue'
 
 . (Join-Path $PSScriptRoot 'paths.ps1')
+if (-not $Commit) { $Commit = $FfxvrFhCommit }   # the tested release, tools\paths.ps1
 $proj   = $FfxvrRepo
 $repo   = Join-Path $proj '_ext\fahrenheit'
 $logDir = Join-Path $proj 'logs'
@@ -99,7 +101,7 @@ if (-not (Test-Path (Join-Path $repo 'Fahrenheit.slnx'))) {
 }
 
 Log ''
-& git -C $repo fetch origin main 2>&1 | ForEach-Object { Log "  $_" }
+& git -C $repo fetch --tags origin main 2>&1 | ForEach-Object { Log "  $_" }
 if ($Latest) {
     Log '[git] building the latest main (untested with FFX VR)'
     & git -C $repo reset --hard origin/main 2>&1 | ForEach-Object { Log "  $_" }
@@ -176,16 +178,17 @@ if (Test-Path -LiteralPath $deploy) {
 
 # ---------------------------------------------------------------- verdict
 # The one known harmless failure: without the Debugging Tools for Windows, MSBuild can't copy
-# dbghelp.dll and symsrv.dll from the Windows Kits debugger folder (two MSB3030 errors, exit code 1;
-# install-fahrenheit.ps1 supplies dbghelp.dll). A non-zero exit passes only when every error line
-# is one of those two, so an unrecognised failure, with older loaders still in place, reads FAILED.
-$knownQuirk = 'error MSB3030:.*Windows Kits\\+10\\+Debuggers\\+x86\\+(dbghelp|symsrv)\.dll.*not found'   # \\+: tolerates a doubled separator
+# dbghelp.dll, dbgcore.dll and symsrv.dll from the Windows Kits debugger folder (MSB3030 errors,
+# exit code 1; Fahrenheit.Stage0.vcxproj copies all three at v1.0.0-alpha12, upstream #369 added
+# dbgcore; install-fahrenheit.ps1 supplies dbghelp.dll). A non-zero exit passes only when every
+# error line is one of those, so an unrecognised failure, with older loaders still in place, reads FAILED.
+$knownQuirk = 'error MSB3030:.*Windows Kits\\+10\\+Debuggers\\+x86\\+(dbghelp|dbgcore|symsrv)\.dll.*not found'   # \\+: tolerates a doubled separator
 $realErrors = @($errLines | Sort-Object -Unique | Where-Object { $_ -notmatch $knownQuirk })
 $ok = ($restoreCode -eq 0) -and ($missing -eq 0) -and
       ($buildCode -eq 0 -or ($errLines.Count -gt 0 -and $realErrors.Count -eq 0))
 Log ''
 if ($buildCode -ne 0 -and $ok) {
-    Log "NOTE: msbuild exit code $buildCode came only from the known dbghelp.dll/symsrv.dll copy errors; the loaders were built."
+    Log "NOTE: msbuild exit code $buildCode came only from the known dbghelp.dll/dbgcore.dll/symsrv.dll copy errors; the loaders were built."
 }
 if (-not $ok -and $realErrors.Count -gt 0) {
     Log 'Errors:'

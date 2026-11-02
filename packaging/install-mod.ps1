@@ -54,6 +54,17 @@ Write-Host '[checks]'
 $fhOk = (Test-Path -LiteralPath (Join-Path $fh 'bin\fhstage0.exe')) -and (Test-Path -LiteralPath (Join-Path $fh 'bin\fhstage1.dll'))
 if ($fhOk) {
     Write-Host '  Fahrenheit         : found'
+    # Its version: '1.0.0-alphaNN (<commit>, official release | built from source)'. alpha11 and older predate
+    # the game's 1 October 2026 patch; that floor is a fact about the game and never moves, so it is a literal.
+    $i = Get-FfxvrFhInfo (Join-Path $fh 'bin')
+    if ($i -and $i.Version -match '^1\.0\.0-alpha(\d+)$' -and [int]$Matches[1] -lt 12) {
+        Write-Host "  Fahrenheit version : $($i.Text) - too old: it does not work with the current game."
+        Write-Host "                       Install release v$FfxvrFhVersion (README.md, section 2)."
+        $problems++
+    } elseif ($i) {
+        $note = if (-not $i.Tested) { " (FFX VR is tested with release v$FfxvrFhVersion)" } else { '' }
+        Write-Host "  Fahrenheit version : $($i.Text)$note"
+    }
 } else {
     Write-Host "  Fahrenheit         : NOT FOUND (expected $fh\bin\fhstage0.exe)"
     Write-Host '                       FFX VR is a Fahrenheit mod. See "Fahrenheit" in README.md.'

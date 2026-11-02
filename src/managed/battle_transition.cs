@@ -70,7 +70,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("frozen world##bt", ref _battle_transition, 2); ImGui.SameLine();
         ImGui.RadioButton("head-locked##bt", ref _battle_transition, 1); ImGui.SameLine();
         ImGui.RadioButton("old (as before)##bt", ref _battle_transition, 0);
-        if (_fn_bt_status != null) ImGui.TextDisabled("  transition: " + bt_status_text());
+        if (_fn_bt_status != null) ImGui.TextDisabled("  transition: " + esc(bt_status_text()));
     }
 
     /// <summary>Debug > Battle loading: the diagnostics switch.</summary>

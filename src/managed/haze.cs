@@ -63,7 +63,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("off in the headset##haze", ref _heat_haze, 0); ImGui.SameLine();
         ImGui.RadioButton("fixed per eye (experimental)##haze", ref _heat_haze, 1); ImGui.SameLine();
         ImGui.RadioButton("as before##haze", ref _heat_haze, 2);
-        if (_xr_want && _fn_haze_status != null) { ImGui.SameLine(); ImGui.TextDisabled(haze_live_text()); }
+        if (_xr_want && _fn_haze_status != null) { ImGui.SameLine(); ImGui.TextDisabled(esc(haze_live_text())); }
     }
 
     /// <summary>Debug > Heat haze: the setting with its explanation and the status line.</summary>
@@ -75,7 +75,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("off in the headset (default)##hazedbg", ref _heat_haze, 0); ImGui.SameLine();
         ImGui.RadioButton("fixed per eye (experimental)##hazedbg", ref _heat_haze, 1); ImGui.SameLine();
         ImGui.RadioButton("as before (A/B)##hazedbg", ref _heat_haze, 2);
-        if (_fn_haze_status != null) ImGui.TextDisabled(haze_status_text());
+        if (_fn_haze_status != null) ImGui.TextDisabled(esc(haze_status_text()));
         ImGui.TextDisabled("ffxvr_diag.log: 'haze:' every 10 s while haze draws are seen (modes 1 and 2 only); Frame census: HAZE lines");
     }
 }

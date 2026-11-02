@@ -154,7 +154,11 @@ $gdir = Find-FfxvrGame
 if ($gdir) {
     $how = if (Test-FfxvrGame $env:FFXVR_GAME_DIR) { 'FFXVR_GAME_DIR' } elseif (Test-FfxvrGame $FfxvrGameOverride) { 'tools\paths.local.ps1' } else { 'found through Steam' }
     Add-Line "  game:       $gdir   ($how)"
-    if (Test-Path (Join-Path $gdir 'fahrenheit\bin\fhstage0.exe')) { Add-Line '  Fahrenheit: installed in the game folder' } else { Add-Line '  Fahrenheit: NOT installed in the game folder yet (tools\build-fahrenheit-full.ps1)' }
+    if (Test-Path -LiteralPath (Join-Path $gdir 'fahrenheit\bin\fhstage0.exe')) {
+        $fi = Get-FfxvrFhInfo (Join-Path $gdir 'fahrenheit\bin')
+        $fv = if ($fi) { "$($fi.Text)$(if (-not $fi.Tested) { "; FFX VR is tested with release v$FfxvrFhVersion" })" } else { 'no fh.dll' }
+        Add-Line "  Fahrenheit: installed in the game folder ($fv)"
+    } else { Add-Line "  Fahrenheit: NOT installed in the game folder yet (install the official Fahrenheit release v${FfxvrFhVersion}: INSTALL-ALPHA.md step 4)" }
 } else {
     Add-Line '  game:       NOT FOUND - set FFXVR_GAME_DIR or create tools\paths.local.ps1 (see tools\paths.ps1)'
 }

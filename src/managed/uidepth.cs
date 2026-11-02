@@ -68,7 +68,7 @@ public sealed unsafe partial class FFXVRModule {
     private void uidepth_ui() {
         ImGui.Checkbox("UI panel comes in front of near objects (adaptive depth)", ref _ui_adaptive); ImGui.SameLine();
         ImGui.SetNextItemWidth(140); ImGui.SliderFloat("dark backing behind the UI (0 = off)##uidb", ref _ui_backing, 0f, 1f, "%.2f");
-        if (_xr_want && _fn_uidepth_status != null) { ImGui.SameLine(); ImGui.TextDisabled(uidepth_live_text()); }
+        if (_xr_want && _fn_uidepth_status != null) { ImGui.SameLine(); ImGui.TextDisabled(esc(uidepth_live_text())); }
     }
 
     /// <summary>Debug > UI panel, next to the distance and width sliders: every setting and the status.</summary>
@@ -81,6 +81,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("auto (default)##uidproj", ref _ui_adaptive_proj, 0); ImGui.SameLine();
         ImGui.RadioButton("near-variant projection##uidproj", ref _ui_adaptive_proj, 1); ImGui.SameLine();
         ImGui.RadioButton("main projection (reads ~2x; test only, not saved)##uidproj", ref _ui_adaptive_proj, 2);
-        if (_fn_uidepth_status != null) ImGui.TextDisabled(uidepth_status_text());
+        if (_fn_uidepth_status != null) ImGui.TextDisabled(esc(uidepth_status_text()));   // a percent sign in it ("UI on 45 percent of the panel") is text, not a format
     }
 }

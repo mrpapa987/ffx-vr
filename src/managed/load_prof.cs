@@ -165,7 +165,7 @@ public sealed unsafe partial class FFXVRModule {
         string sess = li_session_text();
         ImGui.TextDisabled("  released while waiting for the headset; " + (_load_lock_release == 2 ? "all loads (test): battle entries and way backs, area / event map changes, save loads, the title's load, cluster loads the main thread waits for" : "battle entries and way backs")
                          + (_ld_any ? "" : " | the load hooks are not installed (they follow diag_load_lines / load_lock_release / hd_cluster_cache at launch): no load is seen")
-                         + (_fn_lock_release_status != null ? " | " + lp_status_text() : "") + (sess.Length > 0 ? " | " + sess : ""));
+                         + (_fn_lock_release_status != null ? " | " + esc(lp_status_text()) : "") + (sess.Length > 0 ? " | " + esc(sess) : ""));
     }
     /// <summary>Debug > Battle loading: the profiler's switch.</summary>
     private void lp_debug_ui() {
@@ -179,6 +179,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("off##dlp", ref _diag_load_prof, 0); ImGui.SameLine();
         ImGui.RadioButton("loader thread##dlp", ref _diag_load_prof, 1); ImGui.SameLine();
         ImGui.RadioButton("+ render thread##dlp", ref _diag_load_prof, 2);
-        ImGui.TextDisabled($"  the sampler follows this at once; the two exact probes (0x465AB0, 0x58FC20) hook at launch: {(_ld_any ? _pr_status : "off (no load hooks: no phase, no window, no probe)")}");
+        ImGui.TextDisabled($"  the sampler follows this at once; the two exact probes (0x465AB0, 0x58FC20) hook at launch: {(_ld_any ? esc(_pr_status) : "off (no load hooks: no phase, no window, no probe)")}");
     }
 }

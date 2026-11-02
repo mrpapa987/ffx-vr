@@ -28,8 +28,8 @@ over Virtual Desktop (VDXR)**. Anything else is untested.
 |---|---|---|
 | Git | Downloading the source | `winget install Git.Git` |
 | PowerShell 7 (optional) | Not needed: every command below uses Windows PowerShell (`powershell`), which comes with Windows | `winget install Microsoft.PowerShell` |
-| Visual Studio **Build Tools 2026** | Building the C++ part and Fahrenheit | `winget install Microsoft.VisualStudio.BuildTools`, then in the Visual Studio Installer tick **Desktop development with C++**, **.NET desktop build tools** and the **vcpkg** component |
-| vcpkg integration | Fahrenheit's native build | After the Build Tools install, run once in a *Developer* prompt: `vcpkg integrate install` |
+| Visual Studio **Build Tools 2026** | Building the C++ part of the mod (and, optionally, Fahrenheit from source) | `winget install Microsoft.VisualStudio.BuildTools`, then in the Visual Studio Installer tick **Desktop development with C++** and **.NET desktop build tools**; the **vcpkg** component only for building Fahrenheit from source |
+| vcpkg integration | Only for building Fahrenheit from source (step 4, optional) | After the Build Tools install, run once in a *Developer* prompt: `vcpkg integrate install` |
 | .NET 10 SDK | Building the mod | `winget install Microsoft.DotNet.SDK.10` |
 | .NET 10 **x86** runtime | Running the mod (it's 32-bit, like the game) | `winget install Microsoft.DotNet.Runtime.10 --architecture x86` |
 | 7-Zip | Only if you install a texture pack | `winget install 7zip.7zip` |
@@ -80,25 +80,45 @@ The folder you give must contain `FFX.exe`.
 
 ---
 
-## 4. Build and install Fahrenheit (the mod loader)
+## 4. Install Fahrenheit (the mod loader)
 
-FFX VR runs inside [Fahrenheit](https://github.com/fahrenheit-crew/fahrenheit). Fahrenheit's
-latest *release* (alpha11) predates the October game patch and **does not work** with the
-current game, so it's built from source at the commit FFX VR was tested with:
+FFX VR runs inside [Fahrenheit](https://github.com/fahrenheit-crew/fahrenheit). FFX VR is
+tested with the official Fahrenheit release **v1.0.0-alpha12**, the first release that works
+with the October game patch (alpha11 and older don't).
+
+1. Download `fahrenheit_release_v1.0.0-alpha12.zip` from its
+   [releases page](https://github.com/fahrenheit-crew/fahrenheit/releases/tag/v1.0.0-alpha12)
+   (under *Assets*). There's no need to extract it.
+2. Install it:
+   ```
+   powershell -ExecutionPolicy Bypass -File .\tools\install-fahrenheit.ps1 -Zip <path to the zip>
+   ```
+   It empties `<game>\fahrenheit\bin`, copies the release in, makes sure `mods\loadorder`
+   exists, and shows the version it installed, e.g.
+   `Fahrenheit 1.0.0-alpha12 (7e85839, official release)`. It never touches your Fahrenheit
+   config, saves or mods.
+
+### Building Fahrenheit from source (optional)
+
+Only for trying another Fahrenheit commit, or if the release zip is not an option. It needs
+the vcpkg parts of step 1. It rewrites `_ext\fahrenheit\artifacts`, so it **replaces the build that
+`install-fahrenheit.ps1` without `-Zip` installs**: if you keep an older source build there as a fallback,
+back up `_ext\fahrenheit\artifacts\deploy\rel\bin` first.
 
 ```
 powershell -ExecutionPolicy Bypass -File .\tools\build-fahrenheit-full.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\install-fahrenheit.ps1
 ```
 
-- The first script clones Fahrenheit into `_ext\fahrenheit` and builds it. It ends with
-  **RESULT: OK** or **RESULT: FAILED** (exit code 1), below a list of the four loader files
-  (`fhstage0.exe`, `fhstage1.dll`, `minhook.x32.dll`, `nethost.dll`). MSBuild itself may report
-  exit code 1 because it can't copy two debugging DLLs (`dbghelp.dll`, `symsrv.dll`) when the
-  Debugging Tools for Windows aren't installed; the script recognises exactly that and says so.
-  `-Latest` builds Fahrenheit's newest code instead, which is untested with this mod.
-- The second script copies the result into `<game>\fahrenheit\`. It never touches your
-  Fahrenheit config, saves or mods.
+- The first script clones Fahrenheit into `_ext\fahrenheit` and builds it, by default at the
+  tested release (`-Commit <hash or tag>` picks another). It ends with **RESULT: OK** or
+  **RESULT: FAILED** (exit code 1), below a list of the four loader files (`fhstage0.exe`,
+  `fhstage1.dll`, `minhook.x32.dll`, `nethost.dll`). MSBuild itself may report exit code 1
+  because it can't copy three debugging DLLs (`dbghelp.dll`, `dbgcore.dll`, `symsrv.dll`) when
+  the Debugging Tools for Windows aren't installed; the script recognises exactly that and says
+  so. `-Latest` builds Fahrenheit's newest code instead, which is untested with this mod.
+- The second script (without `-Zip`) copies that build into `<game>\fahrenheit\` and says
+  `built from source`.
 
 ---
 
@@ -122,8 +142,10 @@ powershell -ExecutionPolicy Bypass -File .\tools\build-mod.ps1
 ```
 
 This downloads the OpenXR loader from NuGet, builds both halves of the mod, copies them to
-`<game>\fahrenheit\mods\ffxvr\` and adds `ffxvr` to Fahrenheit's load order. Run it again
-after every `git pull`. Your settings (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game
+`<game>\fahrenheit\mods\ffxvr\` and adds `ffxvr` to Fahrenheit's load order. The Fahrenheit SDK
+the mod builds against comes from nuget.org into `_ext\nuget` (`src\managed\nuget.config`), so
+the first build needs the network; the build log names where each Fahrenheit package came from.
+Run it again after every `git pull`. Your settings (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game
 closed (deleted while the game runs, it is written again at your next settings change). You can edit
 `ffxvr.ini` while the game runs: it is read back within a second, and a bad value is ignored and listed in core.log.
 
@@ -198,11 +220,12 @@ on by default). A normal gamepad works too.
 | Symptom | Try |
 |---|---|
 | The game starts flat, nothing in the headset | Is Virtual Desktop connected *before* launch? Is **Headset** ticked in the F8 overlay? Does `logs\prereqs.txt` show VDXR as the 32-bit runtime? |
-| Fahrenheit doesn't start at all | Not as administrator. Re-run `install-fahrenheit.ps1`. Check `logs\run-*.txt`. |
+| Fahrenheit doesn't start at all | Not as administrator. Re-run `install-fahrenheit.ps1 -Zip <zip>` (step 4); it prints the installed version. Check `logs\run-*.txt`. |
+| Fahrenheit starts but the mod doesn't load (no F8 overlay) | `<game>\fahrenheit\mods\loadorder` must list `ffxvr` on a line of its own; `build-mod.ps1` adds it. |
 | Black for a few seconds at some scene changes | The headset should now keep showing the last picture (head-tracked) while the game loads. If it still goes black, send the logs: the `sr:` lines in `ffxvr_diag.log` say why. |
 | Ghosting when turning with the stick | Is "smooth stick turns at the headset rate" ticked in the F8 overlay (under the turn speed)? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, use `game-settings.ps1 -Profile vr`. |
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
-| Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for Fahrenheit to support the new version, then rebuild with `-Latest`. |
+| Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit release that supports the new version (and an FFX VR update that names it). |
 
 For a bug report, send the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next
 to it, plus a description of what you saw.

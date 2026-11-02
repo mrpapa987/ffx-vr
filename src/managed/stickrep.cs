@@ -133,7 +133,7 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.SameLine(); ImGui.RadioButton("first person + seat##sr", ref _stick_reproject, 1);
             ImGui.SameLine(); ImGui.RadioButton("all views (third person, diorama: approximate)##sr", ref _stick_reproject, 2);
         }
-        if (_xr_want) { string s = sr_status_text(out _); if (s.Length > 0) ImGui.TextDisabled("  " + s); }
+        if (_xr_want) { string s = sr_status_text(out _); if (s.Length > 0) ImGui.TextDisabled("  " + esc(s)); }
     }
 
     /// <summary>Debug > Stick reprojection and the loading keepalive.</summary>
@@ -157,7 +157,7 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.Button("stall the main thread 3 s##srd")) _sr_stall_req = true;
         ImGui.SameLine(); ImGui.TextDisabled(_h7_join_ok ? "the headset should keep a head-tracked frame, then the game resumes" : "needs the job join hook (smooth_anchor=1 at launch)");
         string s = sr_status_text(out _);
-        if (s.Length > 0) ImGui.TextDisabled(s);
-        ImGui.TextDisabled(_sr_status);
+        if (s.Length > 0) ImGui.TextDisabled(esc(s));
+        ImGui.TextDisabled(esc(_sr_status));
     }
 }

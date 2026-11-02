@@ -18,6 +18,9 @@
 
 $FfxvrRepo         = Split-Path -Parent $PSScriptRoot
 $FfxvrGameName     = 'FINAL FANTASY FFX&FFX-2 HD Remaster'
+# The Fahrenheit release FFX VR is tested with. ffxvr.csproj's Sdk="Fahrenheit.Sdk/<version>" must match (build-mod checks).
+$FfxvrFhVersion    = '1.0.0-alpha12'
+$FfxvrFhCommit     = '7e85839b2efb67124d1760598c9f220cb559a41a'   # tag v1.0.0-alpha12
 $FfxvrGameOverride = $null
 $ffxvrLocal = Join-Path $PSScriptRoot 'paths.local.ps1'
 if (Test-Path -LiteralPath $ffxvrLocal) { . $ffxvrLocal }
@@ -54,6 +57,31 @@ function Find-FfxvrGame {
         if (Test-FfxvrGame $dir) { return $dir }
     }
     return $null
+}
+
+# What fh.dll in $bin is: Version, Commit (from its ProductVersion '1.0.0-alphaNN+<commit>'), Tested (that commit is
+# $FfxvrFhCommit), Signed (a Valid Authenticode signature: the official release zip is signed by its maintainer; a source
+# build is not signed at all) and a one-line Text. Any other signature status (e.g. UnknownError on a PC that could not
+# fetch the signer's root) is shown as it is, not as a source build. $null if there is no fh.dll.
+function Get-FfxvrFhInfo([string]$bin) {
+    $p = $null
+    try { $p = [IO.Path]::Combine($bin, 'fh.dll') } catch { return $null }
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    $pv = "$((Get-Item -LiteralPath $p).VersionInfo.ProductVersion)"
+    $v, $c = $pv -split '\+', 2
+    $c = "$c".Trim()
+    $st = 'Unknown'
+    try { $st = "$((Get-AuthenticodeSignature -LiteralPath $p).Status)" } catch { $st = 'Unknown' }
+    $sig = ($st -eq 'Valid')
+    $short = if ($c) { $c.Substring(0, [Math]::Min(7, $c.Length)) } else { 'no commit' }
+    $kind  = if ($sig) { 'official release' } elseif ($st -eq 'NotSigned') { 'built from source' } else { "signature: $st" }
+    [pscustomobject]@{
+        Version = "$v".Trim()
+        Commit  = $c
+        Tested  = [bool]($c -and ($c -like ($FfxvrFhCommit.Substring(0, 7) + '*')))
+        Signed  = [bool]$sig
+        Text    = "$("$v".Trim()) ($short, $kind)"
+    }
 }
 
 # The game folder, or a clear message and exit.

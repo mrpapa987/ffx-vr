@@ -61,6 +61,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("override it as the scene camera (old, A/B)##shadowcam", ref _shadow_cam, 0);
         ImGui.RadioButton("first person: draw my own shadow (default)##selfshadow", ref _fp_self_shadow, 1); ImGui.SameLine();
         ImGui.RadioButton("hide it with the body (whole-body mode only)##selfshadow", ref _fp_self_shadow, 0);
-        if (_fn_shadow_status != null) ImGui.TextDisabled(shadow_status_text());
+        if (_fn_shadow_status != null) ImGui.TextDisabled(esc(shadow_status_text()));
     }
 }

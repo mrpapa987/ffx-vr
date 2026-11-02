@@ -17,7 +17,14 @@ Mixing alpha11's native loaders with freshly built managed code **also fails** �
 worse, in fact, dying during module load with no error log. Commits #306 and #342
 changed the native loaders, so both halves must come from the same commit.
 
-**Build everything from `main`. Do not use the alpha11 release.**
+**Since 30 October 2026: use the official release v1.0.0-alpha12** (tag 7e85839,
+20 October), the first release with P4 support. `tools/install-fahrenheit.ps1 -Zip
+<zip>` installs it (INSTALL-ALPHA step 4); the mod restores `Fahrenheit.Sdk` and
+`Fahrenheit` 1.0.0-alpha12 from nuget.org (`src/managed/nuget.config`). Until then
+the mod was built against a source build of commit ecb6702, which carries the same
+version string; `tools/paths.ps1` (`$FfxvrFhVersion`, `$FfxvrFhCommit`) is now the
+one place that names the tested release. Why not main, and what to check before
+alpha13: `docs/design-notes.md`, the Fahrenheit port section.
 
 ## Required
 
@@ -26,7 +33,7 @@ changed the native loaders, so both halves must come from the same commit.
 | Visual Studio **Build Tools 2026** | 18.11.12306.390 | winget id is `Microsoft.VisualStudio.BuildTools` — no year in the id |
 | → Desktop development with C++ | | required for stage0/stage1 |
 | → .NET desktop build tools | | required for a full build |
-| → vcpkg component | | then run `vcpkg integrate install` once |
+| → vcpkg component | | only for building Fahrenheit from source; then run `vcpkg integrate install` once |
 | .NET SDK | 10.0.201 | 64-bit SDK is fine |
 | .NET runtime, **x86** | 10.0.13 | separate install; the mod is a 32-bit managed plugin |
 | Git | 2.43 | |
@@ -36,12 +43,13 @@ changed the native loaders, so both halves must come from the same commit.
 VS Build Tools 2019 and 2022 may remain installed; the build script picks the
 highest version with the C++ workload.
 
-## Known build quirks
+## Known build quirks (Fahrenheit source build only)
 
 **`dbghelp.dll` is not copied by the build.** `Fahrenheit.Stage0.vcxproj` tries to
-copy `dbghelp.dll` and `symsrv.dll` from `Windows Kits\10\Debuggers\x86\`, which
-only exists if Debugging Tools for Windows is installed. The build reports two
-`MSB3030` errors and exits 1, but `fhstage0.exe` itself links fine.
+copy `dbghelp.dll`, `symsrv.dll` and (from alpha12, #369) `dbgcore.dll` from
+`Windows Kits\10\Debuggers\x86\`, which only exists if Debugging Tools for Windows
+is installed. The build reports `MSB3030` errors and exits 1, but `fhstage0.exe`
+itself links fine; `build-fahrenheit-full.ps1` recognises exactly these errors.
 
 `dbghelp.dll` is a **load-time import** of `fhstage0.exe` (commit #306 turned
 stage0 into a stub debugger; `MiniDumpWriteDump` lives there), so stage0 will not
@@ -77,18 +85,20 @@ re-maps the addresses again.
 | Script | Purpose |
 | --- | --- |
 | `tools/check-prereqs.ps1` | Reports toolchain, OpenXR runtime registration, Steam paths |
-| `tools/build-fahrenheit-full.ps1` | Clones if needed, checks out the tested commit (`-Latest` for main), full msbuild build, reports native artifacts |
-| `tools/install-fahrenheit.ps1` | Copies the build into `<game>\fahrenheit\bin` (cleared first; config/mods/saves untouched), adds dbghelp.dll if missing |
+| `tools/build-fahrenheit-full.ps1` | Optional source build: clones if needed, checks out the tested release (`-Commit` for another, `-Latest` for main), full msbuild build, reports native artifacts |
+| `tools/install-fahrenheit.ps1` | `-Zip <zip>`: installs the official release zip; without it, copies the source build. Into `<game>\fahrenheit\bin` (cleared first; config/mods/saves untouched), adds dbghelp.dll if missing, prints the version, commit and signature it installed |
 | `tools/package-release.ps1` | Builds (`build-mod.ps1 -NoDeploy`) and packs the player zip into `dist\` with its README and installer; see `docs/release.md` §1 |
 | `tools/paths.ps1` | Shared by all scripts: repository root, game folder (env var / local file / Steam) |
 | `tools/run-ffx.ps1` | Launches via Fahrenheit, captures console and game-side logs |
 
-`tools/build-fahrenheit.ps1` is the managed-only build. Kept for reference, but it
-is not sufficient on its own.
+The old managed-only `tools/build-fahrenheit.ps1` was deleted on 30 October 2026:
+it reset `_ext\fahrenheit` to main and rebuilt it, which silently replaced the
+source build that the rollback (`install-fahrenheit.ps1` without `-Zip`) installs.
 
 ## Deploying a build
 
-Copy everything from `_ext\fahrenheit\artifacts\deploy\rel\bin\` over
+`install-fahrenheit.ps1` does this. By hand: copy everything from the release
+zip's `bin\` (or `_ext\fahrenheit\artifacts\deploy\rel\bin\`) over
 `<game>\fahrenheit\bin\`. Clear the destination first so removed files do not
 linger — `fhatelier.*` and `fheedit.*` were deleted upstream on 13 October and
 will be stale against a current `fh.dll`.

@@ -193,6 +193,20 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// the virtual screen and its menu lies exactly over it, world-locked, as on the monitor (native xr_tick). 0: the old
     /// head-locked layer over whatever view was showing.</summary>
     private bool _fh_menu_on_screen = true;
+    /// <summary>FH-1 (Fahrenheit port): ini fh_dpi_fix (default 1, applies at once). Fahrenheit alpha12 turns on ImGui's
+    /// ConfigDpiScaleFonts / ConfigDpiScaleViewports (runtime/imgui.cs:90-91, once, in platform_bind), so every ImGui font is
+    /// multiplied by the Windows display scale although the game is DPI-unaware (its save screen outgrows its frames); main
+    /// turned both off (#376, 5173f28). 1: we do the same once Fahrenheit has set them, and put FontScaleDpi back to 1 at that
+    /// edge (ImGui leaves it as it was); 0: Fahrenheit's own values are put back. Nothing is written where Fahrenheit already
+    /// has them off (alpha13). Our only write to Fahrenheit's ImGui state (design-notes, Fahrenheit port).</summary>
+    private bool _fh_dpi_fix = true;
+    private int  _dpi_fh_fonts = -1; private bool _dpi_fh_vps;   // Fahrenheit's values as first seen (-1: not yet)
+    private bool _dpi_ours; private int _dpi_offs;                // the flags are off because of us; how many times we turned them off
+    private const float k_fh_font_px = 20f;                       // Fahrenheit's base font (core/gui/gui.cs: AddFontFromFileTTF(..., 20f))
+    /// <summary>FH-2: ini overlay_text_scale (default 1, 0.5..2 in steps of 0.05, applies at once): our text (F8 window, Eye 2,
+    /// markers, hover labels) relative to its default size, 20 px x the Windows display scale.</summary>
+    private float _overlay_text_scale = 1f;
+    private float _our_px = k_fh_font_px;                         // FH-2: this frame's pushed size, computed before the push
     private bool _fh_menu_open;   // latched: set at OPEN (2: Fahrenheit draws the menu, from a full-screen black), cleared at CLOSED (0)
     /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal; FhSavePal.pal_addr_screen_state, FFX: 0x8CB994, a DWORD in
     /// FFX.exe's .data, VA 0xCCB994): 0 closed, 1 opening, 2 open, 3 / 4 unnamed. A guarded read (native, VirtualQuery first):
@@ -946,6 +960,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
                 case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
+                case "fh_dpi_fix":        pb(k, v, ref _fh_dpi_fix); break;                   // FH-1: Fahrenheit's ImGui text ignores the Windows display scale, as Fahrenheit #376 (default 1; applies at once)
+                case "overlay_text_scale": pf(k, v, ref _overlay_text_scale, 0.5f, 2f); _overlay_text_scale = text_scale_step(_overlay_text_scale); break; // FH-2: our overlay's text size, x the default 20 px x Windows scale (default 1, steps of 0.05; applies at once)
                 case "gestures":          pb(k, v, ref _gestures); break;
                 case "gest_tilt":         pf(k, v, ref _gest_tilt, -2f, 2f); break;
                 case "fp_body_mode":      pe(k, v, ref _fp_body_mode, 0, 1, 2); break;
@@ -1295,6 +1311,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"haptics_gain={_haptics_gain.ToString("0.##", ci)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
             $"fh_menu_on_screen={(_fh_menu_on_screen ? 1 : 0)}\n" +
+            $"fh_dpi_fix={(_fh_dpi_fix ? 1 : 0)}\n" +
+            $"overlay_text_scale={_overlay_text_scale.ToString("0.##", ci)}\n" +
             $"gestures={(_gestures ? 1 : 0)}\n" +
             $"gest_tilt={_gest_tilt.ToString("F2", ci)}\n" +
             $"fp_body_mode={_fp_body_mode.ToString(ci)}\n" +
@@ -1406,7 +1424,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     /// <summary>What a player touches: headset, comfort, view. Everything else is under Debug.</summary>
     private void draw_main() {
-        if (_fn_xr_set == null) { ImGui.Text($"Native helper: {_native_status}"); return; }
+        if (_fn_xr_set == null) { ImGui.Text($"Native helper: {esc(_native_status)}"); return; }
 
         // Headset
         ImGui.Checkbox("Headset", ref _xr_want);   // pushed every frame by push_all, until the native side accepts (it waits for the first 3D frame)
@@ -1417,7 +1435,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.RadioButton("seat##sv", ref _start_view, 0); ImGui.SameLine(); ImGui.RadioButton("first person##sv", ref _start_view, 1); ImGui.SameLine();
             ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
         }
-        ImGui.TextWrapped(xr_status_text());
+        ImGui.TextWrapped(esc(xr_status_text()));   // the OpenXR runtime's name is in it
         if (_xr_drop_image) {   // a test toggle that blacks out the headset after 30 frames: always visible while it is on
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
             ImGui.TextWrapped("TEST ON: the eye image is being dropped (Debug > Headset tests). The headset holds the last frame, then goes black. Untick it to resume.");
@@ -1427,7 +1445,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             byte* lr = stackalloc byte[320];
             if (_fn_lowres_status(lr, 320) != 0) {
                 ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
-                ImGui.TextWrapped(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)lr) ?? "");
+                ImGui.TextWrapped(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)lr)));
                 ImGui.PopStyleColor(1);
             }
         }
@@ -1442,7 +1460,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             int ready = _fn_vrpad_status(st, pl, pr, 64, &frames);
             if (ready == 0) ImGui.TextDisabled(_xr_on ? "controllers: no input this frame (headset not focused, or no bindings)" : "controllers: headset off");
             else {
-                ImGui.Text($"controllers: syncing ({frames} frames)   left: {System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pl)}   right: {System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pr)}");
+                ImGui.Text($"controllers: syncing ({frames} frames)   left: {esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pl))}   right: {esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pr))}");
                 for (int h = 0; h < 2; h++) {
                     float* o = st + h * 12;
                     ImGui.Text($"  {(h == 0 ? "L" : "R")}: {(o[0] > 0 ? "on " : "off")} stick ({o[1],5:F2},{o[2],5:F2}){(o[3] > 0 ? "*" : " ")}  {(h == 0 ? "X" : "A")}{(o[4] > 0 ? "#" : "-")} {(h == 0 ? "Y" : "B")}{(o[5] > 0 ? "#" : "-")}  trig {o[6]:F2} grip {o[7]:F2}  {(h == 0 ? (o[8] > 0 ? "menu#" : "menu-") : "     ")}  pose {(o[9] > 0 ? "grip" : "----")}/{(o[10] > 0 ? "aim" : "---")}");
@@ -1559,9 +1577,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_hist_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"blend draws seen: {_fn_hist_draws()}"); }
 
         ImGui.Separator();
+        // FH-2: overlay_text_scale, driven in whole 0.05 steps (10..40): one keyboard / gamepad press moves one step (a float
+        // slider's 1 % nav step, 0.015, would round back to the same value), and a drag bakes a few font sizes, not hundreds.
+        // The format has no '%': ImGui shows it as it is (a Ctrl+click entry takes the step count, clamped below).
+        int ots = (int)MathF.Round(text_scale_step(_overlay_text_scale) * 20f);
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.SliderInt("text size of this overlay, Eye 2 and the labels##ots", ref ots, 10, 40, I($"{ots / 20f:F2}"))) _overlay_text_scale = text_scale_step(ots / 20f);
+        ImGui.SameLine(); if (ImGui.SmallButton("default##ots")) _overlay_text_scale = 1f;
+        ImGui.SameLine(); ImGui.TextDisabled(I($"now {ImGui.GetFontSize():F0} px"));
         if (_fn_perf_status != null) {
             byte* pb = stackalloc byte[256]; _fn_perf_status(pb, 256);
-            ImGui.TextDisabled(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb) ?? "");
+            ImGui.TextDisabled(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb)));
         }
         ImGui.TextDisabled("Home: recentre   F8: hide/show this overlay (F7 is Fahrenheit's own mod-settings menu)");
     }
@@ -1572,7 +1598,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         // Expanded: keep the native diagnostics armed (1 s heartbeat, slot-0 readback). Closing the header disarms them.
         if (_fn_diag_keepalive != null) _fn_diag_keepalive(2);
 
-        ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {_native_status}   detours: {_detour_status}");
+        ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {esc(_native_status)}   detours: {esc(_detour_status)}");
+        ImGui.Checkbox("Fahrenheit's text ignores the Windows display scale (fh_dpi_fix, as Fahrenheit #376)", ref _fh_dpi_fix);
+        ImGui.SameLine(); ImGui.TextDisabled(I($"Windows scale {ImGui.GetMainViewport().DpiScale:F2}x; Fahrenheit's own: {(_dpi_fh_fonts == 1 ? "scaled" : _dpi_fh_fonts == 0 ? "not scaled" : "?")}; turned off {_dpi_offs}x; our text {ImGui.GetFontSize():F1} px (pushed {_our_px:F1}, overlay_text_scale {_overlay_text_scale:F2})"));
         diag7_ui();   // build 7: status line, "show cursor anchors"
         if (_fn_counter != null)
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
@@ -1643,7 +1671,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SliderFloat("width (m)", ref _ui_width, 0.5f, 4f);
             uidepth_debug_ui();   // adaptive UI panel: ui_adaptive, ui_adaptive_min, ui_adaptive_margin, ui_backing, the projection slot, the status
             if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
-            if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + dream_status_text());
+            if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + esc(dream_status_text()));
             ImGui.TreePop();
         }
 
@@ -1707,10 +1735,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         if (ImGui.TreeNode("First person / follow")) {
             ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
-            ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {_btl_who}" : "");
+            ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {esc(_btl_who)}" : "");   // an actor name read from the game
             ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
             ImGui.Checkbox("smooth follow anchor: the eyes follow the drawn (60 fps) body, not the 30 Hz logic position", ref _smooth_anchor); ImGui.SameLine();
-            ImGui.TextDisabled($"{_sa_status} (snapshot {(_sa_age >= 999 ? "none" : $"{_sa_age} frames old")}{(_sa_rejects > 0 ? $", {_sa_rejects} refused as implausible" : "")}){(_sa_flat > 60 ? " - the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?" : "")}");
+            ImGui.TextDisabled($"{esc(_sa_status)} (snapshot {(_sa_age >= 999 ? "none" : $"{_sa_age} frames old")}{(_sa_rejects > 0 ? $", {_sa_rejects} refused as implausible" : "")}){(_sa_flat > 60 ? " - the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?" : "")}");
             if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle markers brings the old behaviour back (unticking the sprite-signature checkbox does not).");
             if (_c2_active) ImGui.BeginDisabled(true);
             ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
@@ -1723,7 +1751,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 int slot = -1; for (int k = 0; k < _hide_push_n; k++) if (_hide_push_src[k] == i) slot = k;   // C2-1: the pushed slot of this row (the game source drops the two defaults)
                 string hits = slot >= 0 ? $"hidden last frame: {_hide_hits[slot]}" : _c2_active && c2_is_default(e) ? "(off: game cursor source)" : "(not pushed: native takes 16)";
                 string row = $"  {(e[0] == 0 ? "textureless" : $"{e[0]:F0}x{e[1]:F0} atlas")} quad {e[2]:F0}-{e[3]:F0} x {e[4]:F0}-{e[5]:F0} units   {hits}";
-                if (slot >= 0) ImGui.Text(row); else ImGui.TextDisabled(row); ImGui.SameLine();
+                if (slot >= 0) ImGui.Text(esc(row)); else ImGui.TextDisabled(esc(row)); ImGui.SameLine();
                 if (ImGui.SmallButton($"remove##hl{i}")) { _hide_list.RemoveAt(i); _hide_list_dirty = true; break; }
             }
             if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
@@ -1780,7 +1808,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 ImGui.Text("draw:"); ImGui.SameLine();
                 ImGui.RadioButton("whole body", ref _hands_show, 0); ImGui.SameLine(); ImGui.RadioButton("arms", ref _hands_show, 1); ImGui.SameLine();
                 ImGui.RadioButton("forearms + hands", ref _hands_show, 2); ImGui.SameLine(); ImGui.RadioButton("hands only", ref _hands_show, 3);
-                if (_fn_hands_status != null) { uint hf; nint why = _fn_hands_status(&hf); ImGui.SameLine(); ImGui.TextDisabled($"{System.Runtime.InteropServices.Marshal.PtrToStringAnsi(why)}  frames {hf}"); }
+                if (_fn_hands_status != null) { uint hf; nint why = _fn_hands_status(&hf); ImGui.SameLine(); ImGui.TextDisabled($"{esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi(why))}  frames {hf}"); }
                 ImGui.SetNextItemWidth(90); ImGui.SliderFloat("hand yaw", ref _hands_yaw, -180f, 180f, "%.0f"); ImGui.SameLine();
                 ImGui.SetNextItemWidth(90); ImGui.SliderFloat("pitch", ref _hands_pitch, -180f, 180f, "%.0f"); ImGui.SameLine();
                 ImGui.SetNextItemWidth(90); ImGui.SliderFloat("roll", ref _hands_roll, -180f, 180f, "%.0f"); ImGui.SameLine();
@@ -1827,7 +1855,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 _fn_bone_wiggle(_wig_rec, _wig_slot, _wig_on ? _wig_amt : 0f);
                 // Labelling: a button per body part names the current slot, saves, and steps to the next slot.
                 string cur = _bone_labels.TryGetValue((_wig_rec, _wig_slot), out string? cl) ? cl : "(unlabelled)";
-                ImGui.Text($"record {_wig_rec} slot {_wig_slot}: {cur}"); ImGui.SameLine();
+                ImGui.Text($"record {_wig_rec} slot {_wig_slot}: {esc(cur)}"); ImGui.SameLine();
                 if (ImGui.SmallButton("clear")) { _bone_labels.Remove((_wig_rec, _wig_slot)); bone_labels_save(); }
                 for (int i = 0; i < k_bone_names.Length; i++) {
                     if (i % 8 != 0) ImGui.SameLine();
@@ -1852,7 +1880,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.InputText("player model names (comma list, best first)", ref _fp_actor, 64); ImGui.SameLine();
-            ImGui.TextDisabled(_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? _fp_how : $"actor {_fp_actor_idx}");
+            ImGui.TextDisabled(_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? esc(_fp_how) : $"actor {_fp_actor_idx}");
             ImGui.TreePop();
         }
 
@@ -1873,7 +1901,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 string[] hits = _pick_text.Split('\n'); int hi = 0;
                 foreach (string h in hits) {
                     int bar = h.IndexOf("|sig="); string text = bar >= 0 ? h[..bar] : h;
-                    ImGui.TextWrapped(text);
+                    ImGui.TextWrapped(esc(text));
                     if (bar >= 0) {
                         string[] f = h[(bar + 5)..].Split(','); ImGui.SameLine();
                         if (f.Length == 4 && ImGui.SmallButton($"hide this##pk{hi}")) {
@@ -1892,7 +1920,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
 
         if (ImGui.TreeNode("Battle loading (diagnostics, HD cluster cache)")) {
-            ImGui.TextWrapped($"load diagnostics: {_ld_status}");
+            ImGui.TextWrapped($"load diagnostics: {esc(_ld_status)}");
             ImGui.Checkbox("load lines (diag_load_lines): one \"load:\" line per battle entry, way back, area / event map change, save load and the title's load in ffxvr_diag.log", ref _diag_load_lines);
             ImGui.Checkbox("load diagnostics (diag_load): add the expensive parts to those lines (address-space walks, the chr cache table, the wait callers' stack walks, the HDC: line per map free)", ref _diag_load);
             ImGui.Checkbox("actors line (diag_actors): every 10 s, the live actors that are not drawn, in Fahrenheit's log", ref _diag_actors);
@@ -1908,7 +1936,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (ImGui.TreeNode("Battle markers")) {
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
-            ImGui.TextWrapped($"cursor source: {_c2_status}");
+            ImGui.TextWrapped($"cursor source: {esc(_c2_status)}");
             bool legacy_src = !_cursor_game_cfg; if (ImGui.Checkbox("legacy cursor source (the markers from battle-window memory, cursor hiding by shape)", ref legacy_src)) _cursor_game_cfg = !legacy_src;
             if (_c2_active) ImGui.SliderFloat("pointer lift above the game's anchor", ref _marker_lift, -5f, 20f);
             else ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f);
@@ -2012,7 +2040,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         string size = v[4] > 0 ? $", {v[4]}x{v[5]}" : "";
         string refused = v[3] > 0 ? $", {v[3]} draws refused (no blend state)" : "";
         ImGui.SameLine();
-        ImGui.TextDisabled($"{head}layer {where}{size}{refused}");
+        ImGui.TextDisabled(esc($"{head}layer {where}{size}{refused}"));
     }
 
     /// <summary>Every setting to the native side, exactly once per frame, whether the window is open or not. The window
@@ -2228,7 +2256,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z; bool drawn = false;
             for (int k = 0; k < nwp; k++) { float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz; if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; } }
             string line = $"{i,3} {a.chr_id,4}  {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1})  {(drawn ? "yes" : " no"),4}  {hide:X2}  {f194:X8} {f198:X8} {cd,6:F1} {dist,6:F1} {alpha,5:F2}  {mv:X2}";
-            ImGui.Text(line);
+            ImGui.Text(esc(line));   // actor names read from the game
             sb?.Append("\n  ").Append(line);
         }
         if (sb != null) _logger.Info(sb.ToString());
@@ -2604,11 +2632,47 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// <summary>Fahrenheit calls this from inside Present. An exception escaping it fail-fasts the whole
     /// game (exit 0xC0000409, no dump), so everything runs under a catch that logs the stack instead.</summary>
     public override void render_imgui() {
+        try { dpi_apply(); _our_px = our_font_px(); }
+        catch (Exception e) { _our_px = k_fh_font_px; if (_render_faults++ < 5) _logger.Error($"dpi_apply fault #{_render_faults}: {e}"); }
+        ImGui.PushFont(null, _our_px);   // FH-2: one push around all our ImGui output (outside the try: a Pop never runs without it)
         try { render_imgui_inner(); }
         catch (Exception e) {
             if (_render_faults++ < 5) _logger.Error($"render_imgui fault #{_render_faults}: {e}");
         }
+        finally { ImGui.PopFont(); }     // before Fahrenheit's next module; every Begin inside ends in its own finally / End
     }
+
+    /// <summary>FH-1, every frame before our push (render thread, after Fahrenheit's NewFrame, so always after its platform_bind
+    /// wrote the flags). Writes only on an edge: the first frame, a context Fahrenheit made again, someone turning the flags on
+    /// again (logged 5 times, then only counted in the Debug row), or fh_dpi_fix going to 0.</summary>
+    private void dpi_apply() {
+        ImGuiIOPtr io = ImGui.GetIO(); ImGuiStylePtr st = ImGui.GetStyle();
+        bool fonts = io.ConfigDpiScaleFonts, vps = io.ConfigDpiScaleViewports;
+        if (_dpi_fh_fonts < 0) {
+            _dpi_fh_fonts = fonts ? 1 : 0; _dpi_fh_vps = vps;
+            _logger.Info(I($"ImGui: Fahrenheit's DPI font scaling {(fonts ? "on" : "off")} (viewports {(vps ? "on" : "off")}), Windows scale {ImGui.GetMainViewport().DpiScale:F2}, FontScaleDpi {st.FontScaleDpi:F2}"));
+        }
+        if (_fh_dpi_fix && (fonts || vps)) {
+            float was = st.FontScaleDpi;
+            io.ConfigDpiScaleFonts = false; io.ConfigDpiScaleViewports = false; st.FontScaleDpi = 1f; _dpi_ours = true;
+            if (++_dpi_offs <= 5) _logger.Info(I($"ImGui: DPI font scaling off (fh_dpi_fix=1, as Fahrenheit #376); FontScaleDpi {was:F2} -> 1{(_dpi_offs == 5 ? "; further repeats are only counted (Debug row)" : "")}"));
+        } else if (!_fh_dpi_fix && _dpi_ours) {   // ImGui sets FontScaleDpi again at the next frame
+            io.ConfigDpiScaleFonts = _dpi_fh_fonts == 1; io.ConfigDpiScaleViewports = _dpi_fh_vps; _dpi_ours = false;
+            _logger.Info("ImGui: DPI font scaling back to Fahrenheit's own setting (fh_dpi_fix=0)");
+        }
+    }
+
+    /// <summary>FH-2: our text keeps the size it had under Fahrenheit's DPI scaling, 20 px x the Windows scale, whether
+    /// FontScaleDpi is now 1 (fh_dpi_fix=1, alpha13) or the scale itself (fh_dpi_fix=0), times overlay_text_scale. Called
+    /// before our push: inside it, style.FontSizeBase holds the pushed size (imgui.cpp UpdateCurrentFontSize), so it is
+    /// never read here; the base is Fahrenheit's constant 20 px.</summary>
+    private float our_font_px() {
+        float s = ImGui.GetMainViewport().DpiScale; if (!(s >= 0.5f && s <= 4f)) s = 1f;
+        float f = ImGui.GetStyle().FontScaleDpi;   if (!(f >= 0.5f && f <= 4f)) f = 1f;   // someone else's odd value: no 512 px bake
+        return k_fh_font_px * s * text_scale_step(_overlay_text_scale) / f;   // PushFont's size is applied before FontScaleDpi (imgui.cpp:9836)
+    }
+    /// <summary>overlay_text_scale as used: 0.5..2 in steps of 0.05 (a hand-typed 1.234 reads as 1.25; NaN as 1).</summary>
+    private static float text_scale_step(float k) => float.IsFinite(k) ? Math.Clamp(MathF.Round(k * 20f) / 20f, 0.5f, 2f) : 1f;
 
     private void render_imgui_inner() {
         _frames++;
@@ -2656,8 +2720,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         try {
             if (ImGui.Begin("FFX VR", ref _window_open)) {
                 if (!_native_ready) {
-                    ImGui.TextWrapped($"Native helper: {_native_status}");
-                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(_ini_note); ImGui.PopStyleColor(1); }   // R30 / B8-12
+                    ImGui.TextWrapped($"Native helper: {esc(_native_status)}");
+                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(_ini_note)); ImGui.PopStyleColor(1); }   // R30 / B8-12
                     if (_native_mismatch) ImGui.TextWrapped("The VR mod is not running. Reinstall the mod, so that ffxvr.dll and ffxvr_native.dll come from the same build; core.log has the details.");
                     else if (_native_failed) ImGui.TextWrapped("The VR mod is not running: it could not hook the game's renderer. core.log and ffxvr_native.log have the details.");
                     else ImGui.TextDisabled("starting: waiting for the game's renderer");
@@ -2666,10 +2730,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 else {
                     if (_detour_status != "installed") {
                         ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
-                        ImGui.TextWrapped($"Draw detours: {_detour_status}. Stereo, cursor hiding and the UI panel may not work; core.log has the details.");
+                        ImGui.TextWrapped($"Draw detours: {esc(_detour_status)}. Stereo, cursor hiding and the UI panel may not work; core.log has the details.");
                         ImGui.PopStyleColor(1);
                     }
-                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(_ini_note); ImGui.PopStyleColor(1); }   // R30, for the session
+                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(_ini_note)); ImGui.PopStyleColor(1); }   // R30, for the session
                     draw_main();
                     draw_debug();
                 }

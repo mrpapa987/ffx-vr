@@ -114,17 +114,18 @@ if ($dirty) {
 }
 $label = $label -replace '[^A-Za-z0-9._+-]', '-'
 
-# The Fahrenheit commit this build is meant for (the default of build-fahrenheit-full.ps1), and
-# a warning when the SDK in _ext\fahrenheit was built from something else.
-$fhCommit = 'unknown'
-$m = Select-String -Path (Join-Path $PSScriptRoot 'build-fahrenheit-full.ps1') -Pattern "\`$Commit\s*=\s*'([0-9a-f]{40})'" | Select-Object -First 1
-if ($m) { $fhCommit = $m.Matches[0].Groups[1].Value }
-$fhDir = Join-Path $proj '_ext\fahrenheit'
-if ((Test-Path (Join-Path $fhDir '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
-    $built = Invoke-GitQuiet -C $fhDir rev-parse HEAD
-    if ($built -and $fhCommit -ne 'unknown' -and $built.Trim() -ne $fhCommit) {
-        Write-Host "WARNING: _ext\fahrenheit is at $($built.Trim().Substring(0,7)), not the pinned $($fhCommit.Substring(0,7))."
-        Write-Host '         The mod was built against that SDK; the README will still name the pinned commit.'
+# The Fahrenheit release this build is meant for (tools\paths.ps1), and a warning when the packages
+# it was compiled against did not come from nuget.org (a local Fahrenheit build shares the version).
+$fhCommit  = $FfxvrFhCommit
+$fhRelease = "v$FfxvrFhVersion"
+$fhSdkVer  = ((([xml](Get-Content -LiteralPath $csproj -Raw)).Project.Sdk) -split '/')[1]
+if ($fhSdkVer -ne $FfxvrFhVersion) { Fail "ffxvr.csproj builds against Fahrenheit.Sdk '$fhSdkVer', tools\paths.ps1 says $FfxvrFhVersion." }
+foreach ($id in 'fahrenheit.sdk', 'fahrenheit') {
+    $from = $null
+    try { $from = (Get-Content -LiteralPath (Join-Path $proj "_ext\nuget\$id\$FfxvrFhVersion\.nupkg.metadata") -Raw -ErrorAction Stop | ConvertFrom-Json).source } catch { }
+    if ($from -notmatch 'api\.nuget\.org') {
+        Write-Host "WARNING: $id $FfxvrFhVersion in _ext\nuget came from '$from', not nuget.org (see build-mod's log)."
+        Write-Host "         The README will still name release $fhRelease."
     }
 }
 
@@ -157,7 +158,8 @@ foreach ($f in 'LICENSE', 'THIRD-PARTY-NOTICES') {
 
 $readme = [IO.File]::ReadAllText((Join-Path $proj 'packaging\README-zip.md'))
 $readme = $readme.Replace('{VERSION}', $label).Replace('{COMMIT}', $short).
-                  Replace('{DATE}', (Get-Date -Format 'yyyy-MM-dd')).Replace('{FAHRENHEIT_COMMIT}', $fhCommit)
+                  Replace('{DATE}', (Get-Date -Format 'yyyy-MM-dd')).Replace('{FAHRENHEIT_COMMIT}', $fhCommit).
+                  Replace('{FAHRENHEIT_RELEASE}', $fhRelease)
 [IO.File]::WriteAllText((Join-Path $root 'README.md'), $readme, (New-Object Text.UTF8Encoding $false))
 
 # A personal folder baked into a binary (a debug-info path such as C:\Users\<name>\...) would

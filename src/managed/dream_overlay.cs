@@ -42,6 +42,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("hide (default)##dream", ref _dream_overlay, 1); ImGui.SameLine();
         ImGui.RadioButton("tint both eyes##dream", ref _dream_overlay, 2); ImGui.SameLine();
         ImGui.RadioButton("show on the panel (old)##dream", ref _dream_overlay, 0);
-        if (_fn_dream_status != null) ImGui.TextDisabled("  " + dream_status_text());
+        if (_fn_dream_status != null) ImGui.TextDisabled("  " + esc(dream_status_text()));
     }
 }

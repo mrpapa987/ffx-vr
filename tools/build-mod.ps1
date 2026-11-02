@@ -8,8 +8,9 @@
 #
 # This is the iteration loop: edit source -> run this -> run run-ffx.ps1.
 #
-# Requires tools\build-fahrenheit-full.ps1 to have been run at least once,
-# because the managed half builds against the Fahrenheit SDK it produces.
+# The managed half restores the Fahrenheit SDK from nuget.org (src\managed\nuget.config), into
+# _ext\nuget; the first build needs the network. Fahrenheit itself comes from its official release
+# (INSTALL-ALPHA step 4). The SDK version in ffxvr.csproj must equal $FfxvrFhVersion (tools\paths.ps1).
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\build-mod.ps1     (from the repository folder)
@@ -53,12 +54,17 @@ if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
     Log 'ERROR: dotnet (the .NET 10 SDK) is not on PATH. Install it: winget install Microsoft.DotNet.SDK.10'
     exit 1
 }
-$pkgDir = Join-Path $proj '_ext\fahrenheit\artifacts\pkg\rel'
-if (-not (Test-Path -LiteralPath (Join-Path $pkgDir 'Fahrenheit.Sdk.1.0.0-alpha12.nupkg'))) {
+# The SDK version the project builds against, and the release tools\paths.ps1 says FFX VR is tested with.
+$fhVer = $null
+try { $fhVer = ((([xml](Get-Content -LiteralPath (Join-Path $srcMgd 'ffxvr.csproj') -Raw)).Project.Sdk) -split '/')[1] } catch { }
+if ($fhVer -ne $FfxvrFhVersion) {
     Log ''
-    Log "ERROR: Fahrenheit SDK package not found in $pkgDir"
-    Log '  Run tools\build-fahrenheit-full.ps1 first.'
+    Log "ERROR: ffxvr.csproj builds against Fahrenheit.Sdk '$fhVer', tools\paths.ps1 says $FfxvrFhVersion. Make them agree."
     exit 1
+}
+if ($env:NUGET_PACKAGES) {
+    Log "WARNING: NUGET_PACKAGES is set ($env:NUGET_PACKAGES); it overrides src\managed\nuget.config's _ext\nuget, so the"
+    Log '         Fahrenheit package source below can not be checked. Clear it for this build.'
 }
 
 # ---------------------------------------------------------------- OpenXR loader
@@ -161,11 +167,39 @@ finally {
 }
 Log "[managed] exit code: $mgdCode"
 
+if ($mgdCode -ne 0 -and (Select-String -LiteralPath $log -Pattern 'MSB4236' -Quiet)) {
+    Log ''
+    Log "HINT: Fahrenheit.Sdk $fhVer could not be restored: no network, or it is not on nuget.org. See the fallback"
+    Log '      block in docs\design-notes.md (Fahrenheit port) for src\managed\nuget.config.'
+} elseif ($mgdCode -ne 0 -and (Select-String -LiteralPath $log -Pattern 'NU110[12].*[Ff]ahrenheit' -Quiet)) {
+    Log ''
+    Log "HINT: the fahrenheit $fhVer package could not be restored from nuget.org: no network, or that version is not"
+    Log '      published there. Check https://www.nuget.org/packages/Fahrenheit (only nuget.org is used: src\managed\nuget.config).'
+}
 if ($mgdCode -ne 0) {
     Log ''
     Log 'Managed build failed - nothing deployed.'
     Log "Log: $log"
     exit 1
+}
+
+# Where NuGet got the Fahrenheit packages. A local Fahrenheit build has the same version string, so the
+# source recorded in .nupkg.metadata is the only difference. fahrenheit (the API we compile against)
+# must come from nuget.org; fahrenheit.sdk (props/targets, identical in a local build) only warns.
+foreach ($id in 'fahrenheit.sdk', 'fahrenheit') {
+    $meta = Join-Path $proj "_ext\nuget\$id\$fhVer\.nupkg.metadata"
+    $from = $null
+    try { $from = (Get-Content -LiteralPath $meta -Raw -ErrorAction Stop | ConvertFrom-Json).source } catch { }
+    if ($from -match 'api\.nuget\.org') { Log "[managed] $id $fhVer from $from" }
+    elseif ($from -and $id -eq 'fahrenheit') {
+        Log ''
+        Log "ERROR: fahrenheit $fhVer came from $from, not nuget.org. Nothing deployed."
+        Log '  Delete the _ext\nuget folder, run "dotnet build-server shutdown", and build again.'
+        Log "Log: $log"
+        exit 1
+    }
+    elseif ($from) { Log "WARNING: fahrenheit.sdk $fhVer came from $from (the local fallback?); its content equals the release's" }
+    else { Log "WARNING: no record of $id $fhVer in _ext\nuget (NUGET_PACKAGES set? nuget.config missing?): source not checked" }
 }
 
 # Never a Debug build (one from Visual Studio can be newer than this Release build). The test runs

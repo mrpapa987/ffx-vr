@@ -71,6 +71,11 @@ public sealed unsafe partial class FFXVRModule {
     private ulong _d7_ps_m0 = ulong.MaxValue, _d7_ps_m1 = ulong.MaxValue; private double _d7_ps_t; private int _d7_ps_lines;
 
     private static string I(FormattableString f) => FormattableString.Invariant(f);
+    /// <summary>Text for ImGui.Text* (and SetTooltip): Hexa passes our string to ImGui as a printf FORMAT, so a '%' in it prints
+    /// stack garbage, or fail-fasts the game (UCRT's invalid-parameter handler, 0xC0000409: no catch stops it). Rule: every
+    /// NON-LITERAL argument (a field, a helper's return value, a native or file or game string, an exception message) goes
+    /// through this, unless it is a pure number format; literal text writes "%%" (docs/release.md section 5).</summary>
+    private static string esc(string? s) => (s ?? "").Replace("%", "%%");
 
     /// <summary>At module init (Fahrenheit queues hooks added here and applies them after every module has initialised;
     /// it refuses a late hook on an already-hooked function). Needs the native helper for the guarded reads and the log.</summary>
@@ -123,6 +128,8 @@ public sealed unsafe partial class FFXVRModule {
     // (only possible while a FOREIGN late hook insertion writes the table) hands it a 0 pointer, the throw leaves that lock
     // held for good, and the next retry here (and every later Fahrenheit resolution or insertion) blocks forever. So "retry
     // on exception" only covers throws outside that locked region. The same risk applies to the D3D detours' resolution.
+    // Fahrenheit alpha12 (#366) locks readers and releases on a throw (a `lock` statement), so this risk is gone there; the
+    // handshake stays until the port has been soak-tested (design-notes, Fahrenheit port).
     private T d7_resolve_main<T>(ref T? slot, nint addr, T h) where T : Delegate {
         for (int spin = 0; ; spin++) {
             for (int w = 0; System.Threading.Volatile.Read(ref _d7_inserting) != 0; w++) System.Threading.Thread.Sleep(w < 50 ? 0 : 1);
@@ -436,7 +443,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Debug > Build 7 diagnostics: the status and the anchor-dot toggle.</summary>
     private void diag7_ui() {
         if (!ImGui.TreeNode("Build 7 diagnostics (log only)")) return;
-        ImGui.TextWrapped($"{(_diag7 ? "on" : "off")}: {_d7_status}");
+        ImGui.TextWrapped($"{(_diag7 ? "on" : "off")}: {esc(_d7_status)}");
         ImGui.Text($"calls: target pointer {_d7_tgt_calls_total}, turn pointer {_d7_turn_calls_total}, job join {_d7_join_calls_total} (post-join {_d7_join_post_total}), resize {_d7_rsz_calls}; record faults {_d7_main_faults}");
         ImGui.Checkbox("show cursor anchors (monitor)", ref _d7_dots);
         ImGui.SameLine(); ImGui.TextDisabled("magenta: the game's anchor through the game camera; yellow ring: where the game put it; cyan: the turn triangle's anchor");

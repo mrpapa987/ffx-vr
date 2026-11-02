@@ -2612,7 +2612,7 @@ Code: native `ensure_ui_blend` (before `ui_pass_begin`), the ImGui branch of `ff
 - **What was wrong.** The Fahrenheit developers saw the boot Load menu in our headset video "looking off, no transparency, huge text"; the same menu at a save sphere looked better.
   - **Boot only: the capture did not blend.** The ImGui re-issue (the overlay phase's draws into the backbuffer, copied into the ImGui-layer texture) binds `g_ui_blend`, which was created only by `ui_pass_begin`, the opener of a 3D frame's UI pass. At boot every frame is SCREEN, so the state was still null and `OMSetBlendState(nullptr)` meant blending off: every ImGui draw overwrote the capture. Translucent frames and gradients punched see-through holes, every glyph quad left a dark box, the drop shadows were erased. After the first gameplay UI pass the state existed, so later menus (save spheres) were captured right.
   - **Everywhere: a double multiply.** Blending into a target cleared to (0,0,0,0) leaves `rgb = c a` (premultiplied), but the quad was flagged `UNPREMULTIPLIED_ALPHA`, so the compositor multiplied by `a` again. With the sRGB swapchain a white glyph edge at 50 % coverage came out at 0.107 linear instead of 0.5: dark fringes on all ImGui text and on our overlay's borders.
-  - **Size.** The whole 16:9 menu, designed as full-screen TV UI, filled a head-locked quad of 56° at 1.4 m: its corners 28° to the side and 17° up or down, out of comfortable eye rotation, glued to the head, in front of the world-locked virtual screen. (A separate, Fahrenheit-side contributor: alpha12's `ConfigDpiScaleFonts = true` scales every font by the Windows display scale on the monitor too; upstream turned it off on 24 Oct, commit 5173f28. Not changed here.)
+  - **Size.** The whole 16:9 menu, designed as full-screen TV UI, filled a head-locked quad of 56° at 1.4 m: its corners 28° to the side and 17° up or down, out of comfortable eye rotation, glued to the head, in front of the world-locked virtual screen. (A separate, Fahrenheit-side contributor: alpha12's `ConfigDpiScaleFonts = true` scales every font by the Windows display scale on the monitor too; upstream turned it off on 24 Oct, commit 5173f28. Not changed here; the Fahrenheit port turns it off from our module, FH-1 in "Fahrenheit port" below.)
 - **A. The capture always blends.** `ensure_ui_blend()` makes the state (ImGui's own equation: colour `SRC_ALPHA / INV_SRC_ALPHA`, alpha `ONE / INV_SRC_ALPHA`) before any use: from `ui_pass_begin`, at every `xr_tick` where the ImGui texture is made, and in `ffxvr_eye2_begin` before anything is saved or bound. If it still cannot be made, the re-issue is refused (counted, logged once): the draw reaches the backbuffer only and is never captured unblended.
   - Audit of the other state: the re-issue binds only our render target (no depth) and the blend state. The shaders, input layout, sampler, rasterizer (with ImGui's scissor), depth-stencil state and viewport are ImGui's own, bound by its backend just before each draw; the capture has the backbuffer's size and format, so the viewport and scissor rects apply unchanged. The swapchain copy's shaders and sampler are made lazily by `copy_pass_init` at their first use, the swapchain intermediates at `xr_start`. Nothing else was tied to the 3D UI pass.
   - A new capture texture (first headset start, a backbuffer resize) is cleared to transparent when it is made, and not shown until it holds a frame's draws.
@@ -2631,10 +2631,10 @@ Code: native `ensure_ui_blend` (before `ui_pass_begin`), the ImGui branch of `ff
   - **Sizes.** The menu's text is the virtual screen's: on the owner's 6.7 m screen at 6 m (58°) the 86 px text has a cap height of about 1.0°; the default 2.5 m at 2.5 m (53°) gives about 0.9°. That is what every other 2D screen in the mod uses.
   - **The F8 overlay.** Without the save screen it is exactly as before (head-locked). If it is open together with the save screen it rides on the screen with the menu (the whole ImGui layer goes there), at about the same angular size as head-locked (0.33-0.50° em on a 58° screen against 0.32-0.48°).
 - **D. The ImGui swapchain is 1920x1080** (was 2560x1440). From the owner's 4K capture that is exactly 2:1. The copy takes four bilinear taps a quarter of a target pixel around the centre: at 2:1 they fall on the four source texel centres, an exact 2x2 box; at other backbuffer sizes they are a small area filter rather than one tap that skips texels (no mip chain needed). On the 56° head-locked quad it is about 34 px/deg, still above the Quest 3's roughly 25 px/deg, so the overlay's small text is limited by the display as before, with less shimmer from the compositor's unfiltered minification.
-- **Unchanged:** Fahrenheit's ImGui context, fonts, DPI and style (we only scale the capture, never the shared context, so the monitor is unchanged); the UI panel's path; the glass break; FMV; the dream filter.
+- **Unchanged:** Fahrenheit's ImGui context, fonts, DPI and style, except the two DPI flags since the Fahrenheit port (FH-1, below) (we only scale the capture, never the shared context, so the monitor is unchanged); the UI panel's path; the glass break; FMV; the dream filter.
 - **Diagnostics.** `imgui layer: first capture at frame N, blend ready (...)` once; `imgui: frame N: Fahrenheit's save screen open / closed ...` at each edge; `imgui: save screen latch released …` if the watchdog acts; every 10 s while the layer was shown (SU-7: not for the title's mod list alone, which draws every frame), an `imgui:` line (screen frames included): frames with draws and the max per frame, screen frames and how many showed the layer, 3D frames with the layer, frames on the virtual screen, the frames eye 1 was blacked out, the layer settings, the capture and swapchain sizes, the copy mode, and re-issues refused for a missing blend state. Overlay: the row under the ImGui layer checkbox shows where the layer went and whether the save screen is forcing the screen.
 - **ABI 21:** `ffxvr_imgui_layer_set(int on, int force_show, int min_draws, int menu)`, + `ffxvr_imgui_status(int* out, int n)` (6 values: forcing, where the layer went, placed from the head, refused, swapchain width and height).
-- **Open points.** A latched stretch without a menu image longer than 8 frames shows the game's frame flat on the screen (by design, for a game prompt), and the watchdog ends a stuck latch after 5 s. "Opened from 3D" is decided from the edge frame alone (SU-9, not done). The optional `fh_menu_scale` (a smaller menu on a very large screen) is not done. The DPI font scaling is Fahrenheit's (move the pinned commit to 5173f28 or later when convenient).
+- **Open points.** A latched stretch without a menu image longer than 8 frames shows the game's frame flat on the screen (by design, for a game prompt), and the watchdog ends a stuck latch after 5 s. "Opened from 3D" is decided from the edge frame alone (SU-9, not done). The optional `fh_menu_scale` (a smaller menu on a very large screen) is not done. The DPI font scaling is Fahrenheit's: since the Fahrenheit port our module turns it off (FH-1, "Fahrenheit port" below) until alpha13 does it upstream.
 
 ## Heat haze in fire (branch `haze`)
 
@@ -2950,3 +2950,141 @@ device is torn down; `g_sr_exiting` and the in-flight count exist); sRGB / typel
 
 **Expected result when done:** every display slot gets a frame; stick turning indistinguishable from head
 turning; no black loading screens; the `sr:` line shows extras ~= slots - fresh with 0 skipped-by-us.
+
+## Fahrenheit port: release v1.0.0-alpha12 (branch `fhport`, 29 Oct 2026)
+
+Plan: research/fh-port-plan.md (revision 2) and its review, in the session scratchpad. Code: managed `dpi_apply`,
+`our_font_px`, `text_scale_step`, `render_imgui` (module.cs), `esc` (diag7.cs); ini `fh_dpi_fix`, `overlay_text_scale`;
+`src/managed/nuget.config`; tools `paths.ps1`, `build-mod.ps1`, `install-fahrenheit.ps1`, `build-fahrenheit-full.ps1`,
+`check-prereqs.ps1`, `package-release.ps1`; packaging `install-mod.ps1`, `README-zip.md`. No native change (ABI 25).
+
+- **Target: the official release tag `v1.0.0-alpha12`** (7e85839b2efb67124d1760598c9f220cb559a41a, a lightweight tag on
+  main), not main (ff743f0), and not the old pin ecb6702.
+  - It is the only Fahrenheit players can download: a maintainer-built, Authenticode-signed zip plus the NuGet packages.
+    Nobody has to build Fahrenheit any more.
+  - From ecb6702 to the tag the API we compile against is identical, and so is the SDK package (`src/sdk` and
+    `Directory.Build.*` diffs are empty). The hooks, the Present path and the loaders are the same apart from #369.
+  - **Upstream effects at the tag.** #366, the chain-registry lock (`c2fe4fc`; `4caa85d` drops its per-lookup log lines):
+    a benefit, the torn-read risk noted in diag7.cs is gone. #369 (stage-0 dumping under WINE): `Fahrenheit.Stage0.vcxproj`
+    copies a third debugger DLL, `dbgcore.dll`, so a source build without the Debugging Tools fails one more MSB3030 copy
+    (build-fahrenheit-full knows it). The save screen's help texture lives under `/map/hiku`, so the HD cluster cache
+    admits it like a map texture and releases it at the next zone change: harmless, left as is.
+- **FH-1: Fahrenheit's ImGui DPI font scaling off** (ini `fh_dpi_fix`, default 1 for everyone, applies at once; Debug row).
+  - Fahrenheit alpha12 sets `io.ConfigDpiScaleFonts` / `ConfigDpiScaleViewports = true` once, in `platform_bind`
+    (runtime/imgui.cs:90-91, from the game's `D3D11CreateDeviceAndSwapChain` hook). With the flag on, ImGui 1.92.9b's
+    `SetCurrentViewport` sets `style.FontScaleDpi` to the viewport's DPI scale, so every font is multiplied by the Windows
+    display scale although the game is DPI-unaware: at 175 % (the owner's) and 4K, the save screen's 86 px text is drawn
+    at about 150 px and outgrows its frames. Upstream main turned both off (#376, 5173f28); alpha13 will ship that.
+  - Our `render_imgui` runs only from Fahrenheit's Present hook, after `NewFrame`, so our write always follows Fahrenheit's,
+    and nothing writes the flags again. `dpi_apply` (every frame, writes on an edge only): on the first frame it logs
+    Fahrenheit's values; with `fh_dpi_fix=1` and either flag on it turns both off and sets `FontScaleDpi = 1` once (ImGui
+    leaves it as it was when the flag goes off); a re-made context or someone turning them on again is handled the same way,
+    logged 5 times, then only counted. `fh_dpi_fix=0` puts Fahrenheit's own values back; ImGui re-applies the scale at the
+    next frame (`SetCurrentViewport` runs at the first viewport change of a frame). Where Fahrenheit already has the flags
+    off (alpha13) nothing is written.
+  - **A bounded exception to "never write Fahrenheit's ImGui state"** (the saveui rule, above). The rule kept the monitor
+    exactly as Fahrenheit draws it. Upstream has made this exact change for everyone, so taking it early only changes
+    alpha12's monitor look to alpha13's: the save screen fits its frames again, and Fahrenheit's F7 menu and title mod list
+    are smaller than before above 100 %. We write the two flags and one `FontScaleDpi`, nothing else.
+  - **One mixed frame at the flip.** Modules that drew before ours in the frame where the flags flip used the old scale.
+    Harmless, documented, not fixed.
+- **FH-2: our own text keeps its size** (20 px x the Windows scale), and `overlay_text_scale` adjusts it.
+  - One `ImGui.PushFont(null, size)` around all our ImGui output (F8 window, Eye 2, markers, hover labels, diagnostics),
+    popped in a `finally` before Fahrenheit's next module; the push is outside the `try`, so a Pop never runs without it.
+    NULL keeps the current font. The pushed size is applied before `FontScaleDpi` (imgui.cpp:9836) and also sets the
+    foreground draw list's text size, so the markers follow it.
+  - `size = 20 x DpiScale x overlay_text_scale / FontScaleDpi`, computed once per frame **before** the push. The
+    `FontSizeBase` trap: `UpdateCurrentFontSize` copies the pushed size into `style.FontSizeBase` (imgui.cpp:9826), so
+    reading it inside our push would compound (45 px instead of 30 at 150 %). The base is Fahrenheit's constant 20 px
+    (`AddFontFromFileTTF(..., 20f)`, core/gui/gui.cs:38). `viewport->DpiScale` is computed whatever the flags are.
+  - Result: with `fh_dpi_fix` on or off the F8 overlay is the size it had on stickrep (35 px at 175 %), which is what the
+    headset sizes were tuned with. On the monitor that keeps the size #376 calls oversize, for our window only; the owner
+    chose that, with an adjustment.
+  - **`overlay_text_scale`** (ini float, default 1, read clamped to 0.5..2 like every ini float, `pf`, and rounded to a step
+    of 0.05 on read, `text_scale_step`, so the file and the Debug row agree; written `0.##`): a slider at the bottom of the
+    F8 window ("text size of this overlay, Eye 2 and the labels", with a "default" button and the resulting px). It is a
+    `SliderInt` over the step count 10..40, shown as `0.50`..`2.00` (a format with no `%`, displayed as is): a float slider's
+    keyboard / gamepad step (1 % of the range, 0.015) would round back to the same 0.05 step, so the pad in the headset could
+    not move it. Whole steps also mean a drag bakes about 30 font sizes in 1.92's dynamic atlas, not hundreds. A Ctrl+click
+    entry takes the step count (ImGui falls back to `%d` for input), clamped. The `FontScaleDpi` used in the size is taken
+    only within 0.5..4 (else 1), like the DPI scale. Marker labels keep their fixed pixel offset from the triangle (at 2.0 a
+    label overlaps it; cosmetic, not changed). Debug row: `our text <GetFontSize()> px (pushed <size>,
+    overlay_text_scale <k>)`, i.e. 20 x s x k.
+  - **No `ini_rev` bump.** The migration exists to replace old *defaults* that carried no choice of the player's. Both new
+    keys are absent from every older ini, and absent means the default, which is the intended value (1, 1.0); the first
+    save tick writes them (`settings_first_read_done` keeps the raw text as `_ini_last`). Older builds ignore the keys
+    (`default: known--`) and drop them at their next save: a rollback round trip turns an explicit `fh_dpi_fix=0` back into
+    the default 1, and `overlay_text_scale` back to 1. Harmless.
+- **ImGui text is a printf format.** Hexa's `ImGui.Text*(string)` passes our string to ImGui as the format with a garbage
+  `va_list` (cimgui `igTextDisabled0`); ImGui formats through UCRT. A `%` followed by an invalid conversion fail-fasts the
+  process (0xC0000409, no catch stops it); a valid one (`% o`, `% u`) prints stack garbage.
+  - Fixed: hd_cache.cs:603 (`{pct} % of the budget`, `% use`: garbage numbers) writes `%%`; uidepth's status line ("UI on
+    NN% of the panel", built in a helper, so no grep finds it) is shown through `esc()`.
+  - `esc(s)` (diag7.cs) doubles every `%`. **Every non-literal argument of an ImGui text call goes through it**: fields,
+    our own status helpers' return values, native status buffers, the OpenXR runtime and controller profile names, pick
+    lines, bone labels from bone_labels.txt, actor names read from the game (the actors table and the battle-follow "now:"
+    row), the native / detour status. Only interpolated strings whose holes are numbers or our own literal ternaries are
+    exempt.
+  - The grep rules in release.md section 5 run before every release: two per-call commands, which cannot see a string built
+    elsewhere and passed in (hence the esc rule), and a catch-all over every literal with its four known, reviewed hits. Slider and drag formats (`"%.1f"`) are formats on purpose, and widget
+    labels are not formatted (`"% of the screen"` in the stereo screen's slider label is fine).
+- **Build and install.**
+  - **One source for the version:** `tools/paths.ps1` (`$FfxvrFhVersion = '1.0.0-alpha12'`, `$FfxvrFhCommit`), dot-sourced
+    by every script involved and shipped in the player zip. `Get-FfxvrFhInfo <bin>` reads `fh.dll`'s ProductVersion
+    (`1.0.0-alphaNN+<40-hex commit>`) and Authenticode status: `1.0.0-alpha12 (7e85839, official release)` against
+    `1.0.0-alpha12 (ecb6702, built from source)`; any other status (a root not fetched, a broken signature) prints as
+    `signature: <status>` (the official zips are signed; alpha11's signer is the maintainer's
+    Certum open-source code-signing certificate). `ffxvr.csproj`'s `Sdk="Fahrenheit.Sdk/<version>"` must equal it:
+    build-mod and package-release stop otherwise.
+  - **SDK isolation:** `src/managed/nuget.config` clears every package source (and `disabledPackageSources`) but nuget.org,
+    and puts the packages into the repo's own `_ext/nuget`. A local Fahrenheit build and the official release share the
+    version string, so neither a global source nor the global cache may decide which one we compile against. It sits in
+    `src/managed`, not at the root, so it never reaches the Fahrenheit source build in `_ext/fahrenheit`. build-mod reads
+    each package's `.nupkg.metadata` `source` after the build: `fahrenheit` from anywhere but nuget.org is an ERROR (nothing
+    deployed), `fahrenheit.sdk` a WARNING (its content equals the release's). An MSB4236 in the log gets a hint. The first
+    build needs the network. `NUGET_PACKAGES` set overrides the folder (build-mod warns). Determinism, not correctness:
+    the API is identical either way at alpha12; at alpha13 the same trap would have different content.
+  - **Fallback, only if `Fahrenheit.Sdk <version>` is ever missing from nuget.org:** take only the SDK from a local
+    Fahrenheit build (content-identical at alpha12). In `src/managed/nuget.config` add to `packageSources`
+    `<add key="fh-sdk-local" value="..\..\_ext\fahrenheit\artifacts\pkg\rel" />` and, after `</config>`:
+    ```xml
+      <packageSourceMapping>
+        <packageSource key="fh-sdk-local"><package pattern="Fahrenheit.Sdk" /></packageSource>
+        <packageSource key="nuget.org"><package pattern="*" /></packageSource>
+      </packageSourceMapping>
+    ```
+    build-mod's provenance line then reads WARNING for `fahrenheit.sdk` and must still say nuget.org for `fahrenheit`.
+  - **Installing Fahrenheit:** `install-fahrenheit.ps1 -Zip <official zip>` (owner and developers; players extract the
+    zip by hand, README-zip section 2): unblocks, extracts to a temp folder (always removed, also on an error exit), finds
+    `bin\` by its `fhstage0.exe`, checks six files (`fh.dll`, `fhr.dll` added), empties `<game>\fahrenheit\bin`, copies,
+    supplies dbghelp.dll from SysWOW64 if missing (alpha11's zip had none), ensures `mods\loadorder`, prints the version.
+    Without `-Zip` it installs the source build in `_ext\fahrenheit\artifacts\deploy\rel\bin`, the one-command rollback.
+  - `tools/build-fahrenheit.ps1` (the legacy managed-only build) is **deleted**: it reset `_ext\fahrenheit` to origin/main
+    and wrote main's managed DLLs over the pinned build, which silently broke that rollback. `build-fahrenheit-full.ps1`
+    is the developer route only; its default commit comes from paths.ps1, it fetches tags (`-Commit v1.0.0-alpha12`), and
+    it accepts the three debugger-DLL copy errors (`dbghelp`, `dbgcore`, `symsrv`).
+  - Player side: `install-mod.ps1` prints `Fahrenheit version : 1.0.0-alpha12 (7e85839, official release)` and counts
+    alpha11 or older as a problem (a literal floor: alpha11 predates the game patch, a fact that never moves);
+    check-prereqs prints the same; package-release fills `{FAHRENHEIT_RELEASE}` / `{FAHRENHEIT_COMMIT}` from paths.ps1
+    and warns when `_ext/nuget` did not get the packages from nuget.org.
+- **Kept as is.** The diag7 `_d7_inserting` / `_d7_resolving` handshake: redundant after #366, removed only after the soak
+  test. `ffxvr_safe_read` / VirtualQuery-first: an access violation under the stage-0 debugger is still fatal.
+  `docs/exe-analysis.md` (#388 is main only); the `FhSavePal.pal_addr_screen_state` comment (right at the tag).
+- **Why not main.** Main adds #379's unlocked main-thread `UpdateSubresource` / `GenerateMips` on the immediate context at
+  save-screen open (`load_texture_game` handing the immediate context to WIC off the render thread), which breaks the
+  assumption stickrep's extra frames rely on; #388's new first-chance exception semantics, which would need a soak test of
+  their own; and a `1.0.0-alpha13` version string that will collide with the official alpha13. What we give up: the
+  built-in DPI fix (FH-1 replaces it), #388, the save UI refactor (#374/#378), #372, #380, #383. None is needed by FFX VR.
+  We keep alpha12's soft-reset combo (main moved it to EFP, #373).
+- **Revisit when the official alpha13 is released.** Check these first:
+  - (a) #379: does `load_texture_game` still hand the immediate context to WIC off the render thread (main
+    `src/runtime/resources.cs:124-142`, `src/core/wic.cs:570-660`, `src/core/save_mgr.cs:271`)? **The owner will not report
+    it upstream: we add a local guard before moving to alpha13.** No further action now.
+  - (b) A #388 soak test.
+  - (c) FH-1 becomes a no-op (it sees Fahrenheit's flags already off; the first `ImGui:` line says `off`): delete it, keep
+    FH-2 and `overlay_text_scale` (our overlay's size is the owner's choice, not Fahrenheit's).
+  - (d) The version bump: `tools/paths.ps1` (`$FfxvrFhVersion`, `$FfxvrFhCommit`) and `ffxvr.csproj:7` (build-mod checks
+    that the two agree); the literal prose in INSTALL-ALPHA step 4, `docs/release.md` sections 1 / 2 / 4 and this entry
+    (`grep -rn "alpha12" INSTALL-ALPHA.md docs packaging`); the stage-0 debugger paragraph of
+    `docs/exe-analysis.md` (about line 37; #388 changes first-chance exception handling) and the `FhSavePal` comment in module.cs; an INSTALL note on the soft reset (#373).
+  - (e) The publish folder, checked for `TerraFX.Interop.Windows.dll`.

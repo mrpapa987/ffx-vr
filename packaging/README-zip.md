@@ -39,7 +39,7 @@ no `[` or `]` in it: Windows PowerShell may not run scripts from there.
 | **A Quest headset and [Virtual Desktop](https://www.vrdesktop.net/)** | Virtual Desktop on the headset, and the **Virtual Desktop Streamer** on the PC. |
 | **VDXR as the OpenXR runtime** | In the Streamer app on the PC, choose **VDXR** as the OpenXR runtime. SteamVR isn't supported in this alpha. |
 | **.NET 10 runtime, x86 (32-bit)** | `winget install Microsoft.DotNet.Runtime.10 --architecture x86`. The game is 32-bit, so the x86 one is the one that matters, even on 64-bit Windows. |
-| **Fahrenheit**, the mod loader | See section 2. This is the awkward part right now. |
+| **Fahrenheit** {FAHRENHEIT_RELEASE}, the mod loader | See section 2. |
 | **FFX-60fps** (recommended) | See section 3. |
 
 ---
@@ -47,21 +47,25 @@ no `[` or `]` in it: Windows PowerShell may not run scripts from there.
 ## 2. Fahrenheit (read this first)
 
 FFX VR runs inside [Fahrenheit](https://github.com/fahrenheit-crew/fahrenheit), a separate
-project that isn't included in this zip. It installs into `<game folder>\fahrenheit\`.
+project that isn't included in this zip. It installs into `<game folder>\fahrenheit\`. This
+build was tested with Fahrenheit release **{FAHRENHEIT_RELEASE}** (commit `{FAHRENHEIT_COMMIT}`).
+Older releases (alpha11 and earlier) do not work with the current game.
 
-**The catch:** Fahrenheit's newest *release* (alpha11) came out before the game's
-1 October 2026 patch and **does not work with the current game**. Until there's a newer
-release, there are two options:
+1. Download `fahrenheit_release_{FAHRENHEIT_RELEASE}.zip` from the
+   [Fahrenheit releases page](https://github.com/fahrenheit-crew/fahrenheit/releases/tag/{FAHRENHEIT_RELEASE})
+   (under *Assets*).
+2. If you had Fahrenheit installed before, delete `<game folder>\fahrenheit\bin` (keep `config`,
+   `mods`, `saves` and `state`).
+3. Extract the zip so that its `bin` folder becomes `<game folder>\fahrenheit\bin`. Watch out:
+   Explorer's *Extract All* suggests a new folder named after the zip
+   (`...\fahrenheit\fahrenheit_release_{FAHRENHEIT_RELEASE}\bin`), so remove that last part of the
+   path and extract to `<game folder>\fahrenheit\`.
 
-- **A Fahrenheit release newer than alpha11** that supports the current game. When there is
-  one, install it as its own instructions say. This FFX VR build was tested against
-  Fahrenheit commit `{FAHRENHEIT_COMMIT}`.
-- **Build Fahrenheit yourself** with the scripts in the
-  [FFX VR repository](https://github.com/mrpapa987/ffx-vr): follow steps 1 to 4 of its
-  `INSTALL-ALPHA.md` (free build tools, about half an hour). Those steps build and install
-  exactly the tested commit.
+`tools\install-mod.ps1` checks that `fahrenheit\bin\fhstage0.exe` is there and shows the
+Fahrenheit version it found.
 
-`tools\install-mod.ps1` tells you whether Fahrenheit is in place.
+Developers can build Fahrenheit from source: see `INSTALL-ALPHA.md` in the
+[FFX VR repository](https://github.com/mrpapa987/ffx-vr).
 
 ---
 
@@ -173,7 +177,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | Symptom | Try |
 |---|---|
 | The game starts flat, nothing in the headset | Was Virtual Desktop connected *before* launch? Is **Headset** ticked in the F8 overlay? Does `install-mod.ps1` show VDXR as the 32-bit OpenXR runtime? |
-| Fahrenheit doesn't start at all | Not as administrator. Is Fahrenheit a version that supports the current game (section 2)? Check `logs\run-*.txt`. |
+| Fahrenheit doesn't start at all | Not as administrator. Is Fahrenheit release {FAHRENHEIT_RELEASE} installed (section 2; `install-mod.ps1` shows the version it found)? Check `logs\run-*.txt`. |
 | No F8 overlay | The mod didn't load: re-run `install-mod.ps1` and check the .NET x86 runtime. |
 | Black for a few seconds at some scene changes | The headset should now keep showing the last picture (head-tracked) while the game loads. If it still goes black, send the logs: the `sr:` lines in `ffxvr_diag.log` say why. |
 | Ghosting when turning with the stick | Is "smooth stick turns at the headset rate" ticked in the F8 overlay (under the turn speed)? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, try `game-settings.ps1 -Profile vr`. |
