@@ -66,3 +66,7 @@ PRIVATE-do-not-share.txt
 # Python bytecode (tools/hands)
 __pycache__/
 *.pyc
+
+# Importer previews (pictures of a user's model): never committed, wherever they land
+preview*.png
+debug-preview.png

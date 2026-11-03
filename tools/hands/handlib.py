@@ -352,6 +352,13 @@ def top4(W):
 # Tiny software rasteriser for previews (z-buffer, per-pixel UV texturing, Lambert)
 # ----------------------------------------------------------------------------------------------
 def decode_png(b):
+    """PNG or JPEG bytes (by content) -> float RGB. Pillow (which matplotlib needs anyway), else matplotlib's PNG reader."""
+    try:
+        from PIL import Image
+        im = np.asarray(Image.open(io.BytesIO(b)).convert("RGB"), dtype=np.float64) / 255.0
+        return im
+    except ImportError:
+        pass
     import matplotlib.image as mpimg
     im = mpimg.imread(io.BytesIO(b), format="png")
     if im.dtype != np.float32 and im.dtype != np.float64: im = im / 255.0

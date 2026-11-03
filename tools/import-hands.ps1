@@ -19,9 +19,11 @@
 #   -Height 1800          the model height in model units (a hands-only model)
 #   -ZUp                  the model is Z up
 #   -Only right|left      use one hand and mirror it
-#   -HandLength 0.19      wrist to middle fingertip in metres
+#   -HandLength 0.19      wrist to middle fingertip in metres, both hands (their wrist joints are moved to match)
+#   -KeepProportions      keep each hand's own wrist estimate instead (the hands may then differ in length)
 #   -DebugImages          print the search, write debug-preview.png into the pack folder (needs matplotlib)
-#   -Preview out.png      previews of the open / fist / point / grip poses (needs matplotlib)
+#   -Preview preview.png  previews of the open / fist / point / grip poses (needs matplotlib). A bare file name goes into
+#                         the pack folder; like the pack, it is refused inside a git checkout (it is a picture of your model)
 #   -OutDir <folder>      write the pack there instead of the mod folder (never inside a git checkout)
 #   -Python <exe>         the Python 3 to use (default: py -3, python, python3, whichever works first)
 # Windows PowerShell 5.1 and PowerShell 7.
@@ -37,6 +39,7 @@ param(
     [switch]$ZUp,
     [ValidateSet('', 'right', 'left')][string]$Only = '',
     [double]$HandLength = 0,
+    [switch]$KeepProportions,
     [switch]$DebugImages,
     [string]$Preview = '',
     [string]$OutDir = '',
@@ -105,9 +108,11 @@ if (-not $Name) {
     $Name = $Name.Trim('-'); if ($Name.Length -gt 40) { $Name = $Name.Substring(0, 40).Trim('-') }
     if (-not $Name) { $Name = 'my-hands' }
 }
-if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$' -or $Name.EndsWith('.')) { Write-Host "-Name '$Name': use letters, digits, '-', '_' (a folder name)."; exit 1 }
+# no trailing space or dot (Windows drops them: review N7)
+if ($Name -notmatch '^[A-Za-z0-9]([A-Za-z0-9 _.-]{0,62}[A-Za-z0-9_-])?$') { Write-Host "-Name '$Name': use letters, digits, '-', '_' (a folder name)."; exit 1 }
 if ($FfxvrHandPacks -contains $Name.ToLowerInvariant()) { Write-Host "-Name $Name is one of the shipped packs ($($FfxvrHandPacks -join ', ')): pick another name."; exit 1 }
-if ($OutDir) { $out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir) }
+if ($Title -match '"') { Write-Host '-Title may not contain a double quote.'; exit 1 }   # review N6: 5.1 would split it
+if ($OutDir) { $out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir).TrimEnd('\', '/') }   # N6: no "...\" into Python
 else {
     $game = Get-FfxvrGame
     $mod = [IO.Path]::Combine($game, 'fahrenheit', 'mods', 'ffxvr')
@@ -131,8 +136,12 @@ if ($Height -gt 0)     { $a += ('--height=' + $Height.ToString($inv)) }
 if ($ZUp)        { $a += '--z-up' }
 if ($Only)       { $a += @('--only', $Only) }
 if ($HandLength -gt 0) { $a += ('--hand-length=' + $HandLength.ToString($inv)) }
+if ($KeepProportions) { $a += '--keep-proportions' }
 if ($DebugImages) { $a += '--debug' }
-if ($Preview)    { $a += @('--preview', $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Preview)) }
+if ($Preview) {   # a bare name: the importer puts it into the pack folder; a path: resolved here (refused there inside a git checkout)
+    if (Split-Path -Parent $Preview) { $Preview = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Preview).TrimEnd('\', '/') }
+    $a += @('--preview', $Preview)
+}
 
 Write-Host "Model: $Model"
 Write-Host "Pack:  $out"

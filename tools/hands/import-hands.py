@@ -33,13 +33,16 @@ Options:
                        9 to 11 times the hand's length)
   --z-up               the model is Z up (turned to Y up first)
   --only right|left    use one hand, mirrored for the other
-  --hand-length M      wrist to middle fingertip in metres (default 0.19)
+  --hand-length M      wrist to middle fingertip in metres (default 0.19), for both hands: the wrist joints are moved
+                       along each hand to match (one scale for both, from the middle fingers)
+  --keep-proportions   keep each hand's own wrist estimate instead (the hands may then differ in length)
   --debug              print the cut profile, the finger search and the palm side cues; writes debug-*.png into --out
-  --preview FILE.png   render open / fist / point / grip previews (needs matplotlib)
+  --preview FILE.png   render open / fist / point / grip previews (needs matplotlib). A bare file name goes into the
+                       pack folder; like the pack, never inside a git checkout
 It refuses to write inside a git checkout (a pack must never end up in a repository) and never overwrites a pack
 folder that is not one of its own (the shipped generic packs). Needs Python 3.8+ and numpy (pip install numpy).
 """
-import argparse, heapq, json, os, sys
+import argparse, heapq, io, json, os, struct, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import handlib as H
@@ -315,37 +318,59 @@ def rig_hand(hd, height, debug, flip=False):
         log(f"   dorsal cues: thumb {cue_thumb/height*1000:.1f}, curl {curl/height*1000:.1f} (per-mille height) -> "
             f"back of the hand on the {'+' if score > 0 else '-'} side of the palm normal{' (then --flip)' if flip else ''}; thumb on {'-X' if thumb_x < 0 else '+X'} => {handed} hand")
     # joints (model space)
-    J = np.zeros((26, 3)); J[H.J["wrist"]] = wrist_c
-    def along(points, fracs):
-        seg = np.linalg.norm(np.diff(points, axis=0), axis=1); cum = np.r_[0, np.cumsum(seg)]
-        out = []
-        for fr in np.cumsum(fracs)[:-1]:
-            t = fr * cum[-1]; k = min(np.searchsorted(cum, t) - 1, len(seg) - 1); k = max(k, 0)
-            u = (t - cum[k]) / max(seg[k], 1e-9); out.append(points[k] + u * (points[k + 1] - points[k]))
-        return out
-    for n in FINGER_ORDER[1:]:
-        f = named[n]; ch = H.FINGERS[n]
+    # joints (model space), from a wrist position (run() may move the wrist to normalise the hand length)
+    def place(wrist_c):
+        J = np.zeros((26, 3)); J[H.J["wrist"]] = wrist_c
+        def along(points, fracs):
+            seg = np.linalg.norm(np.diff(points, axis=0), axis=1); cum = np.r_[0, np.cumsum(seg)]
+            out = []
+            for fr in np.cumsum(fracs)[:-1]:
+                t = fr * cum[-1]; k = min(np.searchsorted(cum, t) - 1, len(seg) - 1); k = max(k, 0)
+                u = (t - cum[k]) / max(seg[k], 1e-9); out.append(points[k] + u * (points[k + 1] - points[k]))
+            return out
+        for n in FINGER_ORDER[1:]:
+            f = named[n]; ch = H.FINGERS[n]
+            tipj = f["tip"] - (f["tip"] - f["cl"][-1]) * 0.25
+            line = np.vstack([f["mcp"], f["cl"], tipj])
+            inter, dist = along(line, RATIOS[n])
+            J[ch[0]] = wrist_c + 0.27 * (f["mcp"] - wrist_c)
+            J[ch[1]] = f["mcp"]; J[ch[2]] = inter; J[ch[3]] = dist; J[ch[4]] = tipj
+        f = thumb; ch = H.FINGERS["thumb"]
         tipj = f["tip"] - (f["tip"] - f["cl"][-1]) * 0.25
-        line = np.vstack([f["mcp"], f["cl"], tipj])
-        inter, dist = along(line, RATIOS[n])
-        J[ch[0]] = wrist_c + 0.27 * (f["mcp"] - wrist_c)
-        J[ch[1]] = f["mcp"]; J[ch[2]] = inter; J[ch[3]] = dist; J[ch[4]] = tipj
-    f = thumb; ch = H.FINGERS["thumb"]
-    tipj = f["tip"] - (f["tip"] - f["cl"][-1]) * 0.25
-    line = np.vstack([f["cl"], tipj]); vis = np.sum(np.linalg.norm(np.diff(line, axis=0), axis=1))
-    (dj,) = along(line, RATIOS["thumb"])
-    # thumb CMC: one thumb-metacarpal length (0.21 x hand length) from the thumb MCP, toward a point on the
-    # thumb side of the wrist (anatomical proportions; the metacarpal is buried in the thenar, not visible)
-    Lh = np.linalg.norm(named["middle"]["tip"] - wrist_c)
-    tgt = wrist_c + Xb * np.dot(f["cl"][0] - wrist_c, Xb) * 0.45
-    u = tgt - f["cl"][0]; u /= np.linalg.norm(u)
-    J[ch[0]] = f["cl"][0] + u * THUMB_META * Lh; J[ch[1]] = f["cl"][0]; J[ch[2]] = dj; J[ch[3]] = tipj
-    J[H.J["palm"]] = 0.5 * (J[H.J["middle_metacarpal"]] + J[H.J["middle_proximal"]])
+        line = np.vstack([f["cl"], tipj]); vis = np.sum(np.linalg.norm(np.diff(line, axis=0), axis=1))
+        (dj,) = along(line, RATIOS["thumb"])
+        # thumb CMC: one thumb-metacarpal length (0.21 x hand length) from the thumb MCP, toward a point on the
+        # thumb side of the wrist (anatomical proportions; the metacarpal is buried in the thenar, not visible)
+        Lh = np.linalg.norm(named["middle"]["tip"] - wrist_c)
+        tgt = wrist_c + Xb * np.dot(f["cl"][0] - wrist_c, Xb) * 0.45
+        u = tgt - f["cl"][0]; u /= np.linalg.norm(u)
+        J[ch[0]] = f["cl"][0] + u * THUMB_META * Lh; J[ch[1]] = f["cl"][0]; J[ch[2]] = dj; J[ch[3]] = tipj
+        J[H.J["palm"]] = 0.5 * (J[H.J["middle_metacarpal"]] + J[H.J["middle_proximal"]])
+        return J
+    J = place(wrist_c)
     # region per welded vertex: finger index or palm (-1)
     region = np.full(nw, -1)
     for fi, n in enumerate(FINGER_ORDER):
         region[named[n]["mem"]] = fi
-    return dict(W=W, rep=rep, F=F, J=J, Rb=Rb, wrist=wrist_c, region=region, inmain=inmain, handed=handed, adj=adj)
+    return dict(W=W, rep=rep, F=F, J=J, Rb=Rb, wrist=wrist_c, region=region, inmain=inmain, handed=handed, adj=adj,
+                place=place, kc=K.mean(0))
+
+def normalise_wrist(rig, L):
+    """Moves the wrist along its line from the knuckles so that wrist -> middle tip joint is L (model units): the two
+    hands' wrist estimates can differ by a centimetre or more (a bracelet or cuff changes the cross-sections the wrist
+    is snapped to), which would make one hand longer and sit further along its controller. Returns the move (units)."""
+    tip = rig["J"][H.J["middle_tip"]]; kc = rig["kc"]; w0 = rig["wrist"]
+    u = w0 - kc; n = np.linalg.norm(u)
+    if n < 1e-9: return 0.0
+    u /= n; d = kc - tip
+    b = np.dot(u, d); c = np.dot(d, d) - L * L      # |kc + t u - tip|^2 = L^2  ->  t^2 + 2 b t + c = 0
+    disc = b * b - c
+    if disc <= 0: return 0.0
+    t = -b + np.sqrt(disc)
+    if t <= 0: return 0.0
+    w = kc + u * t
+    rig["J"] = rig["place"](w); rig["wrist"] = w
+    return float(t - n)
 
 def seg_dist(p, a, b):
     ab = b - a; t = np.clip(((p - a) @ ab) / max(ab @ ab, 1e-12), 0, 1)
@@ -388,6 +413,61 @@ def finger_scale(rig, hand_len):
     J = rig["J"]; L = sum(np.linalg.norm(J[b] - J[a]) for a, b in zip(H.FINGERS["middle"][1:-1], H.FINGERS["middle"][2:]))
     return hand_len * MIDDLE_FRAC / L
 
+MAX_VERTS, MAX_INDICES, MAX_IMAGES, MAX_TEX, MAX_GLB = 65535, 393216, 4, 2048, 32 << 20   # = the runtime's caps per hand
+
+def image_size(b):
+    """(width, height) from a PNG's IHDR or a JPEG's SOF marker; None if unknown."""
+    if b[:8] == b"\x89PNG\r\n\x1a\n" and len(b) >= 24: return struct.unpack(">II", b[16:24])
+    if b[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(b):
+            if b[i] != 0xFF: i += 1; continue
+            m = b[i + 1]
+            if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7: i += 2; continue
+            L = struct.unpack(">H", b[i + 2:i + 4])[0]
+            if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack(">HH", b[i + 5:i + 9]); return (w, h)
+            i += 2 + L
+    return None
+
+def load_texture(tp):
+    """A texture's bytes for the glb (PNG / JPEG), or None (that part is drawn in its flat colour; warned). One over the
+    game's 2048 px is shrunk to 1024 px when Pillow is installed (the game would draw a 1024 px copy anyway), else warned."""
+    nm = os.path.basename(tp)
+    try: data = open(tp, "rb").read()
+    except OSError as e: log(f"   warning: texture {nm} could not be read ({e}): that part is drawn in its flat colour"); return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n" and data[:2] != b"\xff\xd8":
+        log(f"   warning: texture {nm} is not a PNG or JPEG (convert it): that part is drawn in its flat colour"); return None
+    wh = image_size(data)
+    if wh is None or max(wh) > MAX_TEX or len(data) > 16 << 20:
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(data)); im.load(); im.thumbnail((1024, 1024))
+            buf = io.BytesIO()
+            if data[:2] == b"\xff\xd8": im.convert("RGB").save(buf, "JPEG", quality=92)
+            else: im.save(buf, "PNG")
+            log(f"   note: texture {nm} ({wh[0] if wh else '?'} x {wh[1] if wh else '?'} px) shrunk to {im.size[0]} x {im.size[1]} px (the game reads at most {MAX_TEX})")
+            return buf.getvalue()
+        except ImportError:
+            log(f"   warning: texture {nm} is {wh[0] if wh else '?'} x {wh[1] if wh else '?'} px, over the game's {MAX_TEX} (or over 16 MB): that part is drawn "
+                f"in its flat colour. Resize it to 2048 px or less, or install Pillow (pip install pillow) and run this again")
+            return None
+        except Exception as e:
+            log(f"   warning: texture {nm} could not be shrunk ({type(e).__name__}: {e}): that part is drawn in its flat colour"); return None
+    return data
+
+def weld_prim(pr):
+    """Shares identical corners (position, normal, uv, joints, weights) of a primitive: an OBJ's triangles come unshared,
+    3 vertices each, and the game reads at most 65535 vertices a hand."""
+    uv = pr["uv"] if pr["uv"] is not None else np.zeros((len(pr["pos"]), 2))
+    rows = np.c_[pr["pos"], pr["nrm"], uv, pr["joints"].astype(float), pr["weights"].astype(float)]
+    u, first, inv = np.unique(rows, axis=0, return_index=True, return_inverse=True)
+    order = np.argsort(first); rank = np.empty_like(order); rank[order] = np.arange(len(order))   # keep first-use order
+    keep = first[order]
+    q = dict(pr); q["pos"] = pr["pos"][keep]; q["nrm"] = pr["nrm"][keep]; q["uv"] = pr["uv"][keep] if pr["uv"] is not None else None
+    q["joints"] = pr["joints"][keep]; q["weights"] = pr["weights"][keep]; q["idx"] = rank[inv.reshape(-1)][pr["idx"]]
+    return q
+
 def find_texture(d, name):
     """A map_Kd name (maybe with options, a sub-folder or Windows separators) -> an existing file, also by name alone."""
     t = name.strip().strip('"')
@@ -428,16 +508,11 @@ def build_pack_hand(o, hd, rig, s, out_dir, slot, texcache, debug):
             tp = find_texture(o["dir"], tn)
             if tp is None: log(f"   warning: texture {tn} (material {m}) not found beside the OBJ: that part is drawn in its flat colour {tuple(round(c, 2) for c in col[:3])}")
             else:
-                data = texcache.get(tp)
-                if data is None:
-                    data = open(tp, "rb").read(); texcache[tp] = data
-                if data[:8] != b"\x89PNG\r\n\x1a\n" and data[:2] != b"\xff\xd8":
-                    log(f"   warning: texture {os.path.basename(tp)} is not a PNG or JPEG (convert it): that part is drawn in its flat colour")
-                elif len(data) > 16 << 20:
-                    log(f"   warning: texture {os.path.basename(tp)} is over 16 MB: that part is drawn in its flat colour")
-                else: png = data; col = (1, 1, 1, 1)
-        prims.append(dict(name=m, pos=pos, nrm=nrm, uv=uv, joints=j4[wi], weights=w4[wi], idx=idx.reshape(-1),
-                          color=col, texture_png=png))
+                if tp not in texcache: texcache[tp] = load_texture(tp)
+                data = texcache[tp]
+                if data is not None: png = data; col = (1, 1, 1, 1)
+        prims.append(weld_prim(dict(name=m, pos=pos, nrm=nrm, uv=uv, joints=j4[wi], weights=w4[wi], idx=idx.reshape(-1),
+                               color=col, texture_png=png)))
     # cap the wrist opening (fan from the cut centroid), weighted to the wrist
     cs = np.array(hd["cut_segs"])
     if len(cs):
@@ -453,11 +528,23 @@ def build_pack_hand(o, hd, rig, s, out_dir, slot, texcache, debug):
         pos = np.array(pos); idx = np.array(idx)
         jw = np.zeros((len(pos), 4), np.uint8); jw[:, 0] = H.J["wrist"]
         ww = np.zeros((len(pos), 4), np.float32); ww[:, 0] = 1
-        prims.append(dict(name="wrist_cap", pos=pos, nrm=np.tile([0, 0, 1.0], (len(pos), 1)), uv=None,
-                          joints=jw, weights=ww, idx=idx, color=(0.05, 0.05, 0.06, 1), texture_png=None))
+        prims.append(weld_prim(dict(name="wrist_cap", pos=pos, nrm=np.tile([0, 0, 1.0], (len(pos), 1)), uv=None,
+                               joints=jw, weights=ww, idx=idx, color=(0.05, 0.05, 0.06, 1), texture_png=None)))
+    # the runtime's limits (src/native/ffxvr_hands.h, hand_pack.cs): fail here rather than print "Done" for a pack the game refuses
+    nv = sum(len(p["pos"]) for p in prims); nt = sum(len(p["idx"]) // 3 for p in prims)
+    if nv > MAX_VERTS: fail(f"the {slot} hand has {nv} vertices after welding (the game reads at most {MAX_VERTS}): decimate the hand in Blender first")
+    if nt * 3 > MAX_INDICES: fail(f"the {slot} hand has {nt} triangles (the game reads at most {MAX_INDICES // 3})")
+    imgs = []
+    for p in prims:
+        if p["texture_png"] is not None and not any(p["texture_png"] is q for q in imgs): imgs.append(p["texture_png"])
+    if len(imgs) > MAX_IMAGES:
+        late = [p["name"] for p in prims if p["texture_png"] is not None and all(p["texture_png"] is not q for q in imgs[:MAX_IMAGES])]
+        log(f"   warning: the {slot} hand uses {len(imgs)} textures; the game draws the first {MAX_IMAGES}, the rest in their flat colour ({', '.join(map(str, late))})")
     path = os.path.join(out_dir, f"{slot}.glb")
     H.write_glb(path, prims, Jc, Rj, name=f"{slot}_hand", generator="ffxvr import-hands.py")
-    nv = sum(len(p["pos"]) for p in prims); nt = sum(len(p["idx"]) // 3 for p in prims)
+    size = os.path.getsize(path)
+    if size > MAX_GLB:
+        os.remove(path); fail(f"{slot}.glb would be {size >> 20} MB, over the {MAX_GLB >> 20} MB the game reads: use smaller textures")
     log(f"   wrote {path}: {nv} verts, {nt} tris, {len(prims)} primitives, "
         f"{os.path.getsize(path)//1024} KiB; wrist to middle tip {np.linalg.norm(Jc[H.J['middle_tip']] - Jc[H.J['wrist']]):.3f} m")
     return Jc
@@ -477,7 +564,8 @@ def check_out_dir(out):
     repo = in_git_checkout(out)
     if repo: fail(f"--out {out} is inside a git checkout ({repo}): a pack made from your model must never be committed. "
                   "Write it into the game's mod folder (tools\\import-hands.ps1 does), or another folder outside any repository.")
-    name = os.path.basename(os.path.normpath(out)).lower()
+    name = os.path.basename(os.path.normpath(out)).lower().rstrip(" .")   # Windows drops trailing spaces and dots (review N7)
+    if name != os.path.basename(os.path.normpath(out)).lower(): fail(f"--out {out}: a folder name may not end in a space or a dot")
     if name in ("generic", "generic-glove"): fail(f"--out {out}: that is a shipped pack's folder name; pick another (e.g. -Name tidus)")
     if os.path.isdir(out):
         man = os.path.join(out, "hand.json"); mine = os.path.exists(os.path.join(out, "PRIVATE-do-not-share.txt"))
@@ -502,6 +590,7 @@ def main():
     ap.add_argument("--out", required=True, help="the pack folder to write (normally <game>/fahrenheit/mods/ffxvr/hands/<name>)")
     ap.add_argument("--name", default=None, help="the name shown in F8")
     ap.add_argument("--hand-length", type=float, default=0.19, help="wrist to middle fingertip, metres (0.12 .. 0.30)")
+    ap.add_argument("--keep-proportions", action="store_true", help="keep each hand's own wrist estimate (default: both hands' wrist -> middle tip = --hand-length)")
     ap.add_argument("--cut", type=float, default=None, help="the wrist cut for both hands (fraction of the model height back from the fingertips)")
     ap.add_argument("--cut-right", type=float, default=None); ap.add_argument("--cut-left", type=float, default=None)
     ap.add_argument("--flip-right", action="store_true", help="palm/back of hand detected the wrong way round")
@@ -518,6 +607,8 @@ def main():
         run(a)
     except ImportError_ as e:
         log(f"error: {e}"); log("Nothing usable was written (an earlier pack in that folder, if any, is unchanged unless listed above)."); sys.exit(1)
+    except OSError as e:   # review N9: --out names a file, no write permission, a disk full ...
+        log(f"error: {e.strerror or e} ({e.filename or ''})"); sys.exit(1)
     except (np.linalg.LinAlgError, ValueError, IndexError, ZeroDivisionError) as e:
         log(f"error: the model could not be rigged ({type(e).__name__}: {e}). Try --cut-right / --cut-left, --tip or --height, "
             "or rig the hand in Blender (the pack format: tools/hands/handlib.py)."); sys.exit(1)
@@ -530,6 +621,18 @@ def run(a):
     if a.tip and len(a.tip) > 2: fail("--tip at most twice (one per hand)")
     out = os.path.abspath(a.out)
     check_out_dir(out)
+    if a.preview:   # review B2: a render of the model follows the same rules as the pack: never into a git checkout
+        if not os.path.dirname(a.preview): a.preview = os.path.join(out, a.preview)   # a bare name: into the pack folder
+        a.preview = os.path.abspath(a.preview)
+        if not a.preview.lower().endswith(".png"): fail(f"--preview {a.preview}: a .png file name")
+        repo = in_git_checkout(os.path.dirname(a.preview))
+        if repo: fail(f"--preview {a.preview} is inside a git checkout ({repo}): it is a picture of your model. Give a bare file name "
+                      "(it goes into the pack folder) or a folder outside any repository")
+        pdir = os.path.dirname(a.preview)
+        if os.path.normcase(pdir) != os.path.normcase(out) and os.path.exists(os.path.join(pdir, "hand.json")):
+            try: other_private = json.load(open(os.path.join(pdir, "hand.json"), encoding="utf-8")).get("private") is True
+            except (ValueError, OSError, AttributeError): other_private = False
+            if not other_private: fail(f"--preview {a.preview}: that folder is another hand pack (a shipped one?); give a bare file name")
     if not os.path.isfile(a.obj): fail(f"no such file: {a.obj}")
     if not a.obj.lower().endswith(".obj"): fail(f"{a.obj}: not a Wavefront .obj (export one from Blender: File > Export > Wavefront, Y up)")
     try: o = objio.load_obj(a.obj)
@@ -565,6 +668,10 @@ def run(a):
     # one scale for both hands (else a mis-estimated wrist would make one hand bigger than the other)
     sc = float(np.mean([finger_scale(r, a.hand_length) for _, r in got.values()]))
     log(f"scale {sc:.4g} m per model unit (middle finger fitted to a {a.hand_length} m hand)")
+    if not a.keep_proportions:   # both hands wrist -> middle tip = --hand-length (the model's own wrists: --keep-proportions)
+        for slot, (hd, rig) in got.items():
+            mv = normalise_wrist(rig, a.hand_length / sc)
+            log(f"   {slot} wrist moved {mv * sc * 1000:+.1f} mm along the hand (wrist -> middle tip {a.hand_length} m; --keep-proportions keeps the model's)")
     for f in ("right.glb", "left.glb"):   # a stale hand of an earlier run must not be picked up
         if os.path.exists(os.path.join(out, f)) and f[:-4] not in got: os.remove(os.path.join(out, f))
     for slot, (hd, rig) in got.items():
@@ -589,6 +696,7 @@ def run(a):
             pp = importlib.util.module_from_spec(spec); spec.loader.exec_module(pp)
             sys.argv = ["preview-pack.py", out, path] + (["--bones"] if bones else []); pp.main()
         except ImportError as e: log(f"   (no preview: {e}; pip install matplotlib)")
+        except Exception as e: log(f"   (no preview: {type(e).__name__}: {e})")   # review SF-2: a preview never fails a good pack
     log("Done. In game: F8 > VR hands > hand model > rescan, then pick it. Keep this pack on your PC: do not share it.")
 
 if __name__ == "__main__":
