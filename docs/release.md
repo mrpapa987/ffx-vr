@@ -165,6 +165,12 @@ game version (Steam build id).
 
 ## 7. Release procedure
 
+**Status (3 Nov 2026): experimental.** The release tools (`package-release.ps1`, `set-logging.ps1`, `install-mod.ps1`'s
+`-ResetLogging` / `-DeleteLogs` / `-Purge`, the fresh-install defaults) were reviewed and run in a sandbox, and the new
+build runs on the developer's setup without breaking it, but the player-side tests (release-prep test steps 3-7: the
+logging profiles, a fresh install from the zip, no headset, uninstall) have not been run on Windows yet. Before the first
+public tag, have a second person run them on a separate install.
+
 1. **Version.** Set `<Version>` in `src/managed/ffxvr.csproj` (e.g. `0.1.0-alpha.1`); move the CHANGELOG entry from
    "unreleased" to the date. Commit. Nothing else holds the version.
 2. **Checks.** Section 5's printf greps print nothing; `git status` is clean; `git ls-files` has nothing new that should not
