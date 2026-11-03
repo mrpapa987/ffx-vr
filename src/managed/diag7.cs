@@ -50,7 +50,7 @@ public sealed unsafe partial class FFXVRModule {
     private struct D7Anchor { public int id, idx, fallback, flags, chr10, sx, sy; public Vector3 opt, tl, td; public float heading; public nint actor; }   // flags: 1 attached, 2 override matrix, 4 index outside 0..25
     private struct D7TgtHdr { public uint stamp, mask, cmd, gate, autob, alive, stub_states; public int n, skipped, stubs, bstate; }
     private struct D7Turn   { public uint stamp, apex, bas; public int chr, chr_glob, ok, skipped; public float theta; public Vector3 game_a; public D7Anchor a; }   // game_a: the game's own A (0xF3FA68), read after the original; skipped: C2 skipped the original, so game_a is stale
-    private struct D7Join   { public uint stamp; public int exec, valid, head_ok, flags; public Vector3 pos, off, td, head; public nint actor; }   // smooth anchor: head (game space, push_player's rule), flags 1 attached (+0x19C), 2 override matrix (+0x10C)
+    private struct D7Join   { public uint stamp; public int exec, valid, head_ok, flags, pvalid; public Vector3 pos, off, td, head, ppos, poff, ptd; public nint actor, parent; }   // smooth anchor: head (game space, push_player's rule), flags 1 attached (+0x19C), 2 override matrix (+0x10C)
     private readonly D7TgtHdr[] _d7h = new D7TgtHdr[2]; private readonly D7Anchor[] _d7t = new D7Anchor[2 * 28]; private int _d7_seq;
     private readonly D7Turn[]   _d7u = new D7Turn[2];   private int _d7u_seq;
     private readonly D7Join[]   _d7j = new D7Join[2];   private int _d7j_seq;
@@ -260,15 +260,20 @@ public sealed unsafe partial class FFXVRModule {
         nint act = System.Threading.Volatile.Read(ref _d7_follow_actor); j.actor = act;
         if (act != 0) {
             byte* b = stackalloc byte[0x6C4];   // through optpos[25] (+0x524 + 26 * 16)
+            byte* q = stackalloc byte[0x20C];   // riding: the parent through its drawn root (+0x200..+0x208)
+            j.pvalid = 0; j.parent = 0;
             if (_fn_safe_read((void*)act, b, 0x6C4) != 0) {
                 j.pos = *(Vector3*)(b + 0x0C); j.off = *(Vector3*)(b + 0x6C); j.td = *(Vector3*)(b + 0x200); j.valid = 1;
-                if (*(uint*)(b + 0x19C) != 0) j.flags |= 1;   // attached: the root comes from the parent's bone
+                if (*(uint*)(b + 0x19C) != 0) {   // attached: the root comes from the parent's bone (riding: the chocobo; ride.cs)
+                    j.flags |= 1; j.parent = *(nint*)(b + 0x19C);
+                    if (_fn_safe_read((void*)j.parent, q, 0x20C) != 0) { j.ppos = *(Vector3*)(q + 0x0C); j.poff = *(Vector3*)(q + 0x6C); j.ptd = *(Vector3*)(q + 0x200); j.pvalid = 1; }
+                }
                 if (*(uint*)(b + 0x10C) != 0) j.flags |= 2;   // an override matrix replaces the root
                 // the head as push_player picks it: the highest sub-position (lowest y, game y down) not at the origin; folded with
                 // the actor position if it ever looks relative
                 float hy = float.MaxValue;
                 for (int k = 0; k < 26; k++) { Vector4 sp = *(Vector4*)(b + 0x524 + 16 * k); if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; j.head = new Vector3(sp.X, sp.Y, sp.Z); j.head_ok = 1; } }
-                if (j.head_ok != 0 && MathF.Abs(j.head.X - j.pos.X) + MathF.Abs(j.head.Z - j.pos.Z) > 100f) j.head += j.pos;
+                if (j.head_ok != 0 && (j.flags & 1) == 0 && MathF.Abs(j.head.X - j.pos.X) + MathF.Abs(j.head.Z - j.pos.Z) > 100f) j.head += j.pos;   // never for an attached actor (world already)
             }
         }
         System.Threading.Volatile.Write(ref _d7j_seq, _d7j_seq + 1);

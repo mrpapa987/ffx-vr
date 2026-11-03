@@ -736,6 +736,31 @@ int      g_fp_body_mode = 0; uint32_t g_fp_head_mask = 0; int g_fp_solo = -1;
 float    g_fp_step = 0.f; int g_fp_still_frames = 0;
 float    g_fp_step_hide = 0.f, g_fp_d_prev = 0.f;   // SM-2: the body-hide margin's step: the sum of the last two per-call distances (30 Hz: tick + 0; smooth anchor: half + half)
 uint32_t g_fp_part_idx = 0, g_fp_parts_last = 0;
+// Riding (chocobo; ffxvr_ride_set, ABI 32): the followed actor is attached to another actor's bone (+0x19C). Managed sends the
+// rider's drawn root (his skinned parts sit on it: the body-hide centre) and the mount's; ffxvr_player_set may then carry the
+// bob-smoothed eye base, so while riding the hide matches here and not on g_fp_pos. Render space.
+int      g_ride_flags = 0;                       // 1 attached (centre g_ride_rider), 2 the mount's root is known, 4 hide the mount's parts too
+float    g_ride_rider[3] = {}, g_ride_mount[3] = {}, g_ride_cap = 3.f;
+uint32_t g_ride_rider_n = 0, g_ride_mount_n = 0, g_ride_report = 0;   // first-person matches this frame / last frame (mount << 16 | rider)
+/// The body hide's test for one draw's world translation: 0 not the player's, 1 one of the player's own parts (the rider's
+/// while riding), 2 one of the mount's (riding only). On foot: within hide_radius + 1.5 * step of g_fp_pos, as before. Riding:
+/// around the rider's drawn root with the step margin capped (it grows at chocobo speed and reached NPCs beside the path), and
+/// a draw nearer the mount's root than the rider's is the mount's (its parts sit on its root, a seat's height below).
+static int fp_part_of(const float* w) {
+    const float r0 = g_fp_hide_radius + 1.5f * g_fp_step_hide;
+    if ((g_ride_flags & 1) == 0) {
+        const float dx = w[0] - g_fp_pos[0], dy = w[1] - g_fp_pos[1], dz = w[2] - g_fp_pos[2];
+        return dx*dx + dy*dy + dz*dz < r0 * r0 ? 1 : 0;
+    }
+    const float r = fminf(r0, fmaxf(g_fp_hide_radius, g_ride_cap));
+    const float ax = w[0] - g_ride_rider[0], ay = w[1] - g_ride_rider[1], az = w[2] - g_ride_rider[2];
+    const float dr = ax*ax + ay*ay + az*az;
+    float dm = 1e30f;
+    if (g_ride_flags & 2) { const float bx = w[0] - g_ride_mount[0], by = w[1] - g_ride_mount[1], bz = w[2] - g_ride_mount[2]; dm = bx*bx + by*by + bz*bz; }
+    if (dr < r * r && dr <= dm) return 1;
+    if (dm < r * r) return 2;
+    return 0;
+}
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
 // eyes, 1 eye 1 only, 2 hide in both.
@@ -3231,9 +3256,7 @@ static void write_backdrop_camera(const uint8_t* orig, uint8_t* p, UINT size, UI
 /// world translation sits on the player is appended raw to ffxvr_bones.bin
 /// (record: "BONE", u32 size, u32 frame, u32 view base, f32 world[3], bytes).
 static void bones_capture(const uint8_t* p, UINT size, UINT base, const float* world) {
-    const float dx = world[0] - g_fp_pos[0], dy = world[1] - g_fp_pos[1], dz = world[2] - g_fp_pos[2];
-    const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
-    if (dx*dx + dy*dy + dz*dz >= r * r) return;
+    if (fp_part_of(world) != 1) return;   // the player's (the rider's) parts only
     if (g_bones_frame == 0) g_bones_frame = g_frames;
     if (g_frames != g_bones_frame) { g_bones_left = 0; return; }
     wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_bones_%d.bin", g_dir, g_bones_take);
@@ -3519,9 +3542,7 @@ static int hands_apply(int rec, int n, const uint8_t* orig, uint8_t* eye1, uint8
 /// map, and applies the wiggle to the copies that go to the GPU (both eyes).
 static int bones_record(const uint8_t* p, UINT size, const float* world, uint8_t* eye1, EyeImage* e) {
     uint8_t* eye2 = e ? e->eye2.data() : nullptr;
-    const float dx = world[0] - g_fp_pos[0], dy = world[1] - g_fp_pos[1], dz = world[2] - g_fp_pos[2];
-    const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
-    if (dx*dx + dy*dy + dz*dz >= r * r) return 0;
+    if (fp_part_of(world) != 1) return 0;   // the player's (the rider's) parts only
     const int rec = g_bone_rec++;
     if (rec >= k_pal_max_recs) return 0;
     const UINT po = palette_start(p, size); g_pal_off_cur = po;
@@ -4485,7 +4506,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 31;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push)
+constexpr int FFXVR_ABI = 32;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5193,6 +5214,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     lightcam_frame_end();           // shadow camera: the frame's light-camera count, the per-map line, shadow_cam applied for the next frame
     haze_tick();                    // heat haze: heat_haze applied for the next frame, the frame's counts, the 10 s haze: line
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
+    g_ride_report = ((g_ride_mount_n > 0xFFFFu ? 0xFFFFu : g_ride_mount_n) << 16) | (g_ride_rider_n > 0xFFFFu ? 0xFFFFu : g_ride_rider_n); g_ride_rider_n = g_ride_mount_n = 0;
     bones_frame_end();
     {   // UI pass health: how many 3D frames had a captured UI pass, and the frame structure the detector saw
         static uint32_t resolves_acc = 0, clears_acc = 0, no_pass_acc = 0;
@@ -5873,14 +5895,17 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         // is the body hide's.
         const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;
         const bool whole = bm == 0 || (g_hands_on && g_hands_show >= 2);
-        const float dx = lc->wpos[0] - g_fp_pos[0], dy = lc->wpos[1] - g_fp_pos[1], dz = lc->wpos[2] - g_fp_pos[2];
-        const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
-        if (whole && dx*dx + dy*dy + dz*dz < r * r) { g_lc_self_hidden++; return -1; }
+        const int who = fp_part_of(lc->wpos);   // riding: the bird's shadow goes too only with "hide the chocobo"
+        if (whole && (who == 1 || (who == 2 && (g_ride_flags & 4)))) { g_lc_self_hidden++; return -1; }
     }
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
-        const float dx = g_eye2_cur->world_pos[0] - g_fp_pos[0], dy = g_eye2_cur->world_pos[1] - g_fp_pos[1], dz = g_eye2_cur->world_pos[2] - g_fp_pos[2];
-        const float r = g_fp_hide_radius + 1.5f * g_fp_step_hide;
-        if (dx*dx + dy*dy + dz*dz < r * r) {   // one of the player's own parts
+        const int who = fp_part_of(g_eye2_cur->world_pos);
+        if (who == 2) {   // riding: one of the mount's parts - drawn (you see the bird under you), unless "hide the chocobo"
+            g_ride_mount_n++;
+            if (fp_hiding && (g_ride_flags & 4) && g_fp_solo < 0) { g_fp_hidden_draws++; return -1; }
+        }
+        if (who == 1) {   // one of the player's own parts
+            if (g_ride_flags & 1) g_ride_rider_n++;
             const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && g_cur_rtv0_tex == g_scene_tex;
             const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;   // VR hands: the body is shown, head parts hidden
             if (fp_hiding && bm == 0 && g_fp_solo < 0) { g_fp_hidden_draws++; return -1; }       // the whole body, in every pass
@@ -9643,6 +9668,18 @@ extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, fl
     if (!g_fp_head_s_valid || dx*dx + dy*dy + dz*dz > 50.f * 50.f) { memcpy(g_fp_head_s, g_fp_head, sizeof(g_fp_head)); g_fp_head_s_valid = true; return; }   // first value, or a warp
     const float k = g_fp_head_smooth < 0.02f ? 0.02f : (g_fp_head_smooth > 1.f ? 1.f : g_fp_head_smooth);
     for (int i = 0; i < 3; ++i) g_fp_head_s[i] += (g_fp_head[i] - g_fp_head_s[i]) * k;
+}
+/// Riding (chocobo, ABI 32): flags 1 = the followed actor is attached (rx..rz = the rider's drawn root, render space: the body
+/// hide's centre), 2 = the mount's drawn root mx..mz is known (draws nearer it than the rider's root are the mount's and are
+/// never hidden as the player's), 4 = first person hides the mount's parts too; cap = the hide radius cap while attached.
+/// flags 0 = on foot: the hide works around ffxvr_player_set's position as before. Called every frame after ffxvr_player_set.
+/// Returns last frame's first-person matches: rider parts in the low 16 bits, mount parts in the high 16.
+extern "C" __declspec(dllexport) uint32_t ffxvr_ride_set(int flags, float rx, float ry, float rz, float mx, float my, float mz, float cap) {
+    const bool ok = std::isfinite(rx) && std::isfinite(ry) && std::isfinite(rz) && std::isfinite(mx) && std::isfinite(my) && std::isfinite(mz);
+    g_ride_flags = ok ? (flags & 7) : 0;
+    g_ride_rider[0] = rx; g_ride_rider[1] = ry; g_ride_rider[2] = rz; g_ride_mount[0] = mx; g_ride_mount[1] = my; g_ride_mount[2] = mz;
+    g_ride_cap = std::isfinite(cap) ? (cap < 0.5f ? 0.5f : cap > 12.f ? 12.f : cap) : 3.f;
+    return g_ride_report;
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_head_set(int anchor, float up, float smooth, float fwd) { g_fp_head_anchor = anchor; g_fp_head_up = up; g_fp_head_smooth = smooth; g_fp_head_fwd = fwd; }
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }

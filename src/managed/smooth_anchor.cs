@@ -25,8 +25,11 @@ public sealed unsafe partial class FFXVRModule {
     private const float k_sa_max_d = 16f;     // SM-1: the interpolation offset never exceeds one logic step (a run step is a few units)
 
     /// <summary>push_player, render thread: the followed actor's anchor (game space, in/out) and head (in/out). The logic
-    /// position comes in as today's value; it is replaced by the smoothed one when the snapshot allows.</summary>
-    private void sa_apply(nint act, ref Vector3 pos, ref Vector3 head, ref bool have_head) {
+    /// position comes in as today's value; it is replaced by the smoothed one when the snapshot allows.
+    /// Riding (attached: +0x19C, ride.cs): pos comes in as the rider's drawn root read now; a fresh snapshot replaces it with the
+    /// post-join drawn root (what this frame draws), the head gets the mount's interpolation (FFX-60fps SMOOTH-002-CHILDREL moves
+    /// the rider with the bird), and the mount's drawn root goes to _ride_mount.</summary>
+    private void sa_apply(nint act, ref Vector3 pos, ref Vector3 head, ref bool have_head, bool attached) {
         Vector3 logic = pos;
         d7_read(_d7j, ref _d7j_seq, ref _r7j, ref _r7j_seq);
         uint frame = FhUtil.get_at<uint>(0x1FCBBF0);
@@ -37,8 +40,23 @@ public sealed unsafe partial class FFXVRModule {
         else if (!_h7_join_ok) why = "unavailable: the job-join hook is not installed (smooth_anchor was 0 and diag_build7=0 at launch: it hooks at the next launch; or the hook failed); the 30 Hz logic position";
         else if (_r7j_seq == 0 || _r7j.valid == 0) why = "waiting for a snapshot (the 30 Hz logic position meanwhile)";
         else if (_r7j.actor != act) why = "the followed actor just changed (the 30 Hz logic position for a frame)";
-        else if (_r7j.flags != 0) why = (_r7j.flags & 1) != 0 ? "attached actor (riding / carried): the 30 Hz logic position" : "script matrix (+0x10C): the 30 Hz logic position";
-        else if (_sa_age < 0 || _sa_age > 2) why = "snapshot too old: the 30 Hz logic position";   // (the age is shown separately)
+        else if ((_r7j.flags & 2) != 0) why = "script matrix (+0x10C): the 30 Hz logic position";
+        else if (((_r7j.flags & 1) != 0) != attached) why = attached ? "riding: the rider's drawn root read at Present (attached since the snapshot)" : "the attachment just ended: the 30 Hz logic position for a frame";
+        else if (_sa_age < 0 || _sa_age > 2) why = attached ? "riding, snapshot too old: the rider's drawn root read at Present" : "snapshot too old: the 30 Hz logic position";   // (the age is shown separately)
+        else if (attached) {
+            // The rider's drawn root at the post-join point is what this frame draws; his sub-positions are from the tick, so they
+            // get the mount's interpolation d = drawn - (logic + chr_offset) (a non-attached bird: its root is +0x0C + +0x6C).
+            Vector3 dm = default;
+            bool pok = _r7j.pvalid != 0 && _r7j.parent == _ride_parent && finite(_r7j.ptd) && Vector3.Distance(_r7j.ptd, _r7j.td) < 60f;
+            if (pok) { dm = _r7j.ptd - (_r7j.ppos + _r7j.poff); if (dm.LengthSquared() > k_sa_max_d * k_sa_max_d) { dm = default; _sa_rejects++; } }
+            if (!finite(_r7j.td)) why = "riding: the snapshot's root is not a position: the rider's drawn root read at Present";
+            else {
+                pos = _r7j.td;
+                if (_r7j.head_ok != 0) head = _r7j.head + dm; else have_head = false;   // SM-4
+                if (pok && _ride_mount_ok) _ride_mount = _r7j.ptd;
+                _sa_used = true; why = pok ? "riding: the rider's drawn root (60 fps, on the bird's bone)" : "riding: the rider's drawn root (60 fps; the bird's root read at Present)";
+            }
+        }
         else {
             Vector3 d = _r7j.td - (_r7j.pos + _r7j.off);   // the interpolation FFX-60fps applied to the drawn root this invocation
             if (d.LengthSquared() > k_sa_max_d * k_sa_max_d) { _sa_rejects++; why = "drawn root far from the logic position (not built yet?): the 30 Hz logic position"; }   // SM-1
@@ -50,6 +68,7 @@ public sealed unsafe partial class FFXVRModule {
                 if (d.LengthSquared() < 1e-8f) { if (step_logic > 0.1f) _sa_flat++; } else _sa_flat = 0;   // SM-7: with FFX-60fps smoothing on, d is non-zero on every logic invocation
             }
         }
+        if (attached && !_sa_used && !why.StartsWith("riding", StringComparison.Ordinal)) why += " (riding: the rider's drawn root read at Present instead)";
         _sa_status = why;
         // Motion log: per-Present steps of the anchor used and of +0x0C (render space distances), and the stamp step (SM-3)
         if (_sa_have_prev) { _sa_step = Vector3.Distance(pos, _sa_prev_pos); _sa_step_logic = Vector3.Distance(logic, _sa_prev_logic); }

@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 31;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 32;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -419,6 +419,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_fp_set       = (delegate* unmanaged[Cdecl]<int, float, float, float, int, float, void>)req("ffxvr_fp_set");
             _fn_player_set   = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_set");
             _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_head_set");
+            _fn_ride_set     = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float, float, uint>)req("ffxvr_ride_set");   // ABI 32: riding (ride.cs)
             _fn_anchor_override = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_anchor_override");
             _fn_floor_set    = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_floor_set");
             _fn_fp_head_set  = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_fp_head_set");
@@ -555,7 +556,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
-        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null;
+        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
         _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null; _fn_log_config = null; _fn_build_info = null;
@@ -1090,7 +1091,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
                 } break;
-                default:                  if (!hands2_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs)
+                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs)
             }
         }
         if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
@@ -1410,6 +1411,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_px_left={_hands_px_left.ToString(ci)}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
             hands2_ini_text() +   // VR hands v2 (hands.cs)
+            ride_ini_text() +     // riding (ride.cs)
             $"diag_verbose={(_diag_verbose ? 1 : 0)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
@@ -1759,6 +1761,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
             ImGui.Checkbox("smooth follow anchor: the eyes follow the drawn (60 fps) body, not the 30 Hz logic position", ref _smooth_anchor); ImGui.SameLine();
             ImGui.TextDisabled($"{esc(_sa_status)} (snapshot {(_sa_age >= 999 ? "none" : $"{_sa_age} frames old")}{(_sa_rejects > 0 ? $", {_sa_rejects} refused as implausible" : "")}){(_sa_flat > 60 ? " - the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?" : "")}");
+            ride_ui();   // chocobo: the riding status and its options (ride.cs)
             if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle markers brings the old behaviour back (unticking the sprite-signature checkbox does not).");
             if (_c2_active) ImGui.BeginDisabled(true);
             ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
@@ -1901,7 +1904,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
             ImGui.InputText("player model names (comma list, best first)", ref _fp_actor, 64); ImGui.SameLine();
-            ImGui.TextDisabled(_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? esc(_fp_how) : $"actor {_fp_actor_idx}");
+            ImGui.TextDisabled((_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? esc(_fp_how) : $"actor {_fp_actor_idx}") + (_ride_att ? " | " + esc(_ride_status) : ""));
             ImGui.TreePop();
         }
 
@@ -2241,7 +2244,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (!read(actors + i, out Actor a)) break;
             if (!live(a)) continue;
             live_n++;
-            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z; bool drawn = false;
+            Vector3 apos = new Vector3(a.chr_pos_vec.X, a.chr_pos_vec.Y, a.chr_pos_vec.Z); nint par = 0;
+            if (_fn_safe_read((byte*)(actors + i) + 0x19C, &par, 4) != 0 && par != 0 && read((byte*)(actors + i) + 0x200, out Vector3 td) && finite(td)) apos = td;   // riding: the drawn root
+            float rx = -apos.X, ry = -apos.Y, rz = apos.Z; bool drawn = false;
             for (int k = 0; k < nwp; k++) { float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz; if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; } }
             if (drawn) { drawn_n++; continue; }
             byte* raw = (byte*)(actors + i); byte hide = 0; uint f194 = 0, f198 = 0; float dist = 0; nint model = 0; byte mv = 0xFF;
@@ -2257,8 +2262,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         Actor* actors = Globals.actors;
         if (actors == null) { ImGui.Text("no actor table"); return; }
         bool log_it = ImGui.Button("log this table"); ImGui.SameLine();
-        ImGui.TextDisabled("drawn = a draw at the actor's position this frame; hide = byte +180; f194/f198 = flag words; cd = cull distance (+174), d = distance to the game camera (+178); a = alpha (+354); mv = model visible byte");
-        ImGui.Text("idx  id   name          position                 drawn hide  f194      f198     cd      d      a   mv");
+        ImGui.TextDisabled("drawn = a draw at the actor's position this frame; hide = byte +180; f194/f198 = flag words; cd = cull distance (+174), d = distance to the game camera (+178); a = alpha (+354); mv = model visible byte; att = attached to actor # (+19C; 'ext' outside the table): riding, its position is the drawn root (+200)");
+        ImGui.Text("idx  id   name          position                 drawn hide  f194      f198     cd      d      a   mv  att");
         float* wp = stackalloc float[128 * 3];
         int nwp = _fn_world_positions != null ? _fn_world_positions(wp, 128) : 0;
         var sb = log_it ? new System.Text.StringBuilder("actor table:") : null;
@@ -2276,9 +2281,14 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 _fn_safe_read(raw + 0x830, &model, 4);
                 if (model > 0x10000 && model < 0x7FFF0000) _fn_safe_read((void*)(model + 0x14), &mv, 1);
             }
-            float rx = -a.chr_pos_vec.X, ry = -a.chr_pos_vec.Y, rz = a.chr_pos_vec.Z; bool drawn = false;
+            nint par = 0; Vector3 apos = new Vector3(a.chr_pos_vec.X, a.chr_pos_vec.Y, a.chr_pos_vec.Z);
+            if (_fn_safe_read != null) _fn_safe_read(raw + 0x19C, &par, 4);
+            if (par != 0 && read(raw + 0x200, out Vector3 td) && finite(td)) apos = td;   // riding: drawn from the parent's bone, not from +0x0C
+            string att = par == 0 ? "-" : RideLogic.ParentIndex((long)actors, (long)par, sizeof(Actor), 48, i) is int pix && pix >= 0 ? pix.ToString(CI) : "ext";
+            float rx = -apos.X, ry = -apos.Y, rz = apos.Z; bool drawn = false;
             for (int k = 0; k < nwp; k++) { float dx = wp[k*3] - rx, dy = wp[k*3+1] - ry, dz = wp[k*3+2] - rz; if (dx*dx + dy*dy + dz*dz < 9f) { drawn = true; break; } }
-            string line = $"{i,3} {a.chr_id,4}  {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1})  {(drawn ? "yes" : " no"),4}  {hide:X2}  {f194:X8} {f198:X8} {cd,6:F1} {dist,6:F1} {alpha,5:F2}  {mv:X2}";
+            string line = $"{i,3} {a.chr_id,4}  {actor_name(a.chr_name),-12} ({a.chr_pos_vec.X,7:F1},{a.chr_pos_vec.Y,7:F1},{a.chr_pos_vec.Z,7:F1})  {(drawn ? "yes" : " no"),4}  {hide:X2}  {f194:X8} {f198:X8} {cd,6:F1} {dist,6:F1} {alpha,5:F2}  {mv:X2}  {att,3}" +
+                          (par != 0 ? $"  drawn root ({apos.X:F1},{apos.Y:F1},{apos.Z:F1})" : "");
             ImGui.Text(esc(line));   // actor names read from the game
             sb?.Append("\n  ").Append(line);
         }
@@ -2342,6 +2352,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private void push_player() {
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
+        _ride_att = false; _ride_mount_ok = false;   // ride_probe sets them again for an attached followed actor
         if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
@@ -2459,11 +2470,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // culls, not counted) ranks after every visible listed model but still before the party fallback. In the
             // Luca cutscene lc/lchb1800 the field Tidus (c001, actor 0) is hidden and parked off-stage while the event
             // Tidus (c101, actor 12) plays the scene.
+            // Chocobo: a party model the game hides (c002..c007 parked at (0, 0, 0) while Tidus is swapped onto the bird) ranks
+            // after actor 0 (RideLogic.FpScore).
             int score_of(in Actor a, int i, Actor* tbl) {
-                for (int r = 0; r < names.Length; r++) if (name_is(a.chr_name, names[r])) return script_hidden(tbl + i) ? 500 + r : r;
+                for (int r = 0; r < names.Length; r++) if (name_is(a.chr_name, names[r])) return RideLogic.FpScore(r, script_hidden(tbl + i), (int)a.chr_id, i);
                 int cid = (int)a.chr_id;
-                if (cid > 0 && cid < 0x1000) return 1000 + cid;
-                return i == 0 ? 100000 : -1;
+                return RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && script_hidden(tbl + i), cid, i);
             }
             int cur_score = -1;
             if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
@@ -2480,7 +2492,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
                 pick = best_i;
                 if (pick >= 0 && (pick != _fp_actor_idx || cur_score < 0) && read(actors + pick, out Actor pa2)) {
-                    string how = best < 500 ? "model " + names[best] : best < 1000 ? "model " + names[best - 500] + ", hidden by the game (no visible listed model)" : best < 100000 ? "no listed model on this map: the party model with the lowest id" : "nothing matched: actor 0";
+                    string how = RideLogic.FpHow(best, names);
                     _fp_chr_id = (int)pa2.chr_id;
                     _fp_how = $"actor {pick} '{actor_name(pa2.chr_name)}' ({how})";
                     string mp = map_name();
@@ -2497,11 +2509,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // the one with the LOWEST actor-space Y.
             float hy = float.MaxValue; Vector4 head = default; bool have = false;
             for (int k = 0; k < 26; k++) { Vector4 sp = p.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = sp; have = true; } }
+            // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
+            // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
+            // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
+            bool att = !in_battle && ride_probe(actors, pick);
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
-            if (have && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
-            // Smooth follow anchor: the post-join snapshot's drawn (interpolated) root when fresh, else +0x0C as before
-            Vector3 pos3 = new Vector3(p.chr_pos_vec.X, p.chr_pos_vec.Y, p.chr_pos_vec.Z), head3 = new Vector3(head.X, head.Y, head.Z);
-            sa_apply((nint)(actors + pick), ref pos3, ref head3, ref have);
+            // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low).
+            if (have && !att && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
+            // Smooth follow anchor: the post-join snapshot's drawn (interpolated) root when fresh, else +0x0C as before (riding: +0x200 now)
+            Vector3 pos3 = att ? _ride_rider : new Vector3(p.chr_pos_vec.X, p.chr_pos_vec.Y, p.chr_pos_vec.Z), head3 = new Vector3(head.X, head.Y, head.Z);
+            sa_apply((nint)(actors + pick), ref pos3, ref head3, ref have, att);
+            if (att) ride_eye(ref pos3, ref head3);   // the body-hide centre stays the rider's root; the eye base gets the bob filtered
             _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
             if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, have ? 1 : 0);
         }
@@ -2512,6 +2530,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// markers. Each call has its own null check (they used to sit inside an unrelated `_fn_ui_hide != null`), and they
     /// also run when there is no actor table yet (the title screen's virtual-screen mode).</summary>
     private void push_view_rules(bool in_battle) {
+        ride_push();   // riding: the rider / mount roots for the body hide, the riding line (ride.cs)
         if (_fn_fp_head_set != null) _fn_fp_head_set(_fp_head_anchor, _fp_head_up, _fp_head_smooth, _fp_head_fwd);
         push_battle_anchor();
         if (_fn_floor_set != null) _fn_floor_set(_diorama_floor);
