@@ -30,6 +30,16 @@ namespace FFXVR;
 //   vr_hands_debug      bits, default 0 (Debug only): 1 the wrist axes (red X, green Y, blue Z), 2 the boxes instead of the hand
 //                       mesh, 4 one placement line per drawn frame in ffxvr_diag.log (300 at most per switch-on); 8 is the "log
 //                       one pose dump" button's one-shot.
+//   Tap build (design-notes "Hands: the tap gesture"; native ffxvr_hands2_tap_set, hv_tap_update):
+//   vr_hands_tap          0/1, default 1: with VR hands drawn in first person, a quick forward jab of a pointing hand presses
+//                         the game's confirm button (only in the field: never in battle, the sphere grid, the save screen,
+//                         blitzball, a menu or a movie, nor while a text box is up unless vr_hands_tap_dialogue=1).
+//   vr_hands_tap_sens     0.50..2.00, default 1.00: the forward peak speed a tap needs is 0.70 m/s / this.
+//   vr_hands_tap_dialogue 0/1, default 0: also while a text box is up (advances the text; a choice box takes the highlighted
+//                         answer, so off until the text box signal is confirmed in play).
+//   vr_hands_tap_haptic   0/1, default 1: a short tick on that hand when a tap presses.
+//   vr_hands_tap_button   a / b / x / y, default a (ini only): the XInput button a tap presses (A = cross = confirm in the PC build).
+//   vr_hands_tap_press_ms 60..300, default 100 (ini only): how long it is held (and at least 3 new pad packets).
 // Not here (spec 1.4, owner's decisions): the light / tracking keys of the later stages (tracking dropped).
 public sealed unsafe partial class FFXVRModule {
 
@@ -42,6 +52,18 @@ public sealed unsafe partial class FFXVRModule {
         public uint stamp;   // S3: the files' change stamp (a re-made pack loads again)
     }
     private const int k_h2_status_n = 21;           // ffxvr_hands2_status's values (ABI 29)
+    [StructLayout(LayoutKind.Sequential)]
+    private struct VrTapCfg { public int bytes, flags; public float sens; public int button, game, press_ms; }   // = native VrTapCfg (ABI 30; 24 bytes)
+    private const int k_tap_status_n = 15;          // ffxvr_hands2_tap_status's values (ABI 30)
+    private bool   _vr_hands_tap = true, _vr_hands_tap_dialogue = false, _vr_hands_tap_haptic = true;
+    private float  _vr_hands_tap_sens = 1.00f;
+    private string _vr_hands_tap_button = "a";
+    private int    _vr_hands_tap_press_ms = 100;
+    private int    _tap_game_last = -1;             // the game gate bits last logged
+    private int    _tap_game_logs;                  // game gate lines this session (200 at most)
+    private string _tap_text_info = "";             // the text box windows as last read (F8)
+    private delegate* unmanaged[Cdecl]<VrTapCfg*, int, void> _fn_hands2_tap_set;              // ABI 30: the tap's settings and the game gate
+    private delegate* unmanaged[Cdecl]<float*, int, byte*> _fn_hands2_tap_status;            // ABI 30: the F8 readout
 
     private bool   _vr_hands = false;            // ini vr_hands (default 0)
     private int    _vr_hands_debug = 0;          // ini vr_hands_debug (bits 1, 2, 4)
@@ -91,6 +113,12 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_hands_off_right": pf(k, v, ref _vr_hands_off_r, -0.10f, 0.10f); return true;
             case "vr_hands_off_up":    pf(k, v, ref _vr_hands_off_u, -0.10f, 0.10f); return true;
             case "vr_hands_off_back":  pf(k, v, ref _vr_hands_off_b, -0.10f, 0.10f); return true;
+            case "vr_hands_tap":          pb(k, v, ref _vr_hands_tap); return true;
+            case "vr_hands_tap_sens":     pf(k, v, ref _vr_hands_tap_sens, 0.5f, 2f); return true;
+            case "vr_hands_tap_dialogue": pb(k, v, ref _vr_hands_tap_dialogue); return true;
+            case "vr_hands_tap_haptic":   pb(k, v, ref _vr_hands_tap_haptic); return true;
+            case "vr_hands_tap_button":   { string t = v.Trim().ToLowerInvariant(); if (t == "a" || t == "b" || t == "x" || t == "y") _vr_hands_tap_button = t; else _ini_bad.Add($"{k}='{v}'"); } return true;
+            case "vr_hands_tap_press_ms": pi(k, v, ref _vr_hands_tap_press_ms, 60, 300); return true;
             default: return false;
         }
     }
@@ -111,7 +139,13 @@ public sealed unsafe partial class FFXVRModule {
             $"vr_hands_off_right={_vr_hands_off_r.ToString("F3", ci)}\n" +
             $"vr_hands_off_up={_vr_hands_off_u.ToString("F3", ci)}\n" +
             $"vr_hands_off_back={_vr_hands_off_b.ToString("F3", ci)}\n" +
-            $"vr_hands_debug={(_vr_hands_debug & 7).ToString(ci)}\n";   // bit 8 (the dump) is a one-shot, never saved
+            $"vr_hands_debug={(_vr_hands_debug & 7).ToString(ci)}\n" +   // bit 8 (the dump) is a one-shot, never saved
+            $"vr_hands_tap={(_vr_hands_tap ? 1 : 0)}\n" +
+            $"vr_hands_tap_sens={_vr_hands_tap_sens.ToString("F2", ci)}\n" +
+            $"vr_hands_tap_dialogue={(_vr_hands_tap_dialogue ? 1 : 0)}\n" +
+            $"vr_hands_tap_haptic={(_vr_hands_tap_haptic ? 1 : 0)}\n" +
+            $"vr_hands_tap_button={_vr_hands_tap_button}\n" +
+            $"vr_hands_tap_press_ms={_vr_hands_tap_press_ms.ToString(ci)}\n";
     }
 
     /// <summary>18 comma-separated floats into rc (false: empty, the wrong count, or not numbers).</summary>
@@ -209,6 +243,60 @@ public sealed unsafe partial class FFXVRModule {
             rest_curl = _vr_hands_rest_curl, scale = _vr_hands_scale };
         _fn_hands2_set(&c, sizeof(VrHandsCfg));
         hands2_pack_push();
+        hands2_tap_push();
+    }
+
+    /// <summary>Tap build: the tap's settings and the game gate to native, every frame (native treats a gate older than 3
+    /// frames as shut). Bits: 1 battle (Btl.battle_state != 0), 2 the sphere grid (Fahrenheit Globals.SphereGrid.is_open),
+    /// 4 Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), 8 a text box is up (a TOMesWinWork window of
+    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 0x100 a read failed. Reads only while the tap can
+    /// fire (VR hands and the tap on): off costs nothing.</summary>
+    private void hands2_tap_push() {
+        if (_fn_hands2_tap_set == null) return;
+        bool on = _vr_hands && _vr_hands_tap;
+        int game = on ? hands2_tap_game() : 0;
+        int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
+        var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0),
+                               sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };
+        _fn_hands2_tap_set(&t, sizeof(VrTapCfg));
+        if (!on) { _tap_game_last = -1; return; }
+        if (game != _tap_game_last) {   // a change of the game gate: an event line (200 at most a session), so a test shows what the gate saw
+            if (_tap_game_last >= 0 && _tap_game_logs < 200) {
+                _tap_game_logs++;
+                string m = I($"hands: tap gate (game): {hands2_tap_game_text(game)}{((game & 8) != 0 ? " (" + _tap_text_info + ")" : "")}{(_tap_game_logs == 200 ? " (no more of these lines this session)" : "")}");
+                _logger.Info(m); d7_log(m);
+            }
+            _tap_game_last = game;
+        }
+    }
+    private static string hands2_tap_game_text(int g) {
+        if (g == 0) return "the field (open)";
+        var l = new List<string>();
+        if ((g & 1) != 0) l.Add("battle"); if ((g & 2) != 0) l.Add("sphere grid"); if ((g & 4) != 0) l.Add("save / load screen");
+        if ((g & 8) != 0) l.Add("a text box"); if ((g & 16) != 0) l.Add("blitzball"); if ((g & 0x100) != 0) l.Add("not readable");
+        return string.Join(", ", l);
+    }
+    /// <summary>The game gate bits (hands2_tap_push). Every read guarded (native safe_read).</summary>
+    private int hands2_tap_game() {
+        int g = 0;
+        if (_fn_safe_read == null) return 0x100;
+        if (!read((byte*)Globals.Battle.btl + 0x10, out byte bstate)) g |= 0x100; else if (bstate != 0) g |= 1;   // Btl.battle_state (byte at +0x10; 1 the battle is live, 0 none)
+        if (!read(FhUtil.ptr_at<byte>(0x1685F70), out byte sg)) g |= 0x100; else if (sg != 0) g |= 2;   // Fahrenheit Globals.SphereGrid.is_open (FhUtil 0x1685F70)
+        if (save_screen_state() != 0 || _fh_menu_open) g |= 4;
+        if (_in_blitz) g |= 16;
+        // Text boxes: TOMesWinWork[bank * 8 + i] at FhUtil 0xF26D70 (0x2C bytes each), the bank a signed byte at FhUtil 0xF26B82
+        // (getter 0x86BE90). The game's own per-frame loop (0x871F30) copies each window's state into +0x14 (u16; 4 = closed is
+        // written back as 0) and counts a window with a non-zero state and +0x1D bit 1 as one the player waits on. Any non-zero
+        // state counts here (the stricter reading of "a text box is up").
+        if (!read(FhUtil.ptr_at<sbyte>(0xF26B82), out sbyte bank) || bank < 0 || bank > 15) { g |= 0x100; _tap_text_info = "the text box bank is not readable"; return g; }
+        byte* w0 = FhUtil.ptr_at<byte>(0xF26D70) + bank * 8 * 0x2C;
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < 8; i++) {
+            if (!read(w0 + i * 0x2C + 0x14, out ushort st) || !read(w0 + i * 0x2C + 0x1D, out byte fl)) { g |= 0x100; break; }
+            if (st != 0) { g |= 8; if (sb.Length > 0) sb.Append(", "); sb.Append(I($"#{i} state {st} flags 0x{fl:X2}")); }
+        }
+        _tap_text_info = sb.Length > 0 ? I($"bank {bank}: {sb}") : I($"bank {bank}: none");
+        return g;
     }
 
     /// <summary>S3: reads <mod>\hands\ (every pack folder, its hand.json; hand_pack.cs) and logs what it found. At the first
@@ -352,6 +440,7 @@ public sealed unsafe partial class FFXVRModule {
                 ImGui.PopStyleColor(1);
             }
         }
+        hands2_tap_ui();
         if (ImGui.TreeNode("fine tune##h2ft")) {
             ImGui.SetNextItemWidth(110); ImGui.SliderFloat("yaw##h2", ref _vr_hands_yaw, -45f, 45f, "%.0f deg"); ImGui.SameLine();
             ImGui.SetNextItemWidth(110); ImGui.SliderFloat("pitch##h2", ref _vr_hands_pitch, -45f, 45f, "%.0f deg"); ImGui.SameLine();
@@ -363,6 +452,30 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.TextDisabled("In the hand's own frame: yaw turns about the back of the hand, pitch tips the fingers up or down, roll turns about the fingers; out, up and back move it from the thumb side, out of the back of the hand, toward the elbow.");
             ImGui.TreePop();
         }
+    }
+
+    /// <summary>Tap build: the "gestures" sub-section: the tap's options and a live readout (the fingertip's forward speed, the
+    /// point pose, the gate, the last tap and near miss, the counters).</summary>
+    private void hands2_tap_ui() {
+        if (_fn_hands2_tap_set == null || !ImGui.TreeNode("gestures##h2g")) return;
+        ImGui.Checkbox("tap to press action (point, then a quick jab forward)##h2tap", ref _vr_hands_tap);
+        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("tap sensitivity##h2ts", ref _vr_hands_tap_sens, 0.5f, 2f, "%.2f"); ImGui.SameLine();
+        ImGui.TextDisabled(I($"(a tap peaks above {0.70f / _vr_hands_tap_sens:F2} m/s forward)")); ImGui.SameLine();
+        if (ImGui.SmallButton("default##h2ts")) _vr_hands_tap_sens = 1.00f;
+        ImGui.Checkbox("also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
+        ImGui.Checkbox("haptic tick##h2taph", ref _vr_hands_tap_haptic);
+        ImGui.TextDisabled(esc("Hold the grip with your index finger off the trigger (point), then jab the fingertip about 10 cm forward and stop, as if pressing a button in the air. "
+                           + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + " (confirm: talk, examine, open). Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
+                           + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up."));
+        if (_fn_hands2_tap_status != null) {
+            float* v = stackalloc float[k_tap_status_n];
+            byte* line = _fn_hands2_tap_status(v, k_tap_status_n);
+            string ln = line != null ? Marshal.PtrToStringAnsi((nint)line) ?? "" : "";
+            ImGui.Text(I($"fingertip forward speed: L {v[0],5:F2}  R {v[1],5:F2} m/s | point pose: L {(v[2] > 0.5f ? "yes" : "no ")}  R {(v[3] > 0.5f ? "yes" : "no ")}{(v[8] > 0.5f ? " | PRESSING" : "")}"));
+            ImGui.TextDisabled(esc(ln));
+            ImGui.TextDisabled(esc(I($"taps: L {v[5]:F0} R {v[6]:F0}, not taps {v[9]:F0} | game: {(_vr_hands && _vr_hands_tap ? hands2_tap_game_text(_tap_game_last < 0 ? 0 : _tap_game_last) : "-")} | text boxes: {(_tap_text_info.Length > 0 ? _tap_text_info : "-")}")));
+        }
+        ImGui.TreePop();
     }
 
     /// <summary>S3: the "hand model" combo (every pack: name, author, licence; "(private)"; an unusable one greyed out with
