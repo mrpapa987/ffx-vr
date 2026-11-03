@@ -328,6 +328,14 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
         if (d->buffer_views[i].has_meshopt_compression) return hv_fail(err, errn, "the glb is meshopt-compressed (export without compression)");
     for (cgltf_size i = 0; i < d->meshes_count; ++i) for (cgltf_size k = 0; k < d->meshes[i].primitives_count; ++k)
         if (d->meshes[i].primitives[k].has_draco_mesh_compression) return hv_fail(err, errn, "the glb is Draco-compressed (export without compression)");
+    // Before cgltf_validate: it reads every index accessor (and sparse indices) through typed pointers to find their bound,
+    // so a misaligned one must be refused first (found by the S3 fuzz under UBSan on an importer pack's uint16 indices).
+    for (cgltf_size i = 0; i < d->buffers_count; ++i)
+        if (d->buffers[i].data != nullptr && reinterpret_cast<uintptr_t>(d->buffers[i].data) % 4 != 0) return hv_fail(err, errn, "the glb's binary chunk is misaligned (not a valid glb)");
+    for (cgltf_size i = 0; i < d->accessors_count; ++i) {
+        if (d->accessors[i].is_sparse) return hv_fail(err, errn, "accessor %u is sparse (not supported: export without sparse accessors)", static_cast<unsigned>(i));
+        if (!hv_acc_aligned(&d->accessors[i])) return hv_fail(err, errn, "accessor %u is misaligned (not a valid glTF)", static_cast<unsigned>(i));
+    }
     r = cgltf_validate(d);
     if (r != cgltf_result_success) return hv_fail(err, errn, "the glTF does not validate (cgltf_validate %d: an accessor or view out of range?)", static_cast<int>(r));
     const cgltf_node* mn = nullptr;
@@ -491,18 +499,21 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
     return true;
 }
 
-bool hv_pack_parse(const uint8_t* const data[2], const size_t size[2], const char* const names[2], bool mirror, const float* tint,
+bool hv_pack_parse(const bool have[2], bool mirror, const float* tint, HvPackRead read, void* ctx, const char* const names[2],
                    HvMesh hand[2], char* err, int errn) {
     hand[0] = HvMesh(); hand[1] = HvMesh();
-    const bool have_r = data[1] != nullptr && size[1] > 0, have_l = data[0] != nullptr && size[0] > 0;
-    if (!have_r && !have_l) return hv_fail(err, errn, "no glb named for either hand");
-    const int src = have_r ? 1 : 0;                      // the hand read first; the other is its mirror unless both are read
+    if (!have[0] && !have[1]) return hv_fail(err, errn, "no glb named for either hand");
+    const int src = have[1] ? 1 : 0;                     // the hand read first; the other is its mirror unless both are read
+    const bool both = have[0] && have[1] && !mirror;
     char e[256] = "";
-    if (!hv_glb_parse(data[src], size[src], src, tint, &hand[src], e, sizeof(e))) return hv_fail(err, errn, "%s: %s", names[src] ? names[src] : "?", e);
-    if (have_r && have_l && !mirror) {
-        if (!hv_glb_parse(data[0], size[0], 0, tint, &hand[0], e, sizeof(e))) return hv_fail(err, errn, "%s: %s", names[0] ? names[0] : "?", e);
-    }
-    else hv_mesh_mirror(hand[src], &hand[1 - src]);
+    for (int k = 0; k < (both ? 2 : 1); ++k) {
+        const int h = k == 0 ? src : 1 - src;
+        const char* nm = names[h] ? names[h] : "?";
+        std::vector<uint8_t> b;
+        if (!read(ctx, h, &b, e, sizeof(e))) return hv_fail(err, errn, "%s: %s", nm, e);
+        if (!hv_glb_parse(b.data(), b.size(), h, tint, &hand[h], e, sizeof(e))) return hv_fail(err, errn, "%s: %s", nm, e);
+    }                                                    // b freed here, before the next file is read
+    if (!both) hv_mesh_mirror(hand[src], &hand[1 - src]);
     return true;
 }
 
@@ -625,6 +636,8 @@ void hv_fingers_update(HvFingerState* s, const HvCtrl& in, float dt) {
         if (raw[k] > 0.5f) s->off_s[k] = 0.f; else if (s->off_s[k] < 1e8f) s->off_s[k] += dt;
         tgt[k] = (raw[k] > 0.5f || s->off_s[k] < k_release_hold) ? 1.f : 0.f;
     }
+    if (raw[2] > 0.5f) { tgt[3] = 0.f; s->off_s[3] = 1e9f; }   // review N5: face buttons and thumbrest exclude each other: no hold of the one left
+    if (raw[3] > 0.5f) { tgt[2] = 0.f; s->off_s[2] = 1e9f; }
     auto boolean = [&](float cur, float t) { return hv_approach(cur, t, dt, t > cur ? 0.035f : 0.050f); };   // on 35 ms; off 50 ms after the hold
     s->trig = hv_approach(s->trig, trig, dt, 0.015f); s->sq = hv_approach(s->sq, sq, dt, 0.015f);   // floats 15 ms
     s->trig_t = boolean(s->trig_t, tgt[0]); s->thumb_t = boolean(s->thumb_t, tgt[1]); s->face_t = boolean(s->face_t, tgt[2]); s->rest_t = boolean(s->rest_t, tgt[3]);

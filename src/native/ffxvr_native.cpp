@@ -8387,20 +8387,15 @@ static DWORD WINAPI hands_worker(LPVOID arg) {
     bool ok = true;
     try {   // SF-1: an out-of-memory (std::bad_alloc from any vector here, cgltf's malloc returns null) must not end the game
         // S3: the files a pack needs (hv_pack_parse: right + mirror, left only, or both for a two-handed pack), then the parse
-        const bool have_r = q.right[0] != 0, have_l = q.left[0] != 0;
-        const bool need[2] = { have_l && (!have_r || !q.mirror), have_r };
-        std::vector<uint8_t> b[2]; char pn[2][160] = { "", "" };
-        for (int h = 1; h >= 0 && ok; --h) {
-            if (!need[h]) continue;
-            const wchar_t* path = h ? q.right : q.left; hands_file_part(path, pn[h], sizeof(pn[h]));
-            if (!hv_read_file(path, 32u << 20, &b[h], e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn[h], e); ok = false; }
-        }
-        if (ok) {
-            const uint8_t* const dp[2] = { b[0].empty() ? nullptr : b[0].data(), b[1].empty() ? nullptr : b[1].data() };
-            const size_t ds[2] = { b[0].size(), b[1].size() }; const char* const nm[2] = { pn[0], pn[1] };
-            ok = hv_pack_parse(dp, ds, nm, q.mirror, q.tint, r->hand, r->err, sizeof(r->err));
-            b[0].clear(); b[0].shrink_to_fit(); b[1].clear(); b[1].shrink_to_fit();
-        }
+        const bool have[2] = { q.left[0] != 0, q.right[0] != 0 };
+        char pn[2][160] = { "", "" };
+        hands_file_part(q.left, pn[0], sizeof(pn[0])); hands_file_part(q.right, pn[1], sizeof(pn[1]));
+        const char* const nm[2] = { pn[0], pn[1] };
+        auto rd = [](void* ctx, int h, std::vector<uint8_t>* out, char* er, int ern) -> bool {   // one file at a time (review SF-3)
+            const H2PackReq* rq = static_cast<const H2PackReq*>(ctx);
+            return hv_read_file(h ? rq->right : rq->left, 32u << 20, out, er, ern);
+        };
+        ok = hv_pack_parse(have, q.mirror, q.tint, rd, const_cast<H2PackReq*>(&q), nm, r->hand, r->err, sizeof(r->err));
         for (int h = 0; h < 2 && ok; ++h) {   // the images: decoded, shrunk to 1024 at most and mipped here, not at Present (review SF-1 item 4)
             HvMesh& m = r->hand[h];
             for (size_t i = 0; i < m.tex_file.size(); ++i) {
@@ -8506,7 +8501,7 @@ static void hands_pack_upload(H2CpuPack* c) {
     hands_gpu_release(g_h2_gpu);
     g_h2_gpu = g; g_h2_pack_state = 2; g_h2_pack_err[0] = 0;
     QueryPerformanceCounter(&t1);
-    g->tex_gpu = tex_made; g->tex_bad = c->tex_fail + c->hand[0].images_dropped + c->hand[1].images_dropped;
+    g->tex_gpu = tex_made; g->tex_bad = c->tex_fail + g->rig[0].images_dropped + g->rig[1].images_dropped;   // review N4: rig, not the moved-from c->hand
     g->worker_ms = static_cast<float>(c->ms); g->upload_ms = static_cast<float>((t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
     const HvMesh& R = g->rig[1]; const HvMesh& L = g->rig[0];
     diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded (%d shrunk to %d), %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s%s | worker %.1f ms, upload %.1f ms",

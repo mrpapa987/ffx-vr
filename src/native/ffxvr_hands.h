@@ -108,10 +108,13 @@ struct HvMesh {
 /// hand, HV_MAX_IMAGES images (the rest draw their base colour); compressed glbs (Draco, meshopt) and other required
 /// extensions are refused. Can throw std::bad_alloc (the caller catches).
 bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMesh* out, char* err, int errn);
-/// S3: both hands of a pack from its files' bytes (null / 0: that file is not given; [0] left, [1] right, as HvMesh::hand).
-/// right + mirror (or right only): the left is the right mirrored; left only: the right is the left mirrored; both and no
-/// mirror: both parsed (a two-handed pack). The error names the file (names[h], e.g. "left.glb"). Can throw std::bad_alloc.
-bool hv_pack_parse(const uint8_t* const data[2], const size_t size[2], const char* const names[2], bool mirror, const float* tint,
+/// S3: reads one hand's file into `out` (h 0 left, 1 right); false with err (without the file name) on failure.
+typedef bool (*HvPackRead)(void* ctx, int h, std::vector<uint8_t>* out, char* err, int errn);
+/// S3: both hands of a pack ([0] left, [1] right, as HvMesh::hand; have[h]: that file is named). right + mirror (or right
+/// only): the left is the right mirrored; left only: the right is the left mirrored; both and no mirror: both parsed (a
+/// two-handed pack). Each file is read through `read`, parsed and its bytes freed before the next is read (review SF-3: one
+/// file buffer at a time in a 32-bit process). The error names the file (names[h], e.g. "left.glb"). Can throw std::bad_alloc.
+bool hv_pack_parse(const bool have[2], bool mirror, const float* tint, HvPackRead read, void* ctx, const char* const names[2],
                    HvMesh hand[2], char* err, int errn);
 /// The other hand from this one: x negated in positions and normals, the winding reversed, every bind frame conjugated
 /// with S = diag(-1, 1, 1) (spec 2 row 7). The textures are not copied: dst->tex_from names the hand whose textures it uses.
