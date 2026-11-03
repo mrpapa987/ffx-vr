@@ -6,7 +6,9 @@ namespace FFXVR;
 // ffxvr_hands.cpp). Our own hands drawn at the controllers, in the scene, in both eyes, depth-tested against the world and
 // under the UI panel. S2 draws the shipped generic hand (<mod>\hands\generic-glove or generic: tools/hands/make-generic-hand.py,
 // ours, MIT), skinned on the GPU, its fingers following the controllers' trigger, grip and touch sensors; the S1 boxes are
-// the fallback (no pack, a pack that failed to load) and a debug option. User hand packs come in S3. Off by default.
+// the fallback (no pack, a pack that failed to load) and a debug option. S3: every pack folder under <mod>\hands\ (the two
+// shipped ones and the user's own, e.g. made by tools\import-hands.ps1 from a model they own) is listed in F8 with its
+// hand.json (hand_pack.cs: parsed, validated, clamped); "rescan" reads the folder again. Off by default.
 //
 // The owner's rules (2 Nov, 3 Nov 2026): in first person only with the player's body hidden (fp_body_mode 0, "hide my whole
 // body", the default; no forearm cutting), and by choice in the diorama ("to give our hands some context when adjusting the
@@ -15,7 +17,8 @@ namespace FFXVR;
 // ini keys (all applied at once):
 //   vr_hands            0/1, default 0: the master switch. 0 costs one branch per resolve: no shaders, nothing drawn.
 //   vr_hands_views      bits, default 1: 1 first person (always), 2 the diorama, 4 third person, 8 the seat view.
-//   vr_hands_pack       generic-glove (default) | generic: the look (S2: only the two shipped packs; the other is the fallback).
+//   vr_hands_pack       a folder under <mod>\hands\, default generic-glove: the hand model. Missing or unusable: generic-glove,
+//                       then generic, then the boxes (logged).
 //   vr_hands_rest_curl  0..1, default 0.20: how far the middle, ring and little fingers curl with the grip released.
 //   vr_hands_scale      0.80..1.25, default 1.00: the hand's size.
 //   vr_hands_cal        18 floats or empty: the grip -> hand rotation per controller (left 9, right 9, row-major, the
@@ -33,21 +36,25 @@ public sealed unsafe partial class FFXVRModule {
     [StructLayout(LayoutKind.Sequential)]
     private struct VrHandsCfg { public int bytes, on, views, debug; public float yaw, pitch, roll, off_r, off_u, off_b, rest_curl, scale; }   // = native VrHandsCfg (ABI 28)
     [StructLayout(LayoutKind.Sequential)]
-    private struct VrHandsPackDesc {   // = native VrHandsPackDesc (ABI 28; 84 bytes on x86): absolute UTF-16 paths, copied by native at once
+    private struct VrHandsPackDesc {   // = native VrHandsPackDesc (ABI 29; 88 bytes on x86): absolute UTF-16 paths, copied by native at once
         public int bytes, format; public char* right_glb, left_glb; public int mirror; public float scale;
         public fixed float wrist_off_m[3]; public fixed float wrist_rot_rad[3]; public fixed float tint[3]; public fixed float rest_curl[5]; public byte* name;
+        public uint stamp;   // S3: the files' change stamp (a re-made pack loads again)
     }
-    private const int k_h2_status_n = 17;           // ffxvr_hands2_status's values (ABI 28)
+    private const int k_h2_status_n = 21;           // ffxvr_hands2_status's values (ABI 29)
 
     private bool   _vr_hands = false;            // ini vr_hands (default 0)
     private int    _vr_hands_debug = 0;          // ini vr_hands_debug (bits 1, 2, 4)
     private int    _vr_hands_views = 1;          // ini vr_hands_views (bit 0 first person, always; 2 diorama, 4 third person, 8 seat)
-    private string _vr_hands_pack = "generic-glove";   // ini vr_hands_pack (S2: generic-glove | generic)
+    private string _vr_hands_pack = "generic-glove";   // ini vr_hands_pack: a folder under <mod>\hands\
     private float  _vr_hands_rest_curl = 0.20f, _vr_hands_scale = 1.00f;
     private string _h2_mod_dir = "";             // the mod folder (load_native): the packs are under <mod>\hands\
     private string? _h2_pack_sent;               // the pack native was last given ("" = none: the boxes); null = choose again
     private string _h2_pack_want = "";           // the selection the fallback walk below is for
-    private int    _h2_pack_try;                 // the candidate being tried (the selected pack, then the other shipped one)
+    private int    _h2_pack_try;                 // the candidate being tried (the selected pack, then generic-glove, then generic)
+    private List<HandPack> _h2_packs = new();    // S3: the scan of <mod>\hands\ (hand_pack.cs)
+    private bool   _h2_scanned;                  // scanned once (at the first push), again on "rescan"
+    private HandPack? _h2_pack_sent_p;           // the pack native was last given
     private string _vr_hands_cal = "";           // ini vr_hands_cal ("" = the default placement)
     private bool   _vr_hands_cal_read;           // the key was in the file (the hands_cal migration runs only without it)
     private float  _vr_hands_yaw, _vr_hands_pitch, _vr_hands_roll;      // degrees
@@ -64,6 +71,7 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int*, int, byte*> _fn_hands2_status;                  // ABI 27: (out, n) -> the status line
     private delegate* unmanaged[Cdecl]<float*, int, uint> _fn_hands2_cal;                    // ABI 27: op 0 read, 1 write, 2 capture -> captures
     private delegate* unmanaged[Cdecl]<VrHandsPackDesc*, int, void> _fn_hands2_pack;        // ABI 28: the pack to draw (null: none, the boxes)
+    private delegate* unmanaged[Cdecl]<byte*> _fn_hands2_pack_error;                         // ABI 29: why the last pack asked for was rejected ("" none)
 
     /// <summary>settings_parse's default branch: the vr_hands_* keys. False: not ours.</summary>
     private bool hands2_parse(string k, string v) {
@@ -71,8 +79,9 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_hands":           pb(k, v, ref _vr_hands); return true;
             case "vr_hands_debug":     pi(k, v, ref _vr_hands_debug, 0, 15); return true;
             case "vr_hands_views":     pi(k, v, ref _vr_hands_views, 0, 15); _vr_hands_views |= 1; return true;
-            case "vr_hands_pack":      { string t = v.Trim().ToLowerInvariant(); if (t == "generic" || t == "generic-glove") _vr_hands_pack = t;
-                                         else _logger.Warning($"settings: vr_hands_pack={v}: this build ships generic-glove and generic only (own packs come later); generic-glove is used"); } return true;
+            case "vr_hands_pack":      { string t = v.Trim();   // a folder name; whether it exists is the scan's business (it falls back, logged)
+                                         if (t.Length > 0 && t.Length <= 64 && t.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) < 0 && t != "." && t != "..") _vr_hands_pack = t;
+                                         else _ini_bad.Add($"{k}='{v}'"); } return true;
             case "vr_hands_rest_curl": pf(k, v, ref _vr_hands_rest_curl, 0f, 1f); return true;
             case "vr_hands_scale":     pf(k, v, ref _vr_hands_scale, 0.8f, 1.25f); return true;
             case "vr_hands_cal":       _vr_hands_cal = v.Trim(); _vr_hands_cal_read = true; return true;
@@ -202,48 +211,85 @@ public sealed unsafe partial class FFXVRModule {
         hands2_pack_push();
     }
 
-    /// <summary>S2: which pack native draws. The selected one (vr_hands_pack), else the other shipped one, else none (the boxes),
-    /// walked once per selection: a missing right.glb here, or native's "failed" (status [11] = -1) for the pack it was given,
-    /// moves to the next. Native loads it at Present while vr_hands=1, so this only says where the files are.</summary>
+    /// <summary>S3: reads <mod>\hands\ (every pack folder, its hand.json; hand_pack.cs) and logs what it found. At the first
+    /// push and on "rescan"; a rescan also forgets the native loader's rejections and walks the selection again (a pack
+    /// re-made on disk has a new stamp, so native loads it again).</summary>
+    private void hands2_scan(bool rescan) {
+        _h2_scanned = true;
+        string dir = _h2_mod_dir.Length > 0 ? Path.Join(_h2_mod_dir, "hands") : "";
+        string? note = "no mod folder";
+        _h2_packs = dir.Length > 0 ? HandPackJson.scan(dir, out note) : new List<HandPack>();
+        var sb = new System.Text.StringBuilder();
+        int usable = 0;
+        foreach (HandPack k in _h2_packs) {
+            if (sb.Length > 0) sb.Append(", ");
+            sb.Append(k.id); if (k.priv) sb.Append(" [private]"); if (k.error != null) sb.Append(" [unusable]");
+            if (k.error == null) usable++;
+        }
+        string m = I($"hands: {(rescan ? "rescan: " : "")}packs found {_h2_packs.Count} ({(sb.Length > 0 ? sb.ToString() : "none")}){(usable < _h2_packs.Count ? I($", {usable} usable") : "")} | selected {_vr_hands_pack}{(note != null ? " | " + note : "")}");
+        _logger.Info(m); d7_log(m);
+        foreach (HandPack k in _h2_packs) {
+            if (k.error != null) { string e = $"hands: pack '{k.id}' cannot be used: {k.error}"; _logger.Warning(e); d7_log(e); }
+            if (k.notes.Count > 0) { string e = $"hands: pack '{k.id}' hand.json: {string.Join("; ", k.notes)}"; _logger.Info(e); d7_log(e); }
+        }
+        if (rescan) { _h2_pack_want = ""; _h2_pack_sent = null; _h2_pack_sent_p = null; }   // walk again from the selection
+    }
+    private HandPack? hands2_find(string id) => _h2_packs.Find(k => string.Equals(k.id, id, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Which pack native draws: the selected one (vr_hands_pack), else generic-glove, else generic, else none (the boxes),
+    /// walked once per selection (or rescan): a pack missing or unusable here, or rejected by native (status [11] = -1 for the
+    /// pack it was given: the reason is kept on the pack, greyed out in F8), moves to the next. Native loads it at Present while
+    /// vr_hands=1 and keeps drawing the old pack until the new one is in, so this only says where the files are.</summary>
     private void hands2_pack_push() {
         if (_fn_hands2_pack == null) return;
-        if (_h2_pack_want != _vr_hands_pack) { _h2_pack_want = _vr_hands_pack; _h2_pack_try = 0; _h2_pack_sent = null; }
+        if (!_h2_scanned) hands2_scan(false);
+        if (!string.Equals(_h2_pack_want, _vr_hands_pack, StringComparison.Ordinal)) { _h2_pack_want = _vr_hands_pack; _h2_pack_try = 0; _h2_pack_sent = null; }
         if (!string.IsNullOrEmpty(_h2_pack_sent) && _fn_hands2_status != null) {
             int* v = stackalloc int[k_h2_status_n];
             _fn_hands2_status(v, k_h2_status_n);
-            if (v[11] == -1) { _h2_pack_try++; _h2_pack_sent = null; }   // native rejected it (it logged why): the next candidate
+            if (v[11] == -1) {   // native rejected it (it logged why): remember the reason, the next candidate
+                string why = "";
+                if (_fn_hands2_pack_error != null) { byte* e = _fn_hands2_pack_error(); if (e != null) why = Marshal.PtrToStringUTF8((nint)e) ?? ""; }
+                if (_h2_pack_sent_p != null) _h2_pack_sent_p.native_error = why.Length > 0 ? why : "the loader rejected it (see ffxvr_diag.log)";
+                _h2_pack_try++; _h2_pack_sent = null;
+            }
         }
         if (_h2_pack_sent != null) return;
-        string[] order = _vr_hands_pack == "generic" ? new[] { "generic", "generic-glove" } : new[] { "generic-glove", "generic" };
-        while (_h2_pack_try < order.Length) {
+        var order = new List<string> { _vr_hands_pack };
+        foreach (string sh in HandPackJson.Shipped) if (!order.Exists(o => string.Equals(o, sh, StringComparison.OrdinalIgnoreCase))) order.Add(sh);
+        while (_h2_pack_try < order.Count) {
             string name = order[_h2_pack_try];
-            string path = _h2_mod_dir.Length > 0 ? Path.Join(_h2_mod_dir, "hands", name, "right.glb") : "";
-            if (path.Length > 0 && File.Exists(path)) {
-                if (_h2_pack_try > 0) { string m = I($"hands: using the pack '{name}' instead of '{order[0]}'"); _logger.Info(m); d7_log(m); }
-                hands2_pack_send(name, path);
-                _h2_pack_sent = name;
+            HandPack? k = hands2_find(name);
+            if (k != null && k.usable && _h2_mod_dir.Length > 0) {
+                if (_h2_pack_try > 0) { string m = $"hands: using the pack '{k.id}' instead of '{order[0]}'"; _logger.Info(m); d7_log(m); }
+                hands2_pack_send(k);
+                _h2_pack_sent = k.id; _h2_pack_sent_p = k;
                 return;
             }
-            string miss = I($"hands: pack '{name}' not found (hands\\{name}\\right.glb in the mod folder; reinstall the mod)");
+            string miss = k == null ? (Array.Exists(HandPackJson.Shipped, x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase)) ? $"hands: pack '{name}' not found (hands\\{name}\\ in the mod folder; reinstall the mod)" : $"hands: pack '{name}' not found under hands\\ in the mod folder")
+                        : $"hands: pack '{k.id}' skipped: {k.error ?? k.native_error}";
             _logger.Warning(miss); d7_log(miss);
             _h2_pack_try++;
         }
         _fn_hands2_pack(null, 0);   // nothing usable: the boxes
-        _h2_pack_sent = "";
-        string none = "hands: no usable hand pack (generic-glove, generic): the boxes are drawn";
+        _h2_pack_sent = ""; _h2_pack_sent_p = null;
+        string none = $"hands: no usable hand pack ({string.Join(", ", order)}): the boxes are drawn";
         _logger.Warning(none); d7_log(none);
     }
-    private void hands2_pack_send(string name, string path) {
-        var d = new VrHandsPackDesc { bytes = sizeof(VrHandsPackDesc), format = 1, mirror = 1, scale = 1f };
-        d.tint[0] = d.tint[1] = d.tint[2] = 1f;   // PackFix and the rest curls stay 0 (hand.json fields: S3)
+    private void hands2_pack_send(HandPack k) {
+        var d = new VrHandsPackDesc { bytes = sizeof(VrHandsPackDesc), format = 1, mirror = k.mirror ? 1 : 0, scale = k.scale, stamp = k.stamp };
+        const float d2r = 0.0174533f;
+        for (int i = 0; i < 3; i++) { d.wrist_off_m[i] = k.off_m[i]; d.wrist_rot_rad[i] = k.rot_deg[i] * d2r; d.tint[i] = k.tint[i]; }
+        for (int i = 0; i < 5; i++) d.rest_curl[i] = k.rest[i];
+        string name = k.id;   // the folder name: the log's and the status line's (native keeps printable ASCII, the rest '_')
         int n = Math.Min(name.Length, 63); byte* nb = stackalloc byte[n + 1];
         for (int i = 0; i < n; i++) { char ch = name[i]; nb[i] = ch >= 32 && ch < 127 ? (byte)ch : (byte)'_'; }
         nb[n] = 0; d.name = nb;
-        fixed (char* p = path) { d.right_glb = p; d.left_glb = null; _fn_hands2_pack(&d, sizeof(VrHandsPackDesc)); }
+        fixed (char* pr = k.right, pl = k.left) { d.right_glb = pr; d.left_glb = pl; _fn_hands2_pack(&d, sizeof(VrHandsPackDesc)); }
     }
 
     /// <summary>The native status line ("drawing | generic-glove 2144 v | eye1 1198 eye2 1198 / 1200 frames (last 10 s) | last
-    /// hidden: ..."), and v[0..16].</summary>
+    /// hidden: ..."), and v[0..20].</summary>
     private string hands2_status(int* v) {
         for (int i = 0; i < k_h2_status_n; i++) v[i] = 0;
         if (_fn_hands2_status == null) return "";
@@ -266,18 +312,12 @@ public sealed unsafe partial class FFXVRModule {
                               + (_hands_dev && _hands_on ? ", and turn the old bone hands off." : "."));
             ImGui.PopStyleColor(1);
         }
-        if (_vr_hands && (v[11] == -1 || _h2_pack_sent == "")) {
+        if (_vr_hands && _h2_pack_sent == "") {   // S3: the whole fallback list failed (a single rejection moves on to the next pack)
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
-            ImGui.TextWrapped("The hand model could not be loaded (see ffxvr_diag.log): boxes are drawn instead. Reinstalling the mod puts hands\\generic-glove and hands\\generic back.");
+            ImGui.TextWrapped("No hand model could be loaded (see ffxvr_diag.log): boxes are drawn instead. Reinstalling the mod puts hands\\generic-glove and hands\\generic back.");
             ImGui.PopStyleColor(1);
         }
-        ImGui.Text("look:"); ImGui.SameLine();
-        if (ImGui.RadioButton("dark glove##h2pk", _vr_hands_pack == "generic-glove")) _vr_hands_pack = "generic-glove";
-        ImGui.SameLine(); if (ImGui.RadioButton("bare hand##h2pk", _vr_hands_pack == "generic")) _vr_hands_pack = "generic";
-        if (_h2_pack_try > 0 && !string.IsNullOrEmpty(_h2_pack_sent)) {   // review N6: the fallback is drawn, not the selection
-            ImGui.SameLine(); ImGui.TextDisabled(_h2_pack_sent == "generic" ? "(using the bare hand: the glove could not be loaded)" : "(using the dark glove: the bare hand could not be loaded)");
-        }
-        ImGui.SameLine(); ImGui.TextDisabled("(our own generic hand; your own models come in a later build)");
+        hands2_pack_ui(v);
         ImGui.Text("show in: first person (with your body hidden), and"); ImGui.SameLine();
         bool dio = (_vr_hands_views & 2) != 0, tp = (_vr_hands_views & 4) != 0, seat = (_vr_hands_views & 8) != 0;
         if (ImGui.Checkbox("the diorama##h2v2", ref dio)) _vr_hands_views = dio ? _vr_hands_views | 2 : _vr_hands_views & ~2;
@@ -318,6 +358,40 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.TextDisabled("In the hand's own frame: yaw turns about the back of the hand, pitch tips the fingers up or down, roll turns about the fingers; out, up and back move it from the thumb side, out of the back of the hand, toward the elbow.");
             ImGui.TreePop();
         }
+    }
+
+    /// <summary>S3: the "hand model" combo (every pack: name, author, licence; "(private)"; an unusable one greyed out with
+    /// the reason as its tooltip), "rescan", and what the drawn pack is.</summary>
+    private void hands2_pack_ui(int* v) {
+        if (!_h2_scanned && _fn_hands2_pack != null) hands2_scan(false);
+        HandPack? sel = hands2_find(_vr_hands_pack);
+        ImGui.Text("hand model:"); ImGui.SameLine(); ImGui.SetNextItemWidth(340);
+        string preview = sel != null ? sel.label : _vr_hands_pack + " (not found)";
+        if (ImGui.BeginCombo("##h2pk", preview)) {
+            for (int i = 0; i < _h2_packs.Count; i++) {
+                HandPack k = _h2_packs[i];
+                bool ok = k.usable;
+                if (!ok) ImGui.BeginDisabled(true);
+                if (ImGui.Selectable(k.label + (ok ? "" : "  (cannot be used)") + "##h2pk" + i.ToString(CI), sel == k) && ok) _vr_hands_pack = k.id;
+                if (!ok) ImGui.EndDisabled();
+                if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+                    ImGui.SetTooltip(esc((ok ? "" : "Cannot be used: " + (k.error ?? k.native_error) + "\n") + "folder hands\\" + k.id + (k.source.Length > 0 ? "\nsource: " + k.source : "")
+                                         + (k.priv ? "\nMade from a model you own: keep it on this PC, do not share it." : "")));
+            }
+            if (_h2_packs.Count == 0) ImGui.TextDisabled("no hand packs in the mod folder's hands\\ (reinstall the mod)");
+            ImGui.EndCombo();
+        }
+        ImGui.SameLine(); if (ImGui.SmallButton("rescan##h2pk")) hands2_scan(true);
+        if (_h2_pack_try > 0 && !string.IsNullOrEmpty(_h2_pack_sent)) {   // review N6: the fallback is drawn, not the selection
+            ImGui.SameLine(); ImGui.TextDisabled(esc($"(using '{_h2_pack_sent}': '{_vr_hands_pack}' could not be loaded)"));
+        }
+        if (sel != null) {
+            string by = (sel.author.Length > 0 ? "by " + sel.author : "") + (sel.licence.Length > 0 ? (sel.author.Length > 0 ? " | " : "") + "licence: " + sel.licence : "");
+            string load = v[11] == 2 && _h2_pack_sent_p == sel ? I($" | {v[12]} vertices, {v[17]} texture{(v[17] == 1 ? "" : "s")}{(v[18] > 0 ? I($" ({v[18]} failed: base colour)") : "")}, loaded in {v[19] / 10.0:F1} ms") : v[11] == 1 ? " | loading ..." : "";
+            ImGui.TextDisabled(esc(by + load));
+            if (sel.priv) ImGui.TextDisabled("Made from a model you own: it stays on this PC. Do not share the pack folder.");
+        }
+        ImGui.TextDisabled("Your own hands from a model you own: tools\\import-hands.ps1 (README: \"Your own hands\"), then rescan.");
     }
 
     /// <summary>Debug > First person / follow: the vr_hands_debug bits and the one-shot pose dump.</summary>
