@@ -40,8 +40,15 @@ internal sealed class HandPack {
     public uint stamp;                           // the glbs' sizes and write times (a changed pack loads again)
     public string? native_error;                 // the native loader's rejection, until the next rescan
     public bool usable => error == null && native_error == null;
+    public int notes_dropped;                    // notes past MaxNotes (review N2: a file cannot flood the log)
+    public const int MaxNotes = 16;
+    public void note(string s) { if (notes.Count < MaxNotes) notes.Add(s); else notes_dropped++; }
     /// <summary>The F8 label: the name, "(private)", author and licence (no '#' pairs: ImGui's id separator).</summary>
-    public string label => (name + (priv ? " (private)" : "") + (author.Length > 0 || licence.Length > 0 ? " - " + author + (author.Length > 0 && licence.Length > 0 ? ", " : "") + licence : "")).Replace("##", "#");
+    public string label { get {
+        string s = name + (priv ? " (private)" : "") + (author.Length > 0 || licence.Length > 0 ? " - " + author + (author.Length > 0 && licence.Length > 0 ? ", " : "") + licence : "");
+        while (s.Contains("##")) s = s.Replace("##", "#");   // review N1: "#####" must not leave a pair
+        return s;
+    } }
 }
 
 internal static class HandPackJson {
@@ -85,7 +92,9 @@ internal static class HandPackJson {
                 }
                 catch (Exception e) { readErr = "hand.json could not be read: " + e.Message; }
             }
-            HandPack p = parse(id, d, text, disk_stat);
+            HandPack p;
+            try { p = parse(id, d, text, disk_stat); }   // review B1: one folder's bad file never ends the scan
+            catch (Exception e) { p = new HandPack { id = id, dir = d, name = clean(id, MaxName), error = "hand.json could not be read: " + first_line(e.Message) }; }
             if (readErr != null) { p.error = readErr; p.notes.Clear(); }
             list.Add(p);
         }
@@ -98,13 +107,13 @@ internal static class HandPackJson {
         var p = new HandPack { id = id, dir = dir, name = clean(id, MaxName), has_json = json != null };
         p.shipped = Array.Exists(Shipped, s => string.Equals(s, id, StringComparison.OrdinalIgnoreCase));
         string? rname = null, lname = null; bool r_key = false, l_key = false, mirror_set = false;
-        if (json == null) p.notes.Add("no hand.json: the defaults are used");
+        if (json == null) p.note("no hand.json: the defaults are used");
         else {
             JsonDocument doc;
             try { doc = JsonDocument.Parse(json, k_opt); }
             catch (JsonException e) { p.error = I($"hand.json is not valid JSON (line {(e.LineNumber ?? 0) + 1}: {first_line(e.Message)})"); return p; }
             catch (Exception e) { p.error = "hand.json could not be parsed: " + first_line(e.Message); return p; }
-            using (doc) {
+            try { using (doc) {
                 JsonElement root = doc.RootElement;
                 if (root.ValueKind != JsonValueKind.Object) { p.error = "hand.json is not a JSON object ({ ... })"; return p; }
                 var unknown = new List<string>();
@@ -120,12 +129,12 @@ internal static class HandPackJson {
                         case "author":  p.author = text(p, f.Name, v, MaxText) ?? p.author; break;
                         case "licence": case "license": p.licence = text(p, f.Name, v, MaxText) ?? p.licence; break;
                         case "source":  p.source = text(p, f.Name, v, MaxText) ?? p.source; break;
-                        case "private": if (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) p.priv = v.GetBoolean(); else p.notes.Add("private is not true or false: ignored"); break;
+                        case "private": if (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) p.priv = v.GetBoolean(); else p.note("private is not true or false: ignored"); break;
                         case "right":   r_key = true; if (!file_name(p, f.Name, v, out rname)) return p; break;
                         case "left":    l_key = true; if (!file_name(p, f.Name, v, out lname)) return p; break;
                         case "mirror":
                             if (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False) { p.mirror = v.GetBoolean(); mirror_set = true; }
-                            else p.notes.Add("mirror is not true or false: ignored");
+                            else p.note("mirror is not true or false: ignored");
                             break;
                         case "scale":   { float s = 1f; if (number(p, f.Name, v, 0.5f, 2f, ref s)) p.scale = s; } break;
                         case "wrist_offset_m":     vec(p, f.Name, v, -0.10f, 0.10f, p.off_m); break;
@@ -133,10 +142,13 @@ internal static class HandPackJson {
                         case "tint":               vec(p, f.Name, v, 0f, 4f, p.tint); break;
                         case "rest_curl":          rest(p, v); break;
                         case "preview": break;   // accepted; not shown in this build
-                        default: unknown.Add(f.Name); break;
+                        default: unknown.Add(clean(f.Name, 32)); break;   // review N2: no raw 60 KB keys in the log
                     }
                 }
-                if (unknown.Count > 0) p.notes.Add("unknown fields ignored: " + string.Join(", ", unknown.Count > 8 ? unknown.GetRange(0, 8) : unknown) + (unknown.Count > 8 ? ", ..." : ""));
+                if (unknown.Count > 0) p.note("unknown fields ignored: " + string.Join(", ", unknown.Count > 8 ? unknown.GetRange(0, 8) : unknown) + (unknown.Count > 8 ? ", ..." : ""));
+            } }
+            catch (InvalidOperationException e) {   // review B1: JsonDocument unescapes lazily: a lone surrogate (\ud800) throws on read
+                p.error = "hand.json has a text the loader cannot read (" + first_line(e.Message) + ")"; p.notes.Clear(); return p;
             }
         }
         // The files: named ones must exist; with neither key, the usual names if present.
@@ -158,8 +170,9 @@ internal static class HandPackJson {
         }
         if (rname != null) p.right = Path.Join(dir, rname);
         if (lname != null && need_l) p.left = Path.Join(dir, lname);
-        if (rname != null && lname != null && p.mirror) p.notes.Add("mirror is true: " + lname + " is not used (the left hand is the right mirrored)");
+        if (rname != null && lname != null && p.mirror) p.note("mirror is true: " + lname + " is not used (the left hand is the right mirrored)");
         p.stamp = h;
+        if (p.notes_dropped > 0) p.notes.Add(I($"... and {p.notes_dropped} more notes"));
         return p;
     }
 
@@ -181,9 +194,9 @@ internal static class HandPackJson {
     }
     static string? text(HandPack p, string key, JsonElement v, int max) {
         if (v.ValueKind == JsonValueKind.Null) return "";
-        if (v.ValueKind != JsonValueKind.String) { p.notes.Add(key + " is not a string: ignored"); return null; }
+        if (v.ValueKind != JsonValueKind.String) { p.note(key + " is not a string: ignored"); return null; }
         string s = v.GetString() ?? "", c = clean(s, max);
-        if (c.Length < s.Trim().Length) p.notes.Add(I($"{key} shortened to {max} characters"));
+        if (c.Length < s.Trim().Length) p.note(I($"{key} shortened to {max} characters"));
         return c;
     }
     /// <summary>A plain .glb file name in the pack folder (no path: a pack cannot point the loader anywhere else); null ok.</summary>
@@ -198,28 +211,28 @@ internal static class HandPackJson {
         name = s; return true;
     }
     static bool number(HandPack p, string key, JsonElement v, float lo, float hi, ref float o) {
-        if (v.ValueKind != JsonValueKind.Number || !v.TryGetDouble(out double d) || !double.IsFinite(d)) { p.notes.Add(key + " is not a number: ignored"); return false; }
+        if (v.ValueKind != JsonValueKind.Number || !v.TryGetDouble(out double d) || !double.IsFinite(d)) { p.note(key + " is not a number: ignored"); return false; }
         float f = (float)Math.Clamp(d, lo, hi);
-        if (f != d && Math.Abs(f - d) > 1e-6) p.notes.Add(I($"{key} {d:G4} clamped to {f:G4}"));
+        if (f != d && Math.Abs(f - d) > 1e-6) p.note(I($"{key} {d:G4} clamped to {f:G4}"));
         o = f; return true;
     }
     static void vec(HandPack p, string key, JsonElement v, float lo, float hi, float[] o) {
-        if (v.ValueKind != JsonValueKind.Array || v.GetArrayLength() != 3) { p.notes.Add(key + " is not 3 numbers: ignored"); return; }
+        if (v.ValueKind != JsonValueKind.Array || v.GetArrayLength() != 3) { p.note(key + " is not 3 numbers: ignored"); return; }
         var t = new float[3]; int i = 0;
         foreach (JsonElement e in v.EnumerateArray()) { float f = o[i]; if (!number(p, I($"{key}[{i}]"), e, lo, hi, ref f)) return; t[i++] = f; }
         Array.Copy(t, o, 3);
     }
     static void rest(HandPack p, JsonElement v) {
         if (v.ValueKind == JsonValueKind.Array) {
-            if (v.GetArrayLength() != 5) { p.notes.Add("rest_curl is not 5 numbers (thumb, index, middle, ring, little): ignored"); return; }
+            if (v.GetArrayLength() != 5) { p.note("rest_curl is not 5 numbers (thumb, index, middle, ring, little): ignored"); return; }
             int i = 0; var t = new float[5];
             foreach (JsonElement e in v.EnumerateArray()) { float f = 0f; if (!number(p, I($"rest_curl[{i}]"), e, -1f, 1f, ref f)) return; t[i++] = f; }
             Array.Copy(t, p.rest, 5); return;
         }
-        if (v.ValueKind != JsonValueKind.Object) { p.notes.Add("rest_curl is not an object or 5 numbers: ignored"); return; }
+        if (v.ValueKind != JsonValueKind.Object) { p.note("rest_curl is not an object or 5 numbers: ignored"); return; }
         foreach (JsonProperty f in v.EnumerateObject()) {
             int k = Array.IndexOf(k_fingers, f.Name);
-            if (k < 0) { p.notes.Add("rest_curl." + clean(f.Name, 20) + ": not a finger (thumb, index, middle, ring, little): ignored"); continue; }
+            if (k < 0) { p.note("rest_curl." + clean(f.Name, 20) + ": not a finger (thumb, index, middle, ring, little): ignored"); continue; }
             float c = 0f; if (number(p, "rest_curl." + f.Name, f.Value, -1f, 1f, ref c)) p.rest[k] = c;
         }
     }

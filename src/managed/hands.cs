@@ -53,7 +53,7 @@ public sealed unsafe partial class FFXVRModule {
     private string _h2_pack_want = "";           // the selection the fallback walk below is for
     private int    _h2_pack_try;                 // the candidate being tried (the selected pack, then generic-glove, then generic)
     private List<HandPack> _h2_packs = new();    // S3: the scan of <mod>\hands\ (hand_pack.cs)
-    private bool   _h2_scanned;                  // scanned once (at the first push), again on "rescan"
+    private bool   _h2_scanned, _h2_scan_tried;  // a scan finished / was tried (at the first push; again on "rescan")
     private HandPack? _h2_pack_sent_p;           // the pack native was last given
     private string _vr_hands_cal = "";           // ini vr_hands_cal ("" = the default placement)
     private bool   _vr_hands_cal_read;           // the key was in the file (the hands_cal migration runs only without it)
@@ -80,7 +80,7 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_hands_debug":     pi(k, v, ref _vr_hands_debug, 0, 15); return true;
             case "vr_hands_views":     pi(k, v, ref _vr_hands_views, 0, 15); _vr_hands_views |= 1; return true;
             case "vr_hands_pack":      { string t = v.Trim();   // a folder name; whether it exists is the scan's business (it falls back, logged)
-                                         if (t.Length > 0 && t.Length <= 64 && t.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) < 0 && t != "." && t != "..") _vr_hands_pack = t;
+                                         if (t.Length > 0 && t.Length <= 255 && t.IndexOfAny(new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|' }) < 0 && t != "." && t != "..") _vr_hands_pack = t;
                                          else _ini_bad.Add($"{k}='{v}'"); } return true;
             case "vr_hands_rest_curl": pf(k, v, ref _vr_hands_rest_curl, 0f, 1f); return true;
             case "vr_hands_scale":     pf(k, v, ref _vr_hands_scale, 0.8f, 1.25f); return true;
@@ -215,10 +215,15 @@ public sealed unsafe partial class FFXVRModule {
     /// push and on "rescan"; a rescan also forgets the native loader's rejections and walks the selection again (a pack
     /// re-made on disk has a new stamp, so native loads it again).</summary>
     private void hands2_scan(bool rescan) {
-        _h2_scanned = true;
+        _h2_scan_tried = true;   // once by itself; again only on "rescan" (a failed listing is not retried every frame)
         string dir = _h2_mod_dir.Length > 0 ? Path.Join(_h2_mod_dir, "hands") : "";
         string? note = "no mod folder";
-        _h2_packs = dir.Length > 0 ? HandPackJson.scan(dir, out note) : new List<HandPack>();
+        List<HandPack> found;
+        try { found = dir.Length > 0 ? HandPackJson.scan(dir, out note) : new List<HandPack>(); }
+        catch (Exception e) {   // review B1: never past here (scan catches per folder; this is the folder listing itself)
+            string m0 = "hands: the hand packs could not be listed: " + e.Message; _logger.Warning(m0); d7_log(m0); return;   // the old list stays; retried at the next rescan
+        }
+        _h2_packs = found; _h2_scanned = true;   // only a finished scan counts
         var sb = new System.Text.StringBuilder();
         int usable = 0;
         foreach (HandPack k in _h2_packs) {
@@ -242,7 +247,7 @@ public sealed unsafe partial class FFXVRModule {
     /// vr_hands=1 and keeps drawing the old pack until the new one is in, so this only says where the files are.</summary>
     private void hands2_pack_push() {
         if (_fn_hands2_pack == null) return;
-        if (!_h2_scanned) hands2_scan(false);
+        if (!_h2_scan_tried) hands2_scan(false);
         if (!string.Equals(_h2_pack_want, _vr_hands_pack, StringComparison.Ordinal)) { _h2_pack_want = _vr_hands_pack; _h2_pack_try = 0; _h2_pack_sent = null; }
         if (!string.IsNullOrEmpty(_h2_pack_sent) && _fn_hands2_status != null) {
             int* v = stackalloc int[k_h2_status_n];
@@ -363,7 +368,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>S3: the "hand model" combo (every pack: name, author, licence; "(private)"; an unusable one greyed out with
     /// the reason as its tooltip), "rescan", and what the drawn pack is.</summary>
     private void hands2_pack_ui(int* v) {
-        if (!_h2_scanned && _fn_hands2_pack != null) hands2_scan(false);
+        if (!_h2_scan_tried && _fn_hands2_pack != null) hands2_scan(false);
         HandPack? sel = hands2_find(_vr_hands_pack);
         ImGui.Text("hand model:"); ImGui.SameLine(); ImGui.SetNextItemWidth(340);
         string preview = sel != null ? sel.label : _vr_hands_pack + " (not found)";
