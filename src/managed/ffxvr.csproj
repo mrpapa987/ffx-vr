@@ -12,11 +12,17 @@
         <AssemblyTitle>FFX VR</AssemblyTitle>
         <Product>FFX VR</Product>
         <Description>VR support for Final Fantasy X HD Remaster.</Description>
-        <Version>0.1.0-dev</Version>
+        <!--
+          The version, in one place (docs\release.md, "Release procedure"): the assembly's informational version
+          (shown in the F8 overlay, at the top of ffxvr_diag.log), ffxvr.manifest.json, the native DLL's version string
+          (build-mod writes src\native\ffxvr_version.h from it) and the release zip's name. The git tag is v + this.
+          SemVer: 0.x while the mod is young; -alpha.N while it has been tested on one setup only.
+        -->
+        <Version>0.1.0-alpha.1</Version>
         <Authors>mrpapa</Authors>
 
-        <RepositoryType></RepositoryType>
-        <RepositoryUrl></RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <RepositoryUrl>https://github.com/mrpapa987/ffx-vr</RepositoryUrl>
         <FhManifestHomePage></FhManifestHomePage>
 
         <!--
