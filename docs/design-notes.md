@@ -3199,3 +3199,49 @@ the diorama too** ("to give our hands some context when adjusting the view"). AB
   | put down L N R N`. Debug bit 2 draws the boxes instead of the mesh.
 - **Not done in S2:** the retire commit of the old bone hands (spec section 4; the spec puts it after S2 passes in the
   headset); hand.json parsing and user packs (S3); the game's lights (S4).
+
+## VR hands v2, stage S3: hand packs, hand.json, the importer, the generic hand's proportions (branch `hands-s3`, 3 Nov 2026)
+
+Spec: research/hands-v2-spec.md S3 (+ 1.4, 1.5, 1.6, 5). The owner on S2: "decent placeholders, a little floppy / long
+fingers". ABI 29.
+
+- **Packs** (`src/managed/hand_pack.cs`, managed only; native never parses JSON). Every folder under `<mod>\hands\` with a
+  `hand.json` or a `.glb` is a pack (64 at most), scanned at the first frame and on F8's **rescan**. hand.json format 1
+  (<= 64 KB, System.Text.Json, comments and trailing commas allowed): `name`, `author`, `licence`, `source`, `private`,
+  `right` / `left` (plain `.glb` names in the pack folder only: no paths), `mirror`, `scale` (0.5..2), `wrist_offset_m`
+  (+-0.10 m each), `wrist_rotation_deg` (+-45 each), `tint` (0..4), `rest_curl` (object by finger or 5 numbers, -1..1),
+  `preview` (accepted, not shown). A wrong type or an out-of-range value is a logged note and the default / clamped value is
+  used; only what makes a pack unusable is an error (bad JSON, a newer format, a missing or oversized glb, a file name with a
+  path), and that pack is greyed out in F8 with the reason as its tooltip. Mirror: `true` builds the left from the right
+  even if left.glb exists; both files and no `mirror`: a two-handed pack; only a left file: the right is its mirror.
+- **Choice and fallback.** `vr_hands_pack` is any folder name; the walk is the selection, then `generic-glove`, then
+  `generic`, then the boxes (each step logged). Native keeps drawing the old pack until the new one is in, also when the new
+  one is rejected (S2 dropped to the boxes); its reason (`ffxvr_hands2_pack_error`) is kept on the pack until a rescan.
+  `VrHandsPackDesc` + `stamp` (the glbs' sizes and write times): the same paths with changed files load again, so a pack
+  re-made while the game runs shows after a rescan.
+- **Native.** `hv_pack_parse` does right + mirror, left only, or both (two-handed); the worker decodes the textures with WIC,
+  halves any over 1024 px and builds the mips there (S2 built mips at Present: review SF-1 item 4). The S2 caps stay (65535
+  vertices, 393216 indices, 4 images a hand, 2048 px decoded, 32 MB a file). `ffxvr_hands2_status` 21 values (+ the drawn
+  pack's textures, failed images, worker and upload ms), shown under the F8 combo.
+- **The importer** (`tools/hands/import-hands.py` + `objio.py`, `tools/import-hands.ps1`): the research prototype, hardened.
+  A full-body OBJ in a T or A pose, Y up: both hands found at the X ends (or `--tip`), cut at the cuff (`--cut*`), five
+  fingers from the mesh's geodesic merge tree, the 26 joints, one scale for both hands from the middle finger, textures
+  embedded (PNG / JPEG; a missing one is warned and drawn in its flat colour). It writes `"private": true`, the licence
+  "private - made from your own copy, do not share" and `PRIVATE-do-not-share.txt`; it refuses an output inside a git
+  checkout (a `.git` folder or file above it), a shipped pack's folder, and a folder that is not its own. The wrapper finds
+  Python 3.8+ and numpy and resolves `<mod>\hands\<Name>`. package-release ships the scripts by name, never a pack; its guard
+  now also fails on a private marker or a stray `.glb` anywhere in the zip. On the owner's PS2 Tidus OBJ (scratchpad only,
+  never in the repo): right 602 t, 2 textures; left 694 t, 4 textures (gauntlet, chains, bracelet); both load through the
+  runtime's loader, pose and skin cleanly in all seven gestures.
+- **The generic hand's proportions** (the "floppy / long fingers"). Measured on the S2 mesh: the palm ended at the knuckles,
+  so each finger showed its whole length from the MCP joint (middle finger 0.55 of the 0.19 m hand); a real finger shows
+  about 0.43 from its web (ANSUR II median hand length 193 mm men, breadth 88 mm; webs 15-25 mm past the MCPs and phalanx
+  lengths from Buryanov & Kotiuk, Int. J. Morphol. 28(3), 2010). And the joints blended over 0.35 of the bone either side
+  (a 90 deg PIP bend spread over ~25 mm: rubbery). Now: phalanges to those lengths (middle MCP -> tip 96 -> 91 mm), the
+  knuckles 4 mm further out (hand length stays 0.19 m), palm-side webs 10-13 mm past the knuckles weighted into the
+  proximal bones, fingers 5 % fuller, joint blend 0.22. Visible middle finger 0.55 -> 0.43 of the hand; palm breadth 0.47 L
+  (ANSUR 0.46). In the solver: a touch must be off for 50 ms before its finger opens (a flicker of a capacitive sensor
+  twitched a finger by 25 % in S2), then opens with 50 ms (was 70; the 10 % point stays ~160 ms); the grip has a 0.04 dead
+  zone. `vr_hands_rest_curl` stays 0.20 (an ini keeps its value; raise it in F8 if the idle hand looks too open).
+- **Not done in S3:** the pack's `preview` image in F8; per-hand (left vs right) wrist offsets for asymmetric two-handed
+  packs; the retire commit of the old bone hands; the game's lights (S4).
