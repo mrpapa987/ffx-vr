@@ -77,7 +77,14 @@ extern const char* const hv_joint_name[HV_J];
 struct HvSkinVertex { float p[3]; float n[3]; float uv[2]; uint32_t rgba; uint8_t j[4]; uint8_t w[4]; };
 static_assert(sizeof(HvSkinVertex) == 44, "HvSkinVertex is the skinned input layout's 44-byte vertex");
 struct HvBatch { uint32_t first, count; int tex; };   // an index range drawn with one texture (-1: none, the vertex colour alone)
-struct HvImage { int w = 0, h = 0; std::vector<uint32_t> rgba; };   // decoded RGBA8 (R in the low byte), mip 0
+struct HvImage {                                      // decoded RGBA8 (R in the low byte)
+    int w = 0, h = 0; std::vector<uint32_t> rgba;     // mip 0
+    std::vector<std::vector<uint32_t>> mips;          // S3: levels 1.. (each side halved, at least 1), built on the loader thread
+    int src_w = 0, src_h = 0;                         // the size as decoded (larger than w x h when hv_image_prepare shrank it)
+};
+/// S3 (on the loader thread, not at Present): halves the image (box filter) until both sides are <= max_side, then builds the
+/// box-filtered mip chain down to 1 x 1 (at most 12 levels in all). An image with a bad size is emptied (the base colour).
+void hv_image_prepare(HvImage* im, int max_side);
 /// One hand of a pack, on the CPU.
 struct HvMesh {
     std::vector<HvSkinVertex> v; std::vector<uint32_t> idx; std::vector<HvBatch> batch;
@@ -101,6 +108,11 @@ struct HvMesh {
 /// hand, HV_MAX_IMAGES images (the rest draw their base colour); compressed glbs (Draco, meshopt) and other required
 /// extensions are refused. Can throw std::bad_alloc (the caller catches).
 bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMesh* out, char* err, int errn);
+/// S3: both hands of a pack from its files' bytes (null / 0: that file is not given; [0] left, [1] right, as HvMesh::hand).
+/// right + mirror (or right only): the left is the right mirrored; left only: the right is the left mirrored; both and no
+/// mirror: both parsed (a two-handed pack). The error names the file (names[h], e.g. "left.glb"). Can throw std::bad_alloc.
+bool hv_pack_parse(const uint8_t* const data[2], const size_t size[2], const char* const names[2], bool mirror, const float* tint,
+                   HvMesh hand[2], char* err, int errn);
 /// The other hand from this one: x negated in positions and normals, the winding reversed, every bind frame conjugated
 /// with S = diag(-1, 1, 1) (spec 2 row 7). The textures are not copied: dst->tex_from names the hand whose textures it uses.
 void hv_mesh_mirror(const HvMesh& src, HvMesh* dst);

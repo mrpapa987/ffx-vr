@@ -4461,7 +4461,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 28;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2)
+constexpr int FFXVR_ABI = 29;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -8245,21 +8245,25 @@ HvFingerState g_h2_fs[2]; int64_t g_h2_T_prev = 0; bool g_h2_put_down_seen[2] = 
 
 // S2: the pack. ffxvr_hands2_pack (managed, on a change) sets the request; xr_tick starts a worker thread for it (one at a
 // time) and, when its result is in, uploads it (render thread, at Present) and swaps it in; the CPU copies are freed then.
-struct VrHandsPackDesc { int bytes, format; const wchar_t *right_glb, *left_glb; int mirror; float scale, wrist_off_m[3], wrist_rot_rad[3], tint[3], rest_curl[5]; const char* name; };
-static_assert(sizeof(void*) != 4 || sizeof(VrHandsPackDesc) == 84, "VrHandsPackDesc: 84 bytes on x86, as hands.cs declares it");
+// S3 (ABI 29): + stamp, the files' change stamp (managed: their sizes and write times): the same paths with another stamp
+// load again (a pack re-made while the game runs, then "rescan"). Native reads min(bytes, sizeof) and defaults the rest.
+struct VrHandsPackDesc { int bytes, format; const wchar_t *right_glb, *left_glb; int mirror; float scale, wrist_off_m[3], wrist_rot_rad[3], tint[3], rest_curl[5]; const char* name; uint32_t stamp; };
+static_assert(sizeof(void*) != 4 || sizeof(VrHandsPackDesc) == 88, "VrHandsPackDesc: 88 bytes on x86, as hands.cs declares it");
 static_assert(sizeof(VrHandsCfg) == 48, "VrHandsCfg: 48 bytes, as hands.cs declares it");
-struct H2PackReq { wchar_t right[520] = {}, left[520] = {}; bool mirror = true; float scale = 1.f, off[3] = {}, rot[3] = {}, tint[3] = { 1.f, 1.f, 1.f }, rest[5] = {}; char name[64] = ""; uint32_t gen = 0; };
-struct H2CpuPack { HvMesh hand[2]; bool ok = false; char err[300] = ""; double ms = 0.0; uint32_t gen = 0; int tex_ok = 0, tex_fail = 0; bool from_file[2] = { false, false }; char tex_err[160] = ""; };
+struct H2PackReq { wchar_t right[520] = {}, left[520] = {}; bool mirror = true; float scale = 1.f, off[3] = {}, rot[3] = {}, tint[3] = { 1.f, 1.f, 1.f }, rest[5] = {}; char name[64] = ""; uint32_t gen = 0, stamp = 0; };
+struct H2CpuPack { HvMesh hand[2]; bool ok = false; char err[300] = ""; double ms = 0.0; uint32_t gen = 0; int tex_ok = 0, tex_fail = 0, tex_shrunk = 0; char tex_err[160] = ""; };
 struct H2Gpu {
     HvMesh rig[2];                                       // the skeleton and the batches (the vertices, indices and images are freed after upload)
     ID3D11Buffer* vb = nullptr; ID3D11Buffer* ib = nullptr;
     std::vector<ID3D11ShaderResourceView*> srv[2];       // per hand, by HvBatch::tex (null: the white texture)
     uint32_t vbase[2] = {}, ibase[2] = {}, verts = 0, tris = 0;
+    int tex_gpu = 0, tex_bad = 0; float worker_ms = 0.f, upload_ms = 0.f;   // S3: for the F8 status (ffxvr_hands2_status [17..20])
     H2PackReq req;                                       // what it was loaded from (name, scale, PackFix, tint, rest curls)
 };
 H2PackReq g_h2_req; bool g_h2_req_set = false; uint32_t g_h2_req_gen = 0, g_h2_load_gen = 0;
 std::atomic<H2CpuPack*> g_h2_cpu_ready{ nullptr }; std::atomic<bool> g_h2_worker_busy{ false }; std::atomic<bool> g_h2_worker_oom{ false };
 H2Gpu* g_h2_gpu = nullptr;
+static const int k_h2_tex_side = 1024;                  // S3: a pack texture larger than this is halved on the loader thread (a hand never needs more)
 int  g_h2_pack_state = 0;                                // 0 none asked for, 1 loading, 2 loaded, -1 failed (the boxes are drawn meanwhile)
 char g_h2_pack_err[300] = "";                            // the last failure (for the F8 status)
 
@@ -8380,29 +8384,35 @@ static DWORD WINAPI hands_worker(LPVOID arg) {
     LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
     char e[256] = "";
-    auto load = [&](const wchar_t* path, int h) -> bool {
-        char pn[160]; hands_file_part(path, pn, sizeof(pn));
-        std::vector<uint8_t> b;
-        if (!hv_read_file(path, 32u << 20, &b, e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn, e); return false; }
-        if (!hv_glb_parse(b.data(), b.size(), h, q.tint, &r->hand[h], e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn, e); return false; }
-        HvMesh& m = r->hand[h];
-        for (size_t i = 0; i < m.tex_file.size(); ++i) {
-            if (hv_wic_decode(m.tex_file[i].data(), m.tex_file[i].size(), &m.tex[i], e, sizeof(e))) r->tex_ok++;
-            else { r->tex_fail++; m.tex[i] = HvImage(); if (!r->tex_err[0]) snprintf(r->tex_err, sizeof(r->tex_err), "%s texture %u: %s", pn, static_cast<unsigned>(i), e); }
-        }
-        m.tex_file.clear(); m.tex_file.shrink_to_fit();
-        r->from_file[h] = true;
-        return true;
-    };
     bool ok = true;
     try {   // SF-1: an out-of-memory (std::bad_alloc from any vector here, cgltf's malloc returns null) must not end the game
+        // S3: the files a pack needs (hv_pack_parse: right + mirror, left only, or both for a two-handed pack), then the parse
         const bool have_r = q.right[0] != 0, have_l = q.left[0] != 0;
-        if (have_r) ok = load(q.right, 1);
-        if (ok && have_r && have_l && !q.mirror) ok = load(q.left, 0);
+        const bool need[2] = { have_l && (!have_r || !q.mirror), have_r };
+        std::vector<uint8_t> b[2]; char pn[2][160] = { "", "" };
+        for (int h = 1; h >= 0 && ok; --h) {
+            if (!need[h]) continue;
+            const wchar_t* path = h ? q.right : q.left; hands_file_part(path, pn[h], sizeof(pn[h]));
+            if (!hv_read_file(path, 32u << 20, &b[h], e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn[h], e); ok = false; }
+        }
         if (ok) {
-            if (r->from_file[1] && !r->from_file[0]) hv_mesh_mirror(r->hand[1], &r->hand[0]);          // the left from the right (the generic packs)
-            else if (!have_r && have_l) { ok = load(q.left, 0); if (ok) hv_mesh_mirror(r->hand[0], &r->hand[1]); }   // only a left hand given
-            else if (!have_r) { ok = false; snprintf(r->err, sizeof(r->err), "no glb named for either hand"); }
+            const uint8_t* const dp[2] = { b[0].empty() ? nullptr : b[0].data(), b[1].empty() ? nullptr : b[1].data() };
+            const size_t ds[2] = { b[0].size(), b[1].size() }; const char* const nm[2] = { pn[0], pn[1] };
+            ok = hv_pack_parse(dp, ds, nm, q.mirror, q.tint, r->hand, r->err, sizeof(r->err));
+            b[0].clear(); b[0].shrink_to_fit(); b[1].clear(); b[1].shrink_to_fit();
+        }
+        for (int h = 0; h < 2 && ok; ++h) {   // the images: decoded, shrunk to 1024 at most and mipped here, not at Present (review SF-1 item 4)
+            HvMesh& m = r->hand[h];
+            for (size_t i = 0; i < m.tex_file.size(); ++i) {
+                if (hv_wic_decode(m.tex_file[i].data(), m.tex_file[i].size(), &m.tex[i], e, sizeof(e))) {
+                    m.tex_file[i].clear(); m.tex_file[i].shrink_to_fit();
+                    hv_image_prepare(&m.tex[i], k_h2_tex_side);
+                    if (m.tex[i].w > 0) { r->tex_ok++; if (m.tex[i].src_w != m.tex[i].w || m.tex[i].src_h != m.tex[i].h) r->tex_shrunk++; }
+                    else r->tex_fail++;
+                }
+                else { r->tex_fail++; m.tex[i] = HvImage(); if (!r->tex_err[0]) snprintf(r->tex_err, sizeof(r->tex_err), "%s texture %u: %s", h ? pn[1] : (pn[0][0] ? pn[0] : pn[1]), static_cast<unsigned>(i), e); }
+            }
+            m.tex_file.clear(); m.tex_file.shrink_to_fit();
         }
     }
     catch (...) {
@@ -8425,29 +8435,19 @@ static void hands_gpu_release(H2Gpu*& g) {
     for (auto& v : g->srv) for (auto* s : v) if (s) s->Release();
     delete g; g = nullptr;
 }
-/// One RGBA8 image -> an immutable texture with a box-filtered mip chain, and its view.
+/// One RGBA8 image with its mip chain (hv_image_prepare, on the worker) -> an immutable texture, and its view.
 static ID3D11ShaderResourceView* hands_texture(const HvImage& im) {
-    if (im.w <= 0 || im.h <= 0 || im.rgba.size() != static_cast<size_t>(im.w) * static_cast<size_t>(im.h)) return nullptr;
-    std::vector<std::vector<uint32_t>> lv; std::vector<int> lw, lh;
-    lv.push_back(im.rgba); lw.push_back(im.w); lh.push_back(im.h);
-    while ((lw.back() > 1 || lh.back() > 1) && lv.size() < 12) {
-        const int w = lw.back(), h = lh.back(), nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
-        const std::vector<uint32_t>& s = lv.back(); std::vector<uint32_t> d(static_cast<size_t>(nw) * nh);
-        for (int y = 0; y < nh; ++y) for (int x = 0; x < nw; ++x) {
-            uint32_t acc[4] = {};
-            for (int k = 0; k < 4; ++k) {
-                const int sx = (x * 2 + (k & 1)) < w ? x * 2 + (k & 1) : w - 1, sy = (y * 2 + (k >> 1)) < h ? y * 2 + (k >> 1) : h - 1;
-                const uint32_t p = s[static_cast<size_t>(sy) * w + sx];
-                for (int c = 0; c < 4; ++c) acc[c] += (p >> (8 * c)) & 255u;
-            }
-            d[static_cast<size_t>(y) * nw + x] = ((acc[0] + 2) / 4) | (((acc[1] + 2) / 4) << 8) | (((acc[2] + 2) / 4) << 16) | (((acc[3] + 2) / 4) << 24);
-        }
-        lv.push_back(std::move(d)); lw.push_back(nw); lh.push_back(nh);
-    }
-    D3D11_TEXTURE2D_DESC td = {}; td.Width = static_cast<UINT>(im.w); td.Height = static_cast<UINT>(im.h); td.MipLevels = static_cast<UINT>(lv.size()); td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;   // UNORM, no sRGB view: gamma space like the game
+    if (im.w <= 0 || im.h <= 0 || im.rgba.size() != static_cast<size_t>(im.w) * static_cast<size_t>(im.h) || im.mips.size() > 11) return nullptr;
     D3D11_SUBRESOURCE_DATA sd[12] = {};
-    for (size_t i = 0; i < lv.size(); ++i) { sd[i].pSysMem = lv[i].data(); sd[i].SysMemPitch = static_cast<UINT>(lw[i]) * 4u; }
+    int w = im.w, h = im.h; UINT levels = 0;
+    for (size_t i = 0; i <= im.mips.size(); ++i) {
+        const std::vector<uint32_t>& lv = i == 0 ? im.rgba : im.mips[i - 1];
+        if (lv.size() != static_cast<size_t>(w) * static_cast<size_t>(h)) return nullptr;   // a chain that does not halve: refused
+        sd[i].pSysMem = lv.data(); sd[i].SysMemPitch = static_cast<UINT>(w) * 4u; levels++;
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
+    D3D11_TEXTURE2D_DESC td = {}; td.Width = static_cast<UINT>(im.w); td.Height = static_cast<UINT>(im.h); td.MipLevels = levels; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;   // UNORM, no sRGB view: gamma space like the game
     ID3D11Texture2D* t = nullptr; ID3D11ShaderResourceView* v = nullptr;
     if (SUCCEEDED(g_device->CreateTexture2D(&td, sd, &t)) && t) { g_device->CreateShaderResourceView(t, nullptr, &v); t->Release(); }
     return v;
@@ -8456,14 +8456,14 @@ static ID3D11ShaderResourceView* hands_texture(const HvImage& im) {
 static void hands_pack_upload(H2CpuPack* c) {
     LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
     const char* name = g_h2_req.name[0] ? g_h2_req.name : "?";
+    // S3: a rejected pack leaves the one drawn now in place (managed then asks for the next in its fallback list, or none)
     if (!c->ok) {
         g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, c->err);
-        diag("hands: pack '%s' rejected: %s -> boxes", name, c->err);
-        hands_gpu_release(g_h2_gpu);
+        diag("hands: pack '%s' rejected: %s%s", name, c->err, g_h2_gpu ? "" : " (boxes meanwhile)");
         return;
     }
     H2Gpu* g = new (std::nothrow) H2Gpu();
-    if (g == nullptr) { g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory"); diag("hands: pack '%s' rejected: out of memory -> boxes", name); return; }
+    if (g == nullptr) { g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory"); diag("hands: pack '%s' rejected: out of memory", name); return; }
     int tex_made = 0;
     try {   // SF-1: the vectors below can throw (bad_alloc) on the render thread: never past here
     std::vector<HvSkinVertex> v; std::vector<uint32_t> ix;
@@ -8479,8 +8479,8 @@ static void hands_pack_upload(H2CpuPack* c) {
     if (SUCCEEDED(hr)) { bd.ByteWidth = static_cast<UINT>(ix.size() * sizeof(uint32_t)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER; sd.pSysMem = ix.data(); hr = g_device->CreateBuffer(&bd, &sd, &g->ib); }
     if (FAILED(hr) || g->vb == nullptr || g->ib == nullptr) {
         g_h2_pack_state = -1; snprintf(g_h2_pack_err, sizeof(g_h2_pack_err), "the GPU buffers could not be made (hr 0x%08lX)", static_cast<unsigned long>(hr));
-        diag("hands: pack '%s' rejected: %s -> boxes", name, g_h2_pack_err);
-        hands_gpu_release(g); hands_gpu_release(g_h2_gpu); return;
+        diag("hands: pack '%s' rejected: %s", name, g_h2_pack_err);
+        hands_gpu_release(g); return;
     }
     for (int h = 0; h < 2; ++h) {   // the hands with their own images first
         if (c->hand[h].tex_from >= 0) continue;
@@ -8499,19 +8499,21 @@ static void hands_pack_upload(H2CpuPack* c) {
     }
     catch (...) {
         g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory uploading the pack");
-        diag("hands: pack '%s' rejected: %s -> boxes", name, g_h2_pack_err);
-        hands_gpu_release(g); hands_gpu_release(g_h2_gpu); return;
+        diag("hands: pack '%s' rejected: %s", name, g_h2_pack_err);
+        hands_gpu_release(g); return;
     }
     g->req = g_h2_req;
     hands_gpu_release(g_h2_gpu);
     g_h2_gpu = g; g_h2_pack_state = 2; g_h2_pack_err[0] = 0;
     QueryPerformanceCounter(&t1);
+    g->tex_gpu = tex_made; g->tex_bad = c->tex_fail + c->hand[0].images_dropped + c->hand[1].images_dropped;
+    g->worker_ms = static_cast<float>(c->ms); g->upload_ms = static_cast<float>((t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
     const HvMesh& R = g->rig[1]; const HvMesh& L = g->rig[0];
-    diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded, %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s%s | worker %.1f ms, upload %.1f ms",
+    diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded (%d shrunk to %d), %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s%s | worker %.1f ms, upload %.1f ms",
          name, g->verts - g->vbase[1], R.tris, R.prims, R.prims == 1 ? "" : "s", static_cast<unsigned>(R.batch.size()), R.batch.size() == 1 ? "" : "es", R.mirrored ? " (mirrored from the left)" : "",
-         L.mirrored ? "mirrored, " : "", g->vbase[1], L.tris, c->tex_ok, c->tex_fail, tex_made, c->tex_err[0] ? ": " : "", c->tex_err,
+         L.mirrored ? "mirrored, " : "", g->vbase[1], L.tris, c->tex_ok, c->tex_shrunk, k_h2_tex_side, c->tex_fail, tex_made, c->tex_err[0] ? ": " : "", c->tex_err,
          R.hand_len, g->req.scale, R.palm_rebuilt ? " | palm rebuilt" : "", (R.unknown_joints || L.unknown_joints) ? " | extra skin joints given to the wrist" : "",
-         (R.images_dropped || L.images_dropped) ? " | images past 4 drawn as their base colour" : "", c->ms, (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
+         (R.images_dropped || L.images_dropped) ? " | images past 4 drawn as their base colour" : "", c->ms, static_cast<double>(g->upload_ms));
 }
 /// xr_tick (render thread, at Present): consume a finished load, start the next one. Nothing loads while vr_hands=0.
 static void hands_pack_tick() {
@@ -8961,8 +8963,9 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int 
 }
 
 /// S2 (ABI 28): the pack to draw. Paths are absolute UTF-16; left may be null (mirror: the left from the right). null clears
-/// it (boxes). The load happens at Present on a worker thread while vr_hands=1; the boxes are drawn until it is in. A request
-/// equal to the current one does nothing.
+/// it (boxes). The load happens at Present on a worker thread while vr_hands=1; the pack drawn now (else the boxes) stays
+/// until it is in, and also when it is rejected (S3). A request equal to the current one does nothing (S3: equal includes
+/// the files' stamp, so a pack re-made on disk loads again).
 extern "C" __declspec(dllexport) void ffxvr_hands2_pack(const VrHandsPackDesc* d, int bytes) {
     if (d == nullptr || bytes < static_cast<int>(offsetof(VrHandsPackDesc, mirror) + sizeof(int))) {
         if (g_h2_req_set) { g_h2_req_set = false; g_h2_req = H2PackReq(); g_h2_req_gen++; }
@@ -8990,11 +8993,13 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_pack(const VrHandsPackDesc* d
         for (int i = 0; i < 5; ++i) q.rest[i] = fin(c.rest_curl[i], 0.f, -1.f, 1.f);
         if (c.name != nullptr) { int i = 0; for (; i < 63 && c.name[i] != 0; ++i) q.name[i] = (c.name[i] >= 32 && c.name[i] < 127 && c.name[i] != '%') ? c.name[i] : '_'; q.name[i] = 0; }
     }
+    if (static_cast<size_t>(bytes) >= offsetof(VrHandsPackDesc, stamp) + sizeof(uint32_t)) q.stamp = c.stamp;   // S3
     if (!q.name[0]) strcpy_s(q.name, "pack");
     if (!q.right[0] && !q.left[0]) { if (g_h2_req_set) { g_h2_req_set = false; g_h2_req = H2PackReq(); g_h2_req_gen++; } return; }
     const H2PackReq& o = g_h2_req;
     if (g_h2_req_set && wcscmp(o.right, q.right) == 0 && wcscmp(o.left, q.left) == 0 && o.mirror == q.mirror && o.scale == q.scale && strcmp(o.name, q.name) == 0
-        && memcmp(o.off, q.off, sizeof(q.off)) == 0 && memcmp(o.rot, q.rot, sizeof(q.rot)) == 0 && memcmp(o.tint, q.tint, sizeof(q.tint)) == 0 && memcmp(o.rest, q.rest, sizeof(q.rest)) == 0) return;
+        && memcmp(o.off, q.off, sizeof(q.off)) == 0 && memcmp(o.rot, q.rot, sizeof(q.rot)) == 0 && memcmp(o.tint, q.tint, sizeof(q.tint)) == 0 && memcmp(o.rest, q.rest, sizeof(q.rest)) == 0
+        && o.stamp == q.stamp) return;   // the same files unchanged: nothing to do (a failure stays failed until they change)
     q.gen = ++g_h2_req_gen;
     g_h2_req = q; g_h2_req_set = true; g_h2_pack_state = 1; g_h2_pack_err[0] = 0;
 }
@@ -9004,18 +9009,20 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_pack(const VrHandsPackDesc* d
 /// bit 1 R), [7] calibrated (bit 0 L, bit 1 R), [8] the last hide reason (H2Why), [9] a calibration request pending, [10]
 /// calibrations cancelled (SF-2); S2: [11] the pack (0 none asked for, 1 loading, 2 loaded, -1 failed), [12] its vertices
 /// (both hands), [13] its triangles, [14] the view of the last draw (0 seat, 1 fp, 2 diorama, 3 third person, -1 none),
-/// [15] put down (bit 0 L, bit 1 R), [16] the touch sensors are bound. Returns the status line (a static buffer, valid
-/// until the next call).
+/// [15] put down (bit 0 L, bit 1 R), [16] the touch sensors are bound; S3: of the pack drawn, [17] its textures on the GPU,
+/// [18] its images that failed to decode or were dropped (past 4 a hand), [19] the worker's load time and [20] the upload
+/// time in 0.1 ms. Returns the status line (a static buffer, valid until the next call).
 extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n) {
     static char s[420];
     const H2Stat& w = g_h2_last_valid ? g_h2_last : g_h2w;
     const bool drawing = g_h2cfg.on && g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 2;
     const int pass = g_h2_ok ? 1 : g_h2_tried ? -1 : 0;
     const int pd = (g_h2_fs[0].put_down ? 1 : 0) | (g_h2_fs[1].put_down ? 2 : 0);
-    const int v[17] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
+    const int v[21] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
                         g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why, g_h2_cal_req != 0 ? 1 : 0, static_cast<int>(g_h2_cal_cancels),
-                        g_h2_pack_state, g_h2_gpu ? static_cast<int>(g_h2_gpu->verts) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->tris) : 0, drawing ? g_h2_mode_last : -1, pd, g_vrpad.touch ? 1 : 0 };   // N1: the XR layer's flag, fresh every frame
-    if (out) for (int k = 0; k < n && k < 17; ++k) out[k] = v[k];
+                        g_h2_pack_state, g_h2_gpu ? static_cast<int>(g_h2_gpu->verts) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->tris) : 0, drawing ? g_h2_mode_last : -1, pd, g_vrpad.touch ? 1 : 0,   // N1: the XR layer's flag, fresh every frame
+                        g_h2_gpu ? g_h2_gpu->tex_gpu : 0, g_h2_gpu ? g_h2_gpu->tex_bad : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->worker_ms * 10.f + 0.5f) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->upload_ms * 10.f + 0.5f) : 0 };
+    if (out) for (int k = 0; k < n && k < 21; ++k) out[k] = v[k];
     const char* last = (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why_long[g_h2_last_why] : "nothing yet";
     char pk[200];
     if (g_h2_gpu && (g_h2cfg.debug & 2) == 0) snprintf(pk, sizeof(pk), "%s %u v", g_h2_gpu->req.name, g_h2_gpu->verts);
@@ -9028,6 +9035,14 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n
     else if (pass == 0) snprintf(s, sizeof(s), "waiting for the headset (the pass is built at its first frame)");
     else snprintf(s, sizeof(s), "%s | %s | eye1 %u eye2 %u / %u frames (%s) | last hidden: %s", drawing ? "drawing" : "hidden", pk,
                   w.e1, w.e2, w.frames, g_h2_last_valid ? "last 10 s" : "so far", last);
+    return s;
+}
+
+/// S3 (ABI 29): why the last pack asked for was rejected ("right.glb: joint 'thumb_tip' missing"), or "" (none failed, or
+/// it loaded since). Render thread (like the request); a static copy, valid until the next call.
+extern "C" __declspec(dllexport) const char* ffxvr_hands2_pack_error() {
+    static char s[300];
+    if (g_h2_pack_state == -1) strcpy_s(s, g_h2_pack_err); else s[0] = 0;
     return s;
 }
 

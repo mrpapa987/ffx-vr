@@ -491,6 +491,51 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
     return true;
 }
 
+bool hv_pack_parse(const uint8_t* const data[2], const size_t size[2], const char* const names[2], bool mirror, const float* tint,
+                   HvMesh hand[2], char* err, int errn) {
+    hand[0] = HvMesh(); hand[1] = HvMesh();
+    const bool have_r = data[1] != nullptr && size[1] > 0, have_l = data[0] != nullptr && size[0] > 0;
+    if (!have_r && !have_l) return hv_fail(err, errn, "no glb named for either hand");
+    const int src = have_r ? 1 : 0;                      // the hand read first; the other is its mirror unless both are read
+    char e[256] = "";
+    if (!hv_glb_parse(data[src], size[src], src, tint, &hand[src], e, sizeof(e))) return hv_fail(err, errn, "%s: %s", names[src] ? names[src] : "?", e);
+    if (have_r && have_l && !mirror) {
+        if (!hv_glb_parse(data[0], size[0], 0, tint, &hand[0], e, sizeof(e))) return hv_fail(err, errn, "%s: %s", names[0] ? names[0] : "?", e);
+    }
+    else hv_mesh_mirror(hand[src], &hand[1 - src]);
+    return true;
+}
+
+void hv_image_prepare(HvImage* im, int max_side) {
+    im->mips.clear(); im->src_w = im->w; im->src_h = im->h;
+    if (im->w <= 0 || im->h <= 0 || im->w > HV_MAX_TEX || im->h > HV_MAX_TEX || im->rgba.size() != static_cast<size_t>(im->w) * static_cast<size_t>(im->h)) { *im = HvImage(); return; }
+    auto half = [](const std::vector<uint32_t>& s, int w, int h, std::vector<uint32_t>* d, int* nw_, int* nh_) {
+        const int nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+        d->assign(static_cast<size_t>(nw) * static_cast<size_t>(nh), 0u);
+        for (int y = 0; y < nh; ++y) for (int x = 0; x < nw; ++x) {
+            uint32_t acc[4] = {};
+            for (int k = 0; k < 4; ++k) {
+                const int sx = (x * 2 + (k & 1)) < w ? x * 2 + (k & 1) : w - 1, sy = (y * 2 + (k >> 1)) < h ? y * 2 + (k >> 1) : h - 1;
+                const uint32_t p = s[static_cast<size_t>(sy) * static_cast<size_t>(w) + static_cast<size_t>(sx)];
+                for (int c = 0; c < 4; ++c) acc[c] += (p >> (8 * c)) & 255u;
+            }
+            (*d)[static_cast<size_t>(y) * static_cast<size_t>(nw) + static_cast<size_t>(x)] = ((acc[0] + 2) / 4) | (((acc[1] + 2) / 4) << 8) | (((acc[2] + 2) / 4) << 16) | (((acc[3] + 2) / 4) << 24);
+        }
+        *nw_ = nw; *nh_ = nh;
+    };
+    if (max_side < 1) max_side = 1;
+    while (im->w > max_side || im->h > max_side) {       // too big for a hand: smaller on the GPU (and in a 32-bit process)
+        std::vector<uint32_t> d; int nw = 0, nh = 0; half(im->rgba, im->w, im->h, &d, &nw, &nh);
+        im->rgba.swap(d); im->w = nw; im->h = nh;
+    }
+    im->mips.reserve(11);                                 // no reallocation below: s points into it
+    int w = im->w, h = im->h; const std::vector<uint32_t>* s = &im->rgba;
+    while ((w > 1 || h > 1) && im->mips.size() < 11) {
+        std::vector<uint32_t> d; int nw = 0, nh = 0; half(*s, w, h, &d, &nw, &nh);
+        im->mips.push_back(std::move(d)); s = &im->mips.back(); w = nw; h = nh;
+    }
+}
+
 #if defined(_WIN32)
 bool hv_read_file(const wchar_t* path, size_t max_bytes, std::vector<uint8_t>* out, char* err, int errn) {
     out->clear();
