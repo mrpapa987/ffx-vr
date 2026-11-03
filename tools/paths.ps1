@@ -30,6 +30,45 @@ if (Test-Path -LiteralPath $ffxvrLocal) { . $ffxvrLocal }
 $FfxvrRootExes = @('FFX', 'FFX-2', 'FFX&X-2_LAUNCHER', 'FFX&X-2_Will', 'fhstage0')
 $FfxvrUtf8     = New-Object Text.UTF8Encoding $false
 
+# The mod's diagnostic ffxvr.ini keys (tools\set-logging.ps1, install-mod.ps1), with the value each logging profile writes:
+# Release = a fresh install (every diagnostic off; also what the mod uses for a key that is absent, except diag_verbose in
+# an ini older than ini_rev 2, which the mod reads as 1); Dev = the developer's set ($null: Dev leaves the key as it is).
+# Keep in step with diag_on() in src\managed\logging.cs.
+$FfxvrDiagKeys = [ordered]@{
+    diag_verbose       = @{ Release = '0'; Dev = '1' }   # the periodic log lines, the camera trace, Ctrl+F9 dumps; log cap 64 MB
+    diag_build7        = @{ Release = '0'; Dev = '1' }   # build 7: cursor / timing / pan-scan lines, the stall watchdog
+    diag_load          = @{ Release = '0'; Dev = '1' }   # the load lines' expensive parts (address-space walks, stack walks)
+    diag_load_lines    = @{ Release = '0'; Dev = '1' }   # one load: line per load
+    diag_actors        = @{ Release = '0'; Dev = $null } # the actors: line every 10 s (Fahrenheit's log)
+    diag_cluster_bytes = @{ Release = '0'; Dev = '1' }   # the game pool's alloc / free hooks (next launch)
+    diag_va_log        = @{ Release = '0'; Dev = '1' }   # the ntdll reservation patch (next launch)
+    diag_transition    = @{ Release = '0'; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
+    diag_load_prof     = @{ Release = '0'; Dev = '2' }   # the load profiler (probes at the next launch)
+}
+# What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
+$FfxvrLogPatterns = @('ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
+                      'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',
+                      'img_*.bmp', 'seq_*.bmp', 'ui_atlas_*.dds', 'battle_atlas.dds', 'ffxvr.ini.tmp')
+
+# The diagnostics an ffxvr.ini text has on, as the mod reads them: @('diag_load=1', ...). A key listed twice counts as
+# its last value; an absent key is off, except diag_verbose in an ini older than ini_rev 2 (the mod reads it as 1).
+function Get-FfxvrDiagOn([string]$Text) {
+    $kv = @{}
+    foreach ($raw in ($Text -split "`n")) {
+        $line = $raw.Trim(); $eq = $line.IndexOf('=')
+        if ($line.Length -eq 0 -or $line[0] -eq '#' -or $eq -lt 0) { continue }
+        $kv[$line.Substring(0, $eq).Trim()] = $line.Substring($eq + 1).Trim()
+    }
+    $rev = 0; if ($kv.ContainsKey('ini_rev')) { [void][int]::TryParse($kv['ini_rev'], [ref]$rev) }
+    $on = @()
+    foreach ($k in $FfxvrDiagKeys.Keys) {
+        if ($kv.ContainsKey($k)) {
+            if (@('0', 'false', 'no', 'off') -notcontains $kv[$k].ToLowerInvariant()) { $on += "$k=$($kv[$k])" }
+        } elseif ($k -eq 'diag_verbose' -and $rev -lt 2) { $on += 'diag_verbose (absent in an ini older than rev 2: read as 1)' }
+    }
+    return ,$on
+}
+
 function Test-FfxvrGame([string]$dir) {
     if (-not $dir) { return $false }
     try { return (Test-Path -LiteralPath ([IO.Path]::Combine($dir, 'FFX.exe'))) } catch { return $false }

@@ -5,13 +5,18 @@
 # so installing a newer zip over an older one is safe.
 # It also checks what the mod needs at run time and says what is missing.
 #
-#   -Uninstall   remove the mod's files and its load-order line (ffxvr.ini is kept)
-#   -Force       install even though Fahrenheit was not found
+#   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini and logs are kept, and listed)
+#   -Purge         with -Uninstall: also delete the whole mod folder (settings, logs, captures): nothing is left
+#   -ResetLogging  set every diagnostic in an existing ffxvr.ini to off (tools\set-logging.ps1 -Profile Release;
+#                  a timestamped .bak is made first). A fresh install needs nothing: its defaults are all off.
+#   -DeleteLogs    delete the mod's old logs, dumps and captures (ffxvr_*.log, ffxvr_cbdump_*.txt, *.bmp, *.dds,
+#                  *.bin captures) from the mod folder, listing each with its size. Settings are never touched.
+#   -Force         install even though Fahrenheit was not found
 #
 # Run with (from the ffx-vr-<version> folder, the one with README.md and tools\ in it):
 #   powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1
 
-param([switch]$Uninstall, [switch]$Force)
+param([switch]$Uninstall, [switch]$Purge, [switch]$ResetLogging, [switch]$DeleteLogs, [switch]$Force)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'paths.ps1')
@@ -29,13 +34,41 @@ Write-Host "Game folder: $game"
 Write-Host ''
 
 Assert-FfxvrGameClosed 'the mod''s DLLs'
+if ($Purge -and -not $Uninstall) { Write-Host '-Purge goes with -Uninstall. Nothing was changed.'; exit 1 }
+
+# The mod's logs, dumps and captures in its folder (tools\paths.ps1 $FfxvrLogPatterns), largest first.
+function Get-ModLogFiles {
+    if (-not (Test-Path -LiteralPath $dest)) { return @() }
+    @(Get-ChildItem -LiteralPath $dest -File -ErrorAction SilentlyContinue |
+      Where-Object { $n = $_.Name; [bool]($FfxvrLogPatterns | Where-Object { $n -like $_ }) } |
+      Sort-Object Length -Descending)
+}
+function Remove-ModLogs {
+    $logs = Get-ModLogFiles
+    if ($logs.Count -eq 0) { Write-Host '  no old logs or captures in the mod folder'; return }
+    $total = 0L
+    foreach ($l in $logs) {
+        try { Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop; $total += $l.Length; Write-Host ('  deleted {0,12:N0} KB  {1}' -f ($l.Length / 1KB), $l.Name) }
+        catch { Write-Host "  could not delete $($l.Name): $($_.Exception.Message)" }
+    }
+    Write-Host ('  freed {0:N1} MB' -f ($total / 1MB))
+}
 
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
     Assert-FfxvrWritable $mods
-    foreach ($f in $files) {
-        $p = Join-Path $dest $f
-        if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; Write-Host "  removed $f" }
+    if ($Purge) {
+        if (Test-Path -LiteralPath $dest) {
+            $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue)
+            Remove-Item -LiteralPath $dest -Recurse -Force
+            Write-Host ('  deleted {0} ({1} files, {2:N1} MB: the mod, its settings, logs and captures)' -f $dest, $all.Count, (($all | Measure-Object Length -Sum).Sum / 1MB))
+        }
+    } else {
+        foreach ($f in $files) {
+            $p = Join-Path $dest $f
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; Write-Host "  removed $f" }
+        }
+        if ($DeleteLogs) { Remove-ModLogs }
     }
     if (Test-Path -LiteralPath $lo) {
         $lines = @(Get-Content -LiteralPath $lo | Where-Object { $_.Trim() -ne '' -and $_.Trim() -ne $modId })
@@ -43,7 +76,15 @@ if ($Uninstall) {
         Write-Host "  removed '$modId' from mods\loadorder"
     }
     Write-Host ''
-    Write-Host "Done. Your settings are still in $dest; delete that folder to remove them too."
+    $left = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue })
+    if ($left.Count -eq 0) {
+        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force -Recurse -ErrorAction SilentlyContinue }
+        Write-Host 'Done. Nothing of FFX VR is left in the game folder.'
+    } else {
+        Write-Host ('Done. Left in {0} ({1} files, {2:N1} MB): your settings, logs and captures:' -f $dest, $left.Count, (($left | Measure-Object Length -Sum).Sum / 1MB))
+        $left | Sort-Object Length -Descending | Select-Object -First 8 | ForEach-Object { Write-Host ('  {0,12:N0} KB  {1}' -f ($_.Length / 1KB), $_.Name) }
+        Write-Host '  To remove them too: install-mod.ps1 -Uninstall -Purge'
+    }
     exit 0
 }
 
@@ -131,6 +172,28 @@ if ($lines -notcontains $modId) {
     Write-Host "  added '$modId' to mods\loadorder"
 } else {
     Write-Host "  '$modId' already in mods\loadorder"
+}
+
+# ---------------------------------------------------------------- logging
+# A fresh install has no ffxvr.ini: the mod's defaults have every diagnostic off. An ini kept from an earlier (tester or
+# developer) install may still have them on; -ResetLogging turns them off.
+Write-Host ''
+Write-Host '[logging]'
+$ini = Join-Path $dest 'ffxvr.ini'
+if ($ResetLogging -and (Test-Path -LiteralPath $ini)) {
+    & (Join-Path $PSScriptRoot 'set-logging.ps1') -Profile Release -IniPath $ini
+} elseif (Test-Path -LiteralPath $ini) {
+    $on = Get-FfxvrDiagOn ([IO.File]::ReadAllText($ini))
+    if ($on.Count -gt 0) {
+        Write-Host ('  WARNING: your ffxvr.ini has diagnostics on: ' + ($on -join ', '))
+        Write-Host '           They write large logs and cost frame time. Turn them off with:'
+        Write-Host '             powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1 -ResetLogging'
+    } else { Write-Host '  diagnostics: all off' }
+} else { Write-Host '  no ffxvr.ini yet: the defaults (diagnostics all off) are used, and the mod writes the file at the first settings change' }
+if ($DeleteLogs) { Remove-ModLogs }
+else {
+    $logs = Get-ModLogFiles; $sz = ($logs | Measure-Object Length -Sum).Sum
+    if ($sz -gt 50MB) { Write-Host ('  {0:N0} MB of old logs and captures in the mod folder; -DeleteLogs removes them' -f ($sz / 1MB)) }
 }
 
 Write-Host ''

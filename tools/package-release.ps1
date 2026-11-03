@@ -10,7 +10,7 @@
 #                              openxr_loader.dll
 #       tools\                 install-mod.ps1 (from packaging\), paths.ps1, run-ffx.ps1,
 #                              game-settings.ps1, import-steam-saves.ps1, export-save-to-steam.ps1,
-#                              install-texture-pack.ps1
+#                              install-texture-pack.ps1, set-logging.ps1
 #   dist\ffx-vr-<label>.zip.sha256
 #
 # Fahrenheit and FFX-60fps are NOT included: they are separate projects with their own licences
@@ -18,7 +18,8 @@
 # nothing is taken from the game folder: everything comes from this repository's build output.
 #
 # <label> is -Version if given, otherwise the csproj <Version> plus the git commit, e.g.
-# 0.1.0-dev-b993ffc ("-dirty" is added when there are uncommitted changes).
+# 0.1.0-alpha.1-b993ffc ("-dirty" is added when there are uncommitted changes). For the release itself pass
+# -Version equal to the csproj <Version> (e.g. -Version 0.1.0-alpha.1), so the zip is named like the tag v0.1.0-alpha.1.
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 [-Version 0.1.0-alpha1] [-SkipBuild] [-OutDir <folder>]
@@ -107,7 +108,10 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         $dirty = [bool](Invoke-GitQuiet -C $proj status --porcelain --untracked-files=no)
     }
 }
-if ($Version) { $label = $Version } else { $label = "$csVer-$short" }
+if ($Version) {
+    $label = $Version
+    if ($Version -ne $csVer) { Write-Host "WARNING: -Version $Version is not ffxvr.csproj's <Version> ${csVer}: the overlay and the logs will say $csVer." }
+} else { $label = "$csVer-$short" }
 if ($dirty) {
     $label += '-dirty'
     Write-Host 'WARNING: uncommitted changes. The zip is labelled -dirty; commit first for a real release.'
@@ -143,7 +147,7 @@ Copy-Item $natDll          -Destination $modDst
 Copy-Item $oxrDll.FullName -Destination $modDst
 
 foreach ($f in 'paths.ps1', 'run-ffx.ps1', 'game-settings.ps1', 'import-steam-saves.ps1',
-               'export-save-to-steam.ps1', 'install-texture-pack.ps1') {
+               'export-save-to-steam.ps1', 'install-texture-pack.ps1', 'set-logging.ps1') {
     $p = Join-Path $PSScriptRoot $f
     if (-not (Test-Path $p)) { Fail "tools\$f is missing" }
     Copy-Item $p -Destination $toolsDst
