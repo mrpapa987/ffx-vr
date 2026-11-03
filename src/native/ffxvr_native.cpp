@@ -969,11 +969,12 @@ float   g_hb_P[3], g_hb_Rb[9], g_hb_sc = 1.f; bool g_hb_valid = false;   // firs
 float   g_hb_eye[3], g_hb_right[3], g_hb_fwd[3];                          // the eye in the world and the head's horizontal right / forward: the virtual shoulders hang off these
 float   g_hb_mv[3] = {}; int g_hb_mode = -1;                              // VR hands v2: the manual offset as the world map uses it (mv0, mv1, -mv2) and the view
                                                                           // the base is for (0 the authored seat, 1 first person, 2 diorama, 3 third person), any view
-// VR hands v2 (S1; the block after the 3D markers, ffxvr_hands.cpp): the settings (ffxvr_hands2_set, ABI 27; `views` is
-// reserved: the owner's rule is first person only, with the body hidden) and the inputs latched at the frame's tick.
-struct VrHandsCfg { int bytes, on, views, debug; float trim_rad[3], trim_off_m[3]; };
-VrHandsCfg g_h2cfg = { static_cast<int>(sizeof(VrHandsCfg)), 0, 0, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } };
-struct HandsSnap { bool valid; uint32_t frame, pkt; XrHand hand[2]; float ref_q[4], ref_p[3]; float head_p[3]; float Pj[16]; };
+float   g_hb_dy = 0.f;                                                    // VR hands v2 (S2): how far the diorama / third-person floor lifted eye 1 (world units, + up)
+// VR hands v2 (S1, S2; the block after the 3D markers, ffxvr_hands.cpp): the settings (ffxvr_hands2_set, ABI 28) and the
+// inputs latched at the frame's tick. views: bit 0 first person (always), 1 the diorama, 2 third person, 3 the seat view.
+struct VrHandsCfg { int bytes, on, views, debug; float trim_rad[3], trim_off_m[3]; /* S2 */ float rest_curl, scale; };
+VrHandsCfg g_h2cfg = { static_cast<int>(sizeof(VrHandsCfg)), 0, 1, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, 0.20f, 1.f };
+struct HandsSnap { bool valid; uint32_t frame, pkt; XrHand hand[2]; float ref_q[4], ref_p[3]; float head_p[3]; float Pj[16]; int64_t T; bool touch; };
 HandsSnap g_hs = {};
 uint32_t g_h2_drawn_frame = 0xFFFFFFFFu;     // the frame the hands were last drawn in (uid_depth_pass reads it: SF-3)
 uint32_t g_h2_uid_early = 0, g_h2_uid_skip = 0;   // the adaptive panel's depth measured before the hands were drawn / skipped because they were (10 s window)
@@ -1878,7 +1879,9 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         Pn[i] = P[i] + Rm[0*3+i]*mv[0] + Rn[0*3+i]*lateral + Rm[1*3+i]*mv[1] - Rm[2*3+i]*mv[2]
                      + Rb[0*3+i]*hx + Rb[1*3+i]*hy + Rb[2*3+i]*hz;
 
+    const float pn_y_free = Pn[1];
     if (g_fp_mode >= 2 && g_diorama_floor > 0.f && !g_gest_active && Pn[1] < P[1] + g_diorama_floor) Pn[1] = P[1] + g_diorama_floor;   // diorama / third person floor
+    if (primary && xr) g_hb_dy = Pn[1] - pn_y_free;      // VR hands v2: the hands move with a floor-lifted eye (they are placed relative to it)
     if (primary && xr) {   // for the VR hands: where the eye is, and which way the head faces (horizontal)
         memcpy(g_hb_eye, Pn, sizeof(g_hb_eye));
         float f[3] = { -Rn[6], 0.f, -Rn[8] }; float l = sqrtf(f[0]*f[0] + f[2]*f[2]); if (l < 1e-4f) { f[0] = 0.f; f[2] = -1.f; l = 1.f; } f[0] /= l; f[2] /= l;
@@ -4458,7 +4461,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 27;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1)
+constexpr int FFXVR_ABI = 28;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -8178,39 +8181,50 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 }
 
 // ---------------------------------------------------------------------------
-// VR hands v2, stage S1 (research hands-v2-spec.md; the CPU half is ffxvr_hands.cpp). Our own hands at the controllers,
-// drawn into the scene target just before the game resolves it: ffxvr_pre_resolve is called by the managed
+// VR hands v2, stages S1 and S2 (research hands-v2-spec.md; the CPU half is ffxvr_hands.cpp). Our own hands at the
+// controllers, drawn into the scene target just before the game resolves it: ffxvr_pre_resolve is called by the managed
 // ResolveSubresource detour BEFORE the game's call, at the first resolve of this frame's scene target (>= 20 eye-2 draws).
 // Eye 1 goes into the game's MSAA rtv0 with its DSV, eye 2 into their twins, so the hands are depth-tested against the
 // scene in both eyes and ride the game's resolve and our mirrored one (ffxvr_on_resolve) into the eye images: the
-// transparents, post-processing and the UI panel all come after them. S1 draws boxes (ffxvr_hands.cpp hv_box_mesh).
-// The owner's rules (2 Nov 2026): first person only, only with the body hidden (fp_body_mode 0, the default); off by default.
+// transparents, post-processing and the UI panel all come after them.
+// S2 draws the generic hand pack (assets/hands/generic-glove or generic, deployed to <mod>\hands\): a glb read by a worker
+// thread (cgltf, WIC), uploaded at Present, skinned on the GPU on the 26 OpenXR joints (a 26-bone palette per hand), the
+// fingers following the controllers' trigger / grip values and touch sensors (hands-input.md 4.2, smoothed 4.3). The S1
+// boxes stay as the fallback (no pack, a pack that failed to load) and as a debug option (vr_hands_debug bit 2).
+// The owner's rules (2 Nov 2026, 3 Nov 2026): first person with the body hidden (fp_body_mode 0, the default), and, by
+// choice (vr_hands_views), the diorama, third person and the seat view; off by default.
 //   inputs   latched at the frame's tick (write_camera, the first real-3D eye-1 upload, render thread): the controllers, the
-//            recentre reference and the near-variant projection (hands_latch). The head pose for the frame's camera is
-//            fixed there too; an extra cannot run before the scene resolve (sr_mid_frame), and pkt_mismatch proves it.
+//            recentre reference, the display time and the near-variant projection (hands_latch). The head pose for the
+//            frame's camera is fixed there too; an extra cannot run before the scene resolve (sr_mid_frame), and
+//            pkt_mismatch proves it.
 //   views    recomputed here from the tick's view g_tick_v (build_override_view, read-only, as draw_markers_both does);
 //            projection = the latched near-variant one with each eye's field of view applied exactly as write_camera does.
 //            Cross-checked against g_last_PVn once per 10 s (pv_diff).
-//   place    H_h = Grip_h . (Cal_h | Default_h) . Trim_h in reference space, then the world: w = P + Rb^T (sc r + mv').
-//   state    UidSaved + VS cb 0 + IA slot 0, restored with om_restore_keep, all under InEye2; buffers by g_orig_map.
-// Logging: events always (on / off, the pass, the first draw, the first skip of each kind, calibration); the 10 s hands:
-// line with diag_verbose only; the frame census gets HANDS lines.
+//   place    H_h = Grip_h . (Cal_h | Default_h) . Trim_h . PackFix_h in reference space (the palm frame, metres), then the world:
+//            w = P + Rb^T (sc r + mv') (+ the floor lift of the eye). sc is the view's units per metre (11.4 in first and third
+//            person, world_scale x the grab zoom in the diorama and the seat): the hands are always your own hands at your
+//            own size in the scaled world, so in the diorama they are life-size to you and giant beside the miniature.
+//   state    UidSaved + VS cb 0-1 + IA slot 0 + the index buffer, restored with om_restore_keep, all under InEye2; buffers by
+//            g_orig_map.
+// Logging: events always (on / off, the views, the pass, the pack loaded or rejected, the first draw, the first skip of each
+// kind, calibration); the 10 s hands: line with diag_verbose only; the frame census gets HANDS lines.
 
 enum H2Why { H2_NONE = 0, H2_OFF, H2_NO_XR, H2_SUSPEND, H2_SCREEN3D, H2_BACKDROP, H2_BT, H2_DREAM, H2_FREEZE, H2_VIEW, H2_BODY,
-             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_N };
+             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_N };
 static const char* const k_h2_why[H2_N] = { "", "off", "xr", "suspend", "screen3d", "backdrop", "bt", "dream", "freeze", "view", "body",
-                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev" };
+                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down" };
 static const char* const k_h2_why_long[H2_N] = { "", "off", "the headset is off", "a screen frame (FMV, menu, save screen)", "the stereo screen",
-    "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "not first person",
+    "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "a view the hands are not set to show in",
     "your body is shown (fp_body_mode)", "no camera this frame", "the shader pass is not ready", "no scene projection this frame",
     "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve",
-    "the first scene resolve was not last frame's scene target" };
-struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2]; float pv_diff, pv_diff2; bool pv_done; };
+    "the first scene resolve was not last frame's scene target", "the controllers are put down" };
+struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2], put_down[2], mode_drawn[4], mesh_frames; float pv_diff, pv_diff2; bool pv_done; };
 H2Stat g_h2w = {}, g_h2_last = {}, g_h2_tot = {};       // the live 10 s window, the last complete one, this on-session
 bool g_h2_last_valid = false;
 uint32_t g_h2_res_frame = 0xFFFFFFFFu, g_h2_notprev_frame = 0xFFFFFFFFu; int g_h2_why_frame = H2_NONE, g_h2_last_why = H2_NONE;
 uint32_t g_h2_seen_skips = 0;                           // bit per H2Why (and 1 << 30: no twin DSV): the first of each kind is logged as an event
-int  g_h2_grips_last = 0;                               // bit 0 left, bit 1 right: tracked at the last draw
+int  g_h2_grips_last = 0;                               // bit 0 left, bit 1 right: drawn at the last draw
+int  g_h2_mode_last = -1;                               // the view of the last draw (0 seat, 1 first person, 2 diorama, 3 third person)
 // calibration (Cal_h): the grip -> hand rotation per controller, captured at the tick by ffxvr_hands2_cal(op 2)
 float g_h2_cal[2][9] = {}; bool g_h2_cal_set[2] = { false, false }; volatile LONG g_h2_cal_req = 0; uint32_t g_h2_cal_count = 0;
 int  g_h2_cal_buzz = 0; ULONGLONG g_h2_cal_req_t = 0; uint32_t g_h2_cal_cancels = 0;   // SF-2: a request older than k_h2_cal_max_ms is dropped
@@ -8218,20 +8232,57 @@ static const ULONGLONG k_h2_cal_max_ms = 500;
 D3D11_VIEWPORT g_h2_vp_used = {};   // SF-4: the viewport of the last draw (the game's, else the whole target)
 // the pass
 ID3D11VertexShader* g_h2_vs = nullptr; ID3D11PixelShader* g_h2_ps = nullptr; ID3D11InputLayout* g_h2_il = nullptr;
+ID3D11VertexShader* g_h2_vsk = nullptr; ID3D11InputLayout* g_h2_ilk = nullptr;               // S2: the skinned path
 ID3D11Buffer* g_h2_vb = nullptr; ID3D11Buffer* g_h2_cb[2] = { nullptr, nullptr }; ID3D11DepthStencilState* g_h2_dss = nullptr; ID3D11RasterizerState* g_h2_rs = nullptr;
+ID3D11Buffer* g_h2_pal[2] = { nullptr, nullptr };       // S2: the bone palette per hand (26 x 3 float4)
+ID3D11ShaderResourceView* g_h2_white = nullptr; ID3D11SamplerState* g_h2_smp = nullptr;      // S2: the texture of untextured batches (and the boxes), the sampler
 bool g_h2_tried = false, g_h2_ok = false; double g_h2_compile_ms = 0.0;
 static const int k_h2_max_verts = 1024;
-HvSrcVertex g_h2_mesh[k_h2_max_verts / 2]; int g_h2_mesh_n = 0; bool g_h2_mesh_axes = false;
+HvSrcVertex g_h2_mesh[k_h2_max_verts / 2]; int g_h2_mesh_n = 0; int g_h2_mesh_kind = -1;   // the box mesh, and what it holds (bit 0 axes, bit 1 boxes)
 int  g_h2_dbg_lines = 0; bool g_h2_dump_prev = false;   // debug bit 4: per-frame placement lines (300 per switch-on); bit 8: one pose dump (its rising edge)
+// S2: the fingers (per hand, across frames) and the display time of the last solve (the smoothing's dt)
+HvFingerState g_h2_fs[2]; int64_t g_h2_T_prev = 0; bool g_h2_put_down_seen[2] = { false, false };
+
+// S2: the pack. ffxvr_hands2_pack (managed, on a change) sets the request; xr_tick starts a worker thread for it (one at a
+// time) and, when its result is in, uploads it (render thread, at Present) and swaps it in; the CPU copies are freed then.
+struct VrHandsPackDesc { int bytes, format; const wchar_t *right_glb, *left_glb; int mirror; float scale, wrist_off_m[3], wrist_rot_rad[3], tint[3], rest_curl[5]; const char* name; };
+static_assert(sizeof(void*) != 4 || sizeof(VrHandsPackDesc) == 84, "VrHandsPackDesc: 84 bytes on x86, as hands.cs declares it");
+static_assert(sizeof(VrHandsCfg) == 48, "VrHandsCfg: 48 bytes, as hands.cs declares it");
+struct H2PackReq { wchar_t right[520] = {}, left[520] = {}; bool mirror = true; float scale = 1.f, off[3] = {}, rot[3] = {}, tint[3] = { 1.f, 1.f, 1.f }, rest[5] = {}; char name[64] = ""; uint32_t gen = 0; };
+struct H2CpuPack { HvMesh hand[2]; bool ok = false; char err[300] = ""; double ms = 0.0; uint32_t gen = 0; int tex_ok = 0, tex_fail = 0; bool from_file[2] = { false, false }; char tex_err[160] = ""; };
+struct H2Gpu {
+    HvMesh rig[2];                                       // the skeleton and the batches (the vertices, indices and images are freed after upload)
+    ID3D11Buffer* vb = nullptr; ID3D11Buffer* ib = nullptr;
+    std::vector<ID3D11ShaderResourceView*> srv[2];       // per hand, by HvBatch::tex (null: the white texture)
+    uint32_t vbase[2] = {}, ibase[2] = {}, verts = 0, tris = 0;
+    H2PackReq req;                                       // what it was loaded from (name, scale, PackFix, tint, rest curls)
+};
+H2PackReq g_h2_req; bool g_h2_req_set = false; uint32_t g_h2_req_gen = 0, g_h2_load_gen = 0;
+std::atomic<H2CpuPack*> g_h2_cpu_ready{ nullptr }; std::atomic<bool> g_h2_worker_busy{ false };
+H2Gpu* g_h2_gpu = nullptr;
+int  g_h2_pack_state = 0;                                // 0 none asked for, 1 loading, 2 loaded, -1 failed (the boxes are drawn meanwhile)
+char g_h2_pack_err[300] = "";                            // the last failure (for the F8 status)
 
 // Lit in gamma space like the game (the scene target is R8G8B8A8_UNORM): base x (K.x + K.y max(0, N.L)), L fixed in view space.
+// vs: the boxes (world space, CPU-placed); vsk: a pack mesh skinned on the GPU, 4 bones per vertex from the palette in b1.
 static const char k_hands_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 VP; float4 L; float4 K; };\n"
+    "cbuffer B : register(b1) { float4 Bn[78]; };\n"
+    "Texture2D T : register(t0); SamplerState S : register(s0);\n"
     "struct VI { float3 p : POSITION; float3 n : NORMAL; float2 t : TEXCOORD; float4 c : COLOR; };\n"
-    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
-    "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); float d = saturate(dot(normalize(i.n), L.xyz)); o.c = float4(i.c.rgb * (K.x + K.y * d), 1); return o; }\n"
-    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+    "struct VK { float3 p : POSITION; float3 n : NORMAL; float2 t : TEXCOORD; float4 c : COLOR; uint4 j : BLENDINDICES; float4 w : BLENDWEIGHT; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; float2 t : TEXCOORD; };\n"
+    "VO lit(float3 w, float3 n, float4 c, float2 t) { VO o; o.p = mul(VP, float4(w, 1)); float d = saturate(dot(normalize(n), L.xyz)); o.c = float4(c.rgb * (K.x + K.y * d), 1); o.t = t; return o; }\n"
+    "VO vs(VI i) { return lit(i.p, i.n, i.c, i.t); }\n"
+    "VO vsk(VK i) {\n"
+    "    float4 r0 = 0, r1 = 0, r2 = 0;\n"
+    "    [unroll] for (int k = 0; k < 4; ++k) { uint b = min(i.j[k], 25u) * 3; r0 += i.w[k] * Bn[b]; r1 += i.w[k] * Bn[b + 1]; r2 += i.w[k] * Bn[b + 2]; }\n"
+    "    float4 p = float4(i.p, 1);\n"
+    "    return lit(float3(dot(r0, p), dot(r1, p), dot(r2, p)), float3(dot(r0.xyz, i.n), dot(r1.xyz, i.n), dot(r2.xyz, i.n)), i.c, i.t);\n"
+    "}\n"
+    "float4 ps(VO i) : SV_Target { return float4(i.c.rgb * T.Sample(S, i.t).rgb, 1); }\n";
 struct H2Cb { float VP[16]; float L[4]; float K[4]; };   // 96 B
+struct H2Pal { float B[HV_J * 3][4]; };                 // 1248 B: per joint the 3 rows of world = M (p, 1)
 
 /// At Present (xr_tick: the UD-6 rule, never inside the game's frame), the first time vr_hands=1 with the headset on.
 static void hands_pass_init() {
@@ -8242,14 +8293,18 @@ static void hands_pass_init() {
     HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
     PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
     if (!compile) { diag("hands: pass FAILED: no shader compiler (d3dcompiler_47.dll)"); return; }
-    ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
-    HRESULT hr = compile(k_hands_hlsl, sizeof(k_hands_hlsl) - 1, "hands", nullptr, nullptr, "vs", "vs_4_0", 0, 0, &vsb, &err);
-    if (FAILED(hr)) { diag("hands: pass FAILED: vs: %s", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); if (err) err->Release(); return; }
-    if (err) { err->Release(); err = nullptr; }
-    hr = compile(k_hands_hlsl, sizeof(k_hands_hlsl) - 1, "hands", nullptr, nullptr, "ps", "ps_4_0", 0, 0, &psb, &err);
-    if (FAILED(hr)) { diag("hands: pass FAILED: ps: %s", err ? static_cast<const char*>(err->GetBufferPointer()) : "?"); if (err) err->Release(); vsb->Release(); return; }
-    if (err) err->Release();
+    ID3DBlob *vsb = nullptr, *vskb = nullptr, *psb = nullptr, *err = nullptr;
+    auto build = [&](const char* entry, const char* target, ID3DBlob** out) {
+        HRESULT hr = compile(k_hands_hlsl, sizeof(k_hands_hlsl) - 1, "hands", nullptr, nullptr, entry, target, 0, 0, out, &err);
+        if (FAILED(hr)) diag("hands: pass FAILED: %s: %s", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        if (err) { err->Release(); err = nullptr; }
+        return SUCCEEDED(hr);
+    };
+    if (!build("vs", "vs_4_0", &vsb)) return;
+    if (!build("vsk", "vs_4_0", &vskb)) { vsb->Release(); return; }
+    if (!build("ps", "ps_4_0", &psb)) { vsb->Release(); vskb->Release(); return; }
     g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_h2_vs);
+    g_device->CreateVertexShader(vskb->GetBufferPointer(), vskb->GetBufferSize(), nullptr, &g_h2_vsk);
     g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_h2_ps);
     const D3D11_INPUT_ELEMENT_DESC ie[4] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -8257,26 +8312,203 @@ static void hands_pass_init() {
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
     g_device->CreateInputLayout(ie, 4, vsb->GetBufferPointer(), vsb->GetBufferSize(), &g_h2_il);
-    vsb->Release(); psb->Release();
+    const D3D11_INPUT_ELEMENT_DESC iek[6] = {   // HvSkinVertex (44 B)
+        { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR",        0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "BLENDINDICES", 0, DXGI_FORMAT_R8G8B8A8_UINT,   0, 36, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "BLENDWEIGHT",  0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 40, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+    g_device->CreateInputLayout(iek, 6, vskb->GetBufferPointer(), vskb->GetBufferSize(), &g_h2_ilk);
+    vsb->Release(); vskb->Release(); psb->Release();
     D3D11_BUFFER_DESC bd = {};
     bd.ByteWidth = sizeof(HvVertex) * k_h2_max_verts; bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     g_device->CreateBuffer(&bd, nullptr, &g_h2_vb);
     D3D11_BUFFER_DESC cd = {};
     cd.ByteWidth = sizeof(H2Cb); cd.Usage = D3D11_USAGE_DYNAMIC; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     g_device->CreateBuffer(&cd, nullptr, &g_h2_cb[0]); g_device->CreateBuffer(&cd, nullptr, &g_h2_cb[1]);   // one per eye: no second discard of one buffer mid-pass
+    cd.ByteWidth = sizeof(H2Pal);
+    g_device->CreateBuffer(&cd, nullptr, &g_h2_pal[0]); g_device->CreateBuffer(&cd, nullptr, &g_h2_pal[1]);   // one per hand
+    {
+        const uint32_t white = 0xFFFFFFFFu;
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd = { &white, 4, 4 };
+        ID3D11Texture2D* t = nullptr;
+        if (SUCCEEDED(g_device->CreateTexture2D(&td, &sd, &t)) && t) { g_device->CreateShaderResourceView(t, nullptr, &g_h2_white); t->Release(); }
+        D3D11_SAMPLER_DESC sm = {}; sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+        sm.MaxLOD = D3D11_FLOAT32_MAX; sm.ComparisonFunc = D3D11_COMPARISON_NEVER; sm.MaxAnisotropy = 1;
+        g_device->CreateSamplerState(&sm, &g_h2_smp);
+    }
     D3D11_DEPTH_STENCIL_DESC ds = {};
     ds.DepthEnable = TRUE; ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; ds.DepthFunc = D3D11_COMPARISON_LESS_EQUAL; ds.StencilEnable = FALSE;   // into the game's depth: the later transparents test against the hands
     g_device->CreateDepthStencilState(&ds, &g_h2_dss);
     D3D11_RASTERIZER_DESC rd = {};
-    rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;   // S1: no culling (closed boxes; the depth test hides the far faces, and a box cut by the near plane shows its inside, not a hole)
+    rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;   // no culling: the depth test hides the far faces, and a hand cut by the near plane shows its inside, not a hole
     g_device->CreateRasterizerState(&rd, &g_h2_rs);
-    g_h2_ok = g_h2_vs && g_h2_ps && g_h2_il && g_h2_vb && g_h2_cb[0] && g_h2_cb[1] && g_h2_dss && g_h2_rs;
+    g_h2_ok = g_h2_vs && g_h2_vsk && g_h2_ps && g_h2_il && g_h2_ilk && g_h2_vb && g_h2_cb[0] && g_h2_cb[1] && g_h2_pal[0] && g_h2_pal[1] && g_h2_white && g_h2_smp && g_h2_dss && g_h2_rs;
     QueryPerformanceCounter(&t1); g_h2_compile_ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
-    if (g_h2_ok) { diag("hands: pass ready (vs+ps compiled %.1f ms at Present) | boxes, first person with the body hidden, vertex %u B", g_h2_compile_ms, static_cast<unsigned>(sizeof(HvVertex))); return; }
-    diag("hands: pass FAILED: a D3D object could not be made (vs %d ps %d il %d vb %d cb %d/%d dss %d rs %d)", g_h2_vs != nullptr, g_h2_ps != nullptr, g_h2_il != nullptr,
-              g_h2_vb != nullptr, g_h2_cb[0] != nullptr, g_h2_cb[1] != nullptr, g_h2_dss != nullptr, g_h2_rs != nullptr);
+    if (g_h2_ok) {
+        diag("hands: pass ready (vs+vsk+ps compiled %.1f ms at Present) | the skinned mesh (vertex %u B, 26 bones a hand) and the boxes (vertex %u B)",
+             g_h2_compile_ms, static_cast<unsigned>(sizeof(HvSkinVertex)), static_cast<unsigned>(sizeof(HvVertex)));
+        return;
+    }
+    diag("hands: pass FAILED: a D3D object could not be made (vs %d vsk %d ps %d il %d ilk %d vb %d cb %d/%d pal %d/%d white %d smp %d dss %d rs %d)", g_h2_vs != nullptr, g_h2_vsk != nullptr,
+         g_h2_ps != nullptr, g_h2_il != nullptr, g_h2_ilk != nullptr, g_h2_vb != nullptr, g_h2_cb[0] != nullptr, g_h2_cb[1] != nullptr, g_h2_pal[0] != nullptr, g_h2_pal[1] != nullptr,
+         g_h2_white != nullptr, g_h2_smp != nullptr, g_h2_dss != nullptr, g_h2_rs != nullptr);
     auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };   // N8: nothing half-made is kept
-    drop(g_h2_vs); drop(g_h2_ps); drop(g_h2_il); drop(g_h2_vb); drop(g_h2_cb[0]); drop(g_h2_cb[1]); drop(g_h2_dss); drop(g_h2_rs);
+    drop(g_h2_vs); drop(g_h2_vsk); drop(g_h2_ps); drop(g_h2_il); drop(g_h2_ilk); drop(g_h2_vb); drop(g_h2_cb[0]); drop(g_h2_cb[1]); drop(g_h2_pal[0]); drop(g_h2_pal[1]);
+    drop(g_h2_white); drop(g_h2_smp); drop(g_h2_dss); drop(g_h2_rs);
+}
+
+// -- S2: the pack: worker, upload, swap -------------------------------------------------------------------------------
+
+/// The file name part of a wide path, UTF-8, for the log.
+static void hands_file_part(const wchar_t* path, char* out, int n) {
+    const wchar_t* f = path; for (const wchar_t* p = path; *p != 0; ++p) if (*p == L'\\' || *p == L'/') f = p + 1;
+    if (WideCharToMultiByte(CP_UTF8, 0, f, -1, out, n, nullptr, nullptr) <= 0 && n > 0) strcpy_s(out, static_cast<size_t>(n), "?");
+}
+
+/// The worker thread: read, parse, mirror, decode. Touches nothing global but its result slot and the busy flag (no logging:
+/// the render thread logs the result at upload). `arg` is a heap copy of the request, freed here.
+static DWORD WINAPI hands_worker(LPVOID arg) {
+    H2PackReq* qp = static_cast<H2PackReq*>(arg);
+    const H2PackReq& q = *qp;
+    H2CpuPack* r = new (std::nothrow) H2CpuPack();
+    if (r == nullptr) { delete qp; g_h2_worker_busy.store(false); return 0; }
+    r->gen = q.gen;
+    LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
+    char e[256] = "";
+    auto load = [&](const wchar_t* path, int h) -> bool {
+        char pn[160]; hands_file_part(path, pn, sizeof(pn));
+        std::vector<uint8_t> b;
+        if (!hv_read_file(path, 32u << 20, &b, e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn, e); return false; }
+        if (!hv_glb_parse(b.data(), b.size(), h, q.tint, &r->hand[h], e, sizeof(e))) { snprintf(r->err, sizeof(r->err), "%s: %s", pn, e); return false; }
+        HvMesh& m = r->hand[h];
+        for (size_t i = 0; i < m.tex_file.size(); ++i) {
+            if (hv_wic_decode(m.tex_file[i].data(), m.tex_file[i].size(), &m.tex[i], e, sizeof(e))) r->tex_ok++;
+            else { r->tex_fail++; m.tex[i] = HvImage(); if (!r->tex_err[0]) snprintf(r->tex_err, sizeof(r->tex_err), "%s texture %u: %s", pn, static_cast<unsigned>(i), e); }
+        }
+        m.tex_file.clear(); m.tex_file.shrink_to_fit();
+        r->from_file[h] = true;
+        return true;
+    };
+    bool ok = true;
+    const bool have_r = q.right[0] != 0, have_l = q.left[0] != 0;
+    if (have_r) ok = load(q.right, 1);
+    if (ok && have_r && have_l && !q.mirror) ok = load(q.left, 0);
+    if (ok) {
+        if (r->from_file[1] && !r->from_file[0]) hv_mesh_mirror(r->hand[1], &r->hand[0]);          // the left from the right (the generic packs)
+        else if (!have_r && have_l) { ok = load(q.left, 0); if (ok) hv_mesh_mirror(r->hand[0], &r->hand[1]); }   // only a left hand given
+        else if (!have_r) { ok = false; snprintf(r->err, sizeof(r->err), "no glb named for either hand"); }
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+    QueryPerformanceCounter(&t1); r->ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
+    r->ok = ok;
+    H2CpuPack* old = g_h2_cpu_ready.exchange(r);
+    delete old;   // an unconsumed older result (the request moved on)
+    delete qp;
+    g_h2_worker_busy.store(false);
+    return 0;
+}
+
+static void hands_gpu_release(H2Gpu*& g) {
+    if (g == nullptr) return;
+    if (g->vb) g->vb->Release(); if (g->ib) g->ib->Release();
+    for (auto& v : g->srv) for (auto* s : v) if (s) s->Release();
+    delete g; g = nullptr;
+}
+/// One RGBA8 image -> an immutable texture with a box-filtered mip chain, and its view.
+static ID3D11ShaderResourceView* hands_texture(const HvImage& im) {
+    if (im.w <= 0 || im.h <= 0 || im.rgba.size() != static_cast<size_t>(im.w) * static_cast<size_t>(im.h)) return nullptr;
+    std::vector<std::vector<uint32_t>> lv; std::vector<int> lw, lh;
+    lv.push_back(im.rgba); lw.push_back(im.w); lh.push_back(im.h);
+    while ((lw.back() > 1 || lh.back() > 1) && lv.size() < 12) {
+        const int w = lw.back(), h = lh.back(), nw = w > 1 ? w / 2 : 1, nh = h > 1 ? h / 2 : 1;
+        const std::vector<uint32_t>& s = lv.back(); std::vector<uint32_t> d(static_cast<size_t>(nw) * nh);
+        for (int y = 0; y < nh; ++y) for (int x = 0; x < nw; ++x) {
+            uint32_t acc[4] = {};
+            for (int k = 0; k < 4; ++k) {
+                const int sx = (x * 2 + (k & 1)) < w ? x * 2 + (k & 1) : w - 1, sy = (y * 2 + (k >> 1)) < h ? y * 2 + (k >> 1) : h - 1;
+                const uint32_t p = s[static_cast<size_t>(sy) * w + sx];
+                for (int c = 0; c < 4; ++c) acc[c] += (p >> (8 * c)) & 255u;
+            }
+            d[static_cast<size_t>(y) * nw + x] = ((acc[0] + 2) / 4) | (((acc[1] + 2) / 4) << 8) | (((acc[2] + 2) / 4) << 16) | (((acc[3] + 2) / 4) << 24);
+        }
+        lv.push_back(std::move(d)); lw.push_back(nw); lh.push_back(nh);
+    }
+    D3D11_TEXTURE2D_DESC td = {}; td.Width = static_cast<UINT>(im.w); td.Height = static_cast<UINT>(im.h); td.MipLevels = static_cast<UINT>(lv.size()); td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;   // UNORM, no sRGB view: gamma space like the game
+    D3D11_SUBRESOURCE_DATA sd[12] = {};
+    for (size_t i = 0; i < lv.size(); ++i) { sd[i].pSysMem = lv[i].data(); sd[i].SysMemPitch = static_cast<UINT>(lw[i]) * 4u; }
+    ID3D11Texture2D* t = nullptr; ID3D11ShaderResourceView* v = nullptr;
+    if (SUCCEEDED(g_device->CreateTexture2D(&td, sd, &t)) && t) { g_device->CreateShaderResourceView(t, nullptr, &v); t->Release(); }
+    return v;
+}
+/// Render thread, at Present: the worker's result into GPU buffers and textures, swapped in; the CPU copies freed.
+static void hands_pack_upload(H2CpuPack* c) {
+    LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
+    const char* name = g_h2_req.name[0] ? g_h2_req.name : "?";
+    if (!c->ok) {
+        g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, c->err);
+        diag("hands: pack '%s' rejected: %s -> boxes", name, c->err);
+        hands_gpu_release(g_h2_gpu);
+        return;
+    }
+    H2Gpu* g = new (std::nothrow) H2Gpu();
+    if (g == nullptr) { g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory"); diag("hands: pack '%s' rejected: out of memory -> boxes", name); return; }
+    std::vector<HvSkinVertex> v; std::vector<uint32_t> ix;
+    for (int h = 0; h < 2; ++h) {
+        g->vbase[h] = static_cast<uint32_t>(v.size()); g->ibase[h] = static_cast<uint32_t>(ix.size());
+        v.insert(v.end(), c->hand[h].v.begin(), c->hand[h].v.end()); ix.insert(ix.end(), c->hand[h].idx.begin(), c->hand[h].idx.end());
+    }
+    g->verts = static_cast<uint32_t>(v.size()); g->tris = static_cast<uint32_t>(ix.size() / 3);
+    D3D11_BUFFER_DESC bd = {}; bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.ByteWidth = static_cast<UINT>(v.size() * sizeof(HvSkinVertex)); bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sd = { v.data(), 0, 0 };
+    HRESULT hr = g_device->CreateBuffer(&bd, &sd, &g->vb);
+    if (SUCCEEDED(hr)) { bd.ByteWidth = static_cast<UINT>(ix.size() * sizeof(uint32_t)); bd.BindFlags = D3D11_BIND_INDEX_BUFFER; sd.pSysMem = ix.data(); hr = g_device->CreateBuffer(&bd, &sd, &g->ib); }
+    if (FAILED(hr) || g->vb == nullptr || g->ib == nullptr) {
+        g_h2_pack_state = -1; snprintf(g_h2_pack_err, sizeof(g_h2_pack_err), "the GPU buffers could not be made (hr 0x%08lX)", static_cast<unsigned long>(hr));
+        diag("hands: pack '%s' rejected: %s -> boxes", name, g_h2_pack_err);
+        hands_gpu_release(g); hands_gpu_release(g_h2_gpu); return;
+    }
+    int tex_made = 0;
+    for (int h = 0; h < 2; ++h) {
+        g->srv[h].assign(c->hand[h].tex.size(), nullptr);
+        for (size_t i = 0; i < c->hand[h].tex.size(); ++i) { g->srv[h][i] = hands_texture(c->hand[h].tex[i]); if (g->srv[h][i]) tex_made++; }
+        g->rig[h] = std::move(c->hand[h]);
+        g->rig[h].v.clear(); g->rig[h].v.shrink_to_fit(); g->rig[h].idx.clear(); g->rig[h].idx.shrink_to_fit(); g->rig[h].tex.clear(); g->rig[h].tex.shrink_to_fit();   // 32-bit address space: no CPU copies kept
+    }
+    g->req = g_h2_req;
+    hands_gpu_release(g_h2_gpu);
+    g_h2_gpu = g; g_h2_pack_state = 2; g_h2_pack_err[0] = 0;
+    QueryPerformanceCounter(&t1);
+    const HvMesh& R = g->rig[1]; const HvMesh& L = g->rig[0];
+    diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded, %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s | worker %.1f ms, upload %.1f ms",
+         name, g->verts - g->vbase[1], R.tris, R.prims, R.prims == 1 ? "" : "s", static_cast<unsigned>(R.batch.size()), R.batch.size() == 1 ? "" : "es", R.mirrored ? " (mirrored from the left)" : "",
+         L.mirrored ? "mirrored, " : "", g->vbase[1], L.tris, c->tex_ok, c->tex_fail, tex_made, c->tex_err[0] ? ": " : "", c->tex_err,
+         R.hand_len, g->req.scale, R.palm_rebuilt ? " | palm rebuilt" : "", (R.unknown_joints || L.unknown_joints) ? " | extra skin joints given to the wrist" : "",
+         c->ms, (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
+}
+/// xr_tick (render thread, at Present): consume a finished load, start the next one. Nothing loads while vr_hands=0.
+static void hands_pack_tick() {
+    if (!g_h2cfg.on || !g_h2_ok) return;
+    H2CpuPack* r = g_h2_cpu_ready.exchange(nullptr);
+    if (r != nullptr) {
+        if (r->gen == g_h2_req_gen && g_h2_req_set) hands_pack_upload(r);   // else outdated: the request moved on
+        delete r;
+    }
+    if (!g_h2_req_set) { if (g_h2_gpu) { hands_gpu_release(g_h2_gpu); diag("hands: pack released (none asked for) -> boxes"); } g_h2_pack_state = 0; return; }
+    if (g_h2_load_gen != g_h2_req_gen && !g_h2_worker_busy.load()) {
+        g_h2_load_gen = g_h2_req_gen; g_h2_pack_state = 1;
+        g_h2_worker_busy.store(true);
+        H2PackReq* q = new (std::nothrow) H2PackReq(g_h2_req);
+        HANDLE th = q ? CreateThread(nullptr, 256 * 1024, hands_worker, q, 0, nullptr) : nullptr;
+        if (th != nullptr) CloseHandle(th);   // detached: it ends by itself (milliseconds)
+        else { delete q; g_h2_worker_busy.store(false); g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "no worker thread"); diag("hands: pack '%s' rejected: no worker thread -> boxes", g_h2_req.name); }
+    }
 }
 
 /// The head's yaw in reference space (forward = R(q) . -z).
@@ -8302,6 +8534,7 @@ static void hands_latch(const float* Pj) {
     memcpy(g_hs.ref_q, g_xr_ref_q, sizeof(g_hs.ref_q)); memcpy(g_hs.ref_p, g_xr_ref_p, sizeof(g_hs.ref_p));
     memcpy(g_hs.head_p, g_xr_p, sizeof(g_hs.head_p));
     memcpy(g_hs.Pj, Pj, sizeof(g_hs.Pj));
+    g_hs.T = g_vrpad.time; g_hs.touch = g_vrpad.touch;   // S2: the display time the poses were located at (the finger smoothing's dt)
     if (g_h2_cal_req == 0) return;
     if (GetTickCount64() - g_h2_cal_req_t > k_h2_cal_max_ms) return;   // too old: hands_frame_end cancels it (SF-2)
     if (!g_xr_active || !g_vrpad.ready || (!g_vrpad.hand[0].grip_valid && !g_vrpad.hand[1].grip_valid)) return;   // a later tick within the limit may still take it
@@ -8323,6 +8556,21 @@ static void hands_latch(const float* Pj) {
 }
 }  // namespace
 
+/// The views the hands are set to show in (vr_hands_views): bit 0 first person (always), 1 diorama, 2 third person, 3 seat.
+static bool hands_view_ok(int mode) {
+    switch (mode) {
+        case 1: return true;
+        case 2: return (g_h2cfg.views & 2) != 0;
+        case 3: return (g_h2cfg.views & 4) != 0;
+        case 0: return (g_h2cfg.views & 8) != 0;
+        default: return false;
+    }
+}
+static const char* hands_views_text(int v) {
+    static char s[96];
+    snprintf(s, sizeof(s), "first person%s%s%s", (v & 2) ? " + diorama" : "", (v & 4) ? " + third person" : "", (v & 8) ? " + seat" : "");
+    return s;
+}
 /// The frame-level hide rules, first match wins (the targets are checked at the resolve).
 static int hands_hide_why() {
     if (!g_h2cfg.on) return H2_OFF;
@@ -8333,8 +8581,9 @@ static int hands_hide_why() {
     if (bt_no_split()) return H2_BT;
     if (g_dream_gate) return H2_DREAM;
     if (g_ovr_freeze) return H2_FREEZE;
-    if (g_fp_mode != 1) return H2_VIEW;
-    if (g_fp_body_mode != 0 || !g_fp_hide_body || g_hands_on) return H2_BODY;   // no "show my body" with our hands (the owner's rule); the old bone hands show Tidus's arms
+    if (!hands_view_ok(g_fp_mode) && !hands_view_ok(0)) return H2_VIEW;   // the exact view (first person may fall back to the seat) is checked at the draw
+    if (g_fp_mode == 1 && (g_fp_body_mode != 0 || !g_fp_hide_body || g_hands_on)) return H2_BODY;   // no "show my body" with our hands in first person (the owner's rule); the old bone hands show Tidus's arms.
+                                                                                                     // Not in the other views: Tidus is part of the scene there
     if (g_view_tick_frame != g_frames || g_hs.frame != g_frames) return H2_NO_TICK;
     if (!g_h2_ok) return H2_NO_PASS;
     if (!std::isfinite(g_hs.Pj[0]) || !std::isfinite(g_hs.Pj[5]) || fabsf(g_hs.Pj[0]) <= 0.2f || fabsf(g_hs.Pj[5]) <= 0.2f
@@ -8361,13 +8610,14 @@ static void hands_proj(int e, float P[16]) {
     P[0] = sx * 2.f / (f.r - f.l);  P[2] = sx * (f.r + f.l) / (f.r - f.l);
     P[5] = sy * 2.f / (f.u - f.d);  P[6] = sy * (f.u + f.d) / (f.u - f.d);
 }
-/// A reference-space frame to the world: R = Rb^T X.R, o = P + Rb^T (sc X.t + mv'), s = sc.
-static void hands_to_world(const HvXform& X, const float* P, const float* Rb, float sc, const float* mvp, HvBone* b) {
+/// A reference-space frame to the world: R = Rb^T X.R, o = P + Rb^T (sc X.t + mv') + (0, dy, 0), s = sc.
+static void hands_to_world(const HvXform& X, const float* P, const float* Rb, float sc, const float* mvp, float dy, HvBone* b) {
     float RbT[9]; hv_mat3_T(Rb, RbT);
     hv_mat3_mul(RbT, X.R, b->R);
     const float r[3] = { sc * X.t[0] + mvp[0], sc * X.t[1] + mvp[1], sc * X.t[2] + mvp[2] };
     float w[3]; hv_mat3_vec(RbT, r, w);
     for (int i = 0; i < 3; ++i) b->o[i] = P[i] + w[i];
+    b->o[1] += dy;
     b->s = sc;
 }
 static void hands_census(const char* text) {
@@ -8387,44 +8637,64 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
     if (rtv[0] == nullptr || texture_of(rtv[0]) != src) { hands_skip_event(H2_WRONG_RT, "the scene target is not rtv0 at its resolve"); rel(); return H2_WRONG_RT; }
     if (dsv == nullptr) { hands_skip_event(H2_NO_DSV, "no depth target bound at the scene resolve"); rel(); return H2_NO_DSV; }
     // Views and the base, from the tick's view; one sample for both eyes and both hands.
-    float V[2][16], I[16], Pn[3], P[3], Rb[9], sc, mvp[3]; int mode; float pv_last[16], pv_last2[16]; bool have_pv;
+    float V[2][16], I[16], Pn[3], P[3], Rb[9], sc, mvp[3], dy; int mode; float pv_last[16], pv_last2[16]; bool have_pv;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         float v[12]; memcpy(v, g_tick_v, sizeof(v));
         const float es = g_eye_shift;
         g_eye_shift = 0.f;   build_override_view(v, V[0], I, Pn, false);   // read-only (advance = false); publishes g_hb_* for this view
-        memcpy(P, g_hb_P, sizeof(P)); memcpy(Rb, g_hb_Rb, sizeof(Rb)); sc = g_hb_sc; memcpy(mvp, g_hb_mv, sizeof(mvp)); mode = g_hb_mode;
+        memcpy(P, g_hb_P, sizeof(P)); memcpy(Rb, g_hb_Rb, sizeof(Rb)); sc = g_hb_sc; memcpy(mvp, g_hb_mv, sizeof(mvp)); mode = g_hb_mode; dy = g_hb_dy;
         g_eye_shift = 1e-6f; build_override_view(v, V[1], I, Pn, false);  // eye 2: the headset's right-eye offset (non-zero marks eye 2)
         g_eye_shift = es;
         have_pv = g_have_PV; memcpy(pv_last, g_last_PVn, sizeof(pv_last)); memcpy(pv_last2, g_last_PVn2, sizeof(pv_last2));
     }
-    if (mode != 1) { rel(); return H2_VIEW; }
-    if (!(sc > 1e-3f) || !std::isfinite(sc)) { rel(); return H2_NO_PROJ; }
+    if (!hands_view_ok(mode)) { rel(); return H2_VIEW; }
+    if (!(sc > 1e-3f) || !std::isfinite(sc) || !std::isfinite(dy)) { rel(); return H2_NO_PROJ; }
     if (g_hs.pkt != g_vrpad_packet) { g_h2w.pkt_mismatch++; g_h2_tot.pkt_mismatch++; }   // an extra between the tick and here (expected never)
-    // Placement and skinning: both hands into one vertex buffer, world space.
+    // The fingers: smoothed on the display clock of the latched poses (S2).
+    const float dt = (g_h2_T_prev != 0 && g_hs.T > g_h2_T_prev) ? static_cast<float>(static_cast<double>(g_hs.T - g_h2_T_prev) * 1e-9) : (g_hs.T == g_h2_T_prev ? 0.f : -1.f);
+    g_h2_T_prev = g_hs.T;
+    const H2Gpu* pk = g_h2_gpu;
+    const bool mesh = pk != nullptr && (g_h2cfg.debug & 2) == 0;
     const bool axes = (g_h2cfg.debug & 1) != 0;
-    if (g_h2_mesh_n == 0 || g_h2_mesh_axes != axes) { g_h2_mesh_n = hv_box_mesh(g_h2_mesh, k_h2_max_verts / 2, axes); g_h2_mesh_axes = axes; }
+    const int kind = (axes ? 1 : 0) | (mesh ? 0 : 2);   // the box mesh: with the pack only the axes (if asked for), else the boxes (+ axes)
+    if (g_h2_mesh_kind != kind) { g_h2_mesh_n = kind != 0 ? hv_box_mesh(g_h2_mesh, k_h2_max_verts / 2, axes, !mesh) : 0; g_h2_mesh_kind = kind; }
     static HvVertex verts[k_h2_max_verts];   // render thread only
-    int nv = 0, grips = 0;
+    static H2Pal pal[2];
+    int nv = 0, grips = 0, put_down = 0;
     HvBone wb[2][2]; HvXform Hr[2];
     for (int h = 0; h < 2; ++h) {
         const XrHand& hd = g_hs.hand[h];
-        if (!g_hs.valid || !hd.grip_valid) { g_h2w.grip_lost[h]++; g_h2_tot.grip_lost[h]++; continue; }
+        if (!g_hs.valid || !hd.grip_valid) { g_h2w.grip_lost[h]++; g_h2_tot.grip_lost[h]++; g_h2_fs[h].anchor = false; continue; }
         HvXform grip; hands_grip_ref(hd, g_hs.ref_q, g_hs.ref_p, &grip);
+        const HvCtrl ctl = { hd.trigger, hd.squeeze, hd.trigger_touch, hd.thumb_stick, hd.thumb_rest, hd.thumb_face };
+        hv_fingers_update(&g_h2_fs[h], ctl, dt);
+        if (hv_put_down_update(&g_h2_fs[h], ctl, grip.R, grip.t, dt)) {   // S2: a controller on the desk for 10 s, nothing touched: that hand is not drawn
+            put_down |= 1 << h; g_h2w.put_down[h]++; g_h2_tot.put_down[h]++;
+            if (!g_h2_put_down_seen[h]) { g_h2_put_down_seen[h] = true; diag("hands: %s controller put down (still for 10 s, nothing touched): that hand is hidden until it moves or is touched (counted from now on)", h ? "right" : "left"); }
+            continue;
+        }
         if (!g_xr_translate) for (int i = 0; i < 3; ++i) grip.t[i] -= g_hs.head_p[i];   // N1: head_position=0 keeps the eye at the base: the hands follow it, relative to the (left) eye
         HvXform G; hv_default_grip_to_hand(h, &G);
         if (g_h2_cal_set[h]) memcpy(G.R, g_h2_cal[h], sizeof(G.R));   // the calibration replaces the default's rotation; its offset stays
         HvXform T; hv_trim(h, g_h2cfg.trim_rad, g_h2cfg.trim_off_m, &T);
         HvXform GT; hv_xform_mul(G, T, &GT);
+        if (mesh) { HvXform PF; hv_trim(h, pk->req.rot, pk->req.off, &PF); hv_xform_mul(GT, PF, &GT); }   // PackFix_h (hand.json wrist_offset_m / wrist_rotation_deg; 0 for the generic packs)
         hv_xform_mul(grip, GT, &Hr[h]);
-        hands_to_world(Hr[h], P, Rb, sc, mvp, &wb[h][0]);
-        hands_to_world(grip, P, Rb, sc, mvp, &wb[h][1]);
-        if (nv + g_h2_mesh_n > k_h2_max_verts) break;
-        hv_skin_rigid(g_h2_mesh, g_h2_mesh_n, wb[h], 2, verts + nv);
-        nv += g_h2_mesh_n; grips |= 1 << h;
+        hands_to_world(Hr[h], P, Rb, sc, mvp, dy, &wb[h][0]);
+        hands_to_world(grip, P, Rb, sc, mvp, dy, &wb[h][1]);
+        if (mesh) {
+            float D[HV_J][9]; HvXform skin[HV_J];
+            HvFingerState& fs = g_h2_fs[h];
+            hv_pose_deltas(&fs, pk->rig[h], h, g_h2cfg.rest_curl, pk->req.rest, D);
+            hv_fk_skin(pk->rig[h], D, skin, nullptr);
+            hv_palette(skin, Hr[h], pk->rig[h].bind[HV_PALM], pk->req.scale * g_h2cfg.scale, P, Rb, sc, mvp, dy, pal[h].B);
+        }
+        if (g_h2_mesh_n > 0 && nv + g_h2_mesh_n <= k_h2_max_verts) { hv_skin_rigid(g_h2_mesh, g_h2_mesh_n, wb[h], 2, verts + nv); nv += g_h2_mesh_n; }
+        grips |= 1 << h;
     }
     g_h2_grips_last = grips;
-    if (nv == 0) { rel(); return H2_NO_GRIPS; }
+    if (grips == 0) { rel(); return put_down ? H2_PUT_DOWN : H2_NO_GRIPS; }
     // Per eye: VP, and the light from above and in front, fixed in eye 1's view space (so both eyes shade alike).
     H2Cb cb[2];
     {
@@ -8449,11 +8719,16 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
     D3D11_TEXTURE2D_DESC td = {}; src->GetDesc(&td);
     {
         D3D11_MAPPED_SUBRESOURCE ms = {};
-        bool ok = SUCCEEDED(g_orig_map(g_ctx, g_h2_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) && ms.pData != nullptr;
-        if (ok) { memcpy(ms.pData, verts, sizeof(HvVertex) * nv); g_orig_unmap(g_ctx, g_h2_vb, 0); }
+        bool ok = true;
+        if (nv > 0) { ok = SUCCEEDED(g_orig_map(g_ctx, g_h2_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) && ms.pData != nullptr; if (ok) { memcpy(ms.pData, verts, sizeof(HvVertex) * nv); g_orig_unmap(g_ctx, g_h2_vb, 0); } }
         for (int e = 0; e < 2 && ok; ++e) {
             ok = SUCCEEDED(g_orig_map(g_ctx, g_h2_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) && ms.pData != nullptr;
             if (ok) { memcpy(ms.pData, &cb[e], sizeof(H2Cb)); g_orig_unmap(g_ctx, g_h2_cb[e], 0); }
+        }
+        for (int h = 0; h < 2 && ok && mesh; ++h) {
+            if (!(grips & (1 << h))) continue;
+            ok = SUCCEEDED(g_orig_map(g_ctx, g_h2_pal[h], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) && ms.pData != nullptr;
+            if (ok) { memcpy(ms.pData, &pal[h], sizeof(H2Pal)); g_orig_unmap(g_ctx, g_h2_pal[h], 0); }
         }
         if (!ok) { hands_skip_event(27, "a buffer could not be mapped"); rel(); return H2_NO_PASS; }
     }
@@ -8473,58 +8748,91 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
             && g.TopLeftY + g.Height <= td.Height + 0.5f && g.MinDepth >= 0.f && g.MaxDepth <= 1.f && g.MinDepth < g.MaxDepth) vp = g;
         g_h2_vp_used = vp;
     }
-    ID3D11Buffer* o_cb = nullptr; g_ctx->VSGetConstantBuffers(0, 1, &o_cb);
+    ID3D11Buffer* o_cb[2] = { nullptr, nullptr }; g_ctx->VSGetConstantBuffers(0, 2, o_cb);
     ID3D11Buffer* o_vb = nullptr; UINT o_stride = 0, o_off = 0; g_ctx->IAGetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+    ID3D11Buffer* o_ib = nullptr; DXGI_FORMAT o_ibf = DXGI_FORMAT_UNKNOWN; UINT o_ibo = 0; g_ctx->IAGetIndexBuffer(&o_ib, &o_ibf, &o_ibo);
     bool e2 = false;
     {
         InEye2 guard;
-        g_ctx->VSSetShader(g_h2_vs, nullptr, 0); g_ctx->PSSetShader(g_h2_ps, nullptr, 0);
+        g_ctx->PSSetShader(g_h2_ps, nullptr, 0);
         g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->HSSetShader(nullptr, nullptr, 0); g_ctx->DSSetShader(nullptr, nullptr, 0);
-        const UINT stride = sizeof(HvVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_h2_vb, &stride, &off);
-        g_ctx->IASetInputLayout(g_h2_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(g_h2_dss, 0); g_ctx->RSSetState(g_h2_rs);
         g_ctx->RSSetViewports(1, &g_h2_vp_used);
+        g_ctx->PSSetSamplers(0, 1, &g_h2_smp);
         auto draw = [&](ID3D11RenderTargetView* r, ID3D11DepthStencilView* d, int e) {
             ID3D11RenderTargetView* rts[1] = { r };
             g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, d, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
             g_orig_vssetcb(g_ctx, 0, 1, &g_h2_cb[e]);
-            g_ctx->Draw(static_cast<UINT>(nv), 0);
+            if (mesh) {   // S2: the pack, skinned on the GPU: one palette per hand, a draw per batch (one texture each)
+                g_ctx->VSSetShader(g_h2_vsk, nullptr, 0); g_ctx->IASetInputLayout(g_h2_ilk);
+                const UINT stride = sizeof(HvSkinVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &pk->vb, &stride, &off);
+                g_ctx->IASetIndexBuffer(pk->ib, DXGI_FORMAT_R32_UINT, 0);
+                for (int h = 0; h < 2; ++h) {
+                    if (!(grips & (1 << h))) continue;
+                    g_orig_vssetcb(g_ctx, 1, 1, &g_h2_pal[h]);
+                    for (const HvBatch& b : pk->rig[h].batch) {
+                        ID3D11ShaderResourceView* t = (b.tex >= 0 && static_cast<size_t>(b.tex) < pk->srv[h].size() && pk->srv[h][static_cast<size_t>(b.tex)]) ? pk->srv[h][static_cast<size_t>(b.tex)] : g_h2_white;
+                        g_ctx->PSSetShaderResources(0, 1, &t);
+                        g_ctx->DrawIndexed(b.count, pk->ibase[h] + b.first, static_cast<INT>(pk->vbase[h]));
+                    }
+                }
+            }
+            if (nv > 0) {   // the boxes (no pack, or debug bit 2), or only the wrist axes over the mesh (debug bit 1)
+                g_ctx->VSSetShader(g_h2_vs, nullptr, 0); g_ctx->IASetInputLayout(g_h2_il);
+                const UINT stride = sizeof(HvVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_h2_vb, &stride, &off);
+                g_ctx->PSSetShaderResources(0, 1, &g_h2_white);
+                g_ctx->Draw(static_cast<UINT>(nv), 0);
+            }
         };
         draw(rtv[0], dsv, 0);
         if (rtv2 != nullptr && dsv2 != nullptr) { draw(rtv2, dsv2, 1); e2 = true; }
-        uid_restore(s);   // the targets, viewports, shaders, states, layout, topology (and the releases)
-        g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
+        uid_restore(s);   // the targets, viewports, shaders, PS SRVs 0-1, sampler 0, states, layout, topology (and the releases)
+        g_orig_vssetcb(g_ctx, 0, 2, o_cb);
         g_ctx->IASetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+        g_ctx->IASetIndexBuffer(o_ib, o_ibf, o_ibo);
     }
-    if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release();
-    g_h2w.e1++; g_h2_tot.e1++; g_h2_drawn_frame = g_frames;
+    for (auto* b : o_cb) if (b) b->Release();
+    if (o_vb) o_vb->Release(); if (o_ib) o_ib->Release();
+    g_h2w.e1++; g_h2_tot.e1++; g_h2_drawn_frame = g_frames; g_h2_mode_last = mode;
+    if (mode >= 0 && mode < 4) { g_h2w.mode_drawn[mode]++; g_h2_tot.mode_drawn[mode]++; }
+    if (mesh) { g_h2w.mesh_frames++; g_h2_tot.mesh_frames++; }
     if (e2) { g_h2w.e2++; g_h2_tot.e2++; }
     else if (dsv2 == nullptr) { g_h2w.no_twin_dsv++; g_h2_tot.no_twin_dsv++; hands_skip_event(30, "eye 2: the depth target has no twin (eye 2 is not drawn rather than drawn unoccluded)"); }
     else { g_h2w.no_twin++; g_h2_tot.no_twin++; hands_skip_event(29, "eye 2: the scene target has no twin"); }
+    char what[96];
+    if (mesh) snprintf(what, sizeof(what), "mesh '%s' %u verts %u tris%s", pk->req.name, pk->verts, pk->tris, nv ? " + axes" : "");
+    else snprintf(what, sizeof(what), "boxes %d verts%s", nv, pk ? " (debug)" : "");
     if (g_frame_live) {
-        char t[220];
-        snprintf(t, sizeof(t), "HANDS e1 -> %p %ux%u s%u dsv %p (rtv1 %p, not written) | %d verts, grips %s%s", static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count,
-                 static_cast<void*>(texture_of(dsv)), static_cast<void*>(rtv[1] ? texture_of(rtv[1]) : nullptr), nv, (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-");
+        char t[260];
+        snprintf(t, sizeof(t), "HANDS e1 -> %p %ux%u s%u dsv %p (rtv1 %p, not written) | %s, grips %s%s, view %d", static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count,
+                 static_cast<void*>(texture_of(dsv)), static_cast<void*>(rtv[1] ? texture_of(rtv[1]) : nullptr), what, (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", mode);
         hands_census(t);
         snprintf(t, sizeof(t), "HANDS e2 -> %s %p dsv %p", e2 ? "twin" : "SKIPPED (no twin)", static_cast<void*>(rtv2 ? texture_of(rtv2) : nullptr), static_cast<void*>(dsv2 ? texture_of(dsv2) : nullptr));
         hands_census(t);
     }
-    if (g_h2_tot.e1 == 1)
-        diag("hands: first drawn at frame %u: eye 1 into %p %ux%u x%u (dsv %p), eye 2 %s | grips %s%s, scale %.2f units/m | viewport %gx%g at %g,%g depth %g..%g%s",
-             g_frames, static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count, static_cast<void*>(texture_of(dsv)), e2 ? "into the twins" : "SKIPPED", (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", sc,
-             g_h2_vp_used.Width, g_h2_vp_used.Height, g_h2_vp_used.TopLeftX, g_h2_vp_used.TopLeftY, g_h2_vp_used.MinDepth, g_h2_vp_used.MaxDepth,
+    if (g_h2_tot.e1 == 1 || (mesh && g_h2_tot.mesh_frames == 1))
+        diag("hands: first drawn%s at frame %u: eye 1 into %p %ux%u x%u (dsv %p), eye 2 %s | %s, grips %s%s, view %d, scale %.2f units/m | viewport %gx%g at %g,%g depth %g..%g%s",
+             (mesh && g_h2_tot.e1 > 1) ? " with the mesh" : "", g_frames, static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count, static_cast<void*>(texture_of(dsv)), e2 ? "into the twins" : "SKIPPED", what,
+             (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", mode, sc, g_h2_vp_used.Width, g_h2_vp_used.Height, g_h2_vp_used.TopLeftX, g_h2_vp_used.TopLeftY, g_h2_vp_used.MinDepth, g_h2_vp_used.MaxDepth,
              (s.nvp >= 1 && memcmp(&s.vp[0], &g_h2_vp_used, sizeof(D3D11_VIEWPORT)) == 0) ? " (the game's)" : " (the whole target: the game's was not usable)");
+    if ((mode >= 2 || mode == 0) && mode < 4 && g_h2_tot.mode_drawn[mode] == 1)   // the first draw in each other view (diorama / third person / seat) this on-session
+        diag("hands: first drawn in the %s at frame %u | %.2f units/m (a 0.19 m hand is %.1f units), floor lift %.2f units", mode == 2 ? "diorama" : mode == 3 ? "third person view" : "seat view",
+             g_frames, sc, 0.19f * sc * (mesh ? pk->req.scale * g_h2cfg.scale : 1.f), dy);
     const bool dump = (g_h2cfg.debug & 8) != 0 && !g_h2_dump_prev; g_h2_dump_prev = (g_h2cfg.debug & 8) != 0;
     if (dump || ((g_h2cfg.debug & 4) != 0 && g_h2_dbg_lines < 300)) {
         if (!dump) g_h2_dbg_lines++;
-        char line[900]; size_t l = (size_t)snprintf(line, sizeof(line), "hands: %s f%u | base P (%.2f %.2f %.2f) sc %.2f mv' (%.2f %.2f %.2f)", dump ? "pose dump" : "frame", g_frames, P[0], P[1], P[2], sc, mvp[0], mvp[1], mvp[2]);
-        for (int h = 0; h < 2 && l < sizeof(line) - 200; ++h) {
-            if (!(grips & (1 << h))) { l += (size_t)snprintf(line + l, sizeof(line) - l, " | %c not tracked", h ? 'R' : 'L'); continue; }
-            const HvBone& b = wb[h][0];
-            l += (size_t)snprintf(line + l, sizeof(line) - l, " | %c ref (%.3f %.3f %.3f) world (%.2f %.2f %.2f) Y (%.2f %.2f %.2f) Z (%.2f %.2f %.2f) %s",
-                                  h ? 'R' : 'L', Hr[h].t[0], Hr[h].t[1], Hr[h].t[2], b.o[0], b.o[1], b.o[2], b.R[1], b.R[4], b.R[7], b.R[2], b.R[5], b.R[8], g_h2_cal_set[h] ? "calibrated" : "default");
+        char line[1100]; size_t l = (size_t)snprintf(line, sizeof(line), "hands: %s f%u | view %d base P (%.2f %.2f %.2f) sc %.2f mv' (%.2f %.2f %.2f) dy %.2f | dt %.1f ms", dump ? "pose dump" : "frame", g_frames,
+                                                     mode, P[0], P[1], P[2], sc, mvp[0], mvp[1], mvp[2], dy, dt * 1000.f);
+        for (int h = 0; h < 2 && l < sizeof(line) - 260; ++h) {
+            if (!(grips & (1 << h))) { l += (size_t)snprintf(line + l, sizeof(line) - l, " | %c %s", h ? 'R' : 'L', (put_down & (1 << h)) ? "put down" : "not tracked"); continue; }
+            const HvBone& b = wb[h][0]; const XrHand& hd = g_hs.hand[h]; const HvFingerState& fs = g_h2_fs[h];
+            l += (size_t)snprintf(line + l, sizeof(line) - l, " | %c ref (%.3f %.3f %.3f) world (%.2f %.2f %.2f) Y (%.2f %.2f %.2f) Z (%.2f %.2f %.2f) %s | in trig %.2f%s sq %.2f thumb %s%s%s | curl t%.2f i%.2f m%.2f r%.2f l%.2f",
+                                  h ? 'R' : 'L', Hr[h].t[0], Hr[h].t[1], Hr[h].t[2], b.o[0], b.o[1], b.o[2], b.R[1], b.R[4], b.R[7], b.R[2], b.R[5], b.R[8], g_h2_cal_set[h] ? "calibrated" : "default",
+                                  hd.trigger, hd.trigger_touch ? " touched" : "", hd.squeeze, hd.thumb_stick ? "S" : "", hd.thumb_rest ? "R" : "", hd.thumb_face ? "F" : (!hd.thumb_stick && !hd.thumb_rest ? "-" : ""),
+                                  fs.curl[0], fs.curl[1], fs.curl[2], fs.curl[3], fs.curl[4]);
         }
-        if (dump && l < sizeof(line) - 120) snprintf(line + l, sizeof(line) - l, " | VP1 row0 (%.3f %.3f %.3f %.1f) pv_diff %.2g", cb[0].VP[0], cb[0].VP[1], cb[0].VP[2], cb[0].VP[3], g_h2w.pv_diff);
+        if (dump && l < sizeof(line) - 120) snprintf(line + l, sizeof(line) - l, " | VP1 row0 (%.3f %.3f %.3f %.1f) pv_diff %.2g | %s", cb[0].VP[0], cb[0].VP[1], cb[0].VP[2], cb[0].VP[3], g_h2w.pv_diff, what);
         diag("%s", line);
     }
     rel();
@@ -8575,60 +8883,118 @@ static void hands_frame_end() {
     next = now + 10000;
     const H2Stat& w = g_h2w;
     char grip[2][24]; for (int h = 0; h < 2; ++h) { if (w.grip_lost[h]) snprintf(grip[h], sizeof(grip[h]), "lost %u", w.grip_lost[h]); else strcpy_s(grip[h], "ok"); }
-    diagv("hands: drawn e1 %u e2 %u / %u frames | hidden suspend %u screen3d %u backdrop %u bt %u dream %u freeze %u view %u body %u no_tick %u no_pass %u no_proj %u no_resolve %u no_grips %u xr %u"
+    char pack[120];
+    if (g_h2_gpu) snprintf(pack, sizeof(pack), "mesh '%s' %u v%s", g_h2_gpu->req.name, g_h2_gpu->verts, (g_h2cfg.debug & 2) ? " (boxes: debug)" : "");
+    else snprintf(pack, sizeof(pack), "boxes (%s)", g_h2_pack_state == 1 ? "pack loading" : g_h2_pack_state == -1 ? "the pack failed" : "no pack");
+    const HvFingerState &fl = g_h2_fs[0], &fr = g_h2_fs[1];
+    diagv("hands: drawn e1 %u e2 %u / %u frames | hidden suspend %u screen3d %u backdrop %u bt %u dream %u freeze %u view %u body %u no_tick %u no_pass %u no_proj %u no_resolve %u no_grips %u put_down %u xr %u"
           " | skip no_dsv %u wrong_rt %u not_prev %u no_twin_dsv %u no_twin %u | grips L %s R %s | pv_diff e1 %.1e e2 %.1e%s | pkt_mismatch %u | ui depth measured before the hands %u, skipped %u"
-          " | calibrated L %d R %d | last hidden %s",
+          " | calibrated L %d R %d | %s | views %s: drawn fp %u dio %u tp %u seat %u | fingers L t%.2f i%.2f m%.2f R t%.2f i%.2f m%.2f%s | put down L %u R %u | last hidden %s",
           w.e1, w.e2, w.frames, w.why[H2_SUSPEND], w.why[H2_SCREEN3D], w.why[H2_BACKDROP], w.why[H2_BT], w.why[H2_DREAM], w.why[H2_FREEZE], w.why[H2_VIEW], w.why[H2_BODY],
-          w.why[H2_NO_TICK], w.why[H2_NO_PASS], w.why[H2_NO_PROJ], w.why[H2_NO_RESOLVE], w.why[H2_NO_GRIPS], w.why[H2_NO_XR], w.why[H2_NO_DSV], w.why[H2_WRONG_RT], w.why[H2_NOT_PREV],
+          w.why[H2_NO_TICK], w.why[H2_NO_PASS], w.why[H2_NO_PROJ], w.why[H2_NO_RESOLVE], w.why[H2_NO_GRIPS], w.why[H2_PUT_DOWN], w.why[H2_NO_XR], w.why[H2_NO_DSV], w.why[H2_WRONG_RT], w.why[H2_NOT_PREV],
           w.no_twin_dsv, w.no_twin, grip[0], grip[1], w.pv_diff, w.pv_diff2, w.pv_done ? "" : " (not measured)", w.pkt_mismatch, g_h2_uid_early, g_h2_uid_skip,
-          g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0, (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why[g_h2_last_why] : "-");
+          g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0, pack, hands_views_text(g_h2cfg.views), w.mode_drawn[1], w.mode_drawn[2], w.mode_drawn[3], w.mode_drawn[0],
+          fl.curl[0], fl.curl[1], fl.curl[2], fr.curl[0], fr.curl[1], fr.curl[2], g_hs.touch ? "" : " (no touch sensors bound)", w.put_down[0], w.put_down[1],
+          (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why[g_h2_last_why] : "-");
     g_h2_last = g_h2w; g_h2_last_valid = true; g_h2w = {}; g_h2_uid_early = g_h2_uid_skip = 0;
 }
 }  // namespace
 
-/// The settings (ABI 27), every frame from push_all: the native side reads min(bytes, its size) and defaults the rest.
+/// The settings (ABI 28), every frame from push_all: the native side reads min(bytes, its size) and defaults the rest.
 extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int bytes) {
-    VrHandsCfg n = { static_cast<int>(sizeof(VrHandsCfg)), 0, 0, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } };
+    VrHandsCfg n = { static_cast<int>(sizeof(VrHandsCfg)), 0, 1, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, 0.20f, 1.f };
     if (c != nullptr && bytes > 0) memcpy(&n, c, static_cast<size_t>(bytes) < sizeof(n) ? static_cast<size_t>(bytes) : sizeof(n));
-    n.bytes = static_cast<int>(sizeof(VrHandsCfg)); n.on = n.on ? 1 : 0; n.views = 0; n.debug &= 15;
+    n.bytes = static_cast<int>(sizeof(VrHandsCfg)); n.on = n.on ? 1 : 0; n.views = (n.views & 14) | 1; n.debug &= 15;
     for (int i = 0; i < 3; ++i) {
         const float r = n.trim_rad[i], m = n.trim_off_m[i];
         n.trim_rad[i] = std::isfinite(r) ? fmaxf(-0.7854f, fminf(0.7854f, r)) : 0.f;    // +-45 deg
         n.trim_off_m[i] = std::isfinite(m) ? fmaxf(-0.10f, fminf(0.10f, m)) : 0.f;      // +-0.10 m
     }
+    n.rest_curl = std::isfinite(n.rest_curl) ? fmaxf(0.f, fminf(1.f, n.rest_curl)) : 0.20f;
+    n.scale = std::isfinite(n.scale) ? fmaxf(0.8f, fminf(1.25f, n.scale)) : 1.f;
     if (n.on != g_h2cfg.on) {
         if (n.on) {
             g_h2w = {}; g_h2_tot = {}; g_h2_last_valid = false; g_h2_seen_skips = 0; g_h2_dbg_lines = 0; g_h2_last_why = H2_NONE;
-            diag("hands: on (first person only, with the body hidden) | pass %s | calibrated L %d R %d | trims yaw %.0f pitch %.0f roll %.0f deg, out %.3f up %.3f back %.3f m | debug %d",
-                 g_h2_ok ? "ready" : g_h2_tried ? "FAILED" : "built at the next Present with the headset on", g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0,
-                 n.trim_rad[0] / 0.0174533f, n.trim_rad[1] / 0.0174533f, n.trim_rad[2] / 0.0174533f, n.trim_off_m[0], n.trim_off_m[1], n.trim_off_m[2], n.debug);
+            g_h2_fs[0] = HvFingerState(); g_h2_fs[1] = HvFingerState(); g_h2_T_prev = 0; g_h2_put_down_seen[0] = g_h2_put_down_seen[1] = false;
+            diag("hands: on (views: %s; first person only with the body hidden) | pass %s | pack %s | calibrated L %d R %d | trims yaw %.0f pitch %.0f roll %.0f deg, out %.3f up %.3f back %.3f m"
+                 " | idle curl %.2f, size %.2f | debug %d", hands_views_text(n.views),
+                 g_h2_ok ? "ready" : g_h2_tried ? "FAILED" : "built at the next Present with the headset on",
+                 g_h2_gpu ? g_h2_gpu->req.name : g_h2_req_set ? "loaded at the next Present" : "none (boxes)", g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0,
+                 n.trim_rad[0] / 0.0174533f, n.trim_rad[1] / 0.0174533f, n.trim_rad[2] / 0.0174533f, n.trim_off_m[0], n.trim_off_m[1], n.trim_off_m[2], n.rest_curl, n.scale, n.debug);
         }
         else {
             const H2Stat& t = g_h2_tot;
-            diag("hands: off | while on: drawn e1 %u e2 %u of %u frames; skips no_dsv %u wrong_rt %u not_prev %u no_twin_dsv %u; pkt_mismatch %u; pv_diff max %.1e",
-                 t.e1, t.e2, t.frames, t.why[H2_NO_DSV], t.why[H2_WRONG_RT], t.why[H2_NOT_PREV], t.no_twin_dsv, t.pkt_mismatch, t.pv_diff);
+            diag("hands: off | while on: drawn e1 %u e2 %u of %u frames (with the mesh %u; fp %u dio %u tp %u seat %u); skips no_dsv %u wrong_rt %u not_prev %u no_twin_dsv %u; pkt_mismatch %u; pv_diff max %.1e; put down L %u R %u",
+                 t.e1, t.e2, t.frames, t.mesh_frames, t.mode_drawn[1], t.mode_drawn[2], t.mode_drawn[3], t.mode_drawn[0], t.why[H2_NO_DSV], t.why[H2_WRONG_RT], t.why[H2_NOT_PREV], t.no_twin_dsv,
+                 t.pkt_mismatch, t.pv_diff, t.put_down[0], t.put_down[1]);
         }
     }
+    else if (n.on && n.views != g_h2cfg.views) diag("hands: views now %s", hands_views_text(n.views));
     g_h2cfg = n;
+}
+
+/// S2 (ABI 28): the pack to draw. Paths are absolute UTF-16; left may be null (mirror: the left from the right). null clears
+/// it (boxes). The load happens at Present on a worker thread while vr_hands=1; the boxes are drawn until it is in. A request
+/// equal to the current one does nothing.
+extern "C" __declspec(dllexport) void ffxvr_hands2_pack(const VrHandsPackDesc* d, int bytes) {
+    if (d == nullptr || bytes < static_cast<int>(offsetof(VrHandsPackDesc, mirror) + sizeof(int))) {
+        if (g_h2_req_set) { g_h2_req_set = false; g_h2_req = H2PackReq(); g_h2_req_gen++; }
+        return;
+    }
+    VrHandsPackDesc c = {}; c.scale = 1.f; c.tint[0] = c.tint[1] = c.tint[2] = 1.f; c.mirror = 1;
+    memcpy(&c, d, static_cast<size_t>(bytes) < sizeof(c) ? static_cast<size_t>(bytes) : sizeof(c));
+    auto wcopy = [](const wchar_t* p, wchar_t* o, int n) -> bool {   // false: longer than the buffer
+        o[0] = 0; if (p == nullptr) return true;
+        int i = 0; for (; i < n - 1 && p[i] != 0; ++i) o[i] = p[i];
+        o[i] = 0; return p[i] == 0;
+    };
+    auto fin = [](float x, float def, float lo, float hi) { return std::isfinite(x) ? fmaxf(lo, fminf(hi, x)) : def; };
+    H2PackReq q;
+    if (!wcopy(c.right_glb, q.right, 520) || !wcopy(c.left_glb, q.left, 520)) { diag("hands: pack path longer than 519 characters: not loaded (boxes)"); q.right[0] = q.left[0] = 0; }
+    q.mirror = c.mirror != 0;
+    q.scale = fin(c.scale, 1.f, 0.5f, 2.f);
+    if (static_cast<size_t>(bytes) >= sizeof(VrHandsPackDesc)) {
+        for (int i = 0; i < 3; ++i) { q.off[i] = fin(c.wrist_off_m[i], 0.f, -0.1f, 0.1f); q.rot[i] = fin(c.wrist_rot_rad[i], 0.f, -0.7854f, 0.7854f); q.tint[i] = fin(c.tint[i], 1.f, 0.f, 4.f); }
+        for (int i = 0; i < 5; ++i) q.rest[i] = fin(c.rest_curl[i], 0.f, -1.f, 1.f);
+        if (c.name != nullptr) { int i = 0; for (; i < 63 && c.name[i] != 0; ++i) q.name[i] = (c.name[i] >= 32 && c.name[i] < 127 && c.name[i] != '%') ? c.name[i] : '_'; q.name[i] = 0; }
+    }
+    if (!q.name[0]) strcpy_s(q.name, "pack");
+    if (!q.right[0] && !q.left[0]) { if (g_h2_req_set) { g_h2_req_set = false; g_h2_req = H2PackReq(); g_h2_req_gen++; } return; }
+    const H2PackReq& o = g_h2_req;
+    if (g_h2_req_set && wcscmp(o.right, q.right) == 0 && wcscmp(o.left, q.left) == 0 && o.mirror == q.mirror && o.scale == q.scale && strcmp(o.name, q.name) == 0
+        && memcmp(o.off, q.off, sizeof(q.off)) == 0 && memcmp(o.rot, q.rot, sizeof(q.rot)) == 0 && memcmp(o.tint, q.tint, sizeof(q.tint)) == 0 && memcmp(o.rest, q.rest, sizeof(q.rest)) == 0) return;
+    q.gen = ++g_h2_req_gen;
+    g_h2_req = q; g_h2_req_set = true; g_h2_pack_state = 1; g_h2_pack_err[0] = 0;
 }
 
 /// The F8 status line, and numbers: out[0] 0 off / 1 drawing / 2 hidden, [1] eye-1 frames, [2] eye-2 frames, [3] frames (the
 /// last 10 s, else the live window), [4] captures, [5] pass (-1 failed, 0 not built, 1 ready), [6] grips drawn (bit 0 L,
 /// bit 1 R), [7] calibrated (bit 0 L, bit 1 R), [8] the last hide reason (H2Why), [9] a calibration request pending, [10]
-/// calibrations cancelled (SF-2). Returns the status line (a static buffer, valid until the next call).
+/// calibrations cancelled (SF-2); S2: [11] the pack (0 none asked for, 1 loading, 2 loaded, -1 failed), [12] its vertices
+/// (both hands), [13] its triangles, [14] the view of the last draw (0 seat, 1 fp, 2 diorama, 3 third person, -1 none),
+/// [15] put down (bit 0 L, bit 1 R), [16] the touch sensors are bound. Returns the status line (a static buffer, valid
+/// until the next call).
 extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n) {
-    static char s[256];
+    static char s[420];
     const H2Stat& w = g_h2_last_valid ? g_h2_last : g_h2w;
     const bool drawing = g_h2cfg.on && g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 2;
     const int pass = g_h2_ok ? 1 : g_h2_tried ? -1 : 0;
-    const int v[11] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
-                        g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why, g_h2_cal_req != 0 ? 1 : 0, static_cast<int>(g_h2_cal_cancels) };
-    if (out) for (int k = 0; k < n && k < 11; ++k) out[k] = v[k];
+    const int pd = (g_h2_fs[0].put_down ? 1 : 0) | (g_h2_fs[1].put_down ? 2 : 0);
+    const int v[17] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
+                        g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why, g_h2_cal_req != 0 ? 1 : 0, static_cast<int>(g_h2_cal_cancels),
+                        g_h2_pack_state, g_h2_gpu ? static_cast<int>(g_h2_gpu->verts) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->tris) : 0, drawing ? g_h2_mode_last : -1, pd, g_hs.touch ? 1 : 0 };
+    if (out) for (int k = 0; k < n && k < 17; ++k) out[k] = v[k];
     const char* last = (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why_long[g_h2_last_why] : "nothing yet";
+    char pk[200];
+    if (g_h2_gpu && (g_h2cfg.debug & 2) == 0) snprintf(pk, sizeof(pk), "%s %u v", g_h2_gpu->req.name, g_h2_gpu->verts);
+    else if (g_h2_gpu) snprintf(pk, sizeof(pk), "boxes (debug; %s loaded)", g_h2_gpu->req.name);
+    else if (g_h2_pack_state == 1) snprintf(pk, sizeof(pk), "boxes (loading %s)", g_h2_req.name);
+    else if (g_h2_pack_state == -1) snprintf(pk, sizeof(pk), "boxes (%s failed: %s)", g_h2_req.name, g_h2_pack_err);
+    else snprintf(pk, sizeof(pk), "boxes (no hand pack)");
     if (!g_h2cfg.on) snprintf(s, sizeof(s), "off");
     else if (pass < 0) snprintf(s, sizeof(s), "the shader pass could not be built (see ffxvr_diag.log)");
     else if (pass == 0) snprintf(s, sizeof(s), "waiting for the headset (the pass is built at its first frame)");
-    else snprintf(s, sizeof(s), "%s | eye1 %u eye2 %u / %u frames (%s) | last hidden: %s", drawing ? "drawing" : "hidden",
+    else snprintf(s, sizeof(s), "%s | %s | eye1 %u eye2 %u / %u frames (%s) | last hidden: %s", drawing ? "drawing" : "hidden", pk,
                   w.e1, w.e2, w.frames, g_h2_last_valid ? "last 10 s" : "so far", last);
     return s;
 }
@@ -9606,6 +9972,7 @@ static void xr_tick() {
     if (!g_xr_want) { dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
     if (!g_uid_tried && (g_uid_on || g_uid_backing > 0.001f)) uid_init();   // UD-6: the shaders compile here at Present, at headset start, not inside the game's frame
     if (g_h2cfg.on && !g_h2_tried) hands_pass_init();   // VR hands v2: the same rule (lazily, the first time vr_hands=1 with the headset on)
+    hands_pack_tick();                                    // VR hands v2 (S2): start a pack load, or upload a finished one (at Present, vr_hands=1 only)
     if (!g_copy_tried) copy_pass_init();         // SU-8 backstop: never inside xr_frame's submit
     lowres_check();
     detect_cut();
