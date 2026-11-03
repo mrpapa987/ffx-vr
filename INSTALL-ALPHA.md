@@ -227,5 +227,14 @@ on by default). A normal gamepad works too.
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit release that supports the new version (and an FFX VR update that names it). |
 
-For a bug report, send the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next
-to it, plus a description of what you saw.
+For a bug report (an issue in this repository, never on Fahrenheit's pages), send the newest
+`logs\run-*.txt` and the `logs\run-*-gamelogs` folder next to it, plus a description of what you saw.
+
+### Logging
+
+A fresh install logs little: `ffxvr_diag.log` (events and errors, per session, at most 4 MB; the
+session before is `ffxvr_diag.prev.log`) and `ffxvr_native.log`. For a bug hunt, with the game closed:
+`.\tools\set-logging.ps1 -Profile Dev` turns on the developer's diagnostics (the periodic lines, build-7,
+load lines and profiler, battle-transition lines, the HD-cache hooks; log cap 64 MB) and
+`.\tools\set-logging.ps1 -Profile Release` turns them all off again. Both edit `ffxvr.ini` in place and keep a
+timestamped `.bak`. The F8 overlay's Debug section shows "diagnostics: N on" while any is on.

@@ -22,10 +22,12 @@ building anything:
         install-mod.ps1         from packaging/: checks Fahrenheit, .NET x86, the 32-bit
                                 OpenXR runtime and FFX-60fps; copies mod/ffxvr into
                                 <game>\fahrenheit\mods\ffxvr (keeps the ini), unblocks the
-                                files, adds the loadorder line; -Uninstall
+                                files, adds the loadorder line, warns about diagnostics left on in a
+                                kept ini; -Uninstall [-Purge], -ResetLogging, -DeleteLogs
         paths.ps1               the same game finder the repo uses (env var, paths.local.ps1, Steam)
         run-ffx.ps1, game-settings.ps1, import-steam-saves.ps1,
-        export-save-to-steam.ps1, install-texture-pack.ps1   (they only need paths.ps1)
+        export-save-to-steam.ps1, install-texture-pack.ps1,
+        set-logging.ps1                                      (they only need paths.ps1)
 
 `<label>` is `-Version` if given, else the csproj `<Version>` plus the short commit
 (`-dirty` with uncommitted changes). A `.sha256` file is written next to the zip; `dist/` is
@@ -68,7 +70,7 @@ bulk dumps).
 | Dear ImGui / Hexa.NET.ImGui | MIT | No - we call Fahrenheit's copy | credit only |
 | Direct3D 11, DXGI, D3DCompiler, XInput, PSAPI | Windows system libraries | No | none |
 | FFX-60fps (peternguyenst) | Apache-2.0; its MinHook is BSD-2-Clause | **No** - `tools/build-fps60.ps1` clones and builds it on the user's machine | credit + link. If we ever bundle its binaries: its LICENSE, NOTICE and MinHook's licence go in the zip. Audit: no code of theirs has been copied into `src/` (checked 22 Oct; only addresses learned from reading it, which is fine). |
-| Farplane (topher-au) | check its repo before release (no licence file seen in the clone's root - treat as all-rights-reserved until confirmed) | No | we used it as reference only (offsets, byte patterns); credit + link; no code copied |
+| Farplane (topher-au) | **none**: no LICENSE / COPYING / NOTICE file anywhere in the repo, no licence in its README; only `AssemblyInfo.cs`'s "Copyright © 2016" (checked 2 Nov 2026, last commit 943b2c7 of Apr 2018). So all rights reserved | No | reference only (memory offsets, data layouts, which we re-verified in the exe ourselves; facts, not code); no code, data or resources copied, and none may be; credit + link (README "Standing on", THIRD-PARTY-NOTICES) |
 | Re-Remastered texture pack (HitokageWorshipper, Nexus 244) | Nexus mod, author's permissions | **No** | `tools/install-texture-pack.ps1` works on the user's own download; link to the Nexus page; do not mirror |
 | Virtual Desktop / VDXR, SteamVR | proprietary runtimes | No | nothing to ship; name them in the requirements |
 | Our own code | to decide (see 3) | Yes | LICENSE file at the root and in the zip |
@@ -111,13 +113,26 @@ game version (Steam build id).
 - [x] LICENSE (ours) + THIRD-PARTY-NOTICES (OpenXR Apache-2.0; credits for the rest) at the repo root
 - [x] both copied into the release zip by the packaging script
 - [x] `tools/package-release.ps1`: builds, assembles the zip from a clean folder (never from the live mod folder - it has the ini, logs and captures), writes a SHA-256 next to it
-- [ ] version: one place (`ffxvr.csproj` `<Version>`) flowing into the manifest and a `ffxvr_native` version string shown in the overlay; tag matches
-- [ ] CHANGELOG.md
-- [ ] README: install section for users (requirements, Fahrenheit version/commit, the loadorder line, first-run notes: F8 overlay, headset autostart, recentre), the "Standing on" credits, screenshots or a short clip
-- [ ] `ffxvr.ini` defaults reviewed (headset_autostart, overlay_at_start, hide_pointers, markers) - what a new user gets
-- [ ] remove the debug-only defaults that only make sense on the dev machine (markers logging every second, hands_dev, census buttons can stay but should be in a "Debug" header - they are)
-- [ ] `git ls-files` audit for anything that should not be public (paths with the user's name in docs? the `Tidus - HP` folder name appears in docs - fine, it is just a name)
-- [ ] GitHub: repo description, topics (ffx, vr, openxr, fahrenheit, quest), issues enabled, a release template
+- [x] version: one place (`ffxvr.csproj` `<Version>`, now `0.1.0-alpha.1`) flowing into the assembly's informational version,
+  the manifest, and (through `src/native/ffxvr_version.h`, written by build-mod) the native DLL's `ffxvr_build_info`; both
+  shown at the bottom of the F8 overlay, in Debug, and at the top of `ffxvr_diag.log`; package-release names the zip from it.
+  The tag is `v` + it (release procedure below)
+- [x] CHANGELOG.md
+- [x] README: player-facing (requirements, install in brief, first-run notes, known issues, bug reports, credits,
+  disclaimer). **Still to do: screenshots or a short clip** (placeholder comment at the top of README.md)
+- [x] `ffxvr.ini` defaults reviewed (Nov 2026, release prep notes): no change to the play defaults; questions for the owner
+  on battle_transition (code 2, the owner runs 1), dream_overlay (code 1, the owner runs 0) and hd_cluster_cache (code 0,
+  the owner runs 1)
+- [x] debug-only defaults: every diagnostic off for a fresh install (diag_load_lines 1 -> 0; the new diag_verbose gates
+  the periodic lines, the legacy markers' 1 s "window:" line, the camera trace and Ctrl+F9's 100 MB dump);
+  `ffxvr_diag.log` per session and capped at 4 MB; `tools/set-logging.ps1 -Profile Release|Dev`; hands_dev was already 0
+- [x] `git ls-files` audit (2 Nov 2026): no personal paths, no game files, captures or binaries; three research notes
+  had the research container's `/home/...` path (made relative). The handle `mrpapa` (LICENSE, csproj Authors) and
+  `mrpapa987` (the repo URL) are intended
+- [x] issue templates (`.github/ISSUE_TEMPLATE/bug_report.yml`, `feature_request.yml`, `config.yml`) and a release notes
+  template (`.github/release-template.md`)
+- [ ] GitHub (the owner, on the site): repo description, topics (ffx, final-fantasy-x, vr, openxr, fahrenheit, quest,
+  virtual-desktop), Issues enabled (Discussions optional: `config.yml` links to it), make the repository public
 - [ ] Nexus / Reddit posts link to the GitHub release, never to a rehost
 - [ ] ImGui text is a printf format (Hexa passes `ImGui.Text*`'s string as the format): a stray `%` prints garbage or kills
   the game. Before every release this must print nothing (Git Bash or WSL, from the repo root); fix a hit with `%%`:
@@ -142,6 +157,27 @@ game version (Steam build id).
 
 ## 6. Open questions
 
-- Farplane's licence (and whether to keep it in the credits as "reference" only).
+- ~~Farplane's licence~~: it has none (section 2); kept in the credits as a reference only.
 - Whether the Fahrenheit crew is fine with a mod depending on `main`; ask them.
 - Code signing: not required; mention in the README that the DLLs are unsigned and SmartScreen may complain.
+
+## 7. Release procedure
+
+1. **Version.** Set `<Version>` in `src/managed/ffxvr.csproj` (e.g. `0.1.0-alpha.1`); move the CHANGELOG entry from
+   "unreleased" to the date. Commit. Nothing else holds the version.
+2. **Checks.** Section 5's printf greps print nothing; `git status` is clean; `git ls-files` has nothing new that should not
+   be public.
+3. **Tag.** `git tag -a v0.1.0-alpha.1 -m "FFX VR 0.1.0-alpha.1"` on that commit, `git push --tags`.
+4. **Package**, from the tagged, clean checkout:
+   `powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 -Version 0.1.0-alpha.1`
+   (it warns if `-Version` is not the csproj's, or if the tree is dirty). Out: `dist\ffx-vr-0.1.0-alpha.1.zip` and its
+   `.sha256`.
+5. **Smoke test the zip** on the game PC (the fail-safe tests in the release-prep notes): a fresh install into a game folder
+   with no `ffxvr.ini` (F8 shows the version and "diagnostics: all off"; `ffxvr_diag.log` stays small), a start without the
+   headset, `install-mod.ps1 -Uninstall -Purge`.
+6. **GitHub release** from the tag: title `FFX VR 0.1.0-alpha.1`, tick "pre-release", body from
+   `.github/release-template.md` + the CHANGELOG entry + the SHA-256; attach the zip and the `.sha256`.
+7. **Your own setup afterwards.** The release defaults are for players; for development keep (or restore) the diagnostics
+   with `tools\set-logging.ps1 -Profile Dev` (and `-Profile Release` to see what a player gets). Existing inis are never
+   changed by a new build: an ini older than `ini_rev` 2 keeps the periodic lines on (diag_verbose read as 1).
+8. Nexus / Reddit posts link to the GitHub release, never to a rehost.

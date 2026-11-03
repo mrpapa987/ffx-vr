@@ -1,0 +1,11 @@
+name: Idea or request
+description: A suggestion for FFX VR (a view, a setting, comfort, a part of the game that needs VR work).
+labels: [enhancement]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What you would like, and where in the game it matters.
+    validations:
+      required: true

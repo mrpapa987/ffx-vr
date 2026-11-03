@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas and setup help
+    url: https://github.com/mrpapa987/ffx-vr/discussions
+    about: Ask here (if Discussions is enabled), or open a bug report if something is broken.
+  - name: Fahrenheit (the mod loader) itself
+    url: https://github.com/fahrenheit-crew/fahrenheit
+    about: Only for problems that also happen without FFX VR installed. Never report FFX VR bugs there.

@@ -12,7 +12,7 @@ Static analysis of FFX.exe (ImageBase 0x400000, DYNAMIC_BASE, **large-address-aw
 Companion: `research/battle-data-load.md` (exe-battle-ui) covers the battle-data side in detail: the encounter roll,
 MsBattleExe, the state table, the chr cache, the return tasks. This file covers the loader, I/O, GPU-resource and timing side,
 the measurement plan and the caching options. Sources: Ghidra export `re/out`; Fahrenheit runtime
-`/home/claude/fahrenheit-crew/fahrenheit/src/runtime/{fileloader,cd,malloc}.cs` (commit ecb6702); FFX-60fps source.
+`fahrenheit/src/runtime/{fileloader,cd,malloc}.cs` (commit ecb6702); FFX-60fps source.
 
 ---
 

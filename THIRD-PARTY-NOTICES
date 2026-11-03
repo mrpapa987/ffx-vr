@@ -27,8 +27,10 @@ The DLL is shipped unmodified.
 - FFX-60fps (peternguyenst) - the frame-rate mod used alongside; built
   from source on the user's machine by tools/build-fps60.ps1.
   https://github.com/peternguyenst/FFX-60fps  Apache-2.0.
-- Farplane (topher-au) - consulted as a reference for memory offsets;
-  no code used.  https://github.com/topher-au/Farplane
+- Farplane (topher-au) - consulted as a reference for memory offsets and
+  data layouts only; no code, data or resources taken. The repository has
+  no licence file (checked Nov 2026, commit 943b2c7), so nothing of it may
+  be redistributed, and none is.  https://github.com/topher-au/Farplane
 - Re-Remastered texture pack (HitokageWorshipper) - optional, installed
   from the user's own download by tools/install-texture-pack.ps1.
 

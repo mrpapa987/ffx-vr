@@ -18,6 +18,7 @@ Tested on one setup only: Windows 11, an RTX 3080 Ti, and a **Quest 3 over Virtu
 | `mod\ffxvr\` | The mod itself (copied into the game folder by the installer) |
 | `tools\install-mod.ps1` | Installs, updates or uninstalls the mod, and checks what's missing |
 | `tools\run-ffx.ps1` | Starts the game through Fahrenheit and collects logs for bug reports |
+| `tools\set-logging.ps1` | Turns the mod's diagnostics on for a bug hunt (`-Profile Dev`) and off again (`-Profile Release`) |
 | `tools\game-settings.ps1`, `import-steam-saves.ps1`, `export-save-to-steam.ps1`, `install-texture-pack.ps1` | Optional extras (section 6) |
 | `LICENSE`, `THIRD-PARTY-NOTICES` | Licences (MIT for FFX VR; Apache-2.0 for the bundled OpenXR loader) |
 
@@ -93,7 +94,11 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
   The folder must contain `FFX.exe`.
 - **Updating:** extract the new zip and run its `install-mod.ps1`. Your settings
   (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game closed.
-- **Uninstalling:** `install-mod.ps1 -Uninstall`.
+- **Uninstalling:** `install-mod.ps1 -Uninstall` removes the mod and its load-order line and lists what is
+  left (your settings and logs); `install-mod.ps1 -Uninstall -Purge` deletes those too.
+- **Coming from a test build?** If your kept `ffxvr.ini` has diagnostics on, the installer says so:
+  `install-mod.ps1 -ResetLogging` turns them all off (a backup is made first), and `-DeleteLogs` removes old
+  big logs and captures from the mod folder.
 
 ---
 
@@ -184,8 +189,25 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit (and maybe FFX VR) update. |
 
-**Bug reports:** send the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next to
-it, with a description of what you saw and the FFX VR version ({VERSION}).
+**Bug reports:** open an issue at the [FFX VR repository](https://github.com/mrpapa987/ffx-vr/issues)
+(never on Fahrenheit's or FFX-60fps's pages), with the newest `logs\run-*.txt` and the `logs\run-*-gamelogs`
+folder next to it (zipped), a description of what you saw and the FFX VR version ({VERSION}; also at the
+bottom of the F8 overlay).
+
+The mod logs little by default: `ffxvr_diag.log` in `<game folder>\fahrenheit\mods\ffxvr\` (events and
+errors, started fresh each session, at most 4 MB; the session before is `ffxvr_diag.prev.log`). If you are
+asked for more detail, with the game closed:
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Dev
+```
+
+then play until the problem shows, send the logs, and switch back (the diagnostics write large logs and
+cost some frame time):
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Release
+```
 
 ---
 

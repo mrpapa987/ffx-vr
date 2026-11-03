@@ -3,7 +3,7 @@
 Sources: the work repo at build 6 + review fixes (`git 9b097c3`):
 `src/native/ffxvr_native.cpp` (cited as N:line), `src/managed/module.cs` (M:line), `src/native/ffxvr_xr.cpp`
 (X:line), `docs/design-notes.md` (DN:line); Fahrenheit structs in
-`/home/claude/fahrenheit-crew/fahrenheit/src/core/ffx/battle/btlui.cs`, `chr.cs`, `gstate.cs`.
+`fahrenheit/src/core/ffx/battle/btlui.cs`, `chr.cs`, `gstate.cs`.
 There was no EXE work here. Confidence tags: **[code]** = the code says so; **[doc]** = the notes record a runtime
 observation; **[infer]** = my reading, not verified.
 Addresses: gva = Ghidra VA with ImageBase 0x400000 (confirmed: `objdump -p FFX.exe` gives ImageBase 00400000);
