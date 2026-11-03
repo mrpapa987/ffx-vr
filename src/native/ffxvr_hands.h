@@ -69,7 +69,7 @@ void hv_mat3_vec(const float* A, const float* v, float* o);
 // Joint frames follow OpenXR (+Y dorsal, +Z along the bone away from the tip, X = Y x Z). The pack contract is the one
 // tools/hands/handlib.py writes (research hands-assets.md 1).
 
-enum { HV_J = 26, HV_PALM = 0, HV_WRIST = 1, HV_MAX_VERTS = 65535, HV_MAX_TEX = 2048 };
+enum { HV_J = 26, HV_PALM = 0, HV_WRIST = 1, HV_MAX_VERTS = 65535, HV_MAX_INDICES = 393216, HV_MAX_TEX = 2048, HV_MAX_IMAGES = 4 };   // per hand; a hand needs ~6 k indices
 extern const int  hv_parent[HV_J];
 extern const char* const hv_joint_name[HV_J];
 
@@ -89,15 +89,20 @@ struct HvMesh {
     float hand_len = 0.f;                                 // wrist -> middle tip at the bind pose (m), for the log
     int   prims = 0, tris = 0, unknown_joints = 0;        // glTF primitives read, triangles, skin joints not in the 26 (weights moved to the wrist)
     int   hand = 1;                                       // 0 left, 1 right
+    int   tex_from = -1;                                  // >= 0: this hand uses that hand's textures (a mirror: nothing decoded or uploaded twice)
+    int   images_dropped = 0;                             // images past HV_MAX_IMAGES (those batches draw the base colour)
     bool  palm_rebuilt = false, mirrored = false;
 };
 
 /// Parses a glb (glTF 2.0 binary: one skinned mesh, embedded buffer and images only) into `out`. `h` 0 left, 1 right: the
 /// hand the file is for (only used for the thumb's opposition axis). `tint` multiplies the base colour (null: none). On
 /// failure returns false with the reason in err (e.g. "joint 'thumb_tip' missing"). Every index is checked before use.
+/// Caps (a 32-bit process; a bad file must not reach an out-of-memory): HV_MAX_VERTS vertices and HV_MAX_INDICES indices per
+/// hand, HV_MAX_IMAGES images (the rest draw their base colour); compressed glbs (Draco, meshopt) and other required
+/// extensions are refused. Can throw std::bad_alloc (the caller catches).
 bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMesh* out, char* err, int errn);
 /// The other hand from this one: x negated in positions and normals, the winding reversed, every bind frame conjugated
-/// with S = diag(-1, 1, 1) (spec 2 row 7). The textures are shared (copied).
+/// with S = diag(-1, 1, 1) (spec 2 row 7). The textures are not copied: dst->tex_from names the hand whose textures it uses.
 void hv_mesh_mirror(const HvMesh& src, HvMesh* dst);
 /// The bind's parent-relative locals and inverses from `bind`, and the thumb's opposition axis (`h` 0 left, 1 right).
 void hv_mesh_finish(HvMesh* m, int h);

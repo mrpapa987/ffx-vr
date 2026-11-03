@@ -8258,7 +8258,7 @@ struct H2Gpu {
     H2PackReq req;                                       // what it was loaded from (name, scale, PackFix, tint, rest curls)
 };
 H2PackReq g_h2_req; bool g_h2_req_set = false; uint32_t g_h2_req_gen = 0, g_h2_load_gen = 0;
-std::atomic<H2CpuPack*> g_h2_cpu_ready{ nullptr }; std::atomic<bool> g_h2_worker_busy{ false };
+std::atomic<H2CpuPack*> g_h2_cpu_ready{ nullptr }; std::atomic<bool> g_h2_worker_busy{ false }; std::atomic<bool> g_h2_worker_oom{ false };
 H2Gpu* g_h2_gpu = nullptr;
 int  g_h2_pack_state = 0;                                // 0 none asked for, 1 loading, 2 loaded, -1 failed (the boxes are drawn meanwhile)
 char g_h2_pack_err[300] = "";                            // the last failure (for the F8 status)
@@ -8375,7 +8375,7 @@ static DWORD WINAPI hands_worker(LPVOID arg) {
     H2PackReq* qp = static_cast<H2PackReq*>(arg);
     const H2PackReq& q = *qp;
     H2CpuPack* r = new (std::nothrow) H2CpuPack();
-    if (r == nullptr) { delete qp; g_h2_worker_busy.store(false); return 0; }
+    if (r == nullptr) { g_h2_worker_oom.store(true); delete qp; g_h2_worker_busy.store(false); return 0; }   // N5: reported by hands_pack_tick
     r->gen = q.gen;
     LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
@@ -8395,13 +8395,19 @@ static DWORD WINAPI hands_worker(LPVOID arg) {
         return true;
     };
     bool ok = true;
-    const bool have_r = q.right[0] != 0, have_l = q.left[0] != 0;
-    if (have_r) ok = load(q.right, 1);
-    if (ok && have_r && have_l && !q.mirror) ok = load(q.left, 0);
-    if (ok) {
-        if (r->from_file[1] && !r->from_file[0]) hv_mesh_mirror(r->hand[1], &r->hand[0]);          // the left from the right (the generic packs)
-        else if (!have_r && have_l) { ok = load(q.left, 0); if (ok) hv_mesh_mirror(r->hand[0], &r->hand[1]); }   // only a left hand given
-        else if (!have_r) { ok = false; snprintf(r->err, sizeof(r->err), "no glb named for either hand"); }
+    try {   // SF-1: an out-of-memory (std::bad_alloc from any vector here, cgltf's malloc returns null) must not end the game
+        const bool have_r = q.right[0] != 0, have_l = q.left[0] != 0;
+        if (have_r) ok = load(q.right, 1);
+        if (ok && have_r && have_l && !q.mirror) ok = load(q.left, 0);
+        if (ok) {
+            if (r->from_file[1] && !r->from_file[0]) hv_mesh_mirror(r->hand[1], &r->hand[0]);          // the left from the right (the generic packs)
+            else if (!have_r && have_l) { ok = load(q.left, 0); if (ok) hv_mesh_mirror(r->hand[0], &r->hand[1]); }   // only a left hand given
+            else if (!have_r) { ok = false; snprintf(r->err, sizeof(r->err), "no glb named for either hand"); }
+        }
+    }
+    catch (...) {
+        ok = false; snprintf(r->err, sizeof(r->err), "out of memory reading the pack");
+        r->hand[0] = HvMesh(); r->hand[1] = HvMesh();
     }
     if (SUCCEEDED(co)) CoUninitialize();
     QueryPerformanceCounter(&t1); r->ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
@@ -8458,6 +8464,8 @@ static void hands_pack_upload(H2CpuPack* c) {
     }
     H2Gpu* g = new (std::nothrow) H2Gpu();
     if (g == nullptr) { g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory"); diag("hands: pack '%s' rejected: out of memory -> boxes", name); return; }
+    int tex_made = 0;
+    try {   // SF-1: the vectors below can throw (bad_alloc) on the render thread: never past here
     std::vector<HvSkinVertex> v; std::vector<uint32_t> ix;
     for (int h = 0; h < 2; ++h) {
         g->vbase[h] = static_cast<uint32_t>(v.size()); g->ibase[h] = static_cast<uint32_t>(ix.size());
@@ -8474,33 +8482,49 @@ static void hands_pack_upload(H2CpuPack* c) {
         diag("hands: pack '%s' rejected: %s -> boxes", name, g_h2_pack_err);
         hands_gpu_release(g); hands_gpu_release(g_h2_gpu); return;
     }
-    int tex_made = 0;
-    for (int h = 0; h < 2; ++h) {
+    for (int h = 0; h < 2; ++h) {   // the hands with their own images first
+        if (c->hand[h].tex_from >= 0) continue;
         g->srv[h].assign(c->hand[h].tex.size(), nullptr);
         for (size_t i = 0; i < c->hand[h].tex.size(); ++i) { g->srv[h][i] = hands_texture(c->hand[h].tex[i]); if (g->srv[h][i]) tex_made++; }
+    }
+    for (int h = 0; h < 2; ++h) {   // a mirrored hand shares its source's textures (one decode, one upload: SF-1)
+        const int f = c->hand[h].tex_from;
+        if (f < 0 || f > 1 || f == h) continue;
+        g->srv[h] = g->srv[f]; for (auto* t : g->srv[h]) if (t) t->AddRef();
+    }
+    for (int h = 0; h < 2; ++h) {
         g->rig[h] = std::move(c->hand[h]);
         g->rig[h].v.clear(); g->rig[h].v.shrink_to_fit(); g->rig[h].idx.clear(); g->rig[h].idx.shrink_to_fit(); g->rig[h].tex.clear(); g->rig[h].tex.shrink_to_fit();   // 32-bit address space: no CPU copies kept
+    }
+    }
+    catch (...) {
+        g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory uploading the pack");
+        diag("hands: pack '%s' rejected: %s -> boxes", name, g_h2_pack_err);
+        hands_gpu_release(g); hands_gpu_release(g_h2_gpu); return;
     }
     g->req = g_h2_req;
     hands_gpu_release(g_h2_gpu);
     g_h2_gpu = g; g_h2_pack_state = 2; g_h2_pack_err[0] = 0;
     QueryPerformanceCounter(&t1);
     const HvMesh& R = g->rig[1]; const HvMesh& L = g->rig[0];
-    diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded, %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s | worker %.1f ms, upload %.1f ms",
+    diag("hands: pack '%s' loaded: right %u v / %d t, %d prim%s (%u batch%s)%s, left %s%u v / %d t | textures %d decoded, %d failed, %d on the GPU%s%s | wrist->middle tip %.3f m x scale %.2f%s%s%s | worker %.1f ms, upload %.1f ms",
          name, g->verts - g->vbase[1], R.tris, R.prims, R.prims == 1 ? "" : "s", static_cast<unsigned>(R.batch.size()), R.batch.size() == 1 ? "" : "es", R.mirrored ? " (mirrored from the left)" : "",
          L.mirrored ? "mirrored, " : "", g->vbase[1], L.tris, c->tex_ok, c->tex_fail, tex_made, c->tex_err[0] ? ": " : "", c->tex_err,
          R.hand_len, g->req.scale, R.palm_rebuilt ? " | palm rebuilt" : "", (R.unknown_joints || L.unknown_joints) ? " | extra skin joints given to the wrist" : "",
-         c->ms, (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
+         (R.images_dropped || L.images_dropped) ? " | images past 4 drawn as their base colour" : "", c->ms, (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart);
 }
 /// xr_tick (render thread, at Present): consume a finished load, start the next one. Nothing loads while vr_hands=0.
 static void hands_pack_tick() {
     if (!g_h2cfg.on || !g_h2_ok) return;
+    if (g_h2_worker_oom.exchange(false) && g_h2_load_gen == g_h2_req_gen) {   // N5: the worker could not even start (no memory): failed, not "loading" forever
+        g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "out of memory"); diag("hands: pack '%s' rejected: out of memory -> boxes", g_h2_req.name);
+    }
     H2CpuPack* r = g_h2_cpu_ready.exchange(nullptr);
     if (r != nullptr) {
         if (r->gen == g_h2_req_gen && g_h2_req_set) hands_pack_upload(r);   // else outdated: the request moved on
         delete r;
     }
-    if (!g_h2_req_set) { if (g_h2_gpu) { hands_gpu_release(g_h2_gpu); diag("hands: pack released (none asked for) -> boxes"); } g_h2_pack_state = 0; return; }
+    if (!g_h2_req_set) { if (g_h2_gpu) { hands_gpu_release(g_h2_gpu); diag("hands: pack released (none asked for) -> boxes"); } if (g_h2_pack_state != -1) g_h2_pack_state = 0; return; }   // a failure stays visible in F8
     if (g_h2_load_gen != g_h2_req_gen && !g_h2_worker_busy.load()) {
         g_h2_load_gen = g_h2_req_gen; g_h2_pack_state = 1;
         g_h2_worker_busy.store(true);
@@ -8667,9 +8691,12 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         const XrHand& hd = g_hs.hand[h];
         if (!g_hs.valid || !hd.grip_valid) { g_h2w.grip_lost[h]++; g_h2_tot.grip_lost[h]++; g_h2_fs[h].anchor = false; continue; }
         HvXform grip; hands_grip_ref(hd, g_hs.ref_q, g_hs.ref_p, &grip);
-        const HvCtrl ctl = { hd.trigger, hd.squeeze, hd.trigger_touch, hd.thumb_stick, hd.thumb_rest, hd.thumb_face };
+        HvCtrl ctl = { hd.trigger, hd.squeeze, hd.trigger_touch, hd.thumb_stick, hd.thumb_rest, hd.thumb_face };
+        if (!g_hs.touch) ctl.thumb_stick = hd.squeeze > 0.5f;   // review N10: no touch sensors: a gripping hand's thumb is taken as down on the controller
         hv_fingers_update(&g_h2_fs[h], ctl, dt);
-        if (hv_put_down_update(&g_h2_fs[h], ctl, grip.R, grip.t, dt)) {   // S2: a controller on the desk for 10 s, nothing touched: that hand is not drawn
+        if (!g_hs.touch) g_h2_fs[h].put_down = false;
+        if (g_hs.touch && hv_put_down_update(&g_h2_fs[h], ctl, grip.R, grip.t, dt)) {   // S2: a controller on the desk for 10 s, nothing touched: that hand is not drawn.
+                                                                                     // SF-3: only with the touch sensors bound (without them a held, idle controller looks put down)
             put_down |= 1 << h; g_h2w.put_down[h]++; g_h2_tot.put_down[h]++;
             if (!g_h2_put_down_seen[h]) { g_h2_put_down_seen[h] = true; diag("hands: %s controller put down (still for 10 s, nothing touched): that hand is hidden until it moves or is touched (counted from now on)", h ? "right" : "left"); }
             continue;
@@ -8950,7 +8977,12 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_pack(const VrHandsPackDesc* d
     };
     auto fin = [](float x, float def, float lo, float hi) { return std::isfinite(x) ? fmaxf(lo, fminf(hi, x)) : def; };
     H2PackReq q;
-    if (!wcopy(c.right_glb, q.right, 520) || !wcopy(c.left_glb, q.left, 520)) { diag("hands: pack path longer than 519 characters: not loaded (boxes)"); q.right[0] = q.left[0] = 0; }
+    if (!wcopy(c.right_glb, q.right, 520) || !wcopy(c.left_glb, q.left, 520)) {   // N7: a failure (F8 shows it), not a silent "none"
+        if (!(g_h2_pack_state == -1 && strstr(g_h2_pack_err, "path") != nullptr)) diag("hands: pack rejected: its path is longer than 519 characters (move the game folder?) -> boxes");
+        if (g_h2_req_set) { g_h2_req_set = false; g_h2_req = H2PackReq(); g_h2_req_gen++; }
+        g_h2_pack_state = -1; strcpy_s(g_h2_pack_err, "the pack's path is longer than 519 characters");
+        return;
+    }
     q.mirror = c.mirror != 0;
     q.scale = fin(c.scale, 1.f, 0.5f, 2.f);
     if (static_cast<size_t>(bytes) >= sizeof(VrHandsPackDesc)) {
@@ -8982,7 +9014,7 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n
     const int pd = (g_h2_fs[0].put_down ? 1 : 0) | (g_h2_fs[1].put_down ? 2 : 0);
     const int v[17] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
                         g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why, g_h2_cal_req != 0 ? 1 : 0, static_cast<int>(g_h2_cal_cancels),
-                        g_h2_pack_state, g_h2_gpu ? static_cast<int>(g_h2_gpu->verts) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->tris) : 0, drawing ? g_h2_mode_last : -1, pd, g_hs.touch ? 1 : 0 };
+                        g_h2_pack_state, g_h2_gpu ? static_cast<int>(g_h2_gpu->verts) : 0, g_h2_gpu ? static_cast<int>(g_h2_gpu->tris) : 0, drawing ? g_h2_mode_last : -1, pd, g_vrpad.touch ? 1 : 0 };   // N1: the XR layer's flag, fresh every frame
     if (out) for (int k = 0; k < n && k < 17; ++k) out[k] = v[k];
     const char* last = (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why_long[g_h2_last_why] : "nothing yet";
     char pk[200];

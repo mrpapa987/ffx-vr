@@ -274,6 +274,9 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Text("look:"); ImGui.SameLine();
         if (ImGui.RadioButton("dark glove##h2pk", _vr_hands_pack == "generic-glove")) _vr_hands_pack = "generic-glove";
         ImGui.SameLine(); if (ImGui.RadioButton("bare hand##h2pk", _vr_hands_pack == "generic")) _vr_hands_pack = "generic";
+        if (_h2_pack_try > 0 && !string.IsNullOrEmpty(_h2_pack_sent)) {   // review N6: the fallback is drawn, not the selection
+            ImGui.SameLine(); ImGui.TextDisabled(_h2_pack_sent == "generic" ? "(using the bare hand: the glove could not be loaded)" : "(using the dark glove: the bare hand could not be loaded)");
+        }
         ImGui.SameLine(); ImGui.TextDisabled("(our own generic hand; your own models come in a later build)");
         ImGui.Text("show in: first person (with your body hidden), and"); ImGui.SameLine();
         bool dio = (_vr_hands_views & 2) != 0, tp = (_vr_hands_views & 4) != 0, seat = (_vr_hands_views & 8) != 0;
@@ -281,11 +284,11 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SameLine(); if (ImGui.Checkbox("third person##h2v4", ref tp)) _vr_hands_views = tp ? _vr_hands_views | 4 : _vr_hands_views & ~4;
         ImGui.SameLine(); if (ImGui.Checkbox("the seat view##h2v8", ref seat)) _vr_hands_views = seat ? _vr_hands_views | 8 : _vr_hands_views & ~8;
         ImGui.TextDisabled("In the diorama and the seat view the hands are your own size in the scaled world: life-size to you, giant beside the miniature, and they go behind its walls and ground like a real hand would.");
-        ImGui.TextDisabled("Never on screens, menus, FMVs, battle transitions or under the dream filter. A controller put down for 10 s (nothing touched) hides its hand.");
+        ImGui.TextDisabled("Never on screens, menus, FMVs, battle transitions or under the dream filter. A controller put down for 10 s (nothing touched) hides its hand (with the touch sensors only).");
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("idle finger curl##h2rc", ref _vr_hands_rest_curl, 0f, 1f, "%.2f"); ImGui.SameLine();
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("size##h2sc", ref _vr_hands_scale, 0.8f, 1.25f, "%.2f x"); ImGui.SameLine();
         if (ImGui.SmallButton("defaults##h2rs")) { _vr_hands_rest_curl = 0.20f; _vr_hands_scale = 1.00f; }
-        if (_vr_hands && v[16] == 0 && v[5] == 1) ImGui.TextDisabled("The controllers' touch sensors are not bound (another runtime or profile?): the fingers follow the trigger and grip only.");
+        if (_vr_hands && v[16] == 0 && v[5] == 1) ImGui.TextDisabled("The controllers' touch sensors are not bound (another runtime or profile?): the fingers follow the trigger and grip only, and a controller put down is not hidden.");
         if (_fn_hands2_cal != null) {
             if (_h2_cancels_seen >= 0 && v[10] != _h2_cancels_seen) _h2_cancel_note_until = _now + 10.0;   // SF-2: native dropped a late request
             _h2_cancels_seen = v[10];

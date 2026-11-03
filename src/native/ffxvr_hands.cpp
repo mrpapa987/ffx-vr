@@ -278,7 +278,12 @@ void hv_mesh_finish(HvMesh* m, int h) {
 }
 
 void hv_mesh_mirror(const HvMesh& src, HvMesh* dst) {
-    *dst = src;
+    HvMesh& d = *dst;
+    d = HvMesh();   // field by field: the encoded and decoded images stay with src (SF-1: never two copies)
+    d.v = src.v; d.idx = src.idx; d.batch = src.batch;
+    memcpy(d.bind, src.bind, sizeof(d.bind));
+    d.prims = src.prims; d.tris = src.tris; d.unknown_joints = src.unknown_joints; d.images_dropped = src.images_dropped; d.palm_rebuilt = src.palm_rebuilt;
+    d.tex_from = src.tex_from >= 0 ? src.tex_from : src.hand;
     for (HvSkinVertex& v : dst->v) { v.p[0] = -v.p[0]; v.n[0] = -v.n[0]; }
     for (size_t i = 0; i + 2 < dst->idx.size(); i += 3) { const uint32_t k = dst->idx[i + 1]; dst->idx[i + 1] = dst->idx[i + 2]; dst->idx[i + 2] = k; }
     for (int j = 0; j < HV_J; ++j) { mirror_mat(dst->bind[j].R, dst->bind[j].R); dst->bind[j].t[0] = -dst->bind[j].t[0]; }
@@ -289,6 +294,15 @@ void hv_mesh_mirror(const HvMesh& src, HvMesh* dst) {
 static uint32_t rgba4(const float c[4]) {
     auto q = [](float x) { const int v = static_cast<int>(clampf(x, 0.f, 1.f) * 255.f + 0.5f); return static_cast<uint32_t>(v); };
     return q(c[0]) | (q(c[1]) << 8) | (q(c[2]) << 16) | (q(c[3]) << 24);
+}
+
+/// glTF requires every accessor to be aligned to its component size (and its stride a multiple of it); cgltf reads through a
+/// typed pointer, so a corrupted offset would be a misaligned load. False for a misaligned one (null or without a view: fine).
+static bool hv_acc_aligned(const cgltf_accessor* a) {
+    if (a == nullptr || a->buffer_view == nullptr) return true;
+    const cgltf_size c = cgltf_component_size(a->component_type);
+    if (c <= 1) return true;
+    return (a->buffer_view->offset + a->offset) % c == 0 && a->stride % c == 0;
 }
 
 bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMesh* out, char* err, int errn) {
@@ -305,6 +319,15 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
     if (r != cgltf_result_success) return hv_fail(err, errn, "the embedded buffer could not be read (cgltf_load_buffers %d)", static_cast<int>(r));
     for (cgltf_size i = 0; i < d->buffers_count; ++i)
         if (d->buffers[i].size > 0 && d->buffers[i].data == nullptr) return hv_fail(err, errn, "buffer %u has no data", static_cast<unsigned>(i));
+    for (cgltf_size i = 0; i < d->extensions_required_count; ++i) {   // N8: a compressed or otherwise extended glb would read as zeros or garbage
+        const char* x = d->extensions_required[i] ? d->extensions_required[i] : "?";
+        if (strcmp(x, "KHR_mesh_quantization") == 0 || strcmp(x, "KHR_texture_transform") == 0 || strncmp(x, "KHR_materials_", 14) == 0) continue;
+        return hv_fail(err, errn, "the glb requires the glTF extension %s (export without compression)", x);
+    }
+    for (cgltf_size i = 0; i < d->buffer_views_count; ++i)
+        if (d->buffer_views[i].has_meshopt_compression) return hv_fail(err, errn, "the glb is meshopt-compressed (export without compression)");
+    for (cgltf_size i = 0; i < d->meshes_count; ++i) for (cgltf_size k = 0; k < d->meshes[i].primitives_count; ++k)
+        if (d->meshes[i].primitives[k].has_draco_mesh_compression) return hv_fail(err, errn, "the glb is Draco-compressed (export without compression)");
     r = cgltf_validate(d);
     if (r != cgltf_result_success) return hv_fail(err, errn, "the glTF does not validate (cgltf_validate %d: an accessor or view out of range?)", static_cast<int>(r));
     const cgltf_node* mn = nullptr;
@@ -323,6 +346,7 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
     // Bind frames: the inverse bind matrices inverted (else the joint nodes' world transforms).
     const cgltf_accessor* ibm = sk->inverse_bind_matrices;
     if (ibm != nullptr && (ibm->is_sparse || ibm->type != cgltf_type_mat4 || ibm->count < sk->joints_count)) return hv_fail(err, errn, "the inverse bind matrices are not one 4x4 per joint");
+    if (!hv_acc_aligned(ibm)) return hv_fail(err, errn, "the inverse bind matrices are misaligned");
     for (int c = 0; c < HV_J; ++c) {
         if (skin_of[c] < 0) continue;
         float m[16];
@@ -345,6 +369,7 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
     const float tn[3] = { tint ? clampf(tint[0], 0.f, 4.f) : 1.f, tint ? clampf(tint[1], 0.f, 4.f) : 1.f, tint ? clampf(tint[2], 0.f, 4.f) : 1.f };
     std::vector<const cgltf_image*> images;               // tex index -> image
     std::vector<std::vector<uint32_t>> lists; std::vector<int> list_tex;   // the indices, grouped by texture
+    cgltf_size idx_total = 0;                                               // SF-1: <= HV_MAX_INDICES for the hand
     for (cgltf_size pi = 0; pi < me->primitives_count; ++pi) {
         const cgltf_primitive& p = me->primitives[pi];
         if (p.type != cgltf_primitive_type_triangles) return hv_fail(err, errn, "primitive %u is not a triangle list", static_cast<unsigned>(pi));
@@ -367,6 +392,8 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
         const cgltf_size n = pos->count;
         auto same = [&](const cgltf_accessor* a) { return a == nullptr || (a->count == n && !a->is_sparse); };
         if (pos->is_sparse || !same(nrm) || !same(uv) || !same(jnt) || !same(wgt) || !same(col)) return hv_fail(err, errn, "primitive %u: the attributes differ in length (or are sparse)", static_cast<unsigned>(pi));
+        if (!hv_acc_aligned(pos) || !hv_acc_aligned(nrm) || !hv_acc_aligned(uv) || !hv_acc_aligned(jnt) || !hv_acc_aligned(wgt) || !hv_acc_aligned(col) || !hv_acc_aligned(p.indices))
+            return hv_fail(err, errn, "primitive %u: an accessor is misaligned (not a valid glTF)", static_cast<unsigned>(pi));
         if (nrm != nullptr && nrm->type != cgltf_type_vec3) nrm = nullptr;
         if (uv != nullptr && uv->type != cgltf_type_vec2) uv = nullptr;
         if (col != nullptr && col->type != cgltf_type_vec3 && col->type != cgltf_type_vec4) col = nullptr;
@@ -381,7 +408,8 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
             const cgltf_image* im = (t != nullptr) ? t->image : nullptr;
             if (im != nullptr && im->uri == nullptr && im->buffer_view != nullptr && uv != nullptr && pm.base_color_texture.texcoord == 0) {
                 for (size_t k = 0; k < images.size(); ++k) if (images[k] == im) tex = static_cast<int>(k);
-                if (tex < 0) {
+                if (tex < 0 && images.size() >= static_cast<size_t>(HV_MAX_IMAGES)) out->images_dropped++;   // SF-1: at most 4 images (64 MB decoded)
+                else if (tex < 0) {
                     const uint8_t* b = cgltf_buffer_view_data(im->buffer_view); const size_t bs = im->buffer_view->size;
                     if (b != nullptr && bs > 8 && bs <= (32u << 20)) { images.push_back(im); out->tex_file.emplace_back(b, b + bs); tex = static_cast<int>(images.size() - 1); }
                 }
@@ -422,6 +450,8 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
         std::vector<uint32_t> ix;
         if (p.indices != nullptr) {
             if (p.indices->is_sparse || p.indices->count % 3 != 0) return hv_fail(err, errn, "primitive %u: the index count is not a multiple of 3", static_cast<unsigned>(pi));
+            if (idx_total + p.indices->count > static_cast<cgltf_size>(HV_MAX_INDICES))
+                return hv_fail(err, errn, "primitive %u: %u indices, more than %d for the hand", static_cast<unsigned>(pi), static_cast<unsigned>(p.indices->count), HV_MAX_INDICES);
             ix.resize(p.indices->count);
             for (cgltf_size i = 0; i < p.indices->count; ++i) {
                 const cgltf_size k = cgltf_accessor_read_index(p.indices, i);
@@ -431,6 +461,7 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
         }
         else {
             if (n % 3 != 0) return hv_fail(err, errn, "primitive %u: not indexed and the vertex count is not a multiple of 3", static_cast<unsigned>(pi));
+            if (idx_total + n > static_cast<cgltf_size>(HV_MAX_INDICES)) return hv_fail(err, errn, "primitive %u: more than %d indices for the hand", static_cast<unsigned>(pi), HV_MAX_INDICES);
             ix.resize(n); for (cgltf_size i = 0; i < n; ++i) ix[i] = vb + static_cast<uint32_t>(i);
         }
         if (nrm == nullptr) {   // no normals: area-weighted vertex normals of this primitive
@@ -445,6 +476,7 @@ bool hv_glb_parse(const void* data, size_t size, int h, const float* tint, HvMes
         int li = -1; for (size_t k = 0; k < list_tex.size(); ++k) if (list_tex[k] == tex) li = static_cast<int>(k);
         if (li < 0) { lists.emplace_back(); list_tex.push_back(tex); li = static_cast<int>(lists.size() - 1); }
         lists[static_cast<size_t>(li)].insert(lists[static_cast<size_t>(li)].end(), ix.begin(), ix.end());
+        idx_total += ix.size();
         out->tris += static_cast<int>(ix.size() / 3); out->prims++;
     }
     for (size_t k = 0; k < lists.size(); ++k) {
