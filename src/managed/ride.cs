@@ -91,7 +91,9 @@ public sealed unsafe partial class FFXVRModule {
     private int   _ride_smooth = 1;          // ini ride_smooth: 0 off, 1 the rider's height above the bird (default), 2 height and horizontal offset
     private float _ride_smooth_ms = 150f;    // ini ride_smooth_ms: the low-pass time constant (0..1000)
     private bool  _ride_hide_mount = false;  // ini ride_hide_mount: first person also hides the bird (if its head and neck are in the way)
-    private float _ride_hide_cap = 3f;       // ini ride_hide_cap: the body-hide radius cap while riding (the step margin grows at chocobo speed)
+    private float _ride_hide_radius = 6f;    // ini ride_hide_radius: the body hide's fixed radius around the rider's root while riding (ABI 33)
+    private delegate* unmanaged[Cdecl]<float*, int, int> _fn_ride_stats;   // ABI 33: the riding hide's 10 s statistics
+    private long _ride_stats_t; private int _ride_stats_lines;
     private delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float, float, uint> _fn_ride_set;   // ABI 32
 
     // this frame (render thread, push_player)
@@ -115,7 +117,8 @@ public sealed unsafe partial class FFXVRModule {
             case "ride_smooth":     pi(k, v, ref _ride_smooth, 0, 2); return true;
             case "ride_smooth_ms":  pf(k, v, ref _ride_smooth_ms, 0f, 1000f); return true;
             case "ride_hide_mount": pb(k, v, ref _ride_hide_mount); return true;
-            case "ride_hide_cap":   pf(k, v, ref _ride_hide_cap, 0.5f, 12f); return true;
+            case "ride_hide_radius": pf(k, v, ref _ride_hide_radius, 0.5f, 12f); return true;
+            case "ride_hide_cap":   return true;   // ea5a22f's cap (3) on the step margin: replaced by ride_hide_radius, not carried over (3 missed Tidus)
             default: return false;
         }
     }
@@ -125,7 +128,7 @@ public sealed unsafe partial class FFXVRModule {
             $"ride_smooth={_ride_smooth.ToString(ci)}\n" +
             $"ride_smooth_ms={_ride_smooth_ms.ToString("F0", ci)}\n" +
             $"ride_hide_mount={(_ride_hide_mount ? 1 : 0)}\n" +
-            $"ride_hide_cap={_ride_hide_cap.ToString("F1", ci)}\n";
+            $"ride_hide_radius={_ride_hide_radius.ToString("F1", ci)}\n";
     }
 
     /// <summary>push_player, field only: is the followed actor attached (+0x19C)? If so, its drawn root (+0x200, read now; the
@@ -173,10 +176,10 @@ public sealed unsafe partial class FFXVRModule {
     /// and once per change the status text and the riding line (nothing is formatted on the frames in between, R22).</summary>
     private void ride_push() {
         bool on = _ride_att;
-        if (!on) { _ride_vx = _ride_vy = _ride_vz = false; _ride_t = 0; _ride_last_ok = false; }
+        if (!on) { _ride_vx = _ride_vy = _ride_vz = false; _ride_t = 0; _ride_last_ok = false; _ride_stats_t = 0; }
         int flags = on ? 1 | (_ride_mount_ok ? 2 : 0) | (_ride_hide_mount ? 4 : 0) : 0;
         if (_fn_ride_set != null)
-            _ride_counts = _fn_ride_set(flags, -_ride_rider.X, -_ride_rider.Y, _ride_rider.Z, -_ride_mount.X, -_ride_mount.Y, _ride_mount.Z, _ride_hide_cap);
+            _ride_counts = _fn_ride_set(flags, -_ride_rider.X, -_ride_rider.Y, _ride_rider.Z, -_ride_mount.X, -_ride_mount.Y, _ride_mount.Z, _ride_hide_radius);
         if (on) {
             int mk = _ride_mount_ok ? _ride_mount_key : -1;
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -191,14 +194,29 @@ public sealed unsafe partial class FFXVRModule {
                 _ride_status = _ride_mount_ok ? $"riding: {_ride_mount_name} (actor {_ride_mount_idx})" : "attached (the parent is outside the actor table)";
                 _logger.Info($"riding: '{_ride_rider_name}' (actor {_ride_rider_idx}) is attached to {mount} on map {map}: the eyes use the rider's drawn root (+0x200), not +0x0C" +
                              $" | rider root ({_ride_rider.X:F1}, {_ride_rider.Y:F1}, {_ride_rider.Z:F1}){(_ride_built ? "" : " (not built yet: the last good one or the bird's)")}" + (_ride_mount_ok ? $" bird root ({_ride_mount.X:F1}, {_ride_mount.Y:F1}, {_ride_mount.Z:F1}), {_ride_mount.Y - _ride_rider.Y:F1} units above it" : "") +
-                             $" | bob smoothing {(_ride_smooth == 0 ? "off" : _ride_smooth == 1 ? "height" : "height + sideways")} {_ride_smooth_ms:F0} ms, hide the bird {(_ride_hide_mount ? "on" : "off")}, hide cap {_ride_hide_cap:F1}");
+                             $" | bob smoothing {(_ride_smooth == 0 ? "off" : _ride_smooth == 1 ? "height" : "height + sideways")} {_ride_smooth_ms:F0} ms, hide the bird {(_ride_hide_mount ? "on" : "off")}, hide radius {_ride_hide_radius:F1}");
             }
             if (_ride_check_in > 0 && --_ride_check_in == 0) ride_check_log();
+            ride_stats_log();
         }
         else if (_ride_was) {
             _ride_was = false; _ride_log_rider = -1; _ride_log_mount = -1; _ride_check_in = -1; _ride_status = "on foot";
             _logger.Info($"riding: off ('{_ride_rider_name}' is no longer attached; or first person follows another actor) on map {map_name()}");
         }
+    }
+
+    /// <summary>Every 10 s while riding: the native hide's statistics (first person frames only; 100 lines a session).</summary>
+    private void ride_stats_log() {
+        if (_fn_ride_stats == null) return;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_ride_stats_t == 0) { _ride_stats_t = now; float* z = stackalloc float[6]; _fn_ride_stats(z, 6); return; }   // start a window
+        if (now - _ride_stats_t < 10 * System.Diagnostics.Stopwatch.Frequency) return;
+        _ride_stats_t = now;
+        float* v = stackalloc float[6]; for (int i = 0; i < 6; i++) v[i] = 0;
+        if (_fn_ride_stats(v, 6) < 6 || v[0] < 1f || _ride_stats_lines >= 100) return;
+        _ride_stats_lines++;
+        _logger.Info($"riding hide (10 s, first person): frames {v[0]:F0}, the rider matched in {v[1]:F0}, missed in {v[2]:F0} | matched parts up to {v[5]:F2} units from the rider's root (radius {_ride_hide_radius:F1})" +
+                     $" | an unmatched skinned draw within 12 units in {v[3]:F0} frames (nearest up to {v[4]:F2}){(_ride_stats_lines == 100 ? " (no more of these lines this session)" : "")}");
     }
 
     private static float ride_nearest(float* wp, int n, Vector3 g) {   // render-space skinned translations vs a game-space point
@@ -227,6 +245,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("height + sideways##rs", ref _ride_smooth, 2); ImGui.SameLine();
         ImGui.SetNextItemWidth(140); ImGui.SliderFloat("ms##rsms", ref _ride_smooth_ms, 0f, 1000f, "%.0f");
         ImGui.Checkbox("first person: also hide the chocobo (if its head and neck are in the way)", ref _ride_hide_mount); ImGui.SameLine();
-        ImGui.SetNextItemWidth(120); ImGui.SliderFloat("hide radius cap while riding", ref _ride_hide_cap, 0.5f, 12f, "%.1f");
+        ImGui.SetNextItemWidth(120); ImGui.SliderFloat("hide radius while riding", ref _ride_hide_radius, 0.5f, 12f, "%.1f");
     }
 }

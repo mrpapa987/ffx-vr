@@ -3625,7 +3625,7 @@ off. This answers the questions left open in "Chocobo rides, expected VR problem
   cut to about 40 %). Mode 2 also filters the sideways / fore-aft sway. 0 = off. It applies to every view that follows the
   player (first person, third person, the diorama: all anchor on ffxvr_player_set's position).
 - **Body hide**: ffxvr_ride_set (ABI 32) gives native the rider's drawn root (the hide centre, since player_set may now
-  carry the smoothed eye base) and the bird's. While riding the step margin is capped (`ride_hide_cap`, 3 units: the margin
+  carry the smoothed eye base) and the bird's. (Superseded after headset round 1, below: a fixed `ride_hide_radius` of 6.) While riding the step margin is capped (`ride_hide_cap`, 3 units: the margin
   `0.75 + 1.5 * step` grows with speed; the three dumps give the bird about 14-36 units/s, 0.25-0.6 units a Present, so the
   cap is a guard for a fast sprint or a hitch, not a measured problem), and a draw nearer the bird's root than the
   rider's is the bird's and never hidden as the player's. The bird is drawn (you see its neck and back in front of you) unless
@@ -3665,3 +3665,57 @@ off. This answers the questions left open in "Chocobo rides, expected VR problem
 - The seat height while riding comes from the head bone (`fp_head_anchor` 1, the default). With `fp_head_anchor` 0 (fixed
   eye height) the eye is the rider's (smoothed) root + `fp_eye_height` (18). The rider's root is the seat, not the feet, so
   that eye sits roughly a seat height above his head: keep the head-bone height for riding.
+
+### Headset round 1 of `chocobo` (ea5a22f, 3 Nov 2026): Tidus half visible, the tap, and a crash
+
+The owner: "this works fairly well. It seems like Tidus is visible about half of the time (depending on the chocobo stride
+maybe?) also we had a crash eventually."
+
+**Tidus visible about half the time.** The `riding check:` line showed the hide right at that moment (rider parts 13, the
+nearest skinned draw 0.00 units from the rider's root), so the miss was intermittent. Cause: while riding, the radius was
+`min(0.75 + 1.5 x step, 3)`. The step came from ffxvr_player_set's position, which is the bob-smoothed eye base, so at a
+canter it stayed near 0.75-1.6. The rider's root moves with the bird's bone, and the bone only updates at the 30 Hz ticks
+(FFX-60fps' CHILDREL interpolates the parent's root, not its skeleton). So on frames where the hide centre and the draws
+were a tick apart, the parts were one stride step (1-2 units) off and were missed. Fix (ABI 33): while riding the radius is a
+fixed `ride_hide_radius` (default 6), independent of the step. Nothing else is at seat height: an NPC's root is on the
+ground, 15 units below. The bird rule is unchanged (a draw nearer the bird's root is the bird's). The ea5a22f key
+`ride_hide_cap` is read and ignored. Evidence for next time: every 10 s while riding in first person, a
+`riding hide (10 s, first person)` line gives the frames, the frames with the rider matched and missed, how far the
+matched parts were from the centre, and the nearest unmatched skinned draw within 12 units (ffxvr_ride_stats).
+
+**The tap while riding.** 34 taps fired on the bird (`hands: tap L/R: A pressed`, the gate "field (open)"). The owner was
+moving his hands about, and the grip armed the pushes. His decision: no taps from the bird ("you can't really touch someone
+from the chocobo anyway"; press A). The gate now has a `riding` reason (game bit 32, from `_ride_att`). The taps did nothing
+visible in the log: no `riding: off`, no text box, no map or event change.
+
+**The crash (23:22:58).**
+- **The fault.** An access violation writing to address 0x10 at FFX+0x2D1736 (gva 0x6D1736, `mov [esi+0x10],eax` with
+  esi = 0), on the game's main thread. The image base in the dump is 0x130000, so the console's `eip=00401736` is the
+  same address.
+- **The call path.** WinMain's loop calls the renderer frame (0x642BBC -> 0x668930), then the scene render 0x653600, then
+  the ShadowManager singleton (gva 0xCDEC28, via 0x6D2390) at 0x6C9E50 -> 0x6CA2D3, which reaches 0x6D1530.
+- **The cause.** 0x6D1530 walks tile list 1 (count at manager+0x37AC; the dump shows it on its first entry, i = 0). For a
+  slot without an instance it asks `GetASpareGradMeshInstance` (0x6CC980). That function scans 16 in-use flags for the
+  current buffer half (manager+0xDC4 + half x 16, the half at gva 0xCDEC24 flipping per frame) and, when all are set,
+  printf's "GetASpareGradMeshInstance() , Shouldn't get here, contact cg please" and returns null. The caller writes through
+  the null.
+- **The flags are never cleared.** No code in .text clears a flag: the only accesses at +0xDC4 are the scan and the set. So
+  the pool is handed out and kept. A null on the first entry means it was already exhausted before this frame.
+- **The stall line is not a hang.** `stall #3` (4125 ms, main thread in coreclr) is the crash in progress: the exception
+  being dispatched and the core dumped. The 2D1733 / 2D1736 values on its stack are copies of the faulting site.
+- **Our likely part (medium confidence).** In Ch_DrawMain the shadow-tile request (0x830240 -> 0x82E3E0 -> 0x644A00 ->
+  0x6D3000) runs only for actors whose Ch_VisibleTest passed (`test edi,edi; jne` at 0x82F4B9). Our "keep characters
+  drawn" patches make that test pass for every actor. In the Calm Lands that is about 25 actors spread over 2 km (birds,
+  riders, NPCs, objects), against the handful the game's camera would show. So the ShadowManager handles far more shadows
+  than its designers allowed for, in a pool with a hard limit.
+- **Not ours.** The A presses (no input in this path), the ride hide (render-thread draw skipping only), the smooth anchor
+  and the ride probe (reads only), and the grip strip (input only). FFX-60fps doubles the render invocations; whether that
+  speeds the pool up is unknown.
+- **What settles it.**
+  1. The read-only pool watch added in this build. Every 60 frames it reads the 32 flags and the two list counts and logs a
+     `shadow pool:` line when they change, plus a warning at 14/16. It is also in F8 > Debug > Character shadows. If the
+     counts climb during the ride, this is the cause.
+  2. An A/B: the same ride with "keep characters drawn" unticked.
+  3. Optionally a full-memory dump.
+- **A fix, if confirmed:** keep the character cull off only within a radius of the player (or of the headset's view), or
+  release / cap shadow tiles for far actors. Not done yet: the counts first.

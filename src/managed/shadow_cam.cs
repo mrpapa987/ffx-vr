@@ -27,6 +27,34 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>From push_all, every frame (shadow_cam applies at the next Present, fp_self_shadow at once).</summary>
     private void shadow_push() {
         if (_fn_shadow_set != null) _fn_shadow_set(_shadow_cam, _fp_self_shadow);
+        shadow_pool_watch();
+    }
+
+    // Crash watch (chocobo session 2, 3 Nov 2026: design-notes "The Calm Lands crash"). The game crashed in the ShadowManager's
+    // render (0x6D1530, called from the scene render 0x653600 via 0x6CA2D3): GetASpareGradMeshInstance (0x6CC980) returned
+    // null ("Shouldn't get here, contact cg please") and the caller wrote through it. The pool is 16 instances per buffer
+    // half: in-use flags at ShadowManager+0xDC4 + half * 16, the half at gva 0xCDEC24, the manager at gva 0xCDEC28; no code
+    // in .text clears a flag. The two tile lists' counts are at +0x37A8 / +0x37AC. Read-only: every 60 frames, logged when the
+    // counts change (at most one line every 2 s, 200 a session), so the next session shows whether the pool fills over time.
+    private int  _sp_frame, _sp_used0 = -1, _sp_used1 = -1, _sp_l0, _sp_l1, _sp_lines; private long _sp_log_t; private bool _sp_warned;
+    private string _sp_status = "";
+    private void shadow_pool_watch() {
+        if (_fn_safe_read == null || ++_sp_frame % 60 != 0) return;
+        nint mgr = FhUtil.get_at<nint>(0x8DEC28);   // gva 0xCDEC28 (0x6D2390 returns it)
+        if (mgr == 0) { _sp_status = "no ShadowManager"; return; }
+        byte* f = stackalloc byte[32]; int* c = stackalloc int[2];
+        if (_fn_safe_read((byte*)mgr + 0xDC4, f, 32) == 0 || _fn_safe_read((byte*)mgr + 0x37A8, c, 8) == 0) { _sp_status = "not readable"; return; }
+        int u0 = 0, u1 = 0; for (int i = 0; i < 16; i++) { if (f[i] != 0) u0++; if (f[16 + i] != 0) u1++; }
+        int half = FhUtil.get_at<int>(0x8DEC24);
+        bool changed = u0 != _sp_used0 || u1 != _sp_used1;
+        _sp_used0 = u0; _sp_used1 = u1; _sp_l0 = c[0]; _sp_l1 = c[1];
+        if (changed) _sp_status = $"grad-mesh instances in use: half 0 {u0}/16, half 1 {u1}/16 (now {half}; the game crashes when one is full) | tile lists {c[0]}, {c[1]}";
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (changed && _sp_lines < 200 && now - _sp_log_t >= 2 * System.Diagnostics.Stopwatch.Frequency) {
+            _sp_log_t = now; _sp_lines++;
+            _logger.Info($"shadow pool: {_sp_status} | map {map_name()}{(_ride_att ? " | riding" : "")}{(_sp_lines == 200 ? " (no more of these lines this session)" : "")}");
+        }
+        if (!_sp_warned && Math.Max(u0, u1) >= 14) { _sp_warned = true; _logger.Warning($"shadow pool: {Math.Max(u0, u1)} of 16 grad-mesh instances in use - the game crashes at 16 (the Calm Lands crash of 3 Nov). Save soon; F8: try unticking 'keep characters drawn'."); }
     }
 
     /// <summary>"light cameras last frame N | this session M ..." (the native status; render thread).</summary>
@@ -62,5 +90,6 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("first person: draw my own shadow (default)##selfshadow", ref _fp_self_shadow, 1); ImGui.SameLine();
         ImGui.RadioButton("hide it with the body (whole-body mode only)##selfshadow", ref _fp_self_shadow, 0);
         if (_fn_shadow_status != null) ImGui.TextDisabled(esc(shadow_status_text()));
+        ImGui.TextDisabled("ShadowManager pool: " + esc(_sp_status));
     }
 }

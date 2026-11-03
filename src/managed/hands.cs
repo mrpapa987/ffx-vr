@@ -257,7 +257,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Tap build: the tap's settings and the game gate to native, every frame (native treats a gate older than 3
     /// frames as shut). Bits: 1 battle (Btl.battle_state != 0), 2 the sphere grid (Fahrenheit Globals.SphereGrid.is_open),
     /// 4 Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), 8 a text box is up (a TOMesWinWork window of
-    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 0x100 a read failed. Reads only while the tap can
+    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed. Reads only while the tap can
     /// fire (VR hands and the tap on): off costs nothing.</summary>
     private void hands2_tap_push() {
         if (_fn_hands2_tap_set == null) return;
@@ -281,7 +281,7 @@ public sealed unsafe partial class FFXVRModule {
         if (g == 0) return "the field (open)";
         var l = new List<string>();
         if ((g & 1) != 0) l.Add("battle"); if ((g & 2) != 0) l.Add("sphere grid"); if ((g & 4) != 0) l.Add("save / load screen");
-        if ((g & 8) != 0) l.Add("a text box"); if ((g & 16) != 0) l.Add("blitzball"); if ((g & 0x100) != 0) l.Add("not readable");
+        if ((g & 8) != 0) l.Add("a text box"); if ((g & 16) != 0) l.Add("blitzball"); if ((g & 32) != 0) l.Add("riding"); if ((g & 0x100) != 0) l.Add("not readable");
         return string.Join(", ", l);
     }
     /// <summary>The game gate bits (hands2_tap_push). Every read guarded (native safe_read).</summary>
@@ -292,6 +292,7 @@ public sealed unsafe partial class FFXVRModule {
         if (!read(FhUtil.ptr_at<byte>(0x1685F70), out byte sg)) g |= 0x100; else if (sg != 0) g |= 2;   // Fahrenheit Globals.SphereGrid.is_open (FhUtil 0x1685F70)
         if (save_screen_state() != 0 || _fh_menu_open) g |= 4;
         if (_in_blitz) g |= 16;
+        if (_ride_att) g |= 32;   // riding (ride.cs, push_player runs first): no taps from the bird (the owner, 3 Nov: press A; you cannot touch anyone from up there)
         // Text boxes: TOMesWinWork[bank * 8 + i] at FhUtil 0xF26D70 (0x2C bytes each), the bank a signed byte at FhUtil 0xF26B82
         // (getter 0x86BE90). The game's own per-frame loop (0x871F30) copies each window's state into +0x14 (u16; 4 = closed is
         // written back as 0) and counts a window with a non-zero state and +0x1D bit 1 as one the player waits on; it writes that
