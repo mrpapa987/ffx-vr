@@ -55,7 +55,8 @@ $FfxvrDiagKeys = [ordered]@{
 # is never copied, packaged or deleted, except by install-mod -Uninstall -Purge, which names it first.
 $FfxvrHandPacks = @('generic-glove', 'generic')
 # What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
-$FfxvrLogPatterns = @(   # (install-mod -DeleteLogs deletes exactly these)'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
+$FfxvrLogPatterns = @(   # install-mod -DeleteLogs deletes exactly these
+                      'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
                       'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',
                       'img_*.bmp', 'seq_*.bmp', 'ui_atlas_*.dds', 'battle_atlas.dds', 'ffxvr.ini.tmp')
 
