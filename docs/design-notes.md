@@ -3463,13 +3463,22 @@ you're facing**. ABI 31.
   not verified in the exe this round. Nothing new: the grips have gone through since phase 1, and the first tap build's point
   pose needed the grip too. Added anyway, cheap and safe: "don't pass the grip to the game while a tap can fire" (ini
   `vr_hands_tap_hold_grip`), **off by default** (it changes what the game sees, for a risk not seen): while the gate is open
-  on a drawn first-person frame the hook leaves the grips' LB / RB out; it only ever removes those bits, and it is cleared
-  at once when the gate shuts, the hands are not drawn, or the option or the tap goes off (in battle and menus the grips go
-  through; a grip still held as a battle starts reaches the game then).
+  on a drawn first-person frame, a grip squeezed is **held back from the game until it is let go** (review 3 S1: a per-hand
+  latch in the hook, `hv_grip_strip`, unit-tested). The first version only stripped while the gate was open, so a grip
+  still held as a battle, the menu or a text box came up became a fresh L1 / R1 press, and frames the hands failed to draw
+  (grip pose lost, a buffer map failing) pulsed RB at frame rate. With the latch a grip held back stays held back through
+  gate changes and undrawn frames; letting go always clears it, and it only ever removes bits, so nothing can stick. A grip
+  squeezed while the gate is shut (in battle, a menu) goes to the game as before; one squeezed in the field and held into
+  battle needs a re-squeeze there. The hold flag is time-stamped: a render stall ends it after 250 ms (N1).
 - **F8** (gestures): `armed (grip R)` and `push forward: L 0.0  R 6.3 cm of 10 cm`, the two new options, the distance by the
   sensitivity slider. **Log**: a tap gives how far it was pushed (and the hand itself), its peak, direction and elevation; a
-  near miss (half the distance or more) its reason ("short", "reach", "sideways", "head", "glitch", "grip") and the same
+  near miss (half the distance or more) its reason ("short", "reach", "sideways", "head back", "glitch", "grip") and the same
   numbers with the grip / trigger / touch inputs; a push while not armed the grip value.
+- **Review 3** (no blockers): S1 above. N2: a frame hitch of 40-100 ms mid-push put most of a short push into one sample and
+  failed it as a tracking step; a sample over 40 ms and over twice the shortest recent frame interval now counts its step
+  as spread over those frames (a tracking step comes in one normal frame; a step landing on a hitch is caught only by the
+  5 m/s check). N3: F8's push readout shows the push in progress, else the last push (any ending) for 2 s, so a short push
+  shows how far it got. N5: the "hand did not move, the head moved back" reason is "head back" (beside "head moving").
 - No fingertip glow while armed: the hand's lighting constants are per eye and shared by both hands (a shader change).
 - **Tests**: tap_test.cpp rewritten (65 lines: 59 judged, 6 reported) and tap_test_adv.cpp (115: 48 judged, 67 reported),
   ALL OK at 0.6 / 1 / 1.5 / 2 (ASan + UBSan). Must tap: the grid's pushes of >= 13 cm at 0.5-4 m/s within 0.8 s (0 / 280

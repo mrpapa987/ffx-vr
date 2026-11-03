@@ -775,7 +775,7 @@ void hv_test_inputs(int which, HvCtrl* c) {
 
 // -- the tap gesture (branch hands-tap; ffxvr_hands.h) ----------------------------------------------------------------
 
-const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "head", "short", "long", "reach", "sideways", "grip", "head moving", "turn", "gate", "glitch", "gap", "cooldown", "shake" };
+const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "head back", "short", "long", "reach", "sideways", "grip", "head moving", "turn", "gate", "glitch", "gap", "cooldown", "shake" };
 
 int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     s->blocked = HV_TAP_NONE;
@@ -818,9 +818,13 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     const float v[3] = { (rel[0] - s->rel_prev[0]) / dt, (rel[1] - s->rel_prev[1]) / dt, (rel[2] - s->rel_prev[2]) / dt };   // raw: a tracking jump is one frame's
     // the speeds the start, the slowing, and the head use: the newest sample against the latest one >= v_span older (2 frames back at
     // 60-72 Hz, 3 at 90-120 Hz), so a sample's noise counts the same at any rate
-    float vs[3], vhs[3], head_w = 0.f;
+    float vs[3], vhs[3], head_w = 0.f, dt_mean = 0.f;
     {
         if (!s->have_v) { s->have_v = true; s->ring_t[0] = s->t_prev; memcpy(s->ring_rel[0], s->rel_prev, 12); memcpy(s->ring_head[0], s->head_prev, 12); memcpy(s->ring_fwd[0], s->fwd_prev, 12); s->ring_n = 1; s->ring_i = 1; }
+        if (s->ring_n >= 3) {   // the mean recent frame interval (review 3 N2: tells a frame hitch from a tracking step)
+            const int q = (s->ring_i - 1 + 8) % 8, p = (s->ring_i - s->ring_n + 8) % 8;
+            dt_mean = static_cast<float>(s->ring_t[q] - s->ring_t[p]) / static_cast<float>(s->ring_n - 1);
+        }
         int k = -1;
         for (int j = 1; j <= s->ring_n; ++j) { const int q = (s->ring_i - j + 8) % 8; k = q; if (in.t - s->ring_t[q] >= c.v_span) break; }
         const float dk = static_cast<float>(in.t - s->ring_t[k]);
@@ -835,6 +839,10 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     float fw[3] = { in.head_fwd[0], in.head_fwd[1], in.head_fwd[2] };   // the head's 3-D forward
     if (!v3norm(fw)) { fw[0] = 0.f; fw[1] = 0.f; fw[2] = -1.f; }
     const bool head_bad = s->head_v > c.head_v || s->head_w > c.head_w;
+    // review 3 N2: a sample after a frame hitch (over 50 ms and over 2.5 x the mean recent interval; the display clock's own
+    // uneven steps with a repeated time reach ~42 ms) carries several frames' motion: its step counts for the tracking-step
+    // check as spread over those frames (a tracking step comes in one ordinary frame)
+    const float step_w = (dt > 0.050f && dt_mean > 0.f && dt > 2.5f * dt_mean) ? dt_mean / dt : 1.f;
     int r = HV_TAP_NONE; bool started = false;
     if (s->phase == 0) {
         const float vf = v3dot(vs, fw); s->v_f = vf;
@@ -849,7 +857,7 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
             if (why != HV_TAP_NONE) { s->blocked = why; s->phase = 2; }   // not later in this stroke either
             else {
                 s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->tip0, s->tip_prev, sizeof(s->tip0)); memcpy(s->f, fw, sizeof(s->f));
-                s->peak_s = vf; s->step_max = fmaxf(0.f, v3dot(v, fw) * dt); s->n = 1; s->fail = HV_TAP_NONE; started = true;
+                s->peak_s = vf; s->step_max = fmaxf(0.f, v3dot(v, fw) * dt * step_w); s->n = 1; s->fail = HV_TAP_NONE; started = true;
             }
         }
     }
@@ -865,7 +873,7 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
         if (why != HV_TAP_NONE) r = end(why, rel, in.tip, in.t);
         else {
             if (vf > s->peak_s) s->peak_s = vf;
-            { const float st = v3dot(v, s->f) * dt; if (st > s->step_max) s->step_max = st; }
+            { const float st = v3dot(v, s->f) * dt * step_w; if (st > s->step_max) s->step_max = st; }
             const float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
             const float dw[3] = { in.tip[0] - s->tip0[0], in.tip[1] - s->tip0[1], in.tip[2] - s->tip0[2] };
             const float travel = v3dot(d, s->f), dl = sqrtf(v3dot(d, d)), world = v3dot(dw, s->f);
@@ -889,6 +897,15 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     }
     store();
     return r;
+}
+
+int hv_grip_strip(bool held_back[2], const bool down[2], bool hold) {
+    int pass = 0;
+    for (int h = 0; h < 2; ++h) {
+        if (!down[h]) held_back[h] = false; else if (hold) held_back[h] = true;
+        if (down[h] && !held_back[h]) pass |= 1 << h;
+    }
+    return pass;
 }
 
 int hv_tap_hook(HvTapHook* h, bool pressed, uint32_t pkt, int32_t el_ms, int32_t press_ms, int32_t polls) {

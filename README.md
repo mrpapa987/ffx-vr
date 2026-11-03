@@ -104,7 +104,9 @@ controller. The grip is what arms it: a reach with the grip squeezed presses too
 it (tick **require a pointing finger** to also need the index off the trigger). Only in first person in the field: never in
 battle, a menu, the sphere grid, the save screen, a movie or blitzball, while you turn with the stick or move your head
 fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** sets the distance
-(2.0: 5 cm, 0.5: 20 cm); F8 shows "armed" and how far you have pushed.
+(2.0: 5 cm, 0.5: 20 cm); F8 shows "armed" and how far you have pushed. The grips are also LB / RB to the game; tick
+**don't pass the grip to the game while a tap can fire** if that ever gets in the way: a grip squeezed where a tap can
+fire is then held back from the game until you let go (in battle and menus the grips work as before).
 
 **hand model** lists every pack in the mod folder's `hands\` folder: the two that ship with the mod (our own generic
 hand, MIT: a dark glove and a bare hand) and any you make yourself. **rescan** reads the folder again after you add one.

@@ -207,8 +207,8 @@ struct HvTapIn {
 enum HvTapWhy { HV_TAP_NONE = 0, HV_TAP_FIRED, HV_TAP_SLOW, HV_TAP_SHORT, HV_TAP_LONG, HV_TAP_REACH, HV_TAP_SIDEWAYS, HV_TAP_POSE, HV_TAP_HEAD,
                 HV_TAP_TURN, HV_TAP_GATE, HV_TAP_GLITCH, HV_TAP_GAP, HV_TAP_COOLDOWN, HV_TAP_SHAKE, HV_TAP_N };
 // how a push ends without a tap: SHORT the hand slowed before tap_dist, REACH tap_dist not reached within max_time, SIDEWAYS
-// reached but over dir_max off the forward, SLOW reached relative to the head but the fingertip itself did not move ("head"),
-// GLITCH a tracking step, POSE the grip released, GATE / TURN / HEAD / GAP as named. LONG and SHAKE are no longer used.
+// reached but over dir_max off the forward, SLOW reached relative to the head but the fingertip itself did not move ("head back"),
+// GLITCH a tracking step (one sample's step most of the push; a frame hitch's (over 50 ms) step counts as spread over its frames: review 3 N2), POSE the grip released, GATE / TURN / HEAD / GAP as named. LONG and SHAKE are no longer used.
 extern const char* const hv_tap_why[HV_TAP_N];   // short names for the log ("short", "reach", ...)
 struct HvTapState {
     int    phase = 0;          // 0 idle (armed or not), 1 in a push, 2 waiting for the forward speed to drop
@@ -239,6 +239,13 @@ enum { HV_HOOK_HOLD = 1, HV_HOOK_RELEASE = 2, HV_HOOK_COUNT = 4 };
 enum { k_hv_tap_cap_ms = 400 };
 struct HvTapHook { uint32_t pkt = 0; bool need_clear = false; };
 int hv_tap_hook(HvTapHook* h, bool pressed, uint32_t pkt, int32_t el_ms, int32_t press_ms, int32_t polls);
+
+/// Review 3 S1: "don't pass the grip to the game while a tap can fire", per hand, in the game's XInputGetState (the input
+/// thread). A grip squeezed while hold is on is held back from the game until it is let go, through gate changes and frames
+/// the hands are not drawn (so no LB / RB edge the user did not make); letting go always clears it (never a stuck bit: it
+/// only ever removes a bit). A grip squeezed while hold is off goes to the game as before. held_back: the caller's latch.
+/// Returns the grips to pass to the game: 1 left, 2 right.
+int hv_grip_strip(bool held_back[2], const bool down[2], bool hold);
 
 /// The open / point / fist test poses for the previews and the unit test (the same code path as the runtime).
 void hv_test_inputs(int which, HvCtrl* c);   // 0 open (nothing touched), 1 rest on the trigger, 2 trigger pulled, 3 point (grip, thumb on),

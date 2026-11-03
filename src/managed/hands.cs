@@ -38,7 +38,7 @@ namespace FFXVR;
 //   vr_hands_tap_sens     0.50..2.00, default 1.00: the push that taps is 10 cm / this (0.5: 20 cm, 2: 5 cm).
 //   vr_hands_tap_point    0/1, default 0: also require a pointing finger (the index off the trigger) to arm.
 //   vr_hands_tap_hold_grip 0/1, default 0: don't pass the grips (LB / RB) to the game while a tap can fire (the field, first
-//                         person); in battle and menus they always go through.
+//                         person): a grip squeezed there is held back until you let go; one squeezed in battle or a menu goes through.
 //   vr_hands_tap_dialogue 0/1, default 0: also while a text box is up (advances the text; a choice box takes the highlighted
 //                         answer, so off until the text box signal is confirmed in play).
 //   vr_hands_tap_haptic   0/1, default 1: a short tick on that hand when a tap presses.
@@ -498,14 +498,15 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Checkbox("don't pass the grip to the game while a tap can fire (LB / RB)##h2tapg", ref _vr_hands_tap_hold_grip);
         ImGui.TextDisabled(esc("Squeeze the grip and push your hand forward about a hand's width (" + (10f / _vr_hands_tap_sens).ToString("F0", CI) + " cm) toward what you are facing. "
                            + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + (_vr_hands_tap_button == "a" ? " (confirm: talk, examine, open)" : " (vr_hands_tap_button in the ini; A is confirm)") + ". Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
-                           + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up. A reach with the grip squeezed presses too: let go of the grip when you don't mean it."));
+                           + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up. A reach with the grip squeezed presses too: let go of the grip when you don't mean it. "
+                           + "With \"don't pass the grip\" ticked, a grip squeezed where a tap can fire is held back from the game (LB / RB) until you let go."));
         if (_fn_hands2_tap_status != null) {
             float* v = stackalloc float[k_tap_status_n];
             for (int i = 0; i < k_tap_status_n; i++) v[i] = 0f;
             byte* line = _fn_hands2_tap_status(v, k_tap_status_n);
             string ln = line != null ? Marshal.PtrToStringAnsi((nint)line) ?? "" : "";
             string arm = v[2] > 0.5f && v[3] > 0.5f ? "armed (grip L + R)" : v[3] > 0.5f ? "armed (grip R)" : v[2] > 0.5f ? "armed (grip L)" : "not armed (squeeze a grip)";
-            ImGui.Text(esc(I($"{arm} | push forward: L {v[15] * 100f,4:F1}  R {v[16] * 100f,4:F1} cm of {v[7] * 100f:F0} cm{(v[8] > 0.5f ? " | PRESSING" : "")}{(v[17] > 0.5f ? " | grips held back from the game" : "")}")));
+            ImGui.Text(esc(I($"{arm} | push forward: L {v[15] * 100f,4:F1}  R {v[16] * 100f,4:F1} cm of {v[7] * 100f:F0} cm (the last push stays 2 s){(v[8] > 0.5f ? " | PRESSING" : "")}{(v[17] > 0.5f ? " | grips held back from the game" : "")}")));
             ImGui.TextDisabled(esc(ln));
             ImGui.TextDisabled(esc(I($"taps: L {v[5]:F0} R {v[6]:F0}, not taps {v[9]:F0} | game: {(_vr_hands && _vr_hands_tap ? hands2_tap_game_text(_tap_game_last < 0 ? 0 : _tap_game_last) : "-")} | text boxes: {(_tap_text_info.Length > 0 ? _tap_text_info : "-")}")));
         }

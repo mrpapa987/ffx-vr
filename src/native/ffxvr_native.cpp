@@ -1210,7 +1210,9 @@ bool     g_vrpad_suppress = false;           // a mod gesture is using the contr
 volatile LONG g_tap_press = 0;
 volatile LONG g_tap_press_t0 = 0, g_tap_press_polls = 0, g_tap_press_ms = 100;   // GetTickCount at the press; new packets the game got with it; the length asked for
 volatile LONG g_tap_released_ms = -1, g_tap_released_polls = 0, g_tap_released_n = 0;   // the last press as the hook let it go (logged at the next frame end)
-volatile LONG g_tap_grip_hold = 0;                     // 1: the hook leaves the grips' LB / RB out (the tap's "don't pass the grip" option, gate open)
+volatile LONG g_tap_grip_hold = 0;                     // 1: the hook holds back newly squeezed grips (the tap's "don't pass the grip" option, gate open)
+volatile LONG g_tap_grip_hold_ms = 0;                  // GetTickCount when tap_sample last set it (review 3 N1: a render stall ends it after 250 ms)
+static bool   s_tap_grip_back[2] = {};                 // input thread only: this grip is held back until it is let go (hv_grip_strip, review 3 S1)
 HvTapHook g_tap_hook;                                   // the input thread's press state (the last packet, a release still to reach the game)
 // Diorama gestures (seat view, not first person): a grip grabs the world -
 // one hand pans, two hands pan with the midpoint, rotate with the angle
@@ -1269,7 +1271,13 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     WORD b = 0;
     if (R.primary) b |= XINPUT_GAMEPAD_A;  if (R.secondary) b |= XINPUT_GAMEPAD_B;
     if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
-    if (!g_tap_grip_hold) { if (L.squeeze > 0.5f) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (R.squeeze > 0.5f) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER; }   // tap build: the grips held back while a tap can fire (opt-in)
+    {   // tap build, "don't pass the grip to the game while a tap can fire" (opt-in): a grip squeezed while that holds is held back until
+        // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits
+        const bool gd[2] = { L.squeeze > 0.5f, R.squeeze > 0.5f };
+        const bool hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
+        const int pass = hv_grip_strip(s_tap_grip_back, gd, hold);
+        if (pass & 1) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (pass & 2) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+    }
     if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
@@ -8272,7 +8280,8 @@ HvFingerState g_h2_fs[2]; int64_t g_h2_T_prev = 0; bool g_h2_put_down_seen[2] = 
 // for press_ms AND at least 3 new packets (the game's poll at 0x62DBA0 skips a state whose packet number did not change), at
 // most 400 ms; cleared at once when the tap or the hands go off, the session loses focus, the headset or the VR pad goes off,
 // the view leaves first person or a chord / grab starts. A short haptic tick on that hand (hands_frame_end, as calibration's).
-struct VrTapCfg { int bytes, flags; float sens; int button, game, press_ms; };   // flags: 1 tap on, 2 also in a text box, 4 the haptic tick
+struct VrTapCfg { int bytes, flags; float sens; int button, game, press_ms; };   // flags: 1 tap on, 2 also in a text box, 4 the haptic tick,
+                                                                                 // 8 require a pointing finger, 16 don't pass the grip to the game (ABI 31)
 static_assert(sizeof(VrTapCfg) == 24, "VrTapCfg: 24 bytes, as hands.cs declares it");
 VrTapCfg g_tapcfg = { static_cast<int>(sizeof(VrTapCfg)), 0, 1.f, 0x1000, 0, 100 };
 uint32_t g_tapcfg_frame = 0xFFFFFFFFu;                   // g_frames at the last ffxvr_hands2_tap_set (managed pushes every frame; older = stale)
@@ -8289,6 +8298,7 @@ float g_tap_pose[2] = {};                                // the point pose this 
 uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0, g_tap_log_pose_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
 uint32_t g_tap_w_taps = 0, g_tap_w_not = 0, g_tap_w_drawn = 0, g_tap_w_open = 0;  // the 10 s window (the verbose line)
 uint32_t g_tap_w_not_by[HV_TAP_N] = {}, g_tap_w_blk[HV_TAP_N] = {};
+float     g_tap_push_last[2] = {}; ULONGLONG g_tap_push_last_t[2] = {};   // the last push's forward travel (any ending but a gap) and when: F8 shows it 2 s (review 3 N3)
 ULONGLONG g_tap_last_t = 0, g_tap_last_not_t = 0;       // GetTickCount64 of the last tap / the last near miss
 int  g_tap_last_h = -1, g_tap_last_not_h = -1, g_tap_last_not_why = 0; float g_tap_last_peak = 0, g_tap_last_travel = 0, g_tap_last_dur = 0;
 float g_tap_last_not_peak = 0, g_tap_last_not_travel = 0;
@@ -8738,10 +8748,14 @@ static void tap_sample(int h, int gate, const float* tip) {
     const bool point_ok = !(g_tapcfg.flags & 8) || (pd.finger_off && hd.trigger < 0.05f);
     const bool armed = tip != nullptr && pd.grip && point_ok;
     g_tap_pose[h] = armed ? 1.f : 0.f;
-    // "don't pass the grip to the game while a tap can fire" (flags 16): the hook leaves LB / RB out while the gate is open on a
-    // drawn first-person frame (both hands; cleared at once when the gate shuts or the hands are not drawn: never a stuck bit,
-    // the hook only removes the grip's own bit)
-    if (h == 1) { const LONG want = ((g_tapcfg.flags & 16) && gate == TG_OPEN) ? 1 : 0; if (g_tap_grip_hold != want) InterlockedExchange(&g_tap_grip_hold, want); }
+    // "don't pass the grip to the game while a tap can fire" (flags 16): while the gate is open on a drawn first-person frame, a
+    // grip squeezed is held back from the game until it is let go (the hook's latch, review 3 S1); this flag clears when the gate
+    // shuts or the hands are not drawn, which only stops holding back new squeezes. Time-stamped so a render stall ends it (N1).
+    if (h == 1) {
+        const LONG want = ((g_tapcfg.flags & 16) && gate == TG_OPEN) ? 1 : 0;
+        if (want) InterlockedExchange(&g_tap_grip_hold_ms, static_cast<LONG>(GetTickCount()));
+        if (g_tap_grip_hold != want) InterlockedExchange(&g_tap_grip_hold, want);
+    }
     if (gate == TG_OFF) { st = HvTapState(); return; }
     HvTapIn in = {};
     in.t = tnow;
@@ -8753,6 +8767,7 @@ static void tap_sample(int h, int gate, const float* tip) {
     in.turning = (g_turn_stick && fabsf(g_hs.hand[1].stick[0]) > 0.5f) || g_turn_key != 0.f;   // the right stick past half deflection, or the turn keys (review N3)
     const int r = hv_tap_update(&st, g_tap_c, in);
     const char* hn = h ? "R" : "L";
+    if (r != HV_TAP_NONE && r != HV_TAP_GAP) { g_tap_push_last[h] = fmaxf(0.f, st.last_travel); g_tap_push_last_t[h] = GetTickCount64(); }   // review 3 N3: F8 shows it 2 s
     if (r == HV_TAP_FIRED && (g_tap_press != 0 || (g_tap_last_t != 0 && GetTickCount64() - g_tap_last_t < 400))) {   // the other hand tapped < 400 ms ago: one
         g_tap_not[HV_TAP_COOLDOWN]++; g_tap_w_not_by[HV_TAP_COOLDOWN]++; g_tap_w_not++;                                    // cooldown for both (the game must see a release)
         if (g_tap_log_gate_n < 10) { g_tap_log_gate_n++; diag("hands: tap %s: dropped (the other hand tapped less than 400 ms ago)", hn); }
@@ -9267,15 +9282,17 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_tap_set(const VrTapCfg* c, in
 /// the last sample (m/s), [2] / [3] armed (1 / 0), [4] the gate (TapGate: 0 open), [5] / [6] taps this on-session, [7] the
 /// push that taps (m), [8] the button held now (1 / 0), [9] jabs that were not taps this on-session, [10] seconds
 /// since the last tap (-1 none), [11] its peak (m/s), [12] its travel (m), [13] the last press's length (ms, -1 none),
-/// [14] the new pad packets it was seen in, [15] / [16] the left / right push in progress (m, 0 idle), [17] the grips held
-/// back from the game now (1 / 0). Returns one line: the gate, the last tap, the last near miss (a static buffer).
+/// [14] the new pad packets it was seen in, [15] / [16] the left / right push in progress, else the last push for 2 s after it
+/// ended (m, 0 idle; review 3 N3), [17] the grips held back from the game now (1 / 0). Returns one line: the gate, the last tap, the last near miss (a static buffer).
 extern "C" __declspec(dllexport) const char* ffxvr_hands2_tap_status(float* out, int n) {
     static char s[400];
     const ULONGLONG now = GetTickCount64();
     uint32_t nots = 0; for (int k = HV_TAP_SLOW; k < HV_TAP_N; ++k) nots += g_tap_not[k];
+    float pushv[2];
+    for (int h = 0; h < 2; ++h) pushv[h] = g_tap[h].phase == 1 ? g_tap[h].push : (g_tap_push_last_t[h] && now - g_tap_push_last_t[h] < 2000) ? g_tap_push_last[h] : 0.f;
     const float v[18] = { g_tap[0].v_f, g_tap[1].v_f, g_tap_pose[0], g_tap_pose[1], static_cast<float>(g_tap_gate_now), static_cast<float>(g_tap_taps[0]), static_cast<float>(g_tap_taps[1]),
                           g_tap_c.tap_dist, g_tap_press != 0 ? 1.f : 0.f, static_cast<float>(nots), g_tap_last_t ? static_cast<float>((now - g_tap_last_t) / 1000.0) : -1.f, g_tap_last_peak, g_tap_last_travel,
-                          static_cast<float>(g_tap_released_ms), static_cast<float>(g_tap_released_polls), g_tap[0].push, g_tap[1].push, g_tap_grip_hold ? 1.f : 0.f };
+                          static_cast<float>(g_tap_released_ms), static_cast<float>(g_tap_released_polls), pushv[0], pushv[1], (s_tap_grip_back[0] || s_tap_grip_back[1]) ? 1.f : 0.f };
     if (out) for (int k = 0; k < n && k < 18; ++k) out[k] = v[k];
     char a[150] = "no tap yet", b[150] = "";
     if (g_tap_last_t) snprintf(a, sizeof(a), "last tap: %s pushed %.0f mm in %.0f ms, %.0f s ago", g_tap_last_h ? "R" : "L", g_tap_last_travel * 1000.f, g_tap_last_dur * 1000.f, (now - g_tap_last_t) / 1000.0);
