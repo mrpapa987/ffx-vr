@@ -3110,3 +3110,43 @@ Plan: research/fh-port-plan.md (revision 2) and its review, in the session scrat
     (`grep -rn "alpha12" INSTALL-ALPHA.md docs packaging`); the stage-0 debugger paragraph of
     `docs/exe-analysis.md` (about line 37; #388 changes first-chance exception handling) and the `FhSavePal` comment in module.cs; an INSTALL note on the soft reset (#373).
   - (e) The publish folder, checked for `TerraFX.Interop.Windows.dll`.
+
+## VR hands v2, stage S1: boxes at the controllers (branch `hands-s1`, 2 Nov 2026)
+
+Spec: research/hands-v2-spec.md (session scratchpad; S1 section), with the owner's decisions of 2 Nov 2026, which win
+where they differ: **our hands are drawn only in first person with the body hidden** (`fp_body_mode` 0, the default; with the
+body shown nothing of ours is drawn, no forearm cutting); generic hands first, user packs later (S3); **no optical hand
+tracking** (the spec's S5 is dropped); **off by default** (`vr_hands=0`). Code: native "VR hands v2" block after the 3D
+markers pass (ffxvr_native.cpp), `src/native/ffxvr_hands.cpp/.h` (CPU only), managed `src/managed/hands.cs`. ABI 27.
+
+- **Where it draws.** `ffxvr_pre_resolve`, called by the managed ResolveSubresource detour *before* the game's resolve. At
+  the first resolve of this frame's scene target (`g_scene_live_tex`, >= 20 eye-2 draws), with rtv0 = that texture and a DSV
+  bound: one draw per eye, eye 1 into the game's MSAA rtv0 + DSV, eye 2 into `twin_rtv` / `twin_dsv` (no depth twin: eye 2
+  skips, counted). Depth LESS_EQUAL with write, opaque, no culling in S1 (closed boxes), gamma-space light fixed in view
+  space. The hands then ride the game's resolve and our mirrored resolve into the eye images, so transparents test against
+  them, post-processing applies, and the UI panel is over them. rtv1 (the second MSAA target) is not written; the census
+  line names it.
+- **When.** Inputs are latched at the frame's tick (`hands_latch` in write_camera's advance: the controllers, the recentre
+  reference, the near-variant projection). At the resolve the views are rebuilt from `g_tick_v` (`build_override_view`,
+  read-only, under g_mutex) and each eye's projection is the latched one with that eye's FOV applied exactly as write_camera
+  applies it. Cross-checks: `pkt_mismatch` (the pad packet at the tick vs at the draw) and `pv_diff` (our eye-1 VP vs the
+  last uploaded `g_last_PVn`, once per 10 s).
+- **Placement.** `H = Grip . (Cal | Default) . Trim` in reference space, then `w = P + Rb^T (sc r + mv')` (build_override_view
+  now also publishes `g_hb_mv` and `g_hb_mode`). The hand frame is OpenXR's joint convention at the palm (+Y out of the back
+  of the hand, -Z toward the fingers). **Default** = Meta's palm pose on the Touch grip from VDXR's table (grip . Rx(-70 deg)
+  at (-+1.0, 1.3, 0.75) cm) times Rz(+90 deg) left / Rz(-90 deg) right: Meta's palm pose keeps the grip's X (the palm
+  normal) and has +Y toward the thumb, so the spec's plain `grip . Rx(-70)` would have been a quarter turn off about the
+  fingers. **Cal** (the "calibrate" button, arms out, palms down) is captured in reference space only (shoulder estimate from
+  the head), replaces Default's rotation, keeps its offset; the old `hands_cal` is migrated once (Cal . Rz(+-90 deg)).
+  **Trim**: `vr_hands_yaw/pitch/roll`, `vr_hands_off_right/up/back` in the hand frame, mirrored for the left hand.
+- **Hidden** (first match, counted): off, headset off, screen frames (FMV, menus, save screen), stereo screen, painted
+  backdrop, battle transition, dream filter, frozen view, not first person, body shown (fp_body_mode != 0, the body hide
+  off, or the old bone hands on), no tick, pass not ready, no projection; at the resolve `no_dsv` / `wrong_rt`; per hand an
+  untracked grip; a frame without a qualifying scene resolve is `no_resolve`.
+- **Logging.** Events always: `hands: on|off` (off with the session totals), `hands: pass ready (vs+ps compiled N ms at
+  Present)`, `hands: first drawn ...`, the first skip of each kind, `hands: calibrated L R (wrist vs default ...)`. With
+  `diag_verbose=1` the 10 s line `hands: drawn e1 N e2 N / N frames | hidden ... | skip no_dsv wrong_rt no_twin_dsv no_twin |
+  grips | pv_diff | pkt_mismatch | calibrated | last hidden`. Frame census: `HANDS e1 -> ...` / `HANDS e2 -> ...` before the
+  scene `RSV`. Debug bits: 1 wrist axes, 4 one placement line per drawn frame (300 per switch-on), the pose-dump button.
+- **Not done in S1**: the old bone hands stay as they are (retired in S2, spec section 4); `head_position=0` (no head
+  translation) leaves the hands at their tracked offsets, so they drift against the fixed eye in that mode.
