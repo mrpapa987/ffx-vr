@@ -51,14 +51,19 @@ def _chain(base, knuckle, lens, droop=0.0):
     return pts
 
 def default_rest_positions():
+    """The generic hand's bind joints. Finger bones (proximal, intermediate, distal + a 4.5 mm tip pad) follow the mean
+    phalanx lengths of Buryanov & Kotiuk, "Proportions of Hand Segments", Int. J. Morphol. 28(3), 2010 (X-rays of 66
+    adults: index 39.8/22.4/15.8, middle 44.6/26.3/17.4, ring 41.4/25.7/17.3, little 32.7/18.1/16.0 mm), scaled by
+    190/193 (ANSUR II's median male hand length is 193 mm). The knuckles sit 4 mm further out than the S2 hand so that
+    wrist -> middle tip stays 0.19 m (wrist -> MCP III 0.098 m = 0.52 of the hand length, as 193 - 93 mm)."""
     P = np.zeros((26, 3))
     P[J["wrist"]] = (0, 0, 0)
     fingers = {
-        #           metacarpal base(CMC)        knuckle(MCP)               proximal, intermediate, distal
-        "index":  ((-0.017, 0.004, -0.024), (-0.024, 0.003, -0.090), (0.040, 0.024, 0.021)),
-        "middle": ((-0.004, 0.005, -0.025), (-0.004, 0.004, -0.094), (0.045, 0.028, 0.023)),
-        "ring":   (( 0.008, 0.004, -0.024), ( 0.015, 0.002, -0.088), (0.042, 0.027, 0.022)),
-        "little": (( 0.018, 0.001, -0.022), ( 0.032, -0.002, -0.078), (0.033, 0.020, 0.020)),
+        #           metacarpal base(CMC)        knuckle(MCP)               proximal, intermediate, distal (+ pad)
+        "index":  ((-0.017, 0.004, -0.024), (-0.024, 0.003, -0.094), (0.0392, 0.0220, 0.0201)),
+        "middle": ((-0.004, 0.005, -0.025), (-0.004, 0.004, -0.0986), (0.0439, 0.0259, 0.0216)),
+        "ring":   (( 0.008, 0.004, -0.024), ( 0.015, 0.002, -0.092), (0.0407, 0.0253, 0.0215)),
+        "little": (( 0.018, 0.001, -0.022), ( 0.032, -0.002, -0.082), (0.0322, 0.0178, 0.0202)),
     }
     for f, (b, k, L) in fingers.items():
         for jj, p in zip(FINGERS[f], _chain(b, k, L, droop=0.02)):

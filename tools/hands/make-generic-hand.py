@@ -18,6 +18,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import handlib as H
 
 SIDES = 12
+# S3 (the owner on S2: "a little floppy / long fingers"): the joints bend over a shorter zone (S2: 0.35 of the bone either
+# side, a 90 deg PIP bend spread over ~25 mm, rubbery), the fingers are 5 % fuller (S2: radii 10.0 / 10.4 / 9.8 / 8.6 mm),
+# and the palm reaches past the knuckles to the finger webs (S2 stopped 6 mm short of them, so the fingers showed their
+# whole length from the knuckles: 0.55 of the hand length for the middle finger, a real one shows ~0.43 from its web).
+BLEND = 0.22
+FINGER_R = {"index": 0.0105, "middle": 0.0109, "ring": 0.0103, "little": 0.0090}
+WEB = {"index": 0.010, "middle": 0.010, "ring": 0.010, "little": 0.013}   # palm skin past each knuckle (MCP), metres
 
 def superellipse(n, a, b, e=2.6, phase=0.0):
     t = np.linspace(0, 2 * np.pi, n, endpoint=False) + phase
@@ -59,7 +66,7 @@ def finger(mb, P, R, ch, radius, flat=0.82, back=0.010):
     def ring_at(pt, Rj, r):
         xy = superellipse(SIDES, r, r * flat, e=2.2)
         return pt + xy[:, :1] * Rj[:, 0] + xy[:, 1:] * Rj[:, 1]
-    blend = 0.35   # fraction of the shorter adjacent bone used for a blend zone around each joint
+    blend = BLEND  # fraction of each bone either side of a joint over which the two bones' weights blend
     k0 = joints[0]
     rings.append(ring_at(P[k0] + R[k0][:, 2] * back, R[k0], radius * 1.08)); ws.append(onehot((meta, 1)))
     segs = list(zip(joints[:-1], joints[1:]))
@@ -95,21 +102,33 @@ def build(P, R):
         w[H.J["thumb_metacarpal"]] += 1.2 * th
         return w / w.sum()
     n = 28
-    ts = [0.0, 0.18, 0.4, 0.62, 0.82, 0.94, 1.0]
-    halfw = [0.027, 0.034, 0.041, 0.044, 0.045, 0.043, 0.036]
-    halft = [0.016, 0.017, 0.018, 0.017, 0.015, 0.013, 0.009]
+    order = np.argsort(kx); webz = np.array([WEB[f] for f in ("index", "middle", "ring", "little")])
+    prox = [H.FINGERS[f][1] for f in ("index", "middle", "ring", "little")]
+    def web_weight(pt, s):
+        # past the knuckles the palm skin (the webs between the fingers) follows the proximal bones: s 0 at the knuckle
+        # line, 1 at the web; shared between the nearest fingers by lateral distance
+        w = palm_weight(pt); wp = s * s * (3 - 2 * s)
+        g = np.exp(-((pt[0] - kx) / 0.010) ** 2); g /= g.sum()
+        w = w * (1 - wp)
+        for j, gi in zip(prox, g): w[j] += wp * gi
+        return w / w.sum()
+    # (t along wrist -> knuckles, s past the knuckles to the web, half width, half thickness, centre lowered by): the webs
+    # are on the palm side, thin, below the fingers' axes, so from the back the knuckles and fingers still read separately
+    spec = [(0.0, 0, 0.027, 0.016, 0), (0.18, 0, 0.034, 0.017, 0), (0.4, 0, 0.041, 0.018, 0), (0.62, 0, 0.044, 0.017, 0),
+            (0.82, 0, 0.045, 0.0155, 0), (0.94, 0, 0.044, 0.0145, 0), (1.0, 0.0, 0.043, 0.0135, 0.0),
+            (1.0, 0.55, 0.0415, 0.0085, 0.0045), (1.0, 1.0, 0.0395, 0.0048, 0.0075)]
     rings, ws = [], []
-    for t, hw, ht in zip(ts, halfw, halft):
+    for t, sw, hw, ht, low in spec:
         xy = superellipse(n, hw, ht, e=3.0, phase=np.pi / n)
         xc = 0.004 * t - 0.002
         x = xy[:, 0] + xc
-        zk = np.interp(x, np.sort(kx), kz[np.argsort(kx)])
-        zfront = zk + 0.006
-        z = 0.012 * (1 - t) + zfront * t
-        y = xy[:, 1] + 0.004 - 0.003 * t
-        r = np.c_[x, y, z]; rings.append(r); ws.append(np.array([palm_weight(p) for p in r]))
-    front = rings[-1].mean(0) + np.array([0, 0, -0.003])
-    mb.add_rings(rings, ws, cap_start=None, cap_end=(front, palm_weight(front)))
+        zk = np.interp(x, kx[order], kz[order]); zw = np.interp(x, kx[order], webz[order])
+        z = 0.012 * (1 - t) + (zk + 0.004) * t if t < 1 else zk - zw * sw   # up to the knuckles, then on to the webs
+        y = xy[:, 1] + 0.004 - 0.003 * t - low
+        r = np.c_[x, y, z]; rings.append(r)
+        ws.append(np.array([web_weight(p, sw) if t >= 1 else palm_weight(p) for p in r]))
+    front = rings[-1].mean(0) + np.array([0, 0, -0.002])
+    mb.add_rings(rings, ws, cap_start=None, cap_end=(front, web_weight(front, 1.0)))
     # wrist / forearm stub (separate primitive "cuff") behind the palm, weighted to the wrist
     crings = []
     for z, hw, ht in ((0.030, 0.029, 0.021), (0.016, 0.031, 0.022), (0.004, 0.030, 0.021), (-0.006, 0.027, 0.018)):
@@ -118,8 +137,8 @@ def build(P, R):
     cuff.add_rings(crings, [onehot((H.J["wrist"], 1))] * len(crings),
                    cap_start=(np.array([-0.001, 0.003, 0.030]), onehot((H.J["wrist"], 1))))
     # --- fingers
-    for f, r in (("index", 0.0100), ("middle", 0.0104), ("ring", 0.0098), ("little", 0.0086)):
-        finger(mb, P, R, H.FINGERS[f], r)
+    for f in ("index", "middle", "ring", "little"):
+        finger(mb, P, R, H.FINGERS[f], FINGER_R[f])
     # --- thumb: thick at the metacarpal (thenar), tapering
     ch = H.FINGERS["thumb"]; rings, ws = [], []
     def tring(pt, Rj, r, flat=0.85):
