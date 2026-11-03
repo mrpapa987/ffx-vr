@@ -2,11 +2,13 @@
 #
 # Copies mod\ffxvr\ from the zip into <game>\fahrenheit\mods\ffxvr\ and adds 'ffxvr' to
 # Fahrenheit's load order. Your settings (ffxvr.ini) and anything else in that folder are kept,
-# so installing a newer zip over an older one is safe.
+# so installing a newer zip over an older one is safe. The shipped hand packs (hands\generic-glove\,
+# hands\generic\) are replaced; a hand pack folder of your own under hands\ is never touched.
 # It also checks what the mod needs at run time and says what is missing.
 #
-#   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini and logs are kept, and listed)
-#   -Purge         with -Uninstall: also delete the whole mod folder (settings, logs, captures): nothing is left
+#   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini, logs and your own hand packs are kept, and listed)
+#   -Purge         with -Uninstall: also delete the whole mod folder (settings, logs, captures, your own hand packs, named
+#                  first): nothing is left
 #   -ResetLogging  set every diagnostic in an existing ffxvr.ini to off (tools\set-logging.ps1 -Profile Release;
 #                  a timestamped .bak is made first). A fresh install needs nothing: its defaults are all off.
 #   -DeleteLogs    delete the mod's own old logs, dumps and captures from the mod folder (ffxvr_*.log,
@@ -87,8 +89,10 @@ if ($Uninstall) {
         Set-Content -LiteralPath $lo -Value $lines -Encoding ascii
         Write-Host "  removed '$modId' from mods\loadorder"
     }
+    $ownPacks = @(Get-ChildItem -LiteralPath (Join-Path $dest 'hands') -Directory -ErrorAction SilentlyContinue | Where-Object { $FfxvrHandPacks -notcontains $_.Name })
     if ($Purge) {
         if (Test-Path -LiteralPath $dest) {
+            if ($ownPacks.Count -gt 0) { Write-Host ('  -Purge also deletes your own hand packs: ' + (($ownPacks | ForEach-Object { "hands\$($_.Name)" }) -join ', ')) }
             $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force -ErrorAction SilentlyContinue)
             try {
                 Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
@@ -103,6 +107,13 @@ if ($Uninstall) {
             $p = Join-Path $dest $f
             if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; Write-Host "  removed $f" }
         }
+        foreach ($pk in $FfxvrHandPacks) {   # the shipped hand packs; your own pack folders stay
+            $p = Join-Path $dest "hands\$pk"
+            if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force; Write-Host "  removed hands\$pk" }
+        }
+        $hd = Join-Path $dest 'hands'
+        if ((Test-Path -LiteralPath $hd) -and @(Get-ChildItem -LiteralPath $hd -Force).Count -eq 0) { Remove-Item -LiteralPath $hd -Force }
+        if ($ownPacks.Count -gt 0) { Write-Host ('  kept your own hand packs: ' + (($ownPacks | ForEach-Object { "hands\$($_.Name)" }) -join ', ')) }
         if ($DeleteLogs) { Remove-ModLogs }
     }
     Write-Host ''
@@ -191,6 +202,18 @@ foreach ($f in $files) {
     $p = Join-Path $dest $f
     Unblock-File -LiteralPath $p -ErrorAction SilentlyContinue   # drop the "downloaded from the internet" mark
     Write-Host ('  {0}  ({1} bytes)' -f $f, (Get-Item -LiteralPath $p).Length)
+}
+# VR hands: the shipped hand packs (replaced); a pack folder of your own under hands\ is left as it is.
+foreach ($pk in $FfxvrHandPacks) {
+    $from = Join-Path $src "hands\$pk"
+    if (-not (Test-Path -LiteralPath (Join-Path $from 'right.glb'))) { Write-Host "  WARNING: hands\$pk is missing from the zip: VR hands will draw boxes. Extract the whole zip again."; continue }
+    $to = Join-Path $dest "hands\$pk"
+    New-Item -ItemType Directory -Force -Path $to | Out-Null
+    foreach ($f in @(Get-ChildItem -LiteralPath $from -File)) {
+        Copy-Item -LiteralPath $f.FullName -Destination $to -Force
+        Unblock-File -LiteralPath (Join-Path $to $f.Name) -ErrorAction SilentlyContinue
+    }
+    Write-Host "  hands\$pk\  (the generic hand)"
 }
 
 # ---------------------------------------------------------------- loadorder

@@ -49,6 +49,11 @@ $FfxvrDiagKeys = [ordered]@{
     diag_transition    = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
     diag_load_prof     = @{ Release = '0'; Verbose = $null; Dev = '2' }   # the load profiler: a sampler thread, probe hooks (next launch)
 }
+# VR hands: the hand packs the mod ships, ours (tools\hands\make-generic-hand.py, MIT): assets\hands\<name>\ in the
+# repository, mod\ffxvr\hands\<name>\ in the release zip, <game>\fahrenheit\mods\ffxvr\hands\<name>\ installed. The tools
+# write and remove only these folders: any other folder under hands\ is a user's own pack (often made from a game model) and
+# is never copied, packaged or deleted, except by install-mod -Uninstall -Purge, which names it first.
+$FfxvrHandPacks = @('generic-glove', 'generic')
 # What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
 $FfxvrLogPatterns = @(   # (install-mod -DeleteLogs deletes exactly these)'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
                       'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',

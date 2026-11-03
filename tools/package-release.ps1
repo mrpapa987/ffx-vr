@@ -7,7 +7,8 @@
 #       README.md              packaging\README-zip.md with the version filled in
 #       LICENSE, THIRD-PARTY-NOTICES
 #       mod\ffxvr\             ffxvr.dll (+ deps/runtimeconfig/manifest json), ffxvr_native.dll,
-#                              openxr_loader.dll
+#                              openxr_loader.dll, hands\generic-glove\ and hands\generic\ (our generic hand packs, MIT:
+#                              an allowlist, tools\paths.ps1 $FfxvrHandPacks; a guard below fails on anything else there)
 #       tools\                 install-mod.ps1 (from packaging\), paths.ps1, run-ffx.ps1,
 #                              game-settings.ps1, import-steam-saves.ps1, export-save-to-steam.ps1,
 #                              install-texture-pack.ps1, set-logging.ps1
@@ -145,6 +146,23 @@ New-Item -ItemType Directory -Force -Path $modDst, $toolsDst | Out-Null
 foreach ($f in $mgdFiles) { Copy-Item (Join-Path $mgdDir $f) -Destination $modDst }
 Copy-Item $natDll          -Destination $modDst
 Copy-Item $oxrDll.FullName -Destination $modDst
+# VR hands: only the shipped hand packs, from the repository (never from a game folder, where a user's own packs live).
+foreach ($pk in $FfxvrHandPacks) {
+    $from = Join-Path $proj "assets\hands\$pk"
+    foreach ($f in 'hand.json', 'right.glb') { if (-not (Test-Path -LiteralPath (Join-Path $from $f))) { Fail "assets\hands\$pk\$f is missing (tools\hands\make-generic-hand.py writes it)" } }
+    $to = Join-Path $modDst "hands\$pk"
+    New-Item -ItemType Directory -Force -Path $to | Out-Null
+    Get-ChildItem -LiteralPath $from -File | Copy-Item -Destination $to
+}
+# Guard: under hands\ only the allowlisted folders, and nothing marked private (a pack made from a user's own model, often
+# game-derived, must never ship: tools\hands\ marks those with "private": true and PRIVATE-do-not-share.txt).
+$handsDst = Join-Path $modDst 'hands'
+foreach ($f in @(Get-ChildItem -LiteralPath $handsDst -Recurse -File -ErrorAction SilentlyContinue)) {
+    $rel = $f.FullName.Substring($handsDst.Length + 1); $top = ($rel -split '[\\/]')[0]
+    if ($FfxvrHandPacks -notcontains $top) { Fail "hands\$rel is not one of the shipped hand packs ($($FfxvrHandPacks -join ', '))" }
+    if ($f.Name -eq 'PRIVATE-do-not-share.txt' -or $f.Name -like '*.private.glb') { Fail "hands\$rel is marked private" }
+    if ($f.Name -eq 'hand.json' -and ([IO.File]::ReadAllText($f.FullName) -match '"private"\s*:\s*true')) { Fail "hands\$rel says it is private" }
+}
 
 foreach ($f in 'paths.ps1', 'run-ffx.ps1', 'game-settings.ps1', 'import-steam-saves.ps1',
                'export-save-to-steam.ps1', 'install-texture-pack.ps1', 'set-logging.ps1') {

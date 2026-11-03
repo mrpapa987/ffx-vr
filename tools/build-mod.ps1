@@ -276,6 +276,15 @@ try {
     Get-ChildItem -LiteralPath $outDir | Copy-Item -Destination $dest -Recurse -Force -ErrorAction Stop
     Copy-Item -LiteralPath $natDll          -Destination $dest -Force -ErrorAction Stop
     Copy-Item -LiteralPath $oxrDll.FullName -Destination $dest -Force -ErrorAction Stop
+    # VR hands: the shipped hand packs -> <mod>\hands\<name>\ (their files replaced). A pack folder of the user's own is
+    # never touched (tools\paths.ps1 $FfxvrHandPacks is the whole list).
+    foreach ($pk in $FfxvrHandPacks) {
+        $from = Join-Path $proj "assets\hands\$pk"
+        if (-not (Test-Path -LiteralPath (Join-Path $from 'right.glb'))) { throw "assets\hands\$pk\right.glb is missing from the repository (tools\hands\make-generic-hand.py writes it)" }
+        $to = Join-Path $dest "hands\$pk"
+        New-Item -ItemType Directory -Force -Path $to -ErrorAction Stop | Out-Null
+        Get-ChildItem -LiteralPath $from -File | Copy-Item -Destination $to -Force -ErrorAction Stop
+    }
 } catch {
     Log ''
     Log "ERROR: deploy failed: $($_.Exception.Message)"
@@ -286,7 +295,10 @@ try {
 }
 
 Get-ChildItem -LiteralPath $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
-$kept = @(Get-ChildItem -LiteralPath $dest -Recurse -File | Where-Object { $n = $_.Name; -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' })
+foreach ($pk in $FfxvrHandPacks) { Get-ChildItem -LiteralPath (Join-Path $dest "hands\$pk") -File | ForEach-Object { Log ("  hands\$pk\" + $_.Name + '  (' + $_.Length + ' bytes)') } }
+$shipped = @($FfxvrHandPacks | ForEach-Object { [IO.Path]::Combine($dest, 'hands', $_) + [IO.Path]::DirectorySeparatorChar })
+$kept = @(Get-ChildItem -LiteralPath $dest -Recurse -File | Where-Object { $n = $_.Name; $fn = $_.FullName
+          -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' -and -not ($shipped | Where-Object { $fn.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) })
 Log ("[deploy] kept {0} settings/capture/log files ({1:N1} MB)" -f $kept.Count, (($kept | Measure-Object Length -Sum).Sum / 1MB))
 
 if (-not (Test-Path -LiteralPath (Join-Path $dest "$modId.manifest.json"))) {
