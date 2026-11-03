@@ -68,6 +68,7 @@
   <ItemGroup>
     <ClCompile Include="ffxvr_native.cpp" />
     <ClCompile Include="ffxvr_xr.cpp" />
+    <ClCompile Include="ffxvr_hands.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
