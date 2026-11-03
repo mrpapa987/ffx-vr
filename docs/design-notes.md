@@ -3582,3 +3582,68 @@ game knowledge, not captures: take an actor-table log, one image and a frame cen
   the eyes to the summoner: check only the scale), overdrives (above).
 - **Special screens:** the airship destination map and its coordinate search, the sphere grid (a 3D view), the Monster
   Arena menus.
+## Chocobo rides: how the game does it, and first person on the bird (branch `chocobo`, 3 Nov 2026)
+
+The owner's first ride (Calm Lands, `na/nagi0000`): three actor-table dumps a few seconds apart while moving the bird, a frame
+census and eye captures. First person showed the map's edge from about the world origin, with the chocobo and its rider far
+off. This answers the questions left open in "Chocobo rides, expected VR problems" (21 Oct) and exe-analysis section 14.
+
+### What the game does
+- **Two actors, and a swap.** On foot Tidus (`c001`) is actor 0. Mounting, the chocobo (`f051`) takes actor 0: it is the one
+  that moves between the dumps (-79.7, 45.2, 34.1) -> (-136.2, 28.6, -77.9) -> (-66.3, 9.9, -202.2), it is the actor the
+  player steers, and it is the only actor with bit 0x04 of +0x198 (`00000115`; the script setter 0x82B130 owns that bit; the
+  other birds read `00000111`). Tidus comes back as a new actor in a high slot (28).
+- **The rider is attached to the bird's bone.** +0x19C = the parent actor, +0x1A0 its bone, +0x1A4..+0x1B0 an offset (w 1),
+  +0x1B4 a scale (setters 0x832630 / 0x832680 / 0x8326E0; 0x832630 resolves bone and offset from an attach point,
+  0x833A70). The root builder 0x832760 then makes the rider's root +0x1D0 = scale x parent bone x offset x parent root, and
+  **never reads his +0x0C**. That is why `c001` shows (0.0, 36.3, 0.0), "drawn no", in every dump: a stale script position.
+  The wild birds' riders in the same table look the same (`n064` actor 14 on bird 13, `n069` actor 16 on bird 15, both at
+  (0, 36.3, 0)), so this is the game's general rider pattern, not something of Tidus's.
+- **The rider's sub-positions are world positions.** optpos is built from +0x1D0 (0x8350F0), so the head bone is right while
+  riding. Our "fold it in if it looks relative" rule (head more than 100 units from +0x0C: add +0x0C) fired on every dump and
+  put the head 36.3 units low.
+- **FFX-60fps** (SMOOTH-002-CHILDREL, on by default) moves an attached actor with its parent's interpolation, so the rider's
+  +0x200 at the post-join snapshot is what the frame draws.
+- **The mount moment**: for about a second the table had no `c001`; first person took `c002` (Yuna, script-hidden, parked at
+  (0, 0, 0)) as "the party model with the lowest id" (`22:19:30 following actor 1 'c002'`), then `c001` at 28.
+- The frame census and captures show nothing else wrong: the rider is drawn (with the hide centred on (0, 36.3, 0) it was
+  never matched, so first person drew Tidus), the mini-map goes to the UI pass as usual.
+
+### What first person does now
+- **Riding = the followed actor is attached** (+0x19C non-zero), field only (battle follows the roster, unchanged). No name,
+  map or flag guess: an on-foot actor has no parent, so the `f176` "nothing matched" case on `hi/hiku2100` and every other
+  map are untouched. The followed actor stays Tidus (the fp_actor rule), so mount and dismount are the existing re-pick.
+- **Position**: the rider's drawn root +0x200, from the post-join snapshot when fresh (`D7Join` now also carries the parent's
+  +0x0C / +0x6C / +0x200), else read at Present. The head gets the bird's interpolation (head + bird's drawn - logic root),
+  never the fold. The F8 smooth-anchor status says "riding: the rider's drawn root (60 fps, on the bird's bone)".
+- **Heading**: unchanged. First person's heading is the latched one plus stick turns plus the headset, never the actor's;
+  the left stick (move_remap) steers the bird relative to where you look, as it walks Tidus.
+- **Bob smoothing** (`ride_smooth`, `ride_smooth_ms`): the rider's offset from the bird's drawn root is low-passed (default:
+  the height only, 150 ms), and the eye base is the bird's root plus that. The bird's root glides at the drawn rate, so the
+  eye never trails a sprint and does not lag a climb; only the seat's bob relative to the bird is filtered (a 2.5 Hz bob is
+  cut to about 40 %). Mode 2 also filters the sideways / fore-aft sway. 0 = off. It applies to every view that follows the
+  player (first person, third person, the diorama: all anchor on ffxvr_player_set's position).
+- **Body hide**: ffxvr_ride_set (ABI 32) gives native the rider's drawn root (the hide centre, since player_set may now
+  carry the smoothed eye base) and the bird's. While riding the step margin is capped (`ride_hide_cap`, 3 units; at chocobo
+  speed `0.75 + 1.5 * step` reached about 10 units and NPCs beside the path), and a draw nearer the bird's root than the
+  rider's is the bird's and never hidden as the player's. The bird is drawn (you see its neck and back in front of you) unless
+  "first person: also hide the chocobo" (`ride_hide_mount`) is on; its shadow then goes too with fp_self_shadow 0. The body
+  modes (whole body hidden, head parts with the VR hands) apply to the rider as on foot.
+- **The mount moment**: a script-hidden party model now ranks after actor 0 (`RideLogic.FpScore`: 200000 + chr_id), so the
+  second without `c001` follows the bird at actor 0 instead of jumping to Yuna at the origin. A visible follower still beats
+  actor 0; a hidden one is still taken when nothing else is live.
+- **Logs**: once per change, `riding: 'c001' (actor 28) is attached to 'f051' (actor 0, bone N) on map ...` with both roots
+  and the settings; 1.5 s later one `riding check:` line (nearest skinned draw to each root: the rider's should be about 0, so
+  the hide matches; the counts the hide matched last frame); `riding: off` on dismount. The actor table has an `att` column
+  (the parent's index, `ext` outside the table) and prints an attached actor's drawn root; its "drawn" test (and the 10 s
+  `actors:` line's) uses that root.
+- **F8 > Debug > First person / follow**: "chocobo: riding: f051 (actor 0) - rider parts matched last frame N, bird parts M",
+  the bob smoothing radio buttons and ms slider, the hide-the-chocobo checkbox and the hide cap; the model-names line ends in
+  "| riding: f051 (actor 0)".
+
+### Not done / open
+- Per-part hiding of the bird (only its neck) would need the part finder for the mount's draws; the whole-bird toggle first.
+- The chocobo mini-games (Calm Lands training, the races) are untested: if they are ordinary field control the above holds;
+  if they run scripted cameras, the seat view is the fallback.
+- The seat height while riding comes from the head bone (`fp_head_anchor` 1, the default). With `fp_head_anchor` 0 (fixed
+  eye height) the eye is the rider's root + 18, unsmoothed (the smoothing moves the head, which that mode ignores).

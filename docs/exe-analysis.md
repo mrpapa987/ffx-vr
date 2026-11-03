@@ -331,6 +331,12 @@ mount's actor: whether Tidus stays `c101` with a riding motion and the
 chocobo is a second actor glued to him, or the pair becomes one model, is a
 runtime question (actor table log while riding).
 
+Answered by the Calm Lands logs (3 Nov 2026; design-notes "Chocobo rides: how
+the game does it"): two actors. The chocobo `f051` takes actor 0 and is the
+one steered; Tidus `c001` comes back in a high slot attached to the bird's
+bone (+0x19C parent, +0x1A0 bone, section 18), his +0x0C a stale
+(0, 36.3, 0) that the root builder ignores.
+
 
 ## 15. The battle roster the game keeps (from Farplane, 21 Oct 2026)
 
@@ -453,6 +459,10 @@ render thread.
 | +0x10C | pointer to an override matrix; when non-null, the root is copied from it | H |
 | +0x158 | chr_rotation_rad: the heading used to build the root (0x832A0B) | H |
 | +0x19C | parent actor for attachment: the root comes from the parent's bone `+0x328 + b*0x160 + 0x88` | H |
+| +0x1A0 | attach bone index b (into the parent's +0x328 table) | H |
+| +0x1A4..+0x1B0 | attach offset (vec4, w = 1), scaled by the parent model's +0x30; becomes the translation of `scale x bone` | H |
+| +0x1B4 | attach scale (times 1 / parent model +0x30) | H |
+| +0x1B8 | the parent's +0x190, -1 when detached | H |
 | +0x1D0 | **root matrix** (row vectors; translation = floats 12..14 = **+0x200..+0x208**). Built once per logic tick by **0x832760** (in the JobWorker job 0x833530) from scale, heading and **(+0x0C + +0x6C)**, or +0x10C, or the parent bone. Read by Ch_DrawMain (0x82EF26, 0x82EF85, 0x82FB46) and by the optpos builder. FFX-60fps SMOOTH-002 writes lerp(k-1, k, t) here for the draw and restores it at the next invocation's pre(). So this, not +0x0C, is the 60 fps drawn position. Even without FFX-60fps it differs from +0x0C by +0x6C (and completely for attached actors) | H (code) / M (FFX-60fps source, not its DLL) |
 | +0x200..+0x208 | = root translation (also the last fallback of 0x8354F0) | H |
 | +0x524 | chr_optpos[26] (vec4). **Computed** by **0x8350F0** in the same job: `optpos[i] = bone[i] (+0x328 + b*0x160 + 0x88) × root(+0x1D0) × local offset`, from the tick-k root. **Not interpolated** by FFX-60fps: it steps at 30 Hz. The section 4 row's "highest with X/Z != 0 is the head" is our heuristic; the game addresses entries by index (sections 19.3/19.4) | H/M |
@@ -461,7 +471,9 @@ render thread.
 |---|---|---|---|
 | 0x8354F0 | 0x4354F0 | `get_optpos(actor, idx, out)`: if optpos[idx] is all zero, use optpos[0]; if optpos[0].w (+0x530) == 0, use actor+0x200..+0x208 with w=1 | H |
 | 0x8350F0 | 0x4350F0 | optpos builder (JobWorker) | H |
-| 0x832760 | 0x432760 | root matrix builder (JobWorker) | H |
+| 0x832760 | 0x432760 | root matrix builder (JobWorker). Attached (+0x19C): `root = S x bone[+0x1A0] (translation = offset +0x1A4) x parent root`, **+0x0C not read**; else +0x10C if set; else scale, heading +0x158, translation +0x0C + +0x6C | H |
+| 0x832630 / 0x832680 / 0x8326E0 | 0x432630.. | attach setters `(actor, parent, bone or attach point, [offset])`: write +0x19C, +0x1B8, +0x1A0, +0x1A4..; 0x832630 resolves bone and offset with 0x833A70(parent, point, &bone, &offset); parent 0 detaches | H |
+| 0x82B130 | 0x42B130 | script setter: +0x198 bit 0x04 = arg. Seen only on the steered chocobo (`00000115`; other birds `00000111`) | H (code) / M (meaning) |
 
 ## 19. Battle UI and battle cursors
 

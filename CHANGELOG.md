@@ -44,6 +44,9 @@ recommended.
   the grip and push your hand forward about a hand's width toward what you face to press confirm (talk, examine, open) in
   the field in first person; never in battle, menus, the sphere grid or the save screen, nor (unless you tick it) while a
   text box is up.
+- **Chocobo rides in first person**: your eyes on Tidus's head on the bird, the bird's running bob smoothed
+  (F8 > Debug > First person / follow > chocobo), the bird drawn under you (or hidden, if its neck is in the way);
+  third person and the diorama follow the bird too.
 - **Small logs by default**: one `ffxvr_diag.log` per session, at most 4 MB; the diagnostics for bug
   hunting are off; `tools\set-logging.ps1 -Profile Verbose` turns on a fuller log for a bug report, and
   `-Profile Release` turns it off again.
