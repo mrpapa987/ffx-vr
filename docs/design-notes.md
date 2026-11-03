@@ -3148,5 +3148,10 @@ markers pass (ffxvr_native.cpp), `src/native/ffxvr_hands.cpp/.h` (CPU only), man
   `diag_verbose=1` the 10 s line `hands: drawn e1 N e2 N / N frames | hidden ... | skip no_dsv wrong_rt no_twin_dsv no_twin |
   grips | pv_diff | pkt_mismatch | calibrated | last hidden`. Frame census: `HANDS e1 -> ...` / `HANDS e2 -> ...` before the
   scene `RSV`. Debug bits: 1 wrist axes, 4 one placement line per drawn frame (300 per switch-on), the pose-dump button.
-- **Not done in S1**: the old bone hands stay as they are (retired in S2, spec section 4); `head_position=0` (no head
-  translation) leaves the hands at their tracked offsets, so they drift against the fixed eye in that mode.
+- **Review round** (hands-s1-review.md): the hands draw only at a resolve of last frame's scene target (`not_prev`
+  otherwise, not latched); a calibration request expires 0.5 s after its countdown; the adaptive UI panel's depth is
+  measured before the hands are drawn (the measurement is skipped on a frame where that could not happen), so a hand under
+  the dialogue box does not pull the panel in; the game's bound viewport is used; with `head_position=0` the hands are
+  placed relative to the eye.
+- **Not done in S1**: the old bone hands stay as they are (retired in S2, spec section 4); no A/B of the alpha the hands
+  write into the scene target (review N6).
