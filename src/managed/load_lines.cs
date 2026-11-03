@@ -27,12 +27,12 @@ namespace FFXVR;
 //    difference between its start and its line), with the holders (LD2-4): who held the lock at the contended re-acquires,
 //    and who the watcher saw inside our release windows (about every 1 ms; main = main-thread work mid-list).
 //
-// diag_load_lines (ini, default 1) writes these lines; it needs no hook of its own beyond the load hooks (which the lock
+// diag_load_lines (ini, default 0 since the release prep) writes these lines; it needs no hook of its own beyond the load hooks (which the lock
 // release needs anyway). The expensive parts of the old battle lines (the address-space walks, the chr cache table, the
 // wait-all callers' stack walks, the low-2 GB reports) stay with diag_load (default 0 since this build).
 public sealed unsafe partial class FFXVRModule {
 
-    private bool _diag_load_lines = true;      // ini diag_load_lines (default 1): one load: line per load in ffxvr_diag.log (cheap: no extra hook)
+    private bool _diag_load_lines = false;     // ini diag_load_lines (default 0 since the release prep; was 1): one load: line per load in ffxvr_diag.log (cheap: no extra hook)
     private delegate* unmanaged[Cdecl]<int*, int, int> _fn_load_info;   // ABI 24: (out, n) -> count of values (60)
     private const int k_li_n = 60, k_ev_title = 0x17;
 

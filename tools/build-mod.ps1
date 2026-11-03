@@ -111,6 +111,28 @@ if (-not $oxrDll) {
 }
 Log "[openxr] loader: $($oxrDll.FullName)"
 
+# ---------------------------------------------------------------- version
+# One place: ffxvr.csproj's <Version>. The managed half gets it from the SDK (the assembly and ffxvr.manifest.json);
+# the native half from src\native\ffxvr_version.h, written here before every build (not in git), with the commit
+# ("-dirty" with uncommitted changes). Both are shown in the F8 overlay and at the top of ffxvr_diag.log.
+$modVer = '0.0.0'
+try { $v = ([xml](Get-Content -LiteralPath (Join-Path $srcMgd 'ffxvr.csproj') -Raw)).Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ } | Select-Object -First 1; if ($v) { $modVer = "$v".Trim() } } catch { }
+$modCommit = 'nogit'
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $c = & git -C $proj rev-parse --short=7 HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $c) {
+        $modCommit = "$c".Trim()
+        $d = & git -C $proj status --porcelain --untracked-files=no 2>$null
+        if ($LASTEXITCODE -eq 0 -and $d) { $modCommit += '-dirty' }
+    }
+}
+$verH = "// Written by tools\build-mod.ps1 before every build; not in git.`r`n#define FFXVR_VERSION `"$($modVer -replace '[^A-Za-z0-9._+-]', '-')`"`r`n#define FFXVR_COMMIT `"$($modCommit -replace '[^A-Za-z0-9._+-]', '-')`"`r`n"
+$verHPath = Join-Path $srcNat 'ffxvr_version.h'
+$old = if (Test-Path -LiteralPath $verHPath) { [IO.File]::ReadAllText($verHPath) } else { '' }
+if ($old -ne $verH) { [IO.File]::WriteAllText($verHPath, $verH, $FfxvrUtf8) }   # unchanged: left alone, so MSBuild does not rebuild for nothing
+Log ''
+Log "[version] $modVer ($modCommit)"
+
 # ---------------------------------------------------------------- native half
 Log ''
 Log '[native] locating MSBuild'
@@ -292,7 +314,6 @@ Log ('  contents: ' + ((Get-Content -LiteralPath $loadorder) -join ', '))
 Log ''
 Log ('=' * 70)
 Log 'Done. Now run:  tools\run-ffx.ps1'
-Log '  In game, press F9 to dump constant buffers (once standing still,'
-Log '  once after moving). Dumps land beside the mod DLL and are collected'
-Log '  automatically when the game exits.'
+Log '  Logging: tools\set-logging.ps1 -Profile Dev turns the diagnostics on (Release: off, as a fresh install).'
+Log '  Logs and captures land beside the mod DLL and are collected by run-ffx when the game exits.'
 Log "Log: $log"

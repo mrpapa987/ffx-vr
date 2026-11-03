@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 25;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 26;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -344,7 +344,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     public FFXVRModule() { }
 
     public override bool init(FhModContext mod_context, FileStream global_state_file) {
-        _logger.Info("FFX VR module initialized.");
+        _logger.Info($"FFX VR {s_mod_version} module initialized (Fahrenheit {s_fh_version}).");
         settings_load();
         load_native(mod_context);
         if (_fn_haptics_set != null) _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);   // before ffxvr_init, which installs the XInputSetState hook only if haptics or build 7 are on
@@ -518,6 +518,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_load_info = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_load_info");   // ABI 23: loads build (the load: lines, the lock release per load kind); 24: 60 values
             _fn_sr_set = (delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void>)req("ffxvr_sr_set"); _fn_sr_gate = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_sr_gate");   // ABI 25: stickrep
             _fn_sr_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_sr_status"); _fn_turn_keys = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_turn_keys");
+            _fn_log_config = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_log_config"); _fn_build_info = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_build_info");   // ABI 26: release prep (logging.cs)
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -529,6 +530,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 return;
             }
             _native_ok = true;
+            log_native_loaded();   // release prep: the native version, and diag_verbose / the log cap before ffxvr_init (logging.cs)
             _native_status = "loaded, waiting for the render backend";
             _logger.Info("Native helper loaded. Waiting for ImGui's D3D11 backend to come up.");
         }
@@ -550,7 +552,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
-        _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null;
+        _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null; _fn_log_config = null; _fn_build_info = null;
         _fn_eye2_size = null; _fn_on_updatesub = null; _fn_on_rendertargets = null; _fn_on_rendertargets_uav = null; _fn_on_resolve = null; _fn_on_viewport = null;
         _fn_on_clear = null; _fn_frame_arm = null; _fn_ui_hide = null; _fn_ui_hidden_draws = null; _fn_ui_hide_cursor = null; _fn_ui_rect_stats = null;
         _fn_ui_hide_list = null; _fn_ui_hide_hits = null; _fn_draw_skip_ranges = null; _fn_ui_hide_pointers = null; _fn_ui_pointer_stats = null; _fn_blitz_overlay = null;
@@ -885,7 +887,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     // LD2-5: the ini's revision. An ini without ini_rev (or older) was written before the loads build: its load_lock_release
     // (always 0, LL-2's test rule) and heat_haze (the haze build's 1) carry no choice of the player's, so the launch read
     // replaces them with this build's defaults once; the next save writes ini_rev. The diag_* keys are left as they are.
-    private const int k_ini_rev = 1;           // 1: the loads build
+    // Rev 2 (release prep, logging.cs): diag_verbose is new and defaults to 0; an older ini without it reads 1, the periodic
+    // lines every build before it wrote, so an existing (developer's) setup logs as before.
+    private const int k_ini_rev = 2;           // 1: the loads build; 2: release prep (diag_verbose)
     private int _ini_rev_read;                 // what the file said (0: absent)
     private string? _ini_diag_note;            // the migration / diag_* note, written to ffxvr_diag.log at the first ready frame
     private bool _diag_actors = false;         // ini diag_actors (default 0): the "actors:" line every 10 s in Fahrenheit's log (LD2-8)
@@ -1057,7 +1061,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "diag_build7":       pb(k, v, ref _diag7); break;   // build 7 diagnostics (default 0; logging at once; the hooks follow cursor_source / smooth_anchor at launch)
                 case "smooth_anchor":     pb(k, v, ref _smooth_anchor); break;   // the first / third person / diorama anchor from the drawn (interpolated) root
                 case "diag_load":         pb(k, v, ref _diag_load); break;             // the load lines' expensive parts (default 0; at once)
-                case "diag_load_lines":   pb(k, v, ref _diag_load_lines); break;       // loads build: one load: line per load (default 1; at once; the hooks at launch)
+                case "diag_load_lines":   pb(k, v, ref _diag_load_lines); break;       // loads build: one load: line per load (default 0 since the release prep; at once; the hooks at launch)
                 case "battle_cache_models": break;                                     // retired (the HD cluster cache build): read and ignored, dropped at the next save
                 case "hd_cluster_cache":  pb(k, v, ref _hd_cluster_cache); break;      // keep the HD map textures across random battles in one zone (applies at once)
                 case "diag_cluster_bytes": pb(k, v, ref _diag_cluster_bytes); break;   // HC-2: the game pool's alloc / free hooks, for the bytes per HD cluster (hooks at the next launch; default 0: the header read stands in)
@@ -1068,6 +1072,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "load_lock_release": pe(k, v, ref _load_lock_release, 0, 1, 2); break;   // 0 off, 1 battle loads (default), 2 all loads (test: a hand edit applies at once; a launch read and the saved file make it 1)
                 case "ini_rev":           pi(k, v, ref _ini_rev_read, 0, 1000000); break;     // LD2-5: the file's revision (a launch read below k_ini_rev migrates)
                 case "diag_actors":       pb(k, v, ref _diag_actors); break;                 // LD2-8: the actors: line every 10 s (default 0; at once)
+                case "diag_verbose":      pb(k, v, ref _diag_verbose); _diag_verbose_read = true; break;   // release prep: the periodic log lines, the camera trace, Ctrl+F9 (default 0; at once; logging.cs)
                 case "cursor_source":     pw(k, v, ref _cursor_game_cfg, "game", "legacy"); break;   // cursor stage C2
                 case "marker_lift":       pf(k, v, ref _marker_lift, -5f, 20f); break;              // C2-10
                 case "cursor_look":       pw(k, v, ref _cursor_look_game, "game", "mod"); break;    // cursor stage C3
@@ -1091,21 +1096,22 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// load_lock_release=2 (the test mode) starts as 1 (LD2-R-3). The next save writes ini_rev (ini_text).</summary>
     private void settings_migrate() {
         string mig = "";
-        if (_ini_rev_read < k_ini_rev) {
+        if (_ini_rev_read < 1) {
             var ch = new List<string>();
             if (_load_lock_release == 0) { _load_lock_release = 1; ch.Add("load_lock_release 0 -> 1 (battle loads; the 0 was the old builds' forced value)"); }
             if (_heat_haze == 1) { _heat_haze = 0; ch.Add("heat_haze 1 -> 0 (off in the headset; 1 was the haze build's default)"); }
-            mig = I($"settings: ffxvr.ini rev {_ini_rev_read} (< {k_ini_rev}, written before the loads build): migrated once: {(ch.Count > 0 ? string.Join(", ", ch) : "nothing to change")}; other values (heat_haze 0 / 2, every diag_* key) are kept as chosen");
+            mig = I($"settings: ffxvr.ini rev {_ini_rev_read} (< 1, written before the loads build): migrated once: {(ch.Count > 0 ? string.Join(", ", ch) : "nothing to change")}; other values (heat_haze 0 / 2, every diag_* key) are kept as chosen");
             _logger.Info(mig);
         }
+        if (_ini_rev_read < 2 && !_diag_verbose_read) {   // release prep: an existing ini keeps the periodic lines it always had
+            _diag_verbose = true;
+            string m2 = I($"settings: ffxvr.ini rev {_ini_rev_read} (< 2) has no diag_verbose: 1, the periodic log lines as before (a fresh install starts with 0; tools\\set-logging.ps1 -Profile Release turns every diagnostic off)");
+            _logger.Info(m2); mig = mig.Length > 0 ? mig + "\n" + m2 : m2;
+        }
         if (_load_lock_release == 2) { _load_lock_release = 1; _logger.Info("settings: load_lock_release=2 (all loads, the test mode) starts as 1 (battle loads): the test mode is never kept across launches"); }
-        var on = new List<string>();
-        if (_diag7) on.Add("diag_build7=1"); if (_diag_load) on.Add("diag_load=1"); if (_diag_load_lines) on.Add("diag_load_lines=1 (the default load: lines)");
-        if (_diag_transition) on.Add("diag_transition=1"); if (_diag_load_prof != 0) on.Add(I($"diag_load_prof={_diag_load_prof}"));
-        if (_diag_cluster_bytes) on.Add("diag_cluster_bytes=1"); if (_diag_va_log) on.Add("diag_va_log=1"); if (_diag_actors) on.Add("diag_actors=1");
-        string list = "settings: diag_* keys on: " + (on.Count > 0 ? string.Join(", ", on) : "none");
-        _logger.Info(list);
-        _ini_diag_note = mig.Length > 0 ? mig + "\n" + list : list;
+        var on = diag_on();
+        _logger.Info("settings: diag_* keys on: " + (on.Count > 0 ? string.Join(", ", on) : "none"));
+        _ini_diag_note = mig.Length > 0 ? mig : null;   // the list itself opens every session's ffxvr_diag.log (log_hello)
     }
 
     /// <summary>The launch-only effects of the file (R28): init only, after the first parse.</summary>
@@ -1146,7 +1152,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             if (gone) { _settings_ok = true; _ini_len_seen = -1; _logger.Info($"settings: no {_ini_path} yet; defaults"); return; }   // _ini_last "": the defaults are written once
             if (last != null) { _settings_ok = false; _logger.Info($"settings: could not read {_ini_path} ({last.Message}); keeping defaults in memory and not saving until it can be read (retried every second)"); return; }
-            _ini_rev_read = 0;
+            _ini_rev_read = 0; _diag_verbose_read = false;
             int keys = settings_parse(raw.Split('\n'));
             settings_migrate();   // LD2-5
             settings_apply_launch();
@@ -1186,7 +1192,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 if (_ini_read_fail_n > 0) { _logger.Info($"settings: ffxvr.ini can be read again (after {_ini_read_fail_n} tries)"); _ini_read_fail_n = 0; }
                 _ini_mtime_seen = mt; _ini_len_seen = len;
                 if (!_settings_ok && _ini_disk.Length == 0) {   // B8-6: the start-up read had failed; this is that read, late
-                    _ini_rev_read = 0;
+                    _ini_rev_read = 0; _diag_verbose_read = false;
                     int all = settings_parse(on_disk.Split('\n'));
                     settings_migrate();   // LD2-5: this is the launch read, late
                     settings_first_read_done(on_disk, all);
@@ -1394,6 +1400,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_cal={_hands_cal_ini}\n" +
             $"hands_px_left={_hands_px_left.ToString(ci)}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
+            $"diag_verbose={(_diag_verbose ? 1 : 0)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
             $"smooth_anchor={(_smooth_anchor ? 1 : 0)}\n" +
@@ -1590,6 +1597,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.TextDisabled(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb)));
         }
         ImGui.TextDisabled("Home: recentre   F8: hide/show this overlay (F7 is Fahrenheit's own mod-settings menu)");
+        log_main_ui();   // release prep: the version, and a reminder while diagnostics are on (logging.cs)
     }
 
     /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
@@ -1597,6 +1605,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (!ImGui.CollapsingHeader("Debug")) return;   // settings reach the native side through push_all, whatever is drawn
         // Expanded: keep the native diagnostics armed (1 s heartbeat, slot-0 readback). Closing the header disarms them.
         if (_fn_diag_keepalive != null) _fn_diag_keepalive(2);
+        log_debug_ui();   // release prep: the version, "diagnostics: N on", diag_verbose, the log's size (logging.cs)
 
         ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {esc(_native_status)}   detours: {esc(_detour_status)}");
         ImGui.Checkbox("Fahrenheit's text ignores the Windows display scale (fh_dpi_fix, as Fahrenheit #376)", ref _fh_dpi_fix);
@@ -2074,6 +2083,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_haptics_set != null) _haptics_status = _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);
         bt_push();
         lp_push();   // load lock build: diag_load_prof, load_lock_release
+        log_push();  // release prep: diag_verbose and the log cap (only when changed; logging.cs)
         {   // saveui: one guarded read of the save-screen state a frame; the menu flag is latched from OPEN to CLOSED (no flapping
             // through the unnamed states 1 / 3 / 4), so the switch to the screen comes with Fahrenheit's first frame of the menu
             uint st = save_screen_state();
@@ -2187,7 +2197,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         double now = ImGui.GetTime(); if (now - _blitz_last_log < 0.5) return; _blitz_last_log = now;
         string map = map_name();
         if (map != _map_last) { _logger.Info($"map: {(_map_last.Length > 0 ? _map_last : "?")} -> {map} (event_id {(Globals.event_id != null ? *Globals.event_id : -1)})"); _map_last = map; _in_blitz = map_base(map).StartsWith("bltz", StringComparison.Ordinal); }
-        if (!_in_blitz || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;
+        if (!_in_blitz || !_diag_verbose || _blitz_log_lines >= 1200 || _fn_world_positions == null) return;   // the blitz lines: diag_verbose only
         Actor* actors = Globals.actors; if (actors == null) return;
         float* wp = stackalloc float[128 * 3]; int nwp = _fn_world_positions(wp, 128);
         var sb = new System.Text.StringBuilder($"blitz {map}:");
@@ -2561,7 +2571,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         // Once a second, log the game's actor positions next to the renderer's
         // world positions, to work out the relation between the two spaces.
         double now = ImGui.GetTime();
-        if (now - _last_pos_log > 1.0 && _fn_world_positions != null) {
+        if (_diag_verbose && now - _last_pos_log > 1.0 && _fn_world_positions != null) {   // release prep: diag_verbose only
             _last_pos_log = now;
             var sb = new System.Text.StringBuilder(
                 $"window: state={w.state} type={w.type} cur_chr_id={w.cur_chr_id} depth={w.submenu_depth} cmd={w.window_command_id} "
@@ -2684,6 +2694,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready && _diag_actors) actors_auto_log();   // LD2-8: diag_actors (default 0)
+        if (_native_ready) log_hello();   // release prep: once, the version and the diagnostics at the top of ffxvr_diag.log (logging.cs)
         if (_native_ready && _ini_diag_note != null && _fn_diag_line != null) { foreach (string l in _ini_diag_note.Split('\n')) d7_log(l); _ini_diag_note = null; }   // LD2-5: once, into ffxvr_diag.log
         if (_native_ready) { try { blitz_auto_log(); } catch (Exception e) { if (_blitz_log_lines < 1200) { _blitz_log_lines = 1200; _logger.Info($"blitz log off: {e.Message}"); } } }
         if (_native_ready) draw_eye2_preview();   // its own top-level window, never nested

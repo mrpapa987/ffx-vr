@@ -19,7 +19,7 @@
 // log beside the DLL every few seconds. If Draw fires but Map does not, the game
 // uploads constant buffers by another path, which UpdateSubresource covers.
 //
-// Ctrl+F9 writes a full dump of every constant buffer seen.
+// Ctrl+F9 writes a full dump of every constant buffer seen (with diag_verbose=1 only: one dump is ~100 MB).
 
 #include <windows.h>
 #include <d3d11.h>
@@ -51,8 +51,31 @@ static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 #pragma comment(lib, "d3d11.lib")
 
+// The build's version: tools\build-mod.ps1 writes ffxvr_version.h (not in git) from ffxvr.csproj's <Version> and the git
+// commit before every build; a build without it (Visual Studio alone) says "dev".
+#if defined(__has_include)
+#  if __has_include("ffxvr_version.h")
+#    include "ffxvr_version.h"
+#  endif
+#endif
+#ifndef FFXVR_VERSION
+#  define FFXVR_VERSION "dev"
+#endif
+#ifndef FFXVR_COMMIT
+#  define FFXVR_COMMIT "unknown"
+#endif
+static const char* const k_build_info = FFXVR_VERSION " (" FFXVR_COMMIT ", built " __DATE__ ")";
+
 static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
+static void diagv(const char* fmt, ...);  // ... the same, only with diag_verbose=1 (the periodic summaries)
 static bool diag_try(const char* text);   // ... the same append, false when the log is busy on the render thread (a bt: batch keeps it)
+static FILE* diag_open_ex(bool* drop);    // the log file for one append (session start, cap), or nullptr; closed with diag_close
+static void diag_close(FILE* f);
+// Release prep: ffxvr_diag.log per session and capped (diag_open). g_log_verbose = ini diag_verbose (managed pushes it with
+// ffxvr_log_config before ffxvr_init): the periodic lines (the 10 s summaries, the 1 s cursor-art line, the shadow per-map
+// lines, the camera trace in ffxvr_trace.log) and the Ctrl+F9 constant-buffer dump need it.
+static volatile LONG g_log_verbose = 0;
+static volatile LONG g_log_cap_mb  = 4;
 static void haze_tick();                 // heat haze: at Present (defined before ffxvr_on_draw)
 static void bt_flush();                   // battle transition log batch (defined with bt_tick)
 static void bt_add(const char* fmt, ...);
@@ -1527,13 +1550,14 @@ static DWORD WINAPI stall_watchdog(LPVOID) {
         for (SIZE_T k = 0; k < got / 4 && hits < 16; ++k)
             if (stack[k] >= text_lo && stack[k] < text_hi) { sl += snprintf(st + sl, sizeof(st) - sl, " %X", static_cast<unsigned>(stack[k] - base)); hits++; }
         for (int tries = 0; tries < 3; ++tries) {   // the render thread may hold the log open: a few short retries
-            wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
-            FILE* f = nullptr;
-            if (_wfopen_s(&f, path, L"a") == 0 && f) {
+            bool drop = false;
+            FILE* f = diag_open_ex(&drop);   // the session file and its cap, as every diag line
+            if (f) {
                 fprintf(f, "stall #%u: no Present for %ld ms (frame %u): app+0x3A0 %d, renderer +0x1196 %d +0x1197 %d, battle_state %d, map '%s' | main thread %lu %s: eip %s, stack (FhUtil, first 16 in .text):%s\n",
                         g_stalls, static_cast<long>(now - last), g_frames, app_flag, r96, r97, bstate, map, th_tid, th ? (ctx_ok ? "" : "(no context)") : "(not known yet)", where, sl ? st : " -");
-                fclose(f); break;
+                diag_close(f); break;
             }
+            if (drop) break;
             Sleep(5);
         }
     }
@@ -3684,7 +3708,7 @@ static void lightcam_frame_end() {
     const ULONGLONG t = GetTickCount64();
     // SH-3: the first light camera per map that does not look straight down, in full (a scene camera taken for a light would
     // show here). Checked at most once a second, 50 lines a session; until checked, later tilted ones are not recorded.
-    if (ft.valid && !pend_tilt[0] && t >= g_lc_tilt_next_check) {
+    if (ft.valid && !pend_tilt[0] && t >= g_lc_tilt_next_check && g_log_verbose) {   // the per-map lines: diag_verbose=1 only
         g_lc_tilt_next_check = t + 1000;
         char map[16]; read_map_name(map, sizeof(map));
         if ((!g_lc_tilt_logged || strcmp(map, g_lc_tilt_map) != 0) && g_lc_tilt_lines < 50) {
@@ -3699,7 +3723,7 @@ static void lightcam_frame_end() {
     }
     if (n == 0) { if (g_lc_quiet_frames < 1000000u && ++g_lc_quiet_frames > 120) have_logged = false; return; }
     g_lc_quiet_frames = 0;
-    if (!f.valid || pend_map[0] || g_lc_map_lines >= 200) return;
+    if (!f.valid || pend_map[0] || g_lc_map_lines >= 200 || !g_log_verbose) return;
     if (t < g_lc_next_check) return;
     g_lc_next_check = t + 1000;
     char map[16]; read_map_name(map, sizeof(map));
@@ -3986,7 +4010,7 @@ void heartbeat(bool force) {
     if (!force && (now - g_last_beat) < period) return;
     g_last_beat = now;
 
-    {   // one appended line per beat: the camera as a time series
+    if (g_log_verbose) {   // one appended line per beat: the camera as a time series (diag_verbose=1 only)
         wchar_t tpath[MAX_PATH];
         _snwprintf_s(tpath, _TRUNCATE, L"%s\\ffxvr_trace.log", g_dir);
         FILE* t = nullptr;
@@ -4009,7 +4033,7 @@ void heartbeat(bool force) {
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"w") != 0 || f == nullptr) return;
 
-    fprintf(f, "FFX VR native helper - hook activity\n");
+    fprintf(f, "FFX VR native helper %s - hook activity\n", k_build_info);
     fprintf(f, "hooks installed: %s\n", g_installed ? "yes" : "no");
     fprintf(f, "patched context: %p\n\n", g_patched_context);
 
@@ -4168,7 +4192,7 @@ void tick() {
     // Ctrl+F9: the constant-buffer capture (a large dump; plain F9 is the UI pick in the managed side).
     const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0 && (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
 
-    if (down && !g_f9_was_down) {
+    if (down && !g_f9_was_down && g_log_verbose) {   // release prep: only with diag_verbose=1 (a dump is ~100 MB; a stray key press must not write one)
         std::lock_guard<std::mutex> lock(g_mutex);
         g_arm_next = true;   // begin at the next frame boundary, not mid-overlay
     }
@@ -4419,7 +4443,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 25;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive)
+constexpr int FFXVR_ABI = 26;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -4855,7 +4879,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     g_installed       = true;
     g_patched_context = game_context;
 
-    {   // start this run's trace fresh
+    if (g_log_verbose) {   // start this run's trace fresh (diag_verbose=1 only: ffxvr_log_config came before this)
         wchar_t tpath[MAX_PATH];
         _snwprintf_s(tpath, _TRUNCATE, L"%s\\ffxvr_trace.log", g_dir);
         FILE* t = nullptr;
@@ -5137,7 +5161,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
         if (now >= next) {
             next = now + 10000;
-            if (g_ui_frames_3d) diag("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u) | dream handled %u (mode %d, filter %s), filter-shaped quads with the wrong colour %u this session",
+            if (g_ui_frames_3d) diagv("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u) | dream handled %u (mode %d, filter %s), filter-shaped quads with the wrong colour %u this session",
                 g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws,
                 g_dream_handled_10s, g_dream_mode, g_dream_gate ? "on" : "off", g_dream_rejected);
             g_dream_handled_10s = 0;
@@ -5149,7 +5173,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (now >= next) {
             next = now + 10000; const uint32_t nf = g_frames - f0; f0 = g_frames;
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
-                diag("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early);
+                diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early);
             g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0;
         }
     }
@@ -6159,40 +6183,93 @@ extern "C" __declspec(dllexport) int ffxvr_override_applied() { return static_ca
 extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_cast<int>(g_ovr_mask); }
 
 
-/// Appends a line to ffxvr_diag.log (the heartbeat rewrites ffxvr_native.log
-/// every second, so anything appended there is lost).
-static void diag(const char* fmt, ...) {
+// The session log (release prep). ffxvr_diag.log starts fresh every session: the first write of the process moves the
+// previous session's file to ffxvr_diag.prev.log (one generation, for a crash report after a restart) and starts the new
+// one with the build line. Every append checks the file's size against the session cap (g_log_cap_mb: 4 MB, 64 MB with
+// diag_verbose=1, from ffxvr_log_config); past it, one last line says so and the rest of the session writes nothing.
+// States: 0 not started this session, 1 being started (another thread's line is dropped meanwhile), 2 open, 3 capped.
+static volatile LONG g_log_state = 0;
+/// One append's file, or nullptr. *drop: true when the line is to be discarded (capped, the file being started), false
+/// when the file is busy (opened unshared by another thread; the render thread never waits) and the caller may retry.
+static FILE* diag_open_ex(bool* drop) {
+    *drop = false;
+    const LONG st = g_log_state;
+    if (st == 3 || st == 1) { *drop = true; return nullptr; }
     wchar_t path[MAX_PATH];
     _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
+    if (st == 0) {
+        if (InterlockedCompareExchange(&g_log_state, 1, 0) != 0) { *drop = true; return nullptr; }
+        wchar_t prev[MAX_PATH];
+        _snwprintf_s(prev, _TRUNCATE, L"%s\\ffxvr_diag.prev.log", g_dir);
+        MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);   // no log yet (or held open elsewhere): nothing moved, the "w" below starts it
+        FILE* h = nullptr;
+        if (_wfopen_s(&h, path, L"w") == 0 && h) {
+            SYSTEMTIME t = {}; GetLocalTime(&t);
+            fprintf(h, "FFX VR native %s | log started %04u-%02u-%02u %02u:%02u:%02u | the previous session's log is ffxvr_diag.prev.log\n",
+                    k_build_info, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+            fclose(h);
+        }
+        InterlockedExchange(&g_log_state, 2);
+    }
     FILE* f = nullptr;
     if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) {
         // The file opens unshared: another thread may hold it for a moment. Off the render thread (a resize's backbuffer
         // line, a main-thread caller), a few 1 ms retries instead of a lost line (B7-13); the render thread never waits.
         f = nullptr;
-        if (GetCurrentThreadId() == g_render_tid) return;
+        if (GetCurrentThreadId() == g_render_tid) return nullptr;
         for (int k = 0; k < 3 && f == nullptr; ++k) { Sleep(1); if (_wfopen_s(&f, path, L"a") != 0) f = nullptr; }
-        if (f == nullptr) return;
     }
-    va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
-    fputc('\n', f);
+    return f;
+}
+static FILE* diag_open() { bool drop = false; return diag_open_ex(&drop); }
+/// Closes an append, after the cap check (the position after an append is the file's size).
+static void diag_close(FILE* f) {
+    if (f == nullptr) return;
+    const long cap = static_cast<long>(g_log_cap_mb) * 1048576L;
+    if (ftell(f) > cap && InterlockedCompareExchange(&g_log_state, 3, 2) == 2)
+        fprintf(f, "log: this session's cap of %ld MB is reached; nothing more is written to ffxvr_diag.log until the next start (diag_verbose=1 raises the cap to 64 MB)\n",
+                static_cast<long>(g_log_cap_mb));
     fclose(f);
+}
+static void diag_va(const char* fmt, va_list ap) {
+    FILE* f = diag_open();
+    if (f == nullptr) return;
+    vfprintf(f, fmt, ap);
+    fputc('\n', f);
+    diag_close(f);
+}
+/// Appends a line to ffxvr_diag.log (the heartbeat rewrites ffxvr_native.log
+/// every second, so anything appended there is lost).
+static void diag(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt); diag_va(fmt, ap); va_end(ap);
+}
+/// diag for the periodic lines: written only with diag_verbose=1 (nothing is formatted otherwise).
+static void diagv(const char* fmt, ...) {
+    if (!g_log_verbose) return;
+    va_list ap; va_start(ap, fmt); diag_va(fmt, ap); va_end(ap);
 }
 /// diag's append for a whole batch of lines (BT-4): returns false instead of losing the text when the log is open
-/// elsewhere and this is the render thread (which never waits), so the caller keeps it and tries again.
+/// elsewhere and this is the render thread (which never waits), so the caller keeps it and tries again. A line the
+/// session cap drops counts as written (true): nothing would ever take it.
 static bool diag_try(const char* text) {
-    wchar_t path[MAX_PATH];
-    _snwprintf_s(path, _TRUNCATE, L"%s\\ffxvr_diag.log", g_dir);
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, path, L"a") != 0 || f == nullptr) {
-        f = nullptr;
-        if (GetCurrentThreadId() == g_render_tid) return false;
-        for (int k = 0; k < 3 && f == nullptr; ++k) { Sleep(1); if (_wfopen_s(&f, path, L"a") != 0) f = nullptr; }
-        if (f == nullptr) return false;
-    }
+    bool drop = false;
+    FILE* f = diag_open_ex(&drop);
+    if (f == nullptr) return drop;
     fputs(text, f); fputc('\n', f);
-    fclose(f);
+    diag_close(f);
     return true;
 }
+/// Release prep (ABI 26): diag_verbose (the periodic lines, the camera trace, Ctrl+F9) and the session cap in MB (1..1024).
+/// Managed calls it right after the ABI check, before ffxvr_init, and again whenever the setting changes. Raising the cap
+/// after it was reached opens the log again.
+extern "C" __declspec(dllexport) void ffxvr_log_config(int verbose, int cap_mb) {
+    InterlockedExchange(&g_log_verbose, verbose != 0 ? 1 : 0);
+    const LONG cap = cap_mb < 1 ? 1 : cap_mb > 1024 ? 1024 : cap_mb;
+    const LONG was = InterlockedExchange(&g_log_cap_mb, cap);
+    if (cap > was) InterlockedCompareExchange(&g_log_state, 2, 3);
+}
+/// Release prep (ABI 26): this DLL's version, commit and build date, e.g. "0.1.0-alpha.1 (e6e10f9, built Nov  2 2026)".
+extern "C" __declspec(dllexport) const char* ffxvr_build_info() { return k_build_info; }
 
 static ID3D11Texture2D* texture_of(ID3D11View* view) {
     if (view == nullptr) return nullptr;
@@ -7477,7 +7554,7 @@ static void uid_diag_tick() {
     if (s.panel || s.back) {
         const int slot = uid_slot(); const float* pz = g_uid_pz[slot];
         char nm[32]; if (s.nmin < 1e8f) snprintf(nm, sizeof(nm), "%.2f m", s.nmin); else snprintf(nm, sizeof(nm), "none");
-        diag("uidepth: adaptive %d (min %.2f m, margin %.2f, ui_distance %.2f m) | 3D panel frames %u: distance min %.2f avg %.2f max %.2f m, pulled in %.0f%% (%u frames), nearest scene depth behind the UI %s | frames with no UI pixels %u, a full-screen menu %u, no depth %u, waiting for a readback %u, readbacks stale %u, held after a camera cut %u (cuts %u) | backing %.2f: %u frames, max UI alpha %.3f (session %.3f: halo from %.3f, full at %.3f) | GPU per frame: depth pass %.3f ms (%u), tiles %.3f ms (%u), backing %.3f ms (%u) | depth row %s %s %.4f %.4f (VP block built from: near variant %u frames, main %u), %.1f units/m",
+        diagv("uidepth: adaptive %d (min %.2f m, margin %.2f, ui_distance %.2f m) | 3D panel frames %u: distance min %.2f avg %.2f max %.2f m, pulled in %.0f%% (%u frames), nearest scene depth behind the UI %s | frames with no UI pixels %u, a full-screen menu %u, no depth %u, waiting for a readback %u, readbacks stale %u, held after a camera cut %u (cuts %u) | backing %.2f: %u frames, max UI alpha %.3f (session %.3f: halo from %.3f, full at %.3f) | GPU per frame: depth pass %.3f ms (%u), tiles %.3f ms (%u), backing %.3f ms (%u) | depth row %s %s %.4f %.4f (VP block built from: near variant %u frames, main %u), %.1f units/m",
              g_uid_on ? 1 : 0, g_uid_min, g_uid_margin, g_ui_dist, s.panel, s.panel ? s.dmin : 0.f, s.panel ? static_cast<float>(s.dsum / s.panel) : 0.f, s.dmax, s.panel ? 100.f * s.pulled / s.panel : 0.f, s.pulled,
              nm, s.noui, s.menu, s.nodepth, s.waiting, s.stale, s.cut, g_uid_cuts, g_uid_backing, s.back,
              s.amax, g_uid_amax, 0.55f * (g_uid_amax > 0.2f ? g_uid_amax : 1.f), 0.9f * (g_uid_amax > 0.2f ? g_uid_amax : 1.f),
@@ -7879,7 +7956,7 @@ static uint32_t draw_ptr_sprites_eye(ID3D11RenderTargetView* dst, UINT w, UINT h
     }
     {   // once a second: what was captured and what was drawn (ffxvr_diag.log)
         const double t = (double)GetTickCount64() * 0.001;
-        if (t - g_ptr_log_t > 1.0) {
+        if (g_log_verbose && t - g_ptr_log_t > 1.0) {   // diag_verbose=1 only
             g_ptr_log_t = t;
             char line[600]; size_t l = (size_t)snprintf(line, sizeof(line), "cursor art: %d captured, markers %d:", g_ptr_sprite_n, g_marker_n);
             for (int i = 0; i < g_ptr_sprite_n && l < sizeof(line) - 120; ++i) {
@@ -9196,7 +9273,7 @@ static void xr_tick() {
             if (f_screen_shown + f_3d_shown + f_world > 0 || g_imgui_refused_10s > 0) {   // SU-7: only when the layer was shown (not for the title's mod list alone)
                 D3D11_TEXTURE2D_DESC td = {}; if (g_imgui_tex) g_imgui_tex->GetDesc(&td);
                 unsigned sw = 0, sh = 0; xr_imgui_size(&sw, &sh);
-                diag("imgui: 10 s: frames with ImGui draws %u (max %u a frame, last %u) | screen frames %u, the layer shown on %u; 3D frames with the layer %u | on the virtual screen (save screen) %u frames%s, eye 1 blacked out (latched, no menu image) %u | layer %s, force %d, min %u | capture %ux%u fmt %u -> swapchain %ux%u, %s copy | refused (no blend state) %u (session %u)",
+                diagv("imgui: 10 s: frames with ImGui draws %u (max %u a frame, last %u) | screen frames %u, the layer shown on %u; 3D frames with the layer %u | on the virtual screen (save screen) %u frames%s, eye 1 blacked out (latched, no menu image) %u | layer %s, force %d, min %u | capture %ux%u fmt %u -> swapchain %ux%u, %s copy | refused (no blend state) %u (session %u)",
                      f_draws, draws_max, g_imgui_draws_last, f_screen, f_screen_shown, f_3d_shown, f_world, g_imgui_menu_pose ? " (placed from the head)" : "", g_imgui_menu_black_10s,
                      g_imgui_layer ? "on" : "off", g_imgui_force ? 1 : 0, g_imgui_min_draws, td.Width, td.Height, static_cast<unsigned>(td.Format), sw, sh,
                      (xr_srgb() ? g_copy_ps_premul_srgb : g_copy_ps_premul) ? (xr_srgb() ? "premultiplied linear (sRGB)" : "premultiplied") : "single-tap alpha",
@@ -10595,7 +10672,7 @@ static void sr_present() {
         double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
         const char* why = sr_not_armed_why();
         const uint32_t ne = S.extras ? S.extras : 1;
-        diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
+        diagv("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
              "yaw per extra avg %.2f max %.2f deg (rotating %u%%, clamped %u) | extra cpu avg %.2f max %.2f ms (end %.2f, wait %.2f, begin+locate %.2f), lock busy %u, re-acquire max %.1f ms, gate skips %u (overridden %u) | "
              "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s",
              secs, g_sr_mode, g_sr_keepalive ? " + keepalive" : "", *why ? " (NOT ACTIVE)" : "", pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? ", half rate: VD spacewarp (SSW) active" : "",
