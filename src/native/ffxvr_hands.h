@@ -94,6 +94,9 @@ struct HvMesh {
     float thumb_axis[3] = { 0.f, 1.f, 0.f };              // the opposition axis in the thumb metacarpal's frame (in right-hand terms)
     float thumb_up[3] = { 0.f, 1.f, 0.f };                // the wrist's +Y (dorsal) in that frame: the thumbs-up swing toward the radial side
     float hand_len = 0.f;                                 // wrist -> middle tip at the bind pose (m), for the log
+    float abd[4][3] = {};                                 // tap build: each finger's (index .. little) sideways turn at the bind pose, radians about
+                                                          // the dorsal axis, in right-hand terms: [0] the proximal bone from the hand's long axis,
+                                                          // [1] / [2] the intermediate / distal bone from its parent; a curl takes it out
     int   prims = 0, tris = 0, unknown_joints = 0;        // glTF primitives read, triangles, skin joints not in the 26 (weights moved to the wrist)
     int   hand = 1;                                       // 0 left, 1 right
     int   tex_from = -1;                                  // >= 0: this hand uses that hand's textures (a mirror: nothing decoded or uploaded twice)
@@ -158,6 +161,63 @@ void hv_fk_skin(const HvMesh& m, const float D[HV_J][9], HvXform skin[HV_J], HvX
 /// Rw = Rb^T H.R Bp.R^T, k = sc pack_scale, o = P + Rb^T (sc H.t + mv') - k Rw Bp.t + (0, dy, 0).
 void hv_palette(const HvXform skin[HV_J], const HvXform& H, const HvXform& Bp, float pack_scale, const float P[3], const float Rb[9], float sc,
                 const float mvp[3], float dy, float out[HV_J * 3][4]);
+// ---------------------------------------------------------------------------------------------------------------------
+// The tap gesture (branch hands-tap): a quick forward jab of a pointing hand presses the game's confirm button. Per hand,
+// on the frames the hands are drawn (hands_draw_frame), from the fingertip and the head in reference space (metres, the
+// display time of the latched poses). Pure: no globals, so the unit test drives it with synthetic pose streams.
+//
+// The jab: the fingertip's speed RELATIVE TO THE HEAD (so a lean or a step that carries the arm along is not a jab) along
+// the head's horizontal forward direction rises past v_start, peaks at >= v_on, and falls below stop_frac x the peak (the
+// stop, or the start of the retraction) within max_dur; the fingertip travelled min_travel..max_travel forward meanwhile and
+// the motion stayed within acos(cos_dir) of forward. Throughout: the point pose (held pose_hold before the start), the
+// head slower than head_v / head_w, the stick not turning, the caller's gate open, no tracking jump (> v_glitch). Then a
+// cooldown. A jab that fails any of these is "not a tap" (counted by reason); so is one that could not start (it is not
+// started later in the same stroke either); the next one may start once the forward speed has dropped below v_start / 2.
+struct HvTapCfg {
+    float v_on = 0.70f;        // m/s: the peak forward speed of a tap (sensitivity 1; the F8 slider divides it)
+    float v_start = 0.35f;     // m/s: a jab starts above this forward speed
+    float stop_frac = 0.40f;   // the jab ends when the forward speed falls below this x its peak
+    float min_travel = 0.035f, max_travel = 0.45f;   // m, forward, from the start to the stop
+    float min_dur = 0.05f, max_dur = 0.25f;           // s, from the start to the stop (and at least 3 samples)
+    float cooldown = 0.40f;    // s after a tap
+    float cos_dir = 0.70f;     // the motion within ~45 deg of the head's horizontal forward (a poke a little up or down counts)
+    float head_v = 0.50f;      // m/s: the head moving faster blocks a jab (and aborts one)
+    float head_w = 1.75f;      // rad/s (100 deg/s): the head turning faster blocks a jab
+    float v_glitch = 5.0f;     // m/s: faster is a tracking jump, not a hand
+    float pose_hold = 0.10f;   // s: the point pose held before a jab may start
+};
+struct HvTapIn {
+    double t;                  // seconds (the display time of the poses)
+    float tip[3];              // the index fingertip, reference space (m)
+    float head_p[3];           // the head (m)
+    float head_fwd[3];         // the head's forward (-Z of its pose), unit
+    bool valid;                // the hand is tracked this frame
+    bool pose;                 // the point pose (index off the trigger, the other fingers gripped)
+    bool gate;                 // the caller's gate: the field, the player in control, ... (false blocks a start and aborts a jab)
+    bool turning;              // the stick is turning the view
+};
+enum HvTapWhy { HV_TAP_NONE = 0, HV_TAP_FIRED, HV_TAP_SLOW, HV_TAP_SHORT, HV_TAP_LONG, HV_TAP_REACH, HV_TAP_SIDEWAYS, HV_TAP_POSE, HV_TAP_HEAD,
+                HV_TAP_TURN, HV_TAP_GATE, HV_TAP_GLITCH, HV_TAP_GAP, HV_TAP_COOLDOWN, HV_TAP_N };
+extern const char* const hv_tap_why[HV_TAP_N];   // short names for the log ("slow", "short", ...)
+struct HvTapState {
+    int    phase = 0;          // 0 idle, 1 in a jab, 2 waiting for the forward speed to drop (after a tap or a non-tap)
+    bool   have = false;       // a previous sample
+    double t_prev = 0.0, cool_until = -1e9, t0 = 0.0;
+    float  rel_prev[3] = {}, head_prev[3] = {}, fwd_prev[3] = {}, r0[3] = {}, f[3] = {};
+    float  v_prev[3] = {}; bool have_v = false;                  // the last velocity: the PEAK is taken from the mean of two (noise halved;
+    float  peak_s = 0.f;                                          // a one-frame tracking step stays one frame in the rest of the logic)
+    float  pose_s = 0.f, peak = 0.f;
+    int    n = 0;
+    // the last sample and the last outcome, for the F8 readout and the log
+    float  v_f = 0.f, v_abs = 0.f, head_v = 0.f, head_w = 0.f;
+    float  last_peak = 0.f, last_travel = 0.f, last_dur = 0.f;   // of the last jab that ended (a tap or not)
+    int    last_why = HV_TAP_NONE;                               // how it ended
+    int    blocked = HV_TAP_NONE;                                // this sample: why a jab could not start (forward speed above v_start but ...)
+};
+/// One sample. Returns HV_TAP_FIRED on the sample that completes a tap, else HV_TAP_NONE, or the reason a jab just ended
+/// without one (st->last_why holds it too).
+int hv_tap_update(HvTapState* st, const HvTapCfg& c, const HvTapIn& in);
+
 /// The open / point / fist test poses for the previews and the unit test (the same code path as the runtime).
 void hv_test_inputs(int which, HvCtrl* c);   // 0 open (nothing touched), 1 rest on the trigger, 2 trigger pulled, 3 point (grip, thumb on),
                                              // 4 thumbs-up (grip + trigger, thumb off), 5 fist (everything), 6 finger-gun (grip only)

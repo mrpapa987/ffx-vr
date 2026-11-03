@@ -275,6 +275,26 @@ void hv_mesh_finish(HvMesh* m, int h) {
     { float RmT[9]; hv_mat3_T(Rm, RmT); const float y[3] = { 0.f, 1.f, 0.f }; hv_mat3_vec(RmT, y, m->thumb_up); if (!v3norm(m->thumb_up)) { m->thumb_up[0] = 0.f; m->thumb_up[1] = 1.f; m->thumb_up[2] = 0.f; } }
     float d[3]; for (int i = 0; i < 3; ++i) d[i] = m->bind[15].t[i] - m->bind[HV_WRIST].t[i];
     m->hand_len = sqrtf(v3dot(d, d));
+    // Tap build (the fist fix): how far each finger bone is turned sideways at the bind pose, measured about the wrist's +Y
+    // (dorsal) in the wrist's X-Z plane: abd[f][0] the proximal bone from the hand's long axis (the wrist's -Z), [1] / [2] the
+    // intermediate / distal bone from its parent. A finger that flexes about its own X axis while fanned out curls away from
+    // its neighbour (the owner: "abnormal separation between ring and middle fingers when making a fist"); a real hand closes
+    // its spread as it curls, the curled fingers side by side, so hv_pose_deltas turns each bone back by this as the finger
+    // curls. The wrist, not the middle finger, is the reference, and every bone is straightened, because an imported rig can
+    // zig-zag (the Tidus pack's right middle finger: proximal 26 deg toward the ring, intermediate 19 deg back). In right-hand
+    // terms (a left hand's angles are the mirror: negated); each limited to +-30 deg.
+    // (WT: the wrist's bind rotation transposed, from the thumb's block above)
+    for (int f = 0; f < 4; ++f) {
+        float prev = 0.f;
+        for (int k = 0; k < 3; ++k) {
+            const float* R = m->bind[7 + 5 * f + k].R; const float d[3] = { -R[2], -R[5], -R[8] }; float w[3]; hv_mat3_vec(WT, d, w);
+            float yaw = (w[0] * w[0] + w[2] * w[2] > 1e-8f) ? atan2f(w[0], -w[2]) : prev;
+            if (!std::isfinite(yaw)) yaw = prev;
+            const float a = clampf(yaw - prev, -30.f * k_deg, 30.f * k_deg);
+            m->abd[f][k] = h == 0 ? -a : a;
+            prev = yaw;
+        }
+    }
 }
 
 void hv_mesh_mirror(const HvMesh& src, HvMesh* dst) {
@@ -675,11 +695,18 @@ void hv_pose_deltas(HvFingerState* s, const HvMesh& m, int h, float rest_curl, c
         const int b = 6 + 5 * f;                          // metacarpal of this finger
         float A[9], B[9];
         rot_x(-k_ang.cup[f] * cf * k_d2r, D[b]);
-        rot_y(k_ang.splay[f] * (1.f - 0.7f * clampf(cf, 0.f, 1.f)) * k_d2r, A);
+        // Tap build (the fist fix): the spread closes as the finger curls. Below a curl of 0.25 (open, the idle 0.20, a point's
+        // index) nothing changes; at a full curl every bone of the finger lies along the hand's long axis (its own bind-pose fan
+        // and any zig-zag of the rig taken out: mesh.abd), the four side by side as in a real fist, smoothstepped in between.
+        const float c01 = clampf(cf, 0.f, 1.f), u = clampf((c01 - 0.25f) / 0.70f, 0.f, 1.f), close = u * u * (3.f - 2.f * u);
+        rot_y(k_ang.splay[f] * (1.f - 0.7f * c01) * (1.f - close) * k_d2r + m.abd[f][0] * close, A);
         rot_x(-(k_ang.off[0] + cf * (k_ang.max[0] - k_ang.off[0])) * k_d2r, B);
         hv_mat3_mul(A, B, D[b + 1]);
-        rot_x(-(k_ang.off[1] + cf * (k_ang.max[1] - k_ang.off[1])) * k_d2r, D[b + 2]);
-        rot_x(-(k_ang.off[2] + cf * (k_ang.max[2] - k_ang.off[2])) * k_d2r, D[b + 3]);
+        for (int k = 1; k < 3; ++k) {   // the intermediate and distal bones: straightened by their own sideways turn, then flexed
+            rot_y(m.abd[f][k] * close, A);
+            rot_x(-(k_ang.off[k] + cf * (k_ang.max[k] - k_ang.off[k])) * k_d2r, B);
+            hv_mat3_mul(A, B, D[b + 1 + k]);
+        }
     }
     // the thumb: T = lerp(lerp(FREE, UP, g), lerp(ON', WRAP, g), t), ON' with the surface the thumb is on
     const float t = clampf(s->thumb_t, 0.f, 1.f);
@@ -744,4 +771,99 @@ void hv_test_inputs(int which, HvCtrl* c) {
         case 6: c->squeeze = 1.f; break;                                                           // finger-gun
         default: break;                                                                            // open
     }
+}
+
+// -- the tap gesture (branch hands-tap; ffxvr_hands.h) ----------------------------------------------------------------
+
+const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "slow", "short", "long", "reach", "sideways", "pose", "head", "turn", "gate", "glitch", "gap", "cooldown" };
+
+int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
+    s->blocked = HV_TAP_NONE;
+    auto fin3 = [](const float* v) { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); };
+    auto end = [&](int why, const float* rel, double t) {   // a jab ended: remember how; wait for the forward speed to drop
+        float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
+        s->last_why = why; s->last_peak = s->peak_s; s->last_travel = v3dot(d, s->f); s->last_dur = static_cast<float>(t - s->t0);
+        s->phase = 2;
+        return why;
+    };
+    if (!in.valid || !std::isfinite(in.t) || !fin3(in.tip) || !fin3(in.head_p) || !fin3(in.head_fwd)) {
+        int r = HV_TAP_NONE;
+        if (s->phase == 1) { r = end(HV_TAP_GAP, s->rel_prev, s->t_prev); }
+        s->have = false; s->have_v = false; s->phase = 0; s->pose_s = 0.f; s->v_f = s->v_abs = 0.f;
+        return r;
+    }
+    const float rel[3] = { in.tip[0] - in.head_p[0], in.tip[1] - in.head_p[1], in.tip[2] - in.head_p[2] };
+    auto store = [&]() {
+        s->t_prev = in.t; memcpy(s->rel_prev, rel, sizeof(rel)); memcpy(s->head_prev, in.head_p, sizeof(s->head_prev)); memcpy(s->fwd_prev, in.head_fwd, sizeof(s->fwd_prev));
+        s->have = true;
+    };
+    if (!s->have) { store(); s->have_v = false; s->pose_s = 0.f; s->phase = 0; return HV_TAP_NONE; }
+    const double dtd = in.t - s->t_prev;
+    if (dtd == 0.0) return HV_TAP_NONE;                 // the same poses again (no new display time)
+    if (!(dtd > 0.0) || dtd > 0.1) {                    // time went back, or a gap (a menu, a load, the hands hidden): start over
+        int r = HV_TAP_NONE;
+        if (s->phase == 1) r = end(HV_TAP_GAP, s->rel_prev, s->t_prev);
+        s->phase = 0; s->pose_s = 0.f; s->have_v = false; store();
+        return r;
+    }
+    const float dt = static_cast<float>(dtd);
+    const float v[3] = { (rel[0] - s->rel_prev[0]) / dt, (rel[1] - s->rel_prev[1]) / dt, (rel[2] - s->rel_prev[2]) / dt };
+    float vs[3]; for (int i = 0; i < 3; ++i) vs[i] = s->have_v ? 0.5f * (v[i] + s->v_prev[i]) : v[i];   // for the peak only
+    memcpy(s->v_prev, v, sizeof(v)); s->have_v = true;
+    const float vh[3] = { (in.head_p[0] - s->head_prev[0]) / dt, (in.head_p[1] - s->head_prev[1]) / dt, (in.head_p[2] - s->head_prev[2]) / dt };
+    const float va = sqrtf(v3dot(v, v));
+    const float cw = clampf(v3dot(s->fwd_prev, in.head_fwd) / fmaxf(1e-6f, sqrtf(v3dot(s->fwd_prev, s->fwd_prev) * v3dot(in.head_fwd, in.head_fwd))), -1.f, 1.f);
+    s->v_abs = va; s->head_v = sqrtf(v3dot(vh, vh)); s->head_w = acosf(cw) / dt;
+    float fh[3] = { in.head_fwd[0], 0.f, in.head_fwd[2] };
+    const bool fh_ok = fabsf(in.head_fwd[1]) < 0.95f && v3norm(fh);   // looking straight up or down: no horizontal forward
+    s->pose_s = in.pose ? s->pose_s + dt : 0.f;
+    const bool head_bad = s->head_v > c.head_v || s->head_w > c.head_w;
+    int r = HV_TAP_NONE;
+    if (s->phase == 0) {
+        const float vf = fh_ok ? v3dot(v, fh) : 0.f; s->v_f = vf;
+        if (vf > c.v_start && vf >= c.cos_dir * va) {
+            int why = HV_TAP_NONE;
+            if (va > c.v_glitch) why = HV_TAP_GLITCH;
+            else if (!in.gate) why = HV_TAP_GATE;
+            else if (!in.pose || s->pose_s < c.pose_hold) why = HV_TAP_POSE;
+            else if (in.turning) why = HV_TAP_TURN;
+            else if (head_bad) why = HV_TAP_HEAD;
+            else if (in.t < s->cool_until) why = HV_TAP_COOLDOWN;
+            if (why != HV_TAP_NONE) { s->blocked = why; s->phase = 2; }   // not later in this stroke either (a pose formed mid-swing, the cooldown ending)
+            else { s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->f, fh, sizeof(s->f)); s->peak = vf; s->peak_s = v3dot(vs, fh); s->n = 1; }
+        }
+    }
+    else if (s->phase == 1) {
+        const float vf = v3dot(v, s->f); s->v_f = vf; s->n++;
+        int why = HV_TAP_NONE;
+        if (va > c.v_glitch) why = HV_TAP_GLITCH;
+        else if (!in.gate) why = HV_TAP_GATE;
+        else if (!in.pose) why = HV_TAP_POSE;
+        else if (in.turning) why = HV_TAP_TURN;
+        else if (head_bad) why = HV_TAP_HEAD;
+        else if (in.t - s->t0 > c.max_dur) why = HV_TAP_REACH;
+        else if (vf > c.v_start && vf < c.cos_dir * va) why = HV_TAP_SIDEWAYS;
+        if (why != HV_TAP_NONE) r = end(why, rel, in.t);
+        else {
+            if (vf > s->peak) s->peak = vf;
+            const float vfs = v3dot(vs, s->f); if (vfs > s->peak_s) s->peak_s = vfs;
+            if (vf < c.stop_frac * s->peak) {                // the stop (or the retraction): was it a tap?
+                const float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
+                const float travel = v3dot(d, s->f);
+                const double dur = in.t - s->t0;
+                if (s->peak_s < c.v_on) why = HV_TAP_SLOW;
+                else if (travel < c.min_travel) why = HV_TAP_SHORT;
+                else if (travel > c.max_travel) why = HV_TAP_LONG;
+                else if (dur < c.min_dur || s->n < 3) why = HV_TAP_GLITCH;   // a jolt of a frame or two: a tracking step, not an arm
+                else { why = HV_TAP_FIRED; s->cool_until = in.t + c.cooldown; }
+                r = end(why, rel, in.t);
+            }
+        }
+    }
+    else {   // after a jab: the next may start once the hand has stopped or come back
+        const float vf = fh_ok ? v3dot(v, fh) : 0.f; s->v_f = vf;
+        if (vf < 0.5f * c.v_start) s->phase = 0;
+    }
+    store();
+    return r;
 }
