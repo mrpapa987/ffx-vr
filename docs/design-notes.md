@@ -3271,7 +3271,8 @@ fingers". ABI 29.
 ## Hands: the tap gesture, and the fist fix (branch `hands-tap`, 3 Nov 2026)
 
 The owner: "let's start with the tap. I think much more could get difficult". ABI 30. The first hand gesture that drives
-the game: a quick forward jab of a pointing hand presses confirm in the field.
+the game: a quick forward jab of a pointing hand presses confirm in the field. (The detector's numbers below are the first
+build's; the review round and the retune after the owner's first headset round, further down, change several.)
 
 - **The button.** The game's Phyre pad poll (0x62DBA0) stores XInput A (0x1000) in the second of its PS2-order bytes
   (+0x398 square = X 0x4000, **+0x399 cross = A**, +0x39A circle = B, +0x39B triangle = Y, then L1 R1 L2 R2 select start
@@ -3372,6 +3373,40 @@ the game: a quick forward jab of a pointing hand presses confirm in the field.
   the Numpad turn keys block a jab like the stick; the text-box text is rebuilt only when what was read changes; the
   importer fits the base two thirds of each centreline (a curled bind pose's chord would pull the knuckle palmward; Tidus
   unchanged within 1 mm); exe-analysis.md: the TOMesWinWork bank is a signed byte.
+
+### The owner's first headset round: retuned for his poke (3 Nov 2026)
+
+The owner: "it seems like it worked very well once but then I could never do it again". His log: 2 taps (R 1.67 m/s,
+201 mm in 183 ms; 3.50 m/s, 243 mm in 101 ms), then 12 "sideways" with strong forward peaks (1.44-2.63 m/s, 136-284 mm),
+5 "reach" (0.56-1.68 m/s, 121-313 mm, cut at 250 ms), and in the 10 s lines many starts blocked by "pose" and "shake". Not
+a reset bug: his natural poke is a long (15-30 cm), fast, slightly arcing jab, often after a small wind-up, angled down at
+the NPC. Rebuilt as unit cases (an arc of 3-5 cm, 15-25 deg down, half with a 3 cm wind-up, at 60 and 120 Hz), the first
+build rejected them as he saw (sideways, reach, shake). The causes and the changes:
+- **Direction** was judged per raw sample against the head's level forward: one noisy or arcing sample (at the start of an
+  arc the sideways speed exceeds the forward one) killed the jab, and a poke angled down counted against it. Now the whole
+  jab is judged: its **net displacement within 50 deg** of the forward at the stop; the forward is the head's own with its
+  pitch kept within -60..+30 deg (a poke down at a chest you look at is straight ahead). Chosen over the index finger's
+  direction: the finger's aim depends on the per-pack wrist fit and calibration, the head's gaze is where the NPC is.
+- **Speeds over >= 25 ms** (the newest sample against one >= 25 ms older: 2 frames at 60-72 Hz, 3 at 90-120 Hz) for the
+  start, the stop, the peaks and the strokes: at 120 Hz a 2-frame mean was too noisy (early false stops: "slow"). The raw
+  speed still catches a tracking jump (> 5 m/s), and a raw forward peak above 1.6 x the 25 ms one is a one-frame step.
+- **max_dur 0.36 s** (was 0.25) above 0.35 m/s, **max_travel 0.50 m** (was 0.45): his 20-31 cm jabs take 0.28-0.31 s there.
+  A slow 30 cm reach in 0.8 s still is one ("reach"). Reclassified: a brisk 25 cm reach in 0.55 s at 0.85 m/s is his
+  poke style and now taps.
+- **The shake rule needs a real oscillation**: a start within 0.12 s of a backward stroke that itself turned round from a
+  forward stroke within 0.30 s (forward, back, forward with no pause). A lone wind-up before a poke passes; a poke,
+  pull-back and an immediate re-poke counts as a shake.
+- **The pose** came from the drawn fingers, whose trigger-touch fades out over ~160 ms after the finger lifts, plus 100 ms
+  held: a point formed just before a jab was 250 ms short. Now from the raw bits: grip > 0.5, trigger < 0.05, the touch
+  sensor off for 30 ms (back on for 40 ms ends it, so a sensor flicker mid-jab does not abort), held 80 ms.
+- **The log** says why: a near miss gives the net direction (degrees off forward, yaw and pitch), the worst sample's angle
+  and the pose inputs; a gripping jab blocked by the pose gives the trigger, the touch bit with its on / off times and how
+  long the pose was held (15 a session); a shake block is logged (10); a tap gives its direction too.
+- The unit test (92 cases, judged at sensitivity 0.6 / 1 / 1.5 / 2): the owner's 14 logged jabs (the 7 "sideways" the
+  coordinator listed of his 12, the 5 "reach", the 2 that fired) x 10 trials x 60 / 120 Hz all tap at the default, except
+  his 0.56 m/s one, below the default's 0.70 m/s (it taps from sensitivity 1.5); the review's shake and head-back cases
+  stay at 0; grid 0 / 320 missed, 0 / 480 false at the default. Above the default a slow 6 cm / 1.5 Hz shake (0.57 m/s)
+  taps about once a cycle (a 0.16 s lockout would stop it but costs pokes every 0.35 s).
 
 ## Hands: ideas parked (3 Nov 2026)
 

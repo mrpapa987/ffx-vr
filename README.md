@@ -99,7 +99,7 @@ if you tick them, in the diorama, third person and the seat view). The fingers f
 touch sensors. It is off by default while it is being tested.
 
 **Tap to press action** (F8 > VR hands > gestures, on with VR hands): make a pointing hand (hold the grip, index finger
-off the trigger) and jab the fingertip about 10 cm forward, then stop, as if pressing a button in the air: it presses
+off the trigger) and poke forward, then stop, as if pressing a button in the air (a natural poke of 10-30 cm is fine): it presses
 confirm (A: talk, examine, open) with a short tick on that controller. Only in first person in the field: never in
 battle, a menu, the sphere grid, the save screen, a movie or blitzball, while you turn with the stick or move your head
 fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** makes a slower jab

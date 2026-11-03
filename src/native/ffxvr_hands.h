@@ -166,26 +166,35 @@ void hv_palette(const HvXform skin[HV_J], const HvXform& H, const HvXform& Bp, f
 // on the frames the hands are drawn (hands_draw_frame), from the fingertip and the head in reference space (metres, the
 // display time of the latched poses). Pure: no globals, so the unit test drives it with synthetic pose streams.
 //
-// The jab: the fingertip's speed RELATIVE TO THE HEAD (so a lean or a step that carries the arm along is not a jab) along
-// the head's horizontal forward direction rises past v_start, peaks at >= v_on, and falls below stop_frac x the peak (the
-// stop, or the start of the retraction) within max_dur; the fingertip travelled min_travel..max_travel forward meanwhile and
-// the motion stayed within acos(cos_dir) of forward. Throughout: the point pose (held pose_hold before the start), the
-// head slower than head_v / head_w, the stick not turning, the caller's gate open, no tracking jump (> v_glitch). Then a
-// cooldown. A jab that fails any of these is "not a tap" (counted by reason); so is one that could not start (it is not
-// started later in the same stroke either); the next one may start once the forward speed has dropped below v_start / 2.
+// The jab (retuned after the owner's first headset round, 3 Nov 2026: his natural poke is a long, fast, slightly arcing jab of
+// 15-30 cm, often after a small wind-up): the fingertip's velocity RELATIVE TO THE HEAD (so a lean or a step that carries
+// the arm along is no jab), measured over >= 25 ms, along the head's forward with its pitch kept within -60..+30 deg (a
+// poke down at a chest you look at counts), rises past v_start, peaks at >= v_on, and falls below stop_frac x the peak (the
+// stop, or the start of the retraction) within max_dur. Then the WHOLE jab is judged: its net displacement within dir_max
+// of that forward (no single noisy or arcing sample decides), min_travel..max_travel forward, the fingertip's own forward
+// peak >= world_frac x v_on (the head moving back alone is no jab), and no one-frame jolt (a raw peak far above the 25 ms
+// peak: a tracking step). Throughout: the point pose (held pose_hold before the start), the head slower than head_v /
+// head_w, the stick not turning, the caller's gate open, no raw speed above v_glitch. Then a cooldown. A jab that fails is
+// "not a tap" (counted by reason); a start that is blocked is not started later in the same stroke; the next may start once
+// the forward speed has dropped below v_start / 2. A shake (forward, back, forward with no pause) is blocked; a single
+// wind-up before a poke is not.
 struct HvTapCfg {
     float v_on = 0.70f;        // m/s: the peak forward speed of a tap (sensitivity 1; the F8 slider divides it)
     float v_start = 0.35f;     // m/s: a jab starts above this forward speed
     float stop_frac = 0.40f;   // the jab ends when the forward speed falls below this x its peak
-    float min_travel = 0.035f, max_travel = 0.45f;   // m, forward, from the start to the stop
-    float min_dur = 0.05f, max_dur = 0.25f;           // s, from the start to the stop (and at least 3 samples)
+    float min_travel = 0.035f, max_travel = 0.50f;   // m, forward, from the start to the stop
+    float min_dur = 0.05f, max_dur = 0.36f;           // s, from the start to the stop (and at least 3 samples)
     float cooldown = 0.40f;    // s after a tap
-    float cos_dir = 0.70f;     // the motion within ~45 deg of the head's horizontal forward (a poke a little up or down counts)
+    float dir_max_deg = 50.f;  // the jab's net displacement within this of the forward
+    float pitch_min_deg = -60.f, pitch_max_deg = 30.f;   // the forward follows the head's pitch within these (a level forward when looking far up or down)
     float head_v = 0.50f;      // m/s: the head moving faster blocks a jab (and aborts one)
     float head_w = 1.75f;      // rad/s (100 deg/s): the head turning faster blocks a jab
     float v_glitch = 5.0f;     // m/s: faster is a tracking jump, not a hand
-    float pose_hold = 0.10f;   // s: the point pose held before a jab may start
-    float back_lock = 0.12f;   // s (review S1): no start this soon after a backward stroke (> 0.6 x v_start toward the head): a shake
+    float jolt_ratio = 1.6f;   // a raw forward peak above this x the two-frame peak: a one-frame step
+    float pose_hold = 0.08f;   // s: the point pose held before a jab may start (the caller's pose is quick: the raw touch bit, debounced 30 ms)
+    float back_lock = 0.12f;   // s (review S1): a start this soon after a backward stroke (> 0.6 x v_start toward the head) ...
+    float shake_gap = 0.30f;   // s ... that itself followed a forward stroke within this: a shake (forward, back, forward)
+    float v_span = 0.025f;     // s: the speeds are measured over at least this (the newest sample against one >= this old)
     float world_frac = 0.50f;  // review S2: the fingertip itself (not only relative to the head) must peak at >= this x v_on forward
 };
 struct HvTapIn {
@@ -205,16 +214,21 @@ struct HvTapState {
     int    phase = 0;          // 0 idle, 1 in a jab, 2 waiting for the forward speed to drop (after a tap or a non-tap)
     bool   have = false;       // a previous sample
     double t_prev = 0.0, cool_until = -1e9, t0 = 0.0;
-    float  rel_prev[3] = {}, head_prev[3] = {}, fwd_prev[3] = {}, r0[3] = {}, f[3] = {};
-    float  v_prev[3] = {}; bool have_v = false;                  // the last velocity: the PEAK is taken from the mean of two (noise halved;
-    float  peak_s = 0.f;                                          // a one-frame tracking step stays one frame in the rest of the logic)
-    double t_back = -1e9;                                         // review S1: the last sample moving back toward the head faster than v_start
-    float  tip_prev[3] = {}, peak_w = 0.f;                        // review S2: the fingertip in reference space, and its own forward peak in the jab
-    float  pose_s = 0.f, peak = 0.f;
+    float  rel_prev[3] = {}, head_prev[3] = {}, fwd_prev[3] = {}, r0[3] = {}, f[3] = {}, fw_last[3] = { 0.f, 0.f, -1.f };
+    bool   have_v = false; double ring_t[8] = {}; float ring_rel[8][3] = {}, ring_tip[8][3] = {}; int ring_n = 0, ring_i = 0;   // the last samples: the speeds used
+                                                                 // span >= 25 ms (2 frames at 60-72 Hz, 3 at 90-120 Hz: the same noise at any rate)
+    float  tip_prev[3] = {};
+    float  peak_s = 0.f, peak_raw = 0.f, peak_w = 0.f;           // in the jab: the forward peak (two-frame), the raw one, the fingertip's own (S2)
+    float  worst_deg = 0.f;                                       // in the jab: the largest angle of the (two-frame) velocity from the forward, for the log
+    bool   in_fwd = false, in_back = false;                       // stroke episodes (two-frame forward speed beyond +-0.6 v_start), for the shake rule
+    double t_fwd_end = -1e9, t_back_start = -1e9, t_back_end = -1e9;
+    float  pose_s = 0.f;
     int    n = 0;
     // the last sample and the last outcome, for the F8 readout and the log
     float  v_f = 0.f, v_abs = 0.f, head_v = 0.f, head_w = 0.f;
     float  last_peak = 0.f, last_travel = 0.f, last_dur = 0.f;   // of the last jab that ended (a tap or not)
+    float  last_net_deg = 0.f, last_net_yaw = 0.f, last_net_pitch = 0.f, last_worst_deg = 0.f;   // its net displacement's angle from the forward
+                                                                 // (and its yaw / pitch against it, + right / up), its worst sample's angle
     int    last_why = HV_TAP_NONE;                               // how it ended
     int    blocked = HV_TAP_NONE;                                // this sample: why a jab could not start (forward speed above v_start but ...)
 };

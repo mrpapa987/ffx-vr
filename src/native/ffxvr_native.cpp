@@ -8278,11 +8278,13 @@ enum TapGate { TG_OPEN = 0, TG_OFF, TG_VIEW, TG_NO_TOUCH, TG_FOCUS, TG_PAD, TG_C
 static const char* const k_tap_gate[TG_N] = { "open", "off", "not first person", "no touch sensors", "headset not focused", "VR pad off", "a chord or grab",
     "no game state", "battle", "sphere grid", "save / load screen", "a text box", "blitzball", "game state not readable", "hands not drawn" };
 HvTapState g_tap[2]; HvTapCfg g_tap_c;
+struct TapPoseDb { double t = 0.0; float on_s = 0.f, off_s = 0.f; bool finger_off = false; };   // the point pose from the raw bits, debounced (tap_sample)
+TapPoseDb g_tap_pose_db[2];
 int  g_tap_gate_now = TG_OFF;                            // the gate at the last draw (or TG_HIDDEN when the hands were not drawn)
 LONG g_tap_released_seen = 0;                            // g_tap_released_n when last logged
 int  g_tap_buzz = 0;                                     // bit per hand: a tick at hands_frame_end
 float g_tap_pose[2] = {};                                // the point pose this frame (1 / 0) per hand, for F8
-uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
+uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0, g_tap_log_pose_n = 0, g_tap_log_shake_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
 uint32_t g_tap_w_taps = 0, g_tap_w_not = 0, g_tap_w_drawn = 0, g_tap_w_open = 0;  // the 10 s window (the verbose line)
 uint32_t g_tap_w_not_by[HV_TAP_N] = {}, g_tap_w_blk[HV_TAP_N] = {};
 ULONGLONG g_tap_last_t = 0, g_tap_last_not_t = 0;       // GetTickCount64 of the last tap / the last near miss
@@ -8720,10 +8722,18 @@ static void tap_release(const char* why) {
 /// One sample of hand h (tip: the index fingertip in reference space, null = this hand is not drawn or not tracked).
 static void tap_sample(int h, int gate, const float* tip) {
     HvTapState& st = g_tap[h];
-    const HvFingerState& fs = g_h2_fs[h];
-    // The point pose as the finger solver draws it: the index off the trigger (its touch faded out, the trigger released) and
-    // the grip held (middle, ring and little curled round the handle). The thumb may be anywhere.
-    const bool pose = tip != nullptr && fs.trig_t < 0.15f && fs.trig < 0.05f && fs.sq > 0.60f;
+    // The point pose (owner's round: from the raw controller bits, not the drawn fingers, whose touch fades out over ~160 ms):
+    // the grip held (squeeze > 0.5), the trigger released (< 0.05) and the index off the trigger's touch sensor for 30 ms; it
+    // ends when the finger is back on the sensor for 40 ms (a flicker of the sensor mid-jab does not abort it). The thumb may be
+    // anywhere. hd: the latched controller.
+    TapPoseDb& pd = g_tap_pose_db[h];
+    const XrHand& hd = g_hs.hand[h];
+    const double tnow = static_cast<double>(g_hs.T) * 1e-9;
+    const float pdt = (pd.t > 0.0 && tnow > pd.t && tnow - pd.t < 0.25) ? static_cast<float>(tnow - pd.t) : 0.f; pd.t = tnow;
+    if (hd.trigger_touch) { pd.on_s += pdt; pd.off_s = 0.f; } else { pd.off_s += pdt; pd.on_s = 0.f; }
+    if (pd.off_s >= 0.030f) pd.finger_off = true; else if (pd.on_s >= 0.040f) pd.finger_off = false;
+    if (tip == nullptr) { pd.finger_off = false; pd.on_s = pd.off_s = 0.f; }
+    const bool pose = tip != nullptr && pd.finger_off && hd.trigger < 0.05f && hd.squeeze > 0.50f;
     g_tap_pose[h] = pose ? 1.f : 0.f;
     if (gate == TG_OFF) { st = HvTapState(); return; }
     HvTapIn in = {};
@@ -8748,18 +8758,34 @@ static void tap_sample(int h, int gate, const float* tip) {
         g_tap_last_t = GetTickCount64(); g_tap_last_h = h; g_tap_last_peak = st.last_peak; g_tap_last_travel = st.last_travel; g_tap_last_dur = st.last_dur;
         g_tap_log_letgo = g_tap_log_press_n < 200;   // review S4: the pressed / let-go pair, 200 a session
         if (g_tap_log_letgo) g_tap_log_press_n++;
-        if (g_tap_log_letgo) diag("hands: tap %s: %s pressed (peak %.2f m/s forward, %.0f mm in %.0f ms; fires at %.2f m/s) | text box %s | taps L %u R %u%s", hn, tap_button_name(g_tapcfg.button),
-             st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, g_tap_c.v_on, (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1], g_tap_log_press_n == 200 ? " (no more pressed / let-go lines this session)" : "");
+        if (g_tap_log_letgo) diag("hands: tap %s: %s pressed (peak %.2f m/s forward, %.0f mm in %.0f ms, %.0f deg off forward, worst sample %.0f; fires at %.2f m/s) | text box %s | taps L %u R %u%s", hn, tap_button_name(g_tapcfg.button),
+             st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, st.last_net_deg, st.last_worst_deg, g_tap_c.v_on, (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1], g_tap_log_press_n == 200 ? " (no more pressed / let-go lines this session)" : "");
     }
     else if (r > HV_TAP_FIRED && r < HV_TAP_N) {
         g_tap_not[r]++; g_tap_w_not++; g_tap_w_not_by[r]++;
         if (r != HV_TAP_GAP && st.last_peak >= 0.6f * g_tap_c.v_on) {   // a near miss: shown in F8, the first 30 logged
             g_tap_last_not_t = GetTickCount64(); g_tap_last_not_h = h; g_tap_last_not_why = r; g_tap_last_not_peak = st.last_peak; g_tap_last_not_travel = st.last_travel;
-            if (g_tap_log_n < 30) { g_tap_log_n++; diag("hands: tap %s: not a tap (%s: peak %.2f m/s, %.0f mm in %.0f ms)%s", hn, hv_tap_why[r], st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, g_tap_log_n == 30 ? " (no more of these lines this session: see the hands: tap line with diag_verbose)" : ""); }
+            if (g_tap_log_n < 30) {   // owner's round: enough to tell why (direction, pose) from the log alone
+                g_tap_log_n++;
+                diag("hands: tap %s: not a tap (%s: peak %.2f m/s, %.0f mm in %.0f ms; net direction %.0f deg off forward (yaw %+.0f, pitch %+.0f), worst sample %.0f deg;"
+                     " pose: grip %.2f trigger %.2f touch %d off %.0f ms)%s", hn, hv_tap_why[r], st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f,
+                     st.last_net_deg, st.last_net_yaw, st.last_net_pitch, st.last_worst_deg, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0, pd.off_s * 1000.f,
+                     g_tap_log_n == 30 ? " (no more of these lines this session: see the hands: tap line with diag_verbose)" : "");
+            }
         }
     }
     if (st.blocked > HV_TAP_FIRED && st.blocked < HV_TAP_N) {
         g_tap_blk[st.blocked]++; g_tap_w_blk[st.blocked]++;
+        if (st.blocked == HV_TAP_POSE && hd.squeeze > 0.5f && g_tap_log_pose_n < 15) {   // owner's round: a gripping hand's jab blocked by the pose: its inputs
+            g_tap_log_pose_n++;
+            diag("hands: tap %s: a jab with the grip held but no point pose (%.2f m/s forward): trigger %.2f, touch %d (on %.0f ms / off %.0f ms), pose held %.0f ms of %.0f%s",
+                 hn, st.v_f, hd.trigger, hd.trigger_touch ? 1 : 0, pd.on_s * 1000.f, pd.off_s * 1000.f, st.pose_s * 1000.f, g_tap_c.pose_hold * 1000.f,
+                 g_tap_log_pose_n == 15 ? " (no more of these lines this session)" : "");
+        }
+        if (st.blocked == HV_TAP_SHAKE && g_tap_log_shake_n < 10) {
+            g_tap_log_shake_n++;
+            diag("hands: tap %s: a jab right after a forward-back stroke (a shake, %.2f m/s forward): nothing pressed%s", hn, st.v_f, g_tap_log_shake_n == 10 ? " (no more of these lines this session)" : "");
+        }
         if (st.blocked == HV_TAP_GATE && g_tap_log_gate_n < 10) {   // review S4: a pointing jab (the pose is checked first), its own budget
             g_tap_log_gate_n++; diag("hands: tap %s: a pointing jab with the gate shut (%s): nothing pressed%s", hn, k_tap_gate[gate], g_tap_log_gate_n == 10 ? " (no more of these lines this session)" : "");
         }

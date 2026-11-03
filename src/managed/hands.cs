@@ -486,7 +486,7 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.SmallButton("default##h2ts")) _vr_hands_tap_sens = 1.00f;
         ImGui.Checkbox("also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
         ImGui.Checkbox("haptic tick##h2taph", ref _vr_hands_tap_haptic);
-        ImGui.TextDisabled(esc("Hold the grip with your index finger off the trigger (point), then jab the fingertip about 10 cm forward and stop, as if pressing a button in the air. "
+        ImGui.TextDisabled(esc("Hold the grip with your index finger off the trigger (point), then poke forward and stop, as if pressing a button in the air (a natural poke of 10-30 cm is fine, a small wind-up too). "
                            + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + (_vr_hands_tap_button == "a" ? " (confirm: talk, examine, open)" : " (vr_hands_tap_button in the ini; A is confirm)") + ". Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
                            + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up."));
         if (_fn_hands2_tap_status != null) {
