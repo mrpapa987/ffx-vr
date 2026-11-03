@@ -120,10 +120,13 @@ struct HvCtrl { float trigger, squeeze; bool trigger_touch, thumb_stick, thumb_r
 struct HvFingerState {
     bool  init = false;
     float trig = 0.f, trig_t = 0.f, sq = 0.f, thumb_t = 0.f, face_t = 0.f, rest_t = 0.f;   // smoothed: trigger, trigger touch, squeeze, thumb touch, on the face buttons, on the thumbrest
+    float off_s[4] = { 1e9f, 1e9f, 1e9f, 1e9f };          // S3: seconds since each touch (trigger, thumb, face, rest) was last on: a release holds 50 ms
     float curl[5] = {};                                   // the last solve: thumb (its touch blend), index, middle, ring, little
     float still_s = 0.f; float anchor_p[3] = {}; float anchor_R[9] = {}; bool anchor = false; bool put_down = false;
 };
 /// One step of the smoothing (dt in seconds from the display times; the first call, dt < 0 or > 0.25 s snaps; 0 holds).
+/// S3: a touch must be off for 50 ms before its finger starts to open (a sensor flicker no longer twitches it), then opens
+/// with a 50 ms time constant (S2: at once, 70 ms; the 10 % point is ~165 ms either way); the grip has a 0.04 dead zone.
 void hv_fingers_update(HvFingerState* s, const HvCtrl& in, float dt);
 /// The "controller put down" rule (spec S2): the grip moved < 5 mm and < 2 deg for 10 s and nothing is touched. Returns
 /// the state (true: hide this hand). grip_R / grip_p in reference space.

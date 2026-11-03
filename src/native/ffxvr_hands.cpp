@@ -558,21 +558,31 @@ static const struct HvAngles {
 };
 static const float k_d2r = 0.0174532925f;
 
+static const float k_release_hold = 0.050f;   // S3: seconds a touch must stay off before its finger opens
+static const float k_sq_dead = 0.04f;         // S3: the grip's dead zone (a finger resting on the grip button)
 static float hv_approach(float cur, float tgt, float dt, float tau) { return cur + (tgt - cur) * (1.f - expf(-dt / tau)); }
 
 void hv_fingers_update(HvFingerState* s, const HvCtrl& in, float dt) {
     const float trig = std::isfinite(in.trigger) ? clampf(in.trigger, 0.f, 1.f) : 0.f;
-    const float sq = std::isfinite(in.squeeze) ? clampf(in.squeeze, 0.f, 1.f) : 0.f;
+    const float sq = std::isfinite(in.squeeze) ? clampf((in.squeeze - k_sq_dead) / (1.f - k_sq_dead), 0.f, 1.f) : 0.f;   // S3: a resting finger's grip noise stays 0
     const float tt = (in.trigger_touch || trig > 0.05f) ? 1.f : 0.f;            // trigger > 0.05 counts as a touch (a dropped bit)
     const float th = (in.thumb_stick || in.thumb_rest || in.thumb_face) ? 1.f : 0.f;
     const float fa = in.thumb_face ? 1.f : 0.f, re = (in.thumb_rest && !in.thumb_face) ? 1.f : 0.f;
+    const float raw[4] = { tt, th, fa, re };
     if (!s->init || dt < 0.f || dt > 0.25f || !std::isfinite(dt)) {   // the first frame, or after a pause: snap
-        s->trig = trig; s->sq = sq; s->trig_t = tt; s->thumb_t = th; s->face_t = fa; s->rest_t = re; s->init = true; return;
+        s->trig = trig; s->sq = sq; s->trig_t = tt; s->thumb_t = th; s->face_t = fa; s->rest_t = re; s->init = true;
+        for (int k = 0; k < 4; ++k) s->off_s[k] = raw[k] > 0.5f ? 0.f : 1e9f;
+        return;
     }
     if (dt == 0.f) return;                         // the same poses as last time (no new display time): no step
-    auto boolean = [&](float cur, float tgt) { return hv_approach(cur, tgt, dt, tgt > cur ? 0.035f : 0.070f); };   // on 35 ms, off 70 ms
+    float tgt[4];
+    for (int k = 0; k < 4; ++k) {                  // S3: a release is held for k_release_hold (a flicker of the sensor is ignored)
+        if (raw[k] > 0.5f) s->off_s[k] = 0.f; else if (s->off_s[k] < 1e8f) s->off_s[k] += dt;
+        tgt[k] = (raw[k] > 0.5f || s->off_s[k] < k_release_hold) ? 1.f : 0.f;
+    }
+    auto boolean = [&](float cur, float t) { return hv_approach(cur, t, dt, t > cur ? 0.035f : 0.050f); };   // on 35 ms; off 50 ms after the hold
     s->trig = hv_approach(s->trig, trig, dt, 0.015f); s->sq = hv_approach(s->sq, sq, dt, 0.015f);   // floats 15 ms
-    s->trig_t = boolean(s->trig_t, tt); s->thumb_t = boolean(s->thumb_t, th); s->face_t = boolean(s->face_t, fa); s->rest_t = boolean(s->rest_t, re);
+    s->trig_t = boolean(s->trig_t, tgt[0]); s->thumb_t = boolean(s->thumb_t, tgt[1]); s->face_t = boolean(s->face_t, tgt[2]); s->rest_t = boolean(s->rest_t, tgt[3]);
 }
 
 bool hv_put_down_update(HvFingerState* s, const HvCtrl& in, const float grip_R[9], const float grip_p[3], float dt) {
