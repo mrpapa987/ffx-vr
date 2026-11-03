@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 26;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 27;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -519,6 +519,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_sr_set = (delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void>)req("ffxvr_sr_set"); _fn_sr_gate = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_sr_gate");   // ABI 25: stickrep
             _fn_sr_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_sr_status"); _fn_turn_keys = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_turn_keys");
             _fn_log_config = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_log_config"); _fn_build_info = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_build_info");   // ABI 26: release prep (logging.cs)
+            _fn_pre_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)req("ffxvr_pre_resolve"); _fn_hands2_set = (delegate* unmanaged[Cdecl]<VrHandsCfg*, int, void>)req("ffxvr_hands2_set");   // ABI 27: VR hands v2 (hands.cs)
+            _fn_hands2_status = (delegate* unmanaged[Cdecl]<int*, int, byte*>)req("ffxvr_hands2_status"); _fn_hands2_cal = (delegate* unmanaged[Cdecl]<float*, int, uint>)req("ffxvr_hands2_cal");
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
             int abi = missing.Count == 0 && fn_abi != null ? fn_abi() : -1;
@@ -577,6 +579,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_haze_set = null; _fn_haze_status = null;   // ABI 22 (heat haze)
         _fn_load_info = null;   // ABI 23 (loads)
         _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
+        _fn_pre_resolve = null; _fn_hands2_set = null; _fn_hands2_status = null; _fn_hands2_cal = null;   // ABI 27 (VR hands v2)
     }
     /// <summary>A hard failure (no DLL, a mismatched pair, init failed): the window opens with the status. The forced
     /// open is not saved: the ini keeps the overlay_open from before until the player presses F8.</summary>
@@ -800,6 +803,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     private void h_resolve(nint ctx, nint dst, uint dst_sub, nint src, uint src_sub, uint fmt) {
         _o_resolve ??= new FhCallHandle<d_ResolveSubresource>(new FhCallLocation((void*)_a_resolve)).chain_from(_h_resolve!).fnptr;
+        if (ours(ctx) && _fn_pre_resolve != null) _fn_pre_resolve(dst, dst_sub, src, src_sub, fmt);   // VR hands v2: drawn into the scene target before the game resolves it
         _o_resolve!(ctx, dst, dst_sub, src, src_sub, fmt);
         if (ours(ctx) && _fn_on_resolve != null) _fn_on_resolve(dst, dst_sub, src, src_sub, fmt);
     }
@@ -1081,7 +1085,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
                 } break;
-                default:                  known--; break;
+                default:                  if (!hands2_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs)
             }
         }
         if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
@@ -1400,6 +1404,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"hands_cal={_hands_cal_ini}\n" +
             $"hands_px_left={_hands_px_left.ToString(ci)}\n" +
             $"hands_stretch={_hands_stretch.ToString("F2", ci)}\n" +
+            hands2_ini_text() +   // VR hands v2 (hands.cs)
             $"diag_verbose={(_diag_verbose ? 1 : 0)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
@@ -1528,6 +1533,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
         }
         if (_fp_mode != fp_before) apply_mode_scale(fp_before, _fp_mode);
+        hands2_ui();   // VR hands v2: the "VR hands (experimental)" header (hands.cs)
 
         // View
         ImGui.Separator();
@@ -1803,6 +1809,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.RadioButton("show everything", ref _fp_body_mode, 2);
             ImGui.SetNextItemWidth(160); ImGui.InputText("head parts (indices, e.g. 2,3)", ref _fp_head_parts, 64); ImGui.SameLine();
             ImGui.TextDisabled($"player parts drawn into the scene last frame: {(_fn_fp_parts != null ? _fn_fp_parts() : 0)}");
+            hands2_debug_ui();   // VR hands v2: the debug bits, the pose dump (hands.cs)
             if (!_hands_dev) { _hands_on = false; }   // VR hands are tabled: hidden unless hands_dev=1 in the ini (docs/design-notes.md, "VR hands: state of play")
             if (_hands_dev && _fn_bones_capture != null && ImGui.Button($"capture bone palettes (one frame -> ffxvr_bones_{_bones_take + 1}.bin)")) {
                 float* op = stackalloc float[78]; Actor* actors = Globals.actors;
@@ -2115,6 +2122,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle
         push_hands();
+        hands2_push();   // VR hands v2: vr_hands_*, the calibration (hands.cs)
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
