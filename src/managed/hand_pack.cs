@@ -172,7 +172,11 @@ internal static class HandPackJson {
     /// <summary>Printable text: control characters dropped, trimmed, at most max characters.</summary>
     static string clean(string s, int max) {
         var sb = new System.Text.StringBuilder(Math.Min(s.Length, max));
-        foreach (char c in s) { if (sb.Length >= max) break; if (!char.IsControl(c)) sb.Append(c); }
+        foreach (char c0 in s) {
+            if (sb.Length >= max) break;
+            char c = c0 switch { '\u2013' or '\u2014' or '\u2212' => '-', '\u2018' or '\u2019' => '\'', '\u201C' or '\u201D' => '"', _ => c0 };   // F8's font is Latin-1
+            if (!char.IsControl(c)) sb.Append(c);
+        }
         return sb.ToString().Trim();
     }
     static string? text(HandPack p, string key, JsonElement v, int max) {
