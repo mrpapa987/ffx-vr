@@ -3719,3 +3719,52 @@ visible in the log: no `riding: off`, no text box, no map or event change.
   3. Optionally a full-memory dump.
 - **A fix, if confirmed:** keep the character cull off only within a radius of the player (or of the headset's view), or
   release / cap shadow tiles for far actors. Not done yet: the counts first.
+
+### The shadow pool: prevention (ABI 34, branch `chocobo`)
+
+The owner: "Can we exclude shadows when we get too many away from the character's immediate area?" There are two parts, and
+both are installed once, each only over the bytes it expects.
+
+**Does the pool ever free?** No, not while the game runs. The in-use flags (ShadowManager+0xDC4, 16 per buffer half) are
+cleared in exactly one place, the pool's setup 0x6D1B40. That setup is reached from the renderer's resource build
+(0x6364D4 -> 0x6CE100: start-up, and whenever the renderer rebuilds its targets). It is not run per frame and not per map
+load. The flip of the buffer half (0x6CA1A4) clears the slots' cached instances (+0x8BC, +0x9BC: 16 each) but not the
+flags, so after a flip the slots ask for instances again. Whether vanilla play flips often enough to run out, I cannot tell
+statically. In our setup the pressure builds over the whole session, across maps.
+
+**1. The distance budget** (the owner's request): Ch_DrawMain's `call 0x830240(actor)` at 0x82F4BE (the per-actor shadow
+request, reached only for actors that passed Ch_VisibleTest) now calls `sg_gate`.
+- `sg_gate` skips the request for an actor whose drawn root (+0x200, which is right for riders too) is farther than
+  `shadow_near` from the player, once the pool already holds `shadow_budget` instances (the fuller half).
+- The skipped characters stay drawn, without a shadow. The near ones keep theirs, because the budget leaves 4 instances for
+  them.
+- Defaults: `shadow_near` 300 units (about 26 m at 11.4 units a metre), `shadow_budget` 12.
+- Why 300: it covers talking distance and a chocobo's short dash, and a character's blob shadow at 26 m is a few pixels in
+  the headset. Most of the Calm Lands actors in the dumps are 450-1800 units away, so they are the ones that go
+  shadowless.
+- `shadow_near` 0 turns the budget off.
+- This is the decision point the game itself uses: tiles and list entries come from these requests each frame. Since an
+  instance is never given back, skipping far requests once the pool is near full is what keeps the remaining instances for
+  the near characters.
+
+**2. The guard (always on): no crash when the pool is full.**
+- Both `call 0x6CC980` sites (0x6D16F5 in the tile list 1 walk, 0x6D14AA in the list 0 walk) call a 64-byte stub in an
+  executable page we allocate. The stub calls the pool scan. On a null it drops its frame and counts the hit. Then it
+  replays the loop end without the two stores through the instance (the register reloads and the 5 or 4 x87 pushes the
+  loop top expects) and jumps to the loop's continue point (0x6D174F or 0x6D14FA).
+- The x87 stack is empty at the call: MSVC code keeps it empty across calls. Each loop's prologue pushes exactly as many
+  values as its loop end, so the body pops everything first.
+- **What the player sees when the pool is full:** that character's shadow is missing for the frame (in practice from then
+  on, as nothing frees), instead of the crash.
+- **The install** runs from the job-join hook on the main thread, between frames, so the main thread never runs code that
+  is being rewritten. Without that hook it runs from the render thread after 600 frames.
+- **Every byte is checked first:** the call, the loop end it replays, its continue point, the pool scan's prologue, and the
+  gate's context. A mismatch is logged and left alone. Nothing is restored on unload, as with the culling patches.
+- **Logs:** one `shadow pool: guard on (both tile lists), distance budget on (the main thread)` line; `shadow pool:` lines
+  as the counts change, with the instances in use per half, far characters left without a shadow, and the guard's skips;
+  and a warning the first time the guard fires. The same readout and both settings are in F8 > Debug > Character shadows.
+- **Checks:**
+  - choco_chk/tests/sg_check.py: every verified byte array equals the exe copy, and the calls decode to 0x6CC980 and
+    0x830240.
+  - sg_test.cpp: the stub builder and the budget rule.
+  - sg_replay_check.py: each stub's skip path is the original loop end minus the stores, and jumps to the continue point.

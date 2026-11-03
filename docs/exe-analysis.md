@@ -670,6 +670,7 @@ research note shadows-one-eye.md. "static" where not seen at runtime.
 | 0x831D10 | builds the receiver's ground quads on the CPU (one quad per actor; no shadow matrix in any constant buffer). |
 | 0xCDEC28 / 0xCDEC24 | the ShadowManager singleton (0x6D2390 returns it) / the buffer half, flipped per frame at 0x6CA1A4 (which also clears the slot arrays +0x8BC / +0x9BC) |
 | 0x6CC980 | `GetASpareGradMeshInstance` (thiscall, the manager): the first of 16 in-use flags at +0xDC4 + half x 16 that is clear is set and its instance (+0xCC4 + (half x 16 + i) x 4) returned; all set: printf "Shouldn't get here, contact cg please" and **return 0**. No code in .text clears a flag. The Calm Lands crash of 3 Nov 2026: the caller 0x6D1530 (tile list 1, count +0x37AC, entries +0x2FB4 + list x 0x400) wrote through the null at 0x6D1736 |
+| 0x6D1B40 | the pool's setup: creates the 2 x 16 instances (+0xCC4 / +0xD04) and **clears the in-use flags** (the only place that does); from the renderer's resource build (0x6364D4 -> 0x6CE100) and 0x6D2D30 |
 | 0x830240 | from Ch_DrawMain loop 3 (0x82F4BE), only when Ch_VisibleTest passed (`test edi,edi; jne` at 0x82F4B9): leads to the per-actor shadow tile (0x82E3E0 -> 0x644A00 -> 0x6D3000). So the "keep characters drawn" patches give every actor a shadow |
 | 0x65B8A0 | sets up the map shaders' "AdvShadowMap" inputs (`LightViewProjection`, `LVP2`, `MySMSampler2`, `mainChrYPos`). In the Luca census they bind the 8x8 dummy: environment shadows do not come from the atlas. |
 

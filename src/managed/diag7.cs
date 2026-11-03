@@ -249,6 +249,7 @@ public sealed unsafe partial class FFXVRModule {
 
     private void d7_join_record() {
         _d7_join_calls_total++;
+        if (!_sg_tried && _native_ready && _fn_sg_install != null) { _sg_tried = true; _sg_state = _fn_sg_install(); _sg_on_main = true; }   // the pool guard: written on the main thread, between frames (shadow_cam.cs)
         if (_fn_main_note == null || _fn_main_note() == 0) return;   // the main thread's joins only (the first caller names it, for the watchdog)
         if (_d7_join_mtid == 0) _d7_join_mtid = Environment.CurrentManagedThreadId;
         uint stamp = FhUtil.get_at<uint>(0x1FCBBF0);

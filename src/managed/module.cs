@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 33;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 34;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -421,6 +421,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_head_set");
             _fn_ride_set     = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float, float, uint>)req("ffxvr_ride_set");   // ABI 32: riding (ride.cs)
             _fn_ride_stats   = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ride_stats");   // ABI 33
+            _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
+            _fn_sg_budget    = (delegate* unmanaged[Cdecl]<float, int, void>)req("ffxvr_shadow_budget_set");
+            _fn_sg_status    = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_pool_status");
             _fn_anchor_override = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_anchor_override");
             _fn_floor_set    = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_floor_set");
             _fn_fp_head_set  = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_fp_head_set");
@@ -557,7 +560,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
-        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null;
+        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
         _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null; _fn_log_config = null; _fn_build_info = null;
@@ -1039,6 +1042,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     else _fp_actor = fa;
                 } break;
                 case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
+                case "shadow_near":       pf(k, v, ref _shadow_near, 0f, 2000f); break;   // the pool budget (shadow_cam.cs): 0 = off
+                case "shadow_budget":     pi(k, v, ref _shadow_budget, 4, 16); break;
                 case "shadow_cam":        pi(k, v, ref _shadow_cam, 0, 1); break;       // character shadows: 1 the game's light camera left alone (default), 0 overridden (old, A/B)
                 case "fp_self_shadow":    pi(k, v, ref _fp_self_shadow, 0, 1); break;   // 1 own shadow always drawn (default), 0 hidden in first person's whole-body mode
                 case "heat_haze":         pi(k, v, ref _heat_haze, 0, 2); break;        // fire shimmer: 0 off in the headset's 3D view (default), 1 fixed per eye (experimental), 2 as before (A/B)
@@ -1383,6 +1388,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"noimg_mode={_noimg_mode.ToString(ci)}\n" +
             $"shadow_cam={_shadow_cam.ToString(ci)}\n" +
             $"fp_self_shadow={_fp_self_shadow.ToString(ci)}\n" +
+            $"shadow_near={_shadow_near.ToString("F0", ci)}\n" +
+            $"shadow_budget={_shadow_budget.ToString(ci)}\n" +
             $"heat_haze={_heat_haze.ToString(ci)}\n" +
             $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
