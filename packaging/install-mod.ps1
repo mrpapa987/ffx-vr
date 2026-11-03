@@ -9,8 +9,9 @@
 #   -Purge         with -Uninstall: also delete the whole mod folder (settings, logs, captures): nothing is left
 #   -ResetLogging  set every diagnostic in an existing ffxvr.ini to off (tools\set-logging.ps1 -Profile Release;
 #                  a timestamped .bak is made first). A fresh install needs nothing: its defaults are all off.
-#   -DeleteLogs    delete the mod's old logs, dumps and captures (ffxvr_*.log, ffxvr_cbdump_*.txt, *.bmp, *.dds,
-#                  *.bin captures) from the mod folder, listing each with its size. Settings are never touched.
+#   -DeleteLogs    delete the mod's own old logs, dumps and captures from the mod folder (ffxvr_*.log,
+#                  ffxvr_cbdump_*.txt, img_*.bmp, seq_*.bmp, ui_atlas_*.dds, battle_atlas.dds, ffxvr_bones_*.bin: the
+#                  list is $FfxvrLogPatterns in paths.ps1), listing each with its size. Settings and other files are kept.
 #   -Force         install even though Fahrenheit was not found
 #
 # Run with (from the ffx-vr-<version> folder, the one with README.md and tools\ in it):
@@ -54,14 +55,48 @@ function Remove-ModLogs {
     Write-Host ('  freed {0:N1} MB' -f ($total / 1MB))
 }
 
+# A junction or symbolic link at or under $Dir (Windows PowerShell 5.1's Remove-Item -Recurse follows junctions into their
+# targets). The walk does not descend into one.
+function Find-ReparsePoint([string]$Dir) {
+    $stack = New-Object System.Collections.Stack; $stack.Push((Get-Item -LiteralPath $Dir -Force))
+    while ($stack.Count -gt 0) {
+        $d = $stack.Pop()
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $d.FullName }
+        foreach ($c in @(Get-ChildItem -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue)) {
+            if ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $c.FullName }
+            if ($c.PSIsContainer) { $stack.Push($c) }
+        }
+    }
+    return $null
+}
+
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
     Assert-FfxvrWritable $mods
+    if ($Purge -and (Test-Path -LiteralPath $dest)) {
+        $rp = Find-ReparsePoint $dest
+        if ($rp) {
+            Write-Host "  $rp is a junction or link: -Purge does not delete through it. Nothing was changed."
+            Write-Host '  Remove the link yourself, or uninstall without -Purge.'
+            exit 1
+        }
+    }
+    # The load-order line first: if a delete below fails part-way, Fahrenheit no longer tries to load a half-removed mod.
+    if (Test-Path -LiteralPath $lo) {
+        $lines = @(Get-Content -LiteralPath $lo | Where-Object { $_.Trim() -ne '' -and $_.Trim() -ne $modId })
+        Set-Content -LiteralPath $lo -Value $lines -Encoding ascii
+        Write-Host "  removed '$modId' from mods\loadorder"
+    }
     if ($Purge) {
         if (Test-Path -LiteralPath $dest) {
-            $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue)
-            Remove-Item -LiteralPath $dest -Recurse -Force
-            Write-Host ('  deleted {0} ({1} files, {2:N1} MB: the mod, its settings, logs and captures)' -f $dest, $all.Count, (($all | Measure-Object Length -Sum).Sum / 1MB))
+            $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force -ErrorAction SilentlyContinue)
+            try {
+                Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+                Write-Host ('  deleted {0} ({1} files, {2:N1} MB: the mod, its settings, logs and captures)' -f $dest, $all.Count, (($all | Measure-Object Length -Sum).Sum / 1MB))
+            } catch {
+                Write-Host "  could not delete everything in ${dest}: $($_.Exception.Message)"
+                Write-Host '  Something holds a file (an Explorer window, an antivirus scan?). Close it and run -Uninstall -Purge again.'
+            }
         }
     } else {
         foreach ($f in $files) {
@@ -69,11 +104,6 @@ if ($Uninstall) {
             if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force; Write-Host "  removed $f" }
         }
         if ($DeleteLogs) { Remove-ModLogs }
-    }
-    if (Test-Path -LiteralPath $lo) {
-        $lines = @(Get-Content -LiteralPath $lo | Where-Object { $_.Trim() -ne '' -and $_.Trim() -ne $modId })
-        Set-Content -LiteralPath $lo -Value $lines -Encoding ascii
-        Write-Host "  removed '$modId' from mods\loadorder"
     }
     Write-Host ''
     $left = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue })

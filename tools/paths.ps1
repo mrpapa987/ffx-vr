@@ -30,23 +30,27 @@ if (Test-Path -LiteralPath $ffxvrLocal) { . $ffxvrLocal }
 $FfxvrRootExes = @('FFX', 'FFX-2', 'FFX&X-2_LAUNCHER', 'FFX&X-2_Will', 'fhstage0')
 $FfxvrUtf8     = New-Object Text.UTF8Encoding $false
 
-# The mod's diagnostic ffxvr.ini keys (tools\set-logging.ps1, install-mod.ps1), with the value each logging profile writes:
-# Release = a fresh install (every diagnostic off; also what the mod uses for a key that is absent, except diag_verbose in
-# an ini older than ini_rev 2, which the mod reads as 1); Dev = the developer's set ($null: Dev leaves the key as it is).
+# The mod's diagnostic ffxvr.ini keys (tools\set-logging.ps1, install-mod.ps1), with the value each logging profile writes
+# ($null: that profile leaves the key as it is):
+#   Release = a fresh install: every diagnostic off (also what the mod uses for an absent key, except diag_verbose in an ini
+#             older than ini_rev 2, which the mod reads as 1);
+#   Verbose = more logging only, for a player's bug report: the periodic lines and the load: lines; no extra hooks, patches
+#             or samplers;
+#   Dev     = the developer's set, hooks and profilers included (they cost frame time and change how the game runs).
 # Keep in step with diag_on() in src\managed\logging.cs.
 $FfxvrDiagKeys = [ordered]@{
-    diag_verbose       = @{ Release = '0'; Dev = '1' }   # the periodic log lines, the camera trace, Ctrl+F9 dumps; log cap 64 MB
-    diag_build7        = @{ Release = '0'; Dev = '1' }   # build 7: cursor / timing / pan-scan lines, the stall watchdog
-    diag_load          = @{ Release = '0'; Dev = '1' }   # the load lines' expensive parts (address-space walks, stack walks)
-    diag_load_lines    = @{ Release = '0'; Dev = '1' }   # one load: line per load
-    diag_actors        = @{ Release = '0'; Dev = $null } # the actors: line every 10 s (Fahrenheit's log)
-    diag_cluster_bytes = @{ Release = '0'; Dev = '1' }   # the game pool's alloc / free hooks (next launch)
-    diag_va_log        = @{ Release = '0'; Dev = '1' }   # the ntdll reservation patch (next launch)
-    diag_transition    = @{ Release = '0'; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
-    diag_load_prof     = @{ Release = '0'; Dev = '2' }   # the load profiler (probes at the next launch)
+    diag_verbose       = @{ Release = '0'; Verbose = '1';   Dev = '1' }   # the periodic log lines, the camera trace, Ctrl+F9 dumps
+    diag_build7        = @{ Release = '0'; Verbose = $null; Dev = '1' }   # build 7: game-function hooks, cursor / timing lines, the stall watchdog
+    diag_load          = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the load lines' expensive parts (address-space walks, stack walks)
+    diag_load_lines    = @{ Release = '0'; Verbose = '1';   Dev = '1' }   # one load: line per load (no hook of its own)
+    diag_actors        = @{ Release = '0'; Verbose = $null; Dev = $null } # the actors: line every 10 s (Fahrenheit's log)
+    diag_cluster_bytes = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the game pool's alloc / free hooks (next launch)
+    diag_va_log        = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the ntdll reservation patch (next launch)
+    diag_transition    = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
+    diag_load_prof     = @{ Release = '0'; Verbose = $null; Dev = '2' }   # the load profiler: a sampler thread, probe hooks (next launch)
 }
 # What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
-$FfxvrLogPatterns = @('ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
+$FfxvrLogPatterns = @(   # (install-mod -DeleteLogs deletes exactly these)'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
                       'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',
                       'img_*.bmp', 'seq_*.bmp', 'ui_atlas_*.dds', 'battle_atlas.dds', 'ffxvr.ini.tmp')
 

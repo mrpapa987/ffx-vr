@@ -76,7 +76,7 @@ body:
         Drag in the zipped `logs\run-*-gamelogs` folder and the `logs\run-*.txt` of that run (or, without
         run-ffx, `ffxvr_diag.log`, `ffxvr_diag.prev.log` and `ffxvr_native.log` from
         `<game>\fahrenheit\mods\ffxvr\`, and Fahrenheit's newest `fahrenheit\logs\` folder). If asked for more
-        detail: with the game closed run `tools\set-logging.ps1 -Profile Dev`, reproduce, attach the logs, then
+        detail: with the game closed run `tools\set-logging.ps1 -Profile Verbose`, reproduce, attach the logs, then
         `tools\set-logging.ps1 -Profile Release`.
     validations:
       required: false

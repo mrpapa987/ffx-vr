@@ -125,7 +125,9 @@ game version (Steam build id).
   the owner runs 1)
 - [x] debug-only defaults: every diagnostic off for a fresh install (diag_load_lines 1 -> 0; the new diag_verbose gates
   the periodic lines, the legacy markers' 1 s "window:" line, the camera trace and Ctrl+F9's 100 MB dump);
-  `ffxvr_diag.log` per session and capped at 4 MB; `tools/set-logging.ps1 -Profile Release|Dev`; hands_dev was already 0
+  `ffxvr_diag.log` per session and capped at 4 MB (64 MB while any diagnostic is on); `tools/set-logging.ps1 -Profile
+  Release|Verbose|Dev` (players are pointed at Verbose: more logging, no hooks; Dev is the developer's set); hands_dev was
+  already 0
 - [x] `git ls-files` audit (2 Nov 2026): no personal paths, no game files, captures or binaries; three research notes
   had the research container's `/home/...` path (made relative). The handle `mrpapa` (LICENSE, csproj Authors) and
   `mrpapa987` (the repo URL) are intended
@@ -178,6 +180,7 @@ game version (Steam build id).
 6. **GitHub release** from the tag: title `FFX VR 0.1.0-alpha.1`, tick "pre-release", body from
    `.github/release-template.md` + the CHANGELOG entry + the SHA-256; attach the zip and the `.sha256`.
 7. **Your own setup afterwards.** The release defaults are for players; for development keep (or restore) the diagnostics
-   with `tools\set-logging.ps1 -Profile Dev` (and `-Profile Release` to see what a player gets). Existing inis are never
-   changed by a new build: an ini older than `ini_rev` 2 keeps the periodic lines on (diag_verbose read as 1).
+   with `tools\set-logging.ps1 -Profile Dev` (and `-Profile Release` to see what a player gets). A new build keeps an existing
+   ini's values: an ini older than `ini_rev` 2 reads diag_verbose as 1 and is saved as rev 2 with it a few seconds after the
+   start (and one older than rev 1 still gets the loads build's load_lock_release / heat_haze migration).
 8. Nexus / Reddit posts link to the GitHub release, never to a rehost.

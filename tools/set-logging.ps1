@@ -2,25 +2,30 @@
 #
 #   -Profile Release   every diagnostic key off: what a fresh install has (a small, per-session ffxvr_diag.log of
 #                      events and errors only, capped at 4 MB; no periodic lines, no dumps, no diagnostic hooks)
+#   -Profile Verbose   more logging for a bug report, nothing else: diag_verbose (the periodic summaries, log cap
+#                      64 MB) and diag_load_lines; no extra hooks, patches or samplers (other keys left as they are)
 #   -Profile Dev       the developer's set on: diag_verbose, diag_build7, diag_load, diag_load_lines,
-#                      diag_cluster_bytes, diag_va_log, diag_transition, diag_load_prof=2 (diag_actors is left as it is)
+#                      diag_cluster_bytes, diag_va_log, diag_transition, diag_load_prof=2 (diag_actors is left as it is).
+#                      These add game hooks, an ntdll patch and a loader sampler: for the developer, not for players
 #   -GameDir <folder>  the game folder (the one with FFX.exe); otherwise found as every script does (tools\paths.ps1)
 #   -IniPath <file>    edit this ffxvr.ini instead (a copy, for a test)
 #   -DryRun            only show what would change
 #
 # The file is edited in place: every other line, comment, the order, the line endings and the encoding stay as they
-# are; a key that is missing is added at the end. A timestamped copy (ffxvr.ini.<yyyyMMdd-HHmmss>.bak) is made first.
+# are; a key that is missing is added at the end. A timestamped copy (ffxvr.ini.<yyyyMMdd-HHmmss-fff>.bak) is made first.
 # The game must be closed: the mod reads the file back and rewrites it while it runs. The keys marked "next launch"
 # in the mod's Debug section (diag_cluster_bytes, diag_va_log, diag_load_prof's probes) take effect at the next start
 # anyway; the rest would apply at once, but the game is closed here, so: the next start.
-# Without an ffxvr.ini: Release has nothing to do (no file = the defaults = all off); Dev writes a short one.
+# Without an ffxvr.ini: Release has nothing to do (no file = the defaults = all off); Verbose and Dev write a short one
+# (every diagnostic key, so the mod does not take it for a truncated file; it fills in the rest at its next save).
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Release
+#   powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Verbose
 #   powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Dev
 
 param(
-    [Parameter(Mandatory = $true)] [ValidateSet('Release', 'Dev')] [string]$Profile,
+    [Parameter(Mandatory = $true)] [ValidateSet('Release', 'Verbose', 'Dev')] [string]$Profile,
     [string]$GameDir = '',
     [string]$IniPath = '',
     [switch]$DryRun
@@ -30,7 +35,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'paths.ps1')
 
 if ($IniPath) {
-    $ini = [IO.Path]::GetFullPath($IniPath)
+    $ini = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($IniPath)   # relative to the PowerShell location
 } else {
     if ($GameDir) {
         if (-not (Test-FfxvrGame $GameDir)) { Write-Host "No FFX.exe in $GameDir. Pass the game folder (the one with FFX.exe)."; exit 1 }
@@ -52,8 +57,13 @@ if (-not (Test-Path -LiteralPath $ini)) {
     }
     $dir = Split-Path -Parent $ini
     if (-not (Test-Path -LiteralPath $dir)) { Write-Host "  The mod folder $dir does not exist: install the mod first."; exit 1 }
+    # Every diagnostic key (the profile's value, else Release's): with ini_rev that is 10 keys, so the mod's truncation check
+    # (fewer than 10 keys next to an ffxvr.ini.bak) does not flag the file.
     $lines = @('# FFX VR settings. Edited by the overlay; hand edits are fine.', 'ini_rev=2')
-    foreach ($k in $want.Keys) { $lines += "$k=$($want[$k])"; Write-Host "  $k = $($want[$k]) (new file)" }
+    foreach ($k in $FfxvrDiagKeys.Keys) {
+        $v = if ($want.Contains($k)) { $want[$k] } else { $FfxvrDiagKeys[$k]['Release'] }
+        $lines += "$k=$v"; Write-Host "  $k = $v (new file)"
+    }
     if ($DryRun) { Write-Host 'Dry run: nothing written.'; exit 0 }
     [IO.File]::WriteAllText($ini, (($lines -join "`n") + "`n"), $FfxvrUtf8)   # as the mod writes it: UTF-8 without BOM, LF
     Write-Host "Written: $ini (the mod fills in every other setting at its next save)."
@@ -113,8 +123,9 @@ if ($DryRun) { Write-Host 'Dry run: nothing written.'; exit 0 }
 
 # ---------------------------------------------------------------- write
 if ((Get-Item -LiteralPath $ini).IsReadOnly) { Write-Host "  $ini is read-only: nothing changed. Clear the read-only flag first."; exit 1 }
-$bak = "$ini.$(Get-Date -Format 'yyyyMMdd-HHmmss').bak"
-Copy-Item -LiteralPath $ini -Destination $bak -Force
+$bak = "$ini.$(Get-Date -Format 'yyyyMMdd-HHmmss-fff').bak"
+if (Test-Path -LiteralPath $bak) { Write-Host "  $bak already exists: nothing changed. Run again."; exit 1 }   # never overwrite a backup
+Copy-Item -LiteralPath $ini -Destination $bak
 $body = $enc.GetBytes($out)
 $pre  = if ($skip -gt 0) { $enc.GetPreamble() } else { @() }
 $all  = New-Object byte[] ($pre.Length + $body.Length)

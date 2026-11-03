@@ -233,8 +233,10 @@ For a bug report (an issue in this repository, never on Fahrenheit's pages), sen
 ### Logging
 
 A fresh install logs little: `ffxvr_diag.log` (events and errors, per session, at most 4 MB; the
-session before is `ffxvr_diag.prev.log`) and `ffxvr_native.log`. For a bug hunt, with the game closed:
-`.\tools\set-logging.ps1 -Profile Dev` turns on the developer's diagnostics (the periodic lines, build-7,
-load lines and profiler, battle-transition lines, the HD-cache hooks; log cap 64 MB) and
+session before is `ffxvr_diag.prev.log`) and `ffxvr_native.log`. With the game closed:
+`.\tools\set-logging.ps1 -Profile Verbose` only logs more (the periodic summaries and the load: lines; log cap
+64 MB): that is the one to ask testers for. `.\tools\set-logging.ps1 -Profile Dev` turns on the developer's
+diagnostics (also build-7's hooks and watchdog, the load profiler's sampler, battle-transition lines, the
+HD-cache pool hooks and the ntdll reservation patch: they cost frame time and change how the game runs) and
 `.\tools\set-logging.ps1 -Profile Release` turns them all off again. Both edit `ffxvr.ini` in place and keep a
 timestamped `.bak`. The F8 overlay's Debug section shows "diagnostics: N on" while any is on.

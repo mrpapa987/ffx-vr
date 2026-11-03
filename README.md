@@ -105,11 +105,13 @@ never to the Fahrenheit or FFX-60fps projects: they are not responsible for this
 By default the mod keeps only a small log: `ffxvr_diag.log` in the mod folder (startup, versions,
 headset and view events, errors; started fresh each session, at most 4 MB; the session before is
 `ffxvr_diag.prev.log`) and `ffxvr_native.log` (a small status snapshot). If we ask for more detail,
-turn the diagnostics on with the game closed, play until the problem shows, and turn them off again
-afterwards (they write large logs and cost some frame time):
+turn on the verbose log with the game closed (it only logs more; nothing else changes), play until the
+problem shows, and turn it off again afterwards (its log grows up to 64 MB a session):
 
-    powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Dev
+    powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Verbose
     powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Release
+
+(The same switch is "verbose log" at the top of the F8 overlay's Debug section.)
 
 ## Standing on
 

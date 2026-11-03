@@ -37,7 +37,8 @@ recommended.
 - **Installer** (`tools\install-mod.ps1`) that checks every requirement, and `tools\run-ffx.ps1` that
   starts the game and collects the logs for a bug report.
 - **Small logs by default**: one `ffxvr_diag.log` per session, at most 4 MB; the diagnostics for bug
-  hunting are off and switched with `tools\set-logging.ps1 -Profile Dev | Release`.
+  hunting are off; `tools\set-logging.ps1 -Profile Verbose` turns on a fuller log for a bug report, and
+  `-Profile Release` turns it off again.
 
 ### Known issues
 
