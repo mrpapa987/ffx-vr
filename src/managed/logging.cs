@@ -6,9 +6,9 @@ namespace FFXVR;
 //
 // What a fresh install logs (no ffxvr.ini: every diag_* key at its code default, all off):
 //   ffxvr_diag.log   started fresh each session (the previous one is kept as ffxvr_diag.prev.log), capped at 4 MB a session
-//                    (64 MB with diag_verbose=1; ffxvr_native.cpp diag_open_ex). It opens with the versions and the
+//                    (64 MB while any diagnostic is on; ffxvr_native.cpp diag_open_ex). It opens with the versions and the
 //                    diagnostics that are on (log_hello), then only events: the headset session, view-mode changes, errors,
-//                    loading holds ("sr: hold"), the perf: line every 30 s, settings notes.
+//                    loading holds ("sr: hold"), the perf: line every 30 s, one sr: summary per headset session, settings notes.
 //   ffxvr_native.log a fixed-size status snapshot (hook counters), rewritten every 30 s.
 //   Fahrenheit's own log for this module: events only (settings, battle follow, map changes).
 // diag_verbose=1 adds the periodic lines (the native 10 s summaries ui:, view:, uidepth:, imgui:, sr:; the 1 s cursor art:
@@ -23,7 +23,8 @@ public sealed unsafe partial class FFXVRModule {
     private bool _diag_verbose = false;        // ini diag_verbose (default 0; an ini older than rev 2 without the key reads 1: settings_migrate)
     private bool _diag_verbose_read;           // the launch read saw the key (settings_migrate)
     private const int k_log_cap_mb = 4, k_log_cap_verbose_mb = 64;
-    private int _log_pushed = -1;              // the diag_verbose value last sent to native (-1: not yet)
+    private int _log_pushed = -1;              // the (diag_verbose, cap) last sent to native, as verbose | cap << 1 (-1: not yet)
+    private int _diag_on_n; private double _diag_on_at = -1;   // diag_on().Count, refreshed once a second for the main window's line
     private bool _log_hello_done;
     private string _native_version = "?";
     private double _log_size_at; private long _log_size = -1;   // the Debug line's file size, read once a second
@@ -69,12 +70,16 @@ public sealed unsafe partial class FFXVRModule {
         _logger.Info($"FFX VR {s_mod_version}, native {_native_version}; diagnostics on: {(on.Count > 0 ? string.Join(", ", on) : "none")}");
     }
 
+    /// <summary>The session log's cap: 64 MB while any diagnostic is on (they are the big writers), else 4 MB.</summary>
+    private int log_cap_mb() => diag_on().Count > 0 ? k_log_cap_verbose_mb : k_log_cap_mb;
+
     /// <summary>From push_all, every frame: diag_verbose and the cap, sent only when they change.</summary>
     private void log_push() {
-        int want = _diag_verbose ? 1 : 0;
-        if (_fn_log_config == null || want == _log_pushed) return;
-        _log_pushed = want;
-        _fn_log_config(want, _diag_verbose ? k_log_cap_verbose_mb : k_log_cap_mb);
+        if (_fn_log_config == null) return;
+        int cap = log_cap_mb(), v = _diag_verbose ? 1 : 0, key = v | (cap << 1);
+        if (key == _log_pushed) return;
+        _log_pushed = key;
+        _fn_log_config(v, cap);
     }
 
     /// <summary>Once, at the first ready frame: the head of this session's ffxvr_diag.log (after the native build line).</summary>
@@ -83,13 +88,14 @@ public sealed unsafe partial class FFXVRModule {
         _log_hello_done = true;
         var on = diag_on();
         d7_log(I($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version} | .NET {Environment.Version} | Windows {Environment.OSVersion.Version}"));
-        d7_log(I($"settings: {(_ini_len_seen < 0 ? "no ffxvr.ini yet (defaults)" : I($"ffxvr.ini, {_ini_loaded_keys} keys, rev {_ini_rev_read}"))} | headset_autostart {(_headset_autostart ? 1 : 0)}, start_view {_start_view} | diagnostics on: {(on.Count > 0 ? string.Join(", ", on) : "none")} | log cap {(_diag_verbose ? k_log_cap_verbose_mb : k_log_cap_mb)} MB"));
+        d7_log(I($"settings: {(_ini_loaded_keys == 0 ? "no ffxvr.ini at start (defaults)" : I($"ffxvr.ini, {_ini_loaded_keys} keys, rev {_ini_rev_read}"))} | headset_autostart {(_headset_autostart ? 1 : 0)}, start_view {_start_view} | diagnostics on: {(on.Count > 0 ? string.Join(", ", on) : "none")} | log cap {log_cap_mb()} MB"));
     }
 
     /// <summary>The main window's last line: the version, and a reminder while diagnostics are on.</summary>
     private void log_main_ui() {
         ImGui.TextDisabled(esc($"FFX VR {s_mod_version}   native {_native_version}"));
-        int n = diag_on().Count;
+        if (_now >= _diag_on_at) { _diag_on_at = _now + 1.0; _diag_on_n = diag_on().Count; }   // once a second, not a list every frame
+        int n = _diag_on_n;
         if (n > 0) { ImGui.SameLine(); ImGui.TextDisabled(I($"| diagnostics: {n} on (Debug)")); }
     }
 
@@ -103,12 +109,12 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.PopStyleColor(1);
         }
         else ImGui.TextDisabled("diagnostics: all off (the release default; tools\\set-logging.ps1 -Profile Dev turns the developer's set on)");
-        ImGui.Checkbox("verbose log (diag_verbose): the periodic summaries in ffxvr_diag.log, the camera trace, Ctrl+F9 dumps; log cap 64 MB instead of 4", ref _diag_verbose);
+        ImGui.Checkbox("verbose log (diag_verbose): the periodic summaries in ffxvr_diag.log, the camera trace, Ctrl+F9 dumps (any diagnostic on: log cap 64 MB instead of 4)", ref _diag_verbose);
         if (_now >= _log_size_at) {
             _log_size_at = _now + 1.0;
             try { var fi = new FileInfo(Path.Combine(Path.GetDirectoryName(_ini_path) ?? ".", "ffxvr_diag.log")); _log_size = fi.Exists ? fi.Length : -1; } catch { _log_size = -1; }
         }
         ImGui.TextDisabled(_log_size < 0 ? "ffxvr_diag.log: not written yet this session"
-                                         : I($"ffxvr_diag.log: {_log_size / 1024} KB this session (cap {(_diag_verbose ? k_log_cap_verbose_mb : k_log_cap_mb)} MB; the previous session is ffxvr_diag.prev.log)"));
+                                         : I($"ffxvr_diag.log: {_log_size / 1024} KB this session (cap {log_cap_mb()} MB; the previous session is ffxvr_diag.prev.log)"));
     }
 }

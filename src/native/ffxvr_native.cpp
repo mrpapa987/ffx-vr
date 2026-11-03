@@ -6186,7 +6186,7 @@ extern "C" __declspec(dllexport) int ffxvr_override_mask()    { return static_ca
 // The session log (release prep). ffxvr_diag.log starts fresh every session: the first write of the process moves the
 // previous session's file to ffxvr_diag.prev.log (one generation, for a crash report after a restart) and starts the new
 // one with the build line. Every append checks the file's size against the session cap (g_log_cap_mb: 4 MB, 64 MB with
-// diag_verbose=1, from ffxvr_log_config); past it, one last line says so and the rest of the session writes nothing.
+// any diagnostic on, from ffxvr_log_config); past it, one last line says so and the rest of the session writes nothing.
 // States: 0 not started this session, 1 being started (another thread's line is dropped meanwhile), 2 open, 3 capped.
 static volatile LONG g_log_state = 0;
 /// One append's file, or nullptr. *drop: true when the line is to be discarded (capped, the file being started), false
@@ -6201,12 +6201,22 @@ static FILE* diag_open_ex(bool* drop) {
         if (InterlockedCompareExchange(&g_log_state, 1, 0) != 0) { *drop = true; return nullptr; }
         wchar_t prev[MAX_PATH];
         _snwprintf_s(prev, _TRUNCATE, L"%s\\ffxvr_diag.prev.log", g_dir);
-        MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING);   // no log yet (or held open elsewhere): nothing moved, the "w" below starts it
+        // The move keeps the last session for a crash report. A read-only ffxvr_diag.prev.log (copied back from a zip) is
+        // cleared and the move tried once more; if it still fails (the log held open without delete sharing), this session is
+        // appended after the old one rather than truncating it.
+        bool moved = MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING) != 0;
+        const DWORD me = moved ? 0 : GetLastError();
+        if (!moved && me != ERROR_FILE_NOT_FOUND && me != ERROR_PATH_NOT_FOUND) {
+            SetFileAttributesW(prev, FILE_ATTRIBUTE_NORMAL);
+            moved = MoveFileExW(path, prev, MOVEFILE_REPLACE_EXISTING) != 0;
+        }
+        const bool keep_old = !moved && me != ERROR_FILE_NOT_FOUND && me != ERROR_PATH_NOT_FOUND;
         FILE* h = nullptr;
-        if (_wfopen_s(&h, path, L"w") == 0 && h) {
+        if (_wfopen_s(&h, path, keep_old ? L"a" : L"w") == 0 && h) {
             SYSTEMTIME t = {}; GetLocalTime(&t);
-            fprintf(h, "FFX VR native %s | log started %04u-%02u-%02u %02u:%02u:%02u | the previous session's log is ffxvr_diag.prev.log\n",
-                    k_build_info, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+            fprintf(h, "%sFFX VR native %s | log started %04u-%02u-%02u %02u:%02u:%02u | %s\n", keep_old ? "\n" : "",
+                    k_build_info, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+                    keep_old ? "ffxvr_diag.prev.log could not be replaced: appended after the previous session" : "the previous session's log is ffxvr_diag.prev.log");
             fclose(h);
         }
         InterlockedExchange(&g_log_state, 2);
@@ -6219,6 +6229,9 @@ static FILE* diag_open_ex(bool* drop) {
         if (GetCurrentThreadId() == g_render_tid) return nullptr;
         for (int k = 0; k < 3 && f == nullptr; ++k) { Sleep(1); if (_wfopen_s(&f, path, L"a") != 0) f = nullptr; }
     }
+    // An "a" stream's position is 0 until its first write reaches the file (the CRT seeks to the end then): without this
+    // seek, diag_close's ftell would be the buffered line's length, never the file's size, and the cap would not fire.
+    if (f) fseek(f, 0, SEEK_END);
     return f;
 }
 static FILE* diag_open() { bool drop = false; return diag_open_ex(&drop); }
@@ -6227,7 +6240,7 @@ static void diag_close(FILE* f) {
     if (f == nullptr) return;
     const long cap = static_cast<long>(g_log_cap_mb) * 1048576L;
     if (ftell(f) > cap && InterlockedCompareExchange(&g_log_state, 3, 2) == 2)
-        fprintf(f, "log: this session's cap of %ld MB is reached; nothing more is written to ffxvr_diag.log until the next start (diag_verbose=1 raises the cap to 64 MB)\n",
+        fprintf(f, "log: this session's cap of %ld MB is reached; nothing more is written to ffxvr_diag.log until the next start (any diagnostic on, e.g. diag_verbose=1, raises the cap to 64 MB)\n",
                 static_cast<long>(g_log_cap_mb));
     fclose(f);
 }
@@ -10668,11 +10681,18 @@ static void sr_present() {
     SrStats& S = g_sr_s;
     g_sr_rate_extras = S.extras / secs; g_sr_rate_skipped = S.skipped / secs;
     g_sr_rate_yaw = S.rot ? S.yaw_sum / S.rot : 0.0; g_sr_rate_delay_max = S.delay_max;
+    static int s_sr_windows = 0; static char s_sr_why[96] = "";   // the default (non-verbose) sr: lines, per headset session
+    if (!(want && g_xr_want && xr_active())) { s_sr_windows = 0; s_sr_why[0] = 0; }
     if (want && g_xr_want && xr_active()) {
         double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
         const char* why = sr_not_armed_why();
         const uint32_t ne = S.extras ? S.extras : 1;
-        diagv("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
+        // Every 10 s with diag_verbose=1. Without it (release prep): the second window of each headset session (10-20 s in,
+        // settled) and whenever the not-active reason changes, so a stick-ghosting report has the numbers by default.
+        const bool why_changed = strcmp(why, s_sr_why) != 0;
+        if (why_changed) strncpy_s(s_sr_why, why, _TRUNCATE);
+        const bool log_it = g_log_verbose || ++s_sr_windows == 2 || why_changed;
+        if (log_it) diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
              "yaw per extra avg %.2f max %.2f deg (rotating %u%%, clamped %u) | extra cpu avg %.2f max %.2f ms (end %.2f, wait %.2f, begin+locate %.2f), lock busy %u, re-acquire max %.1f ms, gate skips %u (overridden %u) | "
              "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s",
              secs, g_sr_mode, g_sr_keepalive ? " + keepalive" : "", *why ? " (NOT ACTIVE)" : "", pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? ", half rate: VD spacewarp (SSW) active" : "",

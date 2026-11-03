@@ -142,7 +142,8 @@ public sealed unsafe partial class FFXVRModule {
                         + "(first person and the seat; with 'all views' also third person and the diorama, where the turn's pivot is the player and "
                         + "the result is approximate). The same extra frames keep the headset fed while the game loads (the stick stops a few degrees "
                         + "past the held frame). Screens, the stereo screen, the save screen and the glass break are held unturned. Test with Virtual "
-                        + "Desktop at 120 Hz and SSW Disabled: the sr: line every 10 s in ffxvr_diag.log has the numbers.");
+                        + "Desktop at 120 Hz and SSW Disabled: the sr: line in ffxvr_diag.log has the numbers (once per headset session, and every 10 s with "
+                        + "the verbose log, diag_verbose, at the top of Debug).");
         ImGui.Text("stick_reproject:"); ImGui.SameLine();
         ImGui.RadioButton("off##srd", ref _stick_reproject, 0); ImGui.SameLine();
         ImGui.RadioButton("first person + seat (default)##srd", ref _stick_reproject, 1); ImGui.SameLine();
