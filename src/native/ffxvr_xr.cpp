@@ -153,6 +153,8 @@ XrActionSet g_aset = XR_NULL_HANDLE;
 XrAction g_a_stick = XR_NULL_HANDLE, g_a_stick_click = XR_NULL_HANDLE, g_a_primary = XR_NULL_HANDLE, g_a_secondary = XR_NULL_HANDLE;
 XrAction g_a_trigger = XR_NULL_HANDLE, g_a_squeeze = XR_NULL_HANDLE, g_a_menu = XR_NULL_HANDLE;
 XrAction g_a_grip = XR_NULL_HANDLE, g_a_aim = XR_NULL_HANDLE, g_a_haptic = XR_NULL_HANDLE;
+XrAction g_a_trig_touch = XR_NULL_HANDLE, g_a_thumb_stick = XR_NULL_HANDLE, g_a_thumb_rest = XR_NULL_HANDLE, g_a_thumb_face = XR_NULL_HANDLE;   // VR hands v2 (S2): optional
+bool     g_touch_bound = false;                             // the Touch bindings were accepted with the touch inputs
 XrPath   g_hand_path[2] = {};
 XrSpace  g_grip_space[2] = {}, g_aim_space[2] = {};
 bool     g_input_ok = false, g_input_attached = false;
@@ -190,6 +192,11 @@ bool input_create() {
     ok &= make_action(g_a_aim,         "aim_pose",         "Aim pose",          XR_ACTION_TYPE_POSE_INPUT);
     ok &= make_action(g_a_haptic,      "haptic",           "Haptic",            XR_ACTION_TYPE_VIBRATION_OUTPUT);
     if (!ok) return false;
+    // VR hands v2 (S2): the touch sensors drive the fingers. Optional: input works without them.
+    bool touch_ok = make_action(g_a_trig_touch, "trigger_touch", "Trigger touch", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    touch_ok &= make_action(g_a_thumb_stick, "thumb_stick", "Thumb on the stick", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    touch_ok &= make_action(g_a_thumb_rest,  "thumb_rest",  "Thumb on the thumbrest", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    touch_ok &= make_action(g_a_thumb_face,  "thumb_face",  "Thumb on the face buttons", XR_ACTION_TYPE_BOOLEAN_INPUT);
 
     struct B { XrAction a; const char* p; };
     // Touch controllers: the right controller's menu button is the system button and never delivered.
@@ -204,6 +211,13 @@ bool input_create() {
         { g_a_grip, "/user/hand/left/input/grip/pose" },            { g_a_grip, "/user/hand/right/input/grip/pose" },
         { g_a_aim, "/user/hand/left/input/aim/pose" },              { g_a_aim, "/user/hand/right/input/aim/pose" },
         { g_a_haptic, "/user/hand/left/output/haptic" },            { g_a_haptic, "/user/hand/right/output/haptic" },
+    };
+    const B touch_sensors[] = {   // VR hands v2 (S2; research hands-input.md 4.1); several bindings on one boolean action are ORed
+        { g_a_trig_touch, "/user/hand/left/input/trigger/touch" },     { g_a_trig_touch, "/user/hand/right/input/trigger/touch" },
+        { g_a_thumb_stick, "/user/hand/left/input/thumbstick/touch" }, { g_a_thumb_stick, "/user/hand/right/input/thumbstick/touch" },
+        { g_a_thumb_rest, "/user/hand/left/input/thumbrest/touch" },   { g_a_thumb_rest, "/user/hand/right/input/thumbrest/touch" },
+        { g_a_thumb_face, "/user/hand/left/input/x/touch" },           { g_a_thumb_face, "/user/hand/left/input/y/touch" },
+        { g_a_thumb_face, "/user/hand/right/input/a/touch" },          { g_a_thumb_face, "/user/hand/right/input/b/touch" },
     };
     const B simple[] = {
         { g_a_primary, "/user/hand/left/input/select/click" },      { g_a_primary, "/user/hand/right/input/select/click" },
@@ -221,7 +235,18 @@ bool input_create() {
         g_h.diag("xr: bindings for %s: %s (%u)", profile, XR_SUCCEEDED(rr) ? "ok" : res_str(rr), (unsigned)v.size());
         return XR_SUCCEEDED(rr);
     };
-    bool any = suggest("/interaction_profiles/oculus/touch_controller", touch, sizeof(touch) / sizeof(touch[0]));
+    // The Touch profile with the touch sensors first; a runtime that refuses any of them gets the old set (the whole
+    // suggestion fails on one unsupported path), so the controls never depend on the hands.
+    bool any = false;
+    if (touch_ok) {
+        std::vector<B> all(touch, touch + sizeof(touch) / sizeof(touch[0]));
+        all.insert(all.end(), touch_sensors, touch_sensors + sizeof(touch_sensors) / sizeof(touch_sensors[0]));
+        any = g_touch_bound = suggest("/interaction_profiles/oculus/touch_controller", all.data(), all.size());
+    }
+    if (!any) {
+        if (touch_ok) g_h.diag("xr: the Touch bindings with the touch sensors were refused; bound without them (VR hands: the fingers follow trigger and grip only)");
+        any = suggest("/interaction_profiles/oculus/touch_controller", touch, sizeof(touch) / sizeof(touch[0]));
+    }
     any |= suggest("/interaction_profiles/khr/simple_controller", simple, sizeof(simple) / sizeof(simple[0]));
     return any;
 }
@@ -252,6 +277,7 @@ void input_destroy() {
     if (g_aset != XR_NULL_HANDLE && p_xrDestroyActionSet) p_xrDestroyActionSet(g_aset);   // destroys its actions
     g_aset = XR_NULL_HANDLE;
     g_a_stick = g_a_stick_click = g_a_primary = g_a_secondary = g_a_trigger = g_a_squeeze = g_a_menu = g_a_grip = g_a_aim = g_a_haptic = XR_NULL_HANDLE;
+    g_a_trig_touch = g_a_thumb_stick = g_a_thumb_rest = g_a_thumb_face = XR_NULL_HANDLE; g_touch_bound = false;
     g_input_ok = g_input_attached = false; g_input = {};
 }
 
@@ -263,7 +289,7 @@ void input_sync(XrTime t) {
     XrResult r = p_xrSyncActions(g_session, &si);
     if (r == XR_SESSION_NOT_FOCUSED) { g_input.ready = false; return; }     // another app has the controllers (the Quest home, say)
     if (XR_FAILED(r)) { if (++g_sync_fail <= 3) g_h.diag("xr: xrSyncActions: %s", res_str(r)); g_input.ready = false; return; }
-    g_input.ready = true;
+    g_input.ready = true; g_input.time = static_cast<int64_t>(t); g_input.touch = g_touch_bound;
     for (int h = 0; h < 2; ++h) {
         XrHand& hd = g_input.hand[h];
         XrActionStateGetInfo gi = { XR_TYPE_ACTION_STATE_GET_INFO }; gi.subactionPath = g_hand_path[h];
@@ -274,6 +300,8 @@ void input_sync(XrTime t) {
         bool active = v2.isActive == XR_TRUE;
         active |= getb(g_a_stick_click, hd.stick_click); active |= getb(g_a_primary, hd.primary); active |= getb(g_a_secondary, hd.secondary);
         active |= getf(g_a_trigger, hd.trigger); active |= getf(g_a_squeeze, hd.squeeze); getb(g_a_menu, hd.menu);
+        hd.trigger_touch = hd.thumb_stick = hd.thumb_rest = hd.thumb_face = false;   // VR hands v2: the touch sensors (not part of "active")
+        if (g_touch_bound) { getb(g_a_trig_touch, hd.trigger_touch); getb(g_a_thumb_stick, hd.thumb_stick); getb(g_a_thumb_rest, hd.thumb_rest); getb(g_a_thumb_face, hd.thumb_face); }
         XrActionStatePose ps = { XR_TYPE_ACTION_STATE_POSE }; gi.action = g_a_grip;
         const bool grip_active = XR_SUCCEEDED(p_xrGetActionStatePose(g_session, &gi, &ps)) && ps.isActive;
         active |= grip_active;

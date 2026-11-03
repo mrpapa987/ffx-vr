@@ -78,8 +78,12 @@ struct XrHand {
     bool  menu;                                             // left controller's menu button (the right one's is the system button)
     bool  grip_valid; float grip_q[4], grip_p[3];           // grip pose in the reference space (orientation x,y,z,w; metres)
     bool  aim_valid;  float aim_q[4],  aim_p[3];            // aim pose (the pointing ray)
+    // VR hands v2 (S2): the capacitive touch sensors of the Touch controllers (oculus/touch_controller only; false elsewhere)
+    bool  trigger_touch;                                    // the index finger on the trigger
+    bool  thumb_stick, thumb_rest, thumb_face;              // the thumb on the stick / on the thumbrest / on A-B (right) or X-Y (left)
 };
-struct XrInput { bool ready; XrHand hand[2]; char profile[2][64]; };   // 0 left, 1 right; profile: the bound interaction profile per hand
+struct XrInput { bool ready; XrHand hand[2]; char profile[2][64]; int64_t time; bool touch; };   // 0 left, 1 right; profile: the bound interaction profile per hand;
+                                                            // time: the XrTime the poses were located at (predictedDisplayTime); touch: the touch actions are bound
 void        xr_input_get(XrInput* out);                     // copies the state synced at the last xr_frame
 void        xr_haptic(int hand, float amplitude, float seconds);   // 0 left, 1 right
 void        xr_haptic_stop(int hand);                              // rumble to haptics: stop a running pulse (xrStopHapticFeedback)
