@@ -3155,3 +3155,47 @@ markers pass (ffxvr_native.cpp), `src/native/ffxvr_hands.cpp/.h` (CPU only), man
   placed relative to the eye.
 - **Not done in S1**: the old bone hands stay as they are (retired in S2, spec section 4); no A/B of the alpha the hands
   write into the scene target (review N6).
+
+## VR hands v2, stage S2: the generic hand, controller-driven fingers, the diorama (branch `hands-s2`, 3 Nov 2026)
+
+Spec: research/hands-v2-spec.md S2 (session scratchpad), with the owner's decisions, which win: hands only with the body
+hidden in first person (no "show my body"), no optical hand tracking, off by default, and **a setting to show the hands in
+the diorama too** ("to give our hands some context when adjusting the view"). ABI 28.
+
+- **Packs.** `assets/hands/generic-glove` (dark glove, the default look) and `assets/hands/generic` (skin mannequin), each
+  `hand.json` + `right.glb` (the left hand is the X mirror), written by `tools/hands/make-generic-hand.py` (ours, MIT; the
+  committed glb is what ships). Deployed to `<mod>\hands\<name>\` by build-mod / install-mod; package-release copies only
+  these two (an allowlist) and fails on anything else under `hands\` or anything marked private. The managed side names the
+  file (`vr_hands_pack`, the other shipped pack as the fallback, else none); hand.json is not parsed yet (S3).
+- **Loader** (`ffxvr_hands.cpp`, CPU only): cgltf 1.15 (vendored, `third_party/cgltf`, MIT) from memory; glb with its embedded
+  buffer and images only; joints by name (also `XR_HAND_JOINT_*_EXT`); palm rebuilt if missing; rigid binds only; weights to
+  unorm8; <= 65535 vertices; textures via WIC on the worker thread (<= 2048 px, else the base colour). Native reads the file
+  on a worker thread (CreateThread, one at a time) and uploads at Present (immutable buffers, CPU mips); a failure is logged
+  and the S1 boxes are drawn. Tested in the container: both committed glbs load; 3000 corrupted copies under ASan/UBSan fail
+  cleanly.
+- **Skinning on the GPU** in our pass: VS b1 holds a 26-joint palette per hand (3 float4 rows each); one DrawIndexed per hand
+  per texture batch per eye. The palette puts the pack's palm joint on S1's hand frame (Default / Cal, Trim, PackFix), scaled
+  about it (`vr_hands_scale` x the pack's scale), then `w = P + Rb^T (sc r + mv')` as the boxes. No culling (as S1).
+- **Fingers** (hands-input 4.1-4.3): four new actions on `oculus/touch_controller` (trigger, thumbstick, thumbrest, A-B / X-Y
+  touch; optional: refused bindings fall back to the old set). Index = lerp(0, 0.3 + 0.7 trigger, trigger touch); middle /
+  ring / little = rest + (1 - rest) squeeze (ring ^0.85, little ^0.7; `vr_hands_rest_curl` 0.20); thumb = the 2x2 blend of
+  FREE / UP / ON / WRAP by thumb touch and squeeze (ON nudged for the face buttons / thumbrest). MCP 8..80, PIP 10..100, DIP
+  5..70 deg, splay and cupping as the research; the thumb's key poses were tuned on the generic hand from rendered previews.
+  Smoothing on the display clock (touch on 35 ms, off 70 ms; values 15 ms). A controller still for 10 s (< 5 mm, < 2 deg)
+  with nothing touched hides its hand until it moves or is touched.
+- **Views** (`vr_hands_views`, bits): first person always; 2 the diorama, 4 third person, 8 the seat view (default 1). The
+  placement needs nothing new: sc is the view's units per metre (11.4 in first and third person, `world_scale` x the grab
+  zoom in the diorama and the seat), and the eye is placed with the same sc and mv', so a hand is exactly where and as big as
+  your real hand relative to your eye: life-size to you, giant beside the miniature (a 0.19 m hand is 2.2 units in first
+  person, about 18-23 units in the diorama). Unit-tested: the palm relative to the eye in real metres equals the real
+  controller offset to 1e-6 m in both. The depth test is the scene's, so a hand pushed into the miniature goes behind its
+  ground and walls; the near plane (1 unit) is about 1 cm in the diorama. The one addition: the diorama / third-person floor
+  lifts the eye (`g_hb_dy`, published by build_override_view) and the hands are lifted with it. The body rule applies only
+  in first person (Tidus is part of the scene in the others).
+- **Logging.** Events: `hands: pack 'generic-glove' loaded: right 1072 v / 2024 t, 2 prims (1 batch), left mirrored, ...`,
+  `hands: pack 'x' rejected: right.glb: joint 'thumb_tip' missing -> boxes`, `hands: views now first person + diorama`,
+  `hands: first drawn in the diorama at frame N | 122.20 units/m ...`, `hands: right controller put down ...` (first per
+  hand). The 10 s line adds `| mesh 'generic-glove' 2144 v | views ...: drawn fp N dio N tp N seat N | fingers L t i m R t i m
+  | put down L N R N`. Debug bit 2 draws the boxes instead of the mesh.
+- **Not done in S2:** the retire commit of the old bone hands (spec section 4; the spec puts it after S2 passes in the
+  headset); hand.json parsing and user packs (S3); the game's lights (S4).

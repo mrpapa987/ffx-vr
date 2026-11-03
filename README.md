@@ -141,6 +141,7 @@ This mod only works because of other people's projects:
     src/managed/   C# Fahrenheit module: camera hook, mode detection, settings, the F8 overlay
     src/native/    C++ DLL: D3D11 hooks, OpenXR session, per-eye render, UI panels
     tools/         Build, install and diagnostic scripts
+    assets/hands/  The generic VR hand packs (ours, MIT; regenerate with python tools/hands/make-generic-hand.py)
     packaging/     The release zip's installer and README
     docs/          Design notes
 
