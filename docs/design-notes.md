@@ -3495,6 +3495,15 @@ you're facing**. ABI 31.
   talking, B4b the lean-in reach, B6 drops, B7 raises, B8 sweeps went from judged 0 to reported; the grid's "not a tap" class
   is now distance / speed only.
 
+### Owner's third headset round (20f6a1f, 3 Nov 2026): accepted
+
+"This seems to work much better, I have no complaints with how it works so far." The log: 8 taps (both hands, pushes of
+52-71 mm in 67-100 ms at sensitivity 2.00 = a 50 mm push, 7-56 deg off forward), every armed push while a text box was up
+blocked (`gate shut (a text box)`), nothing fired on the save screen. **Not yet seen in play: a Yes/No choice box** (owner
+test step 6b). The gate is expected to hold there (the text-box bank or the game's waiting bit), but if a push ever picks a
+highlighted answer, untick "tap to press action" and look at the `text boxes:` readout on that prompt. The owner chose to
+merge and come back to it if it shows up. Default sensitivity stays 1.00 (100 mm) until he says whether 2.00 is his pick.
+
 ## Hands: ideas parked (3 Nov 2026)
 
 The owner: "I think much more could get difficult ... just take a note of the other ideas for now". One line each, with
