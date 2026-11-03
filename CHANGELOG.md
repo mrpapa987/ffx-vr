@@ -40,7 +40,9 @@ recommended.
   the diorama, third person and the seat view), depth-tested in both eyes, fingers following the trigger, grip and
   touch sensors. F8 > VR hands > **hand model** picks the look: our generic dark glove or bare hand (MIT), or a pack
   you make from a model you own with `tools\import-hands.ps1` (Python 3 + numpy). Such a pack is marked private and
-  stays on your PC; the mod's tools never package, copy or delete it.
+  stays on your PC; the mod's tools never package, copy or delete it. With VR hands on, **tap to press action**: point
+  (grip held, index finger off the trigger) and jab forward to press confirm (talk, examine, open) in the field in first
+  person; never in battle, menus, the sphere grid or the save screen, nor (unless you tick it) while a text box is up.
 - **Small logs by default**: one `ffxvr_diag.log` per session, at most 4 MB; the diagnostics for bug
   hunting are off; `tools\set-logging.ps1 -Profile Verbose` turns on a fuller log for a bug report, and
   `-Profile Release` turns it off again.

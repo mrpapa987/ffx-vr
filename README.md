@@ -98,6 +98,13 @@ F8 > **VR hands (experimental)** > tick **VR hands** draws a pair of hands at yo
 if you tick them, in the diorama, third person and the seat view). The fingers follow the trigger, the grip and the
 touch sensors. It is off by default while it is being tested.
 
+**Tap to press action** (F8 > VR hands > gestures, on with VR hands): make a pointing hand (hold the grip, index finger
+off the trigger) and jab the fingertip about 10 cm forward, then stop, as if pressing a button in the air: it presses
+confirm (A: talk, examine, open) with a short tick on that controller. Only in first person in the field: never in
+battle, a menu, the sphere grid, the save screen, a movie or blitzball, while you turn with the stick or move your head
+fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** makes a slower jab
+count (2.0: about half the speed) or only a sharper one (0.5).
+
 **hand model** lists every pack in the mod folder's `hands\` folder: the two that ship with the mod (our own generic
 hand, MIT: a dark glove and a bare hand) and any you make yourself. **rescan** reads the folder again after you add one.
 
@@ -113,7 +120,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "D:\models\My 
 It writes `<game>\fahrenheit\mods\ffxvr\hands\mine\`. In game: F8 > VR hands > hand model > **rescan**, pick it.
 If a hand looks wrong: `-CutRight 0.095` / `-CutLeft` move the wrist cut, `-FlipRight` / `-FlipLeft` swap a palm and
 back, `-Only right` mirrors one hand, `-Tip "x,y,z"` picks a hand by hand, `-DebugImages` shows what it found,
-`-Preview preview.png` renders the poses into the pack folder (the script's header lists everything). Both hands are
+`-Preview preview.png` renders the poses into the pack folder (the script's header lists everything). A pack made
+before 3 Nov 2026 (hands-tap) may show a gap between two fingers in a fist: run the importer again (it now places the
+knuckles evenly). Both hands are
 made 0.19 m from wrist to middle fingertip (`-HandLength`; `-KeepProportions` keeps the model's own wrists). `hand.json` in the pack folder holds the per-pack fit (`wrist_offset_m`,
 `wrist_rotation_deg`, `scale`, `tint`, `rest_curl`; see `src/managed/hand_pack.cs`).
 

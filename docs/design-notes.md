@@ -3267,3 +3267,105 @@ fingers". ABI 29.
   rig, N5 face / thumbrest holds exclusive, N6 `-OutDir` / `-Preview` trailing `\` trimmed and `"` refused in `-Title`,
   N7 no trailing space or dot in a name, N9 an OSError is an `error:` line. Skipped: N8 (a rescan with the selection still
   broken reloads the fallback pack once: harmless, about 1 ms).
+
+## Hands: the tap gesture, and the fist fix (branch `hands-tap`, 3 Nov 2026)
+
+The owner: "let's start with the tap. I think much more could get difficult". ABI 30. The first hand gesture that drives
+the game: a quick forward jab of a pointing hand presses confirm in the field.
+
+- **The button.** The game's Phyre pad poll (0x62DBA0) stores XInput A (0x1000) in the second of its PS2-order bytes
+  (+0x398 square = X 0x4000, **+0x399 cross = A**, +0x39A circle = B, +0x39B triangle = Y, then L1 R1 L2 R2 select start
+  L3 R3 and the d-pad); cross is confirm in the PC (international) build, and our VR pad maps the right controller's A
+  button to XInput A. So the tap ORs `XINPUT_GAMEPAD_A` into the VR pad's state (`vrpad_apply`, the game's input thread);
+  `vr_hands_tap_button` (ini only) can pick B / X / Y. The same poll **skips a state whose packet number did not change**
+  (`cmp ecx,[esi+0x3B4]; je`), so a press is held for `vr_hands_tap_press_ms` (100 ms, about 3 logic frames at 30 Hz)
+  **and** at least 3 new packets (our packet moves once a rendered frame), never past 400 ms; then the 400 ms cooldown keeps
+  it released long enough for the game to see the edge. Never stuck: the render thread lets it go at once when the tap or
+  the hands go off, the headset or the VR pad goes off, the session loses focus, a chord / grab starts
+  (`g_vrpad_suppress`, which also blanks it in the hook) or the view leaves first person, and after 500 ms regardless.
+- **The detector** (`hv_tap_update`, ffxvr_hands.cpp; pure, unit-tested): per hand, on the frames the hands are drawn
+  (hands_draw_frame), from the posed index fingertip (the pack's joint 10 through the pack's palm frame and scale; the
+  boxes: 10 cm along the hand) and the head, both in reference space at the latched display time. The fingertip's
+  velocity **relative to the head** (a lean or a step that carries the arm along is no jab) along the head's horizontal
+  forward: a jab starts above 0.35 m/s within ~45 deg of forward (cos 0.70; a poke a little down at a chest counts), ends
+  when the forward speed falls below 0.40 x its peak (the stop or the retraction), and is a tap if its peak (the mean of two
+  frames: noise halved) reached **0.70 m/s / sensitivity**, it travelled 3.5-45 cm forward, took 50-250 ms from the start
+  to the stop and at least 3 samples. Blocked at the start, and aborted during: the point pose not held 100 ms (fingers as
+  drawn: trigger touch faded below 0.15, trigger < 0.05, grip > 0.60), the gate shut, the right stick past half deflection
+  (turning), the head faster than 0.5 m/s or 100 deg/s, a raw speed over 5 m/s (a tracking jump). A blocked stroke is not
+  started later in the same stroke. A gap over 100 ms (a hidden frame, a menu) starts over.
+- **Why these numbers.** Quick pokes peak at 0.8-1.5 m/s (the brief; minimum-jerk strokes of 5-20 cm in 0.10-0.25 s give
+  0.9-3.7 m/s); a deliberate reach peaks at 0.3-0.7 m/s and lasts 0.5-1 s, so 0.70 m/s and 250 ms above 0.35 m/s sit in
+  the gap between them; 3.5 cm and 3 samples reject the one- or two-frame steps tracking makes when it re-finds a
+  controller (4-10 cm steps never fire in the test); 0.5 m/s of head speed is above a lean or a nod and below a jerk.
+- **The gate** (F8 shows which): VR hands drawn (that already excludes FMVs, menus and the save screen (screen frames),
+  loads, the stereo screen, painted backdrops, battle transitions, the dream filter, the frozen view, a controller put
+  down), first person (`g_hb_mode` 1), the touch sensors bound (without the trigger's touch a finger resting on it looks
+  pointed), the session focused, the VR pad on, no chord or grab; and managed's game gate every frame
+  (`ffxvr_hands2_tap_set`, stale after 3 frames): `Btl.battle_state != 0`, the sphere grid open (FhUtil 0x1685F70,
+  Fahrenheit `Globals.SphereGrid.is_open`), Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), a bltz
+  map, and **a text box**: any TOMesWinWork window of the current bank (FhUtil 0xF26D70 + (bank x 8 + i) x 0x2C, bank =
+  signed byte FhUtil 0xF26B82) with a non-zero state word at +0x14. The game's own per-frame loop (0x871F30) copies each
+  window's state there (4 = closed, written back as 0) and counts a window with a non-zero state and +0x1D bit 1 as one the
+  player waits on; our stricter reading counts any non-zero state. **Static only, not yet seen in play**: the F8 readout and
+  a `hands: tap gate (game): ...` line per change (with the windows' states and flags) are there to confirm it. Cutscenes
+  with no text box are not gated: confirm does nothing there (the game ignores it outside a text box), and a voiced line
+  is a text box.
+- **Dialogue: off by default** (`vr_hands_tap_dialogue`, "also advance dialogue"). A tap to advance text would be welcome
+  (the same button), but a choice box takes the highlighted answer at a confirm and we cannot yet tell a choice box from a
+  text box (perhaps +0x1D's other bits), and the text-box signal itself is unconfirmed; one tick turns it on.
+- **Default on** (`vr_hands_tap=1`) with VR hands, which are off by default anyway: the tap needs a deliberate pose and a
+  sharp jab, and it only acts where A would talk / examine / open; testing it is the point of the build.
+- **Feedback**: a 30 ms, 0.45 haptic tick on that hand (`hands_frame_end`, like calibration's; `vr_hands_tap_haptic`). No
+  fingertip flash: the hand's constant buffer is per eye and shared by both hands, so a per-hand tint is a shader change.
+- **Logging**: events always (`hands: tap R: A pressed (peak 1.12 m/s forward, 96 mm in 140 ms ...)`, `hands: tap: A let
+  go after 117 ms, seen in 7 new pad packets`, an early release with its reason, the first 30 near misses and jabs with the
+  gate shut, the game gate changes (200 a session), on / off); the 10 s `hands: tap |` line (taps, not-taps by reason,
+  blocked starts by reason, how often the gate was open) with diag_verbose only.
+- **The unit test** (scratchpad htapchk/tap_test.cpp, 44 cases, ASan + UBSan): single pokes of 3-30 cm in 0.10-0.70 s
+  (20 noisy trials each, 0.5 mm per sample, frame jitter): 0 / 320 meant taps missed, 0 / 520 non-taps fired at
+  sensitivity 1; at 30 / 72 / 90 / 120 Hz; up, down, 30 deg aside fire, 45 deg aside, sideways swings, chops and pulls do
+  not; a lean, a head jerk, a fast head turn (also with a poke during it), walking in place, sweeping the pointing hand do
+  not; slow reaches, a gentle nudge, a 60 cm thrust do not, a fast 40 cm punch does; the stick turning, the gate shut or
+  shutting mid-jab, an open hand, the pose changing mid-jab or formed 40 ms before do not, formed 150 ms before does;
+  pokes every 0.25 / 0.35 s fire every other one (the cooldown), every 0.5 / 0.8 s all six; tracking steps of 4-10 cm,
+  tracking lost mid-jab, holding still with 2 mm noise do not. The known false positive: a vigorous forward-back shake of
+  the pointing hand (8 cm at 2 Hz, 1 m/s) taps about every 0.5-1 s, as a deliberate jab would.
+- **The fist fix** (shared finger code, every pack). As a finger curls past 0.25 (smoothstepped to a full curl), its
+  bones turn sideways back onto the hand's long axis: `HvMesh::abd[f][3]`, measured at load about the wrist's +Y (the
+  proximal bone from the wrist's -Z, the intermediate and distal from their parent), applied as a yaw before each joint's
+  flexion, and the solver's own splay goes to 0 with it. The open hand, the idle curl and a point's index are unchanged.
+  Generic hand: the curled tips used to drift 5-7 mm toward the little finger (ring and little fanned 8 / 16 deg); now
+  within 2.5 mm. The owner's gap between middle and ring was mostly **the importer**: the Tidus right middle knuckle sat
+  12 mm from the index and 36 mm from the ring (its proximal bone 26 deg off, then 19 deg back), because each MCP was
+  extended back along the direction of the finger's first two centreline rings, which bend toward a neighbour at the web.
+  `import-hands.py` now extends along the line fitted through the whole centreline: knuckles 20 / 23 / 21 mm apart (left
+  23 / 22 / 21), fist spacing 20-27 mm on both hands (was 12-41 mm). An existing pack needs the importer run again.
+
+## Hands: ideas parked (3 Nov 2026)
+
+The owner: "I think much more could get difficult ... just take a note of the other ideas for now". One line each, with
+the catch.
+
+- **Point at an enemy to target, tap to confirm in battle**: the battle's target cycling is camera-relative pad input
+  (0x780CE0's tables), so pointing needs a ray-to-combatant pick and a way to set the game's target directly; and a tap in
+  battle must never fire a command by accident (the reason the tap is gated out of battle now).
+- **A laser pointer into the F8 overlay**: ImGui would need our own mouse position from a hand ray against the head-locked
+  ImGui quad, and a click gesture that is not the game's confirm (or the overlay gets both).
+- **A haptic buzz when a hand touches scene geometry**: needs the scene depth at the hand's position each frame (a GPU
+  read-back of the depth target, a frame late), and the game's depth has no idea which surface is "touchable".
+- **Body gestures** (a hand over the shoulder = the menu, both hands to the face = recentre): reliable only with a body
+  model (shoulder and head positions from the head pose alone), and a reach behind the head loses controller tracking.
+- **Overdrive gestures** (Lulu's Fury as stick-like circles, Tidus's timing bar): each overdrive has its own input
+  routine and timing window; a gesture must feed the same pad input within the game's frames, and failing it costs a turn.
+- **Point-and-walk** (point where to go): the game walks by stick only; we would need the walkmesh (still not mapped:
+  Fahrenheit's Globals.Map pointers are commented out) to turn a pointed spot into stick input and stop there.
+- **Grabbing a sphere in the Cloister of Trials**: the game then shows a confirmation dialog ("Take the sphere?") that
+  would still need a click (a tap with "also advance dialogue" would do) or a way to skip it; and the grab itself must map
+  to the game's examine at the right pedestal.
+- **Importer: mesh subdivision / smoothing and local texture upscaling for low-res user models** (the owner: "the hands
+  are a little low res, but that's maybe just the nature of the files I sourced"): Loop subdivision with skin weights
+  carried over, and an offline upscaler (Python + a model on the owner's GPU, his preference for local compute); the
+  catch is the cost (more vertices skinned per frame is fine, but a 4x texture is 16x the memory in a 32-bit process) and
+  that smoothing rounds off the model's own silhouette.
+
