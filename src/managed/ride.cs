@@ -54,12 +54,30 @@ internal static class RideLogic {
         return "nothing matched and no actor 0: a party model hidden by the game";
     }
 
+    /// <summary>CR-1: the rider's root to use this frame (game space). A new rider actor (Tidus comes back in a fresh slot at the
+    /// mount) can be live a Present before the logic job built his root, so +0x200 can be about (0, 0, 0) or the previous
+    /// occupant's. built = td is not about zero and, with a known mount, within 60 units of it. Not built: the last good root
+    /// (same rider, same parent) if it is near the mount, else the mount's root; with neither, td (the caller then treats the
+    /// actor as not attached).</summary>
+    public static System.Numerics.Vector3 RiderRoot(System.Numerics.Vector3 td, bool mount_ok, System.Numerics.Vector3 mount,
+                                                    bool last_ok, System.Numerics.Vector3 last, out bool built) {
+        bool zero = System.MathF.Abs(td.X) + System.MathF.Abs(td.Y) + System.MathF.Abs(td.Z) < 0.01f;
+        built = !zero && (!mount_ok || System.Numerics.Vector3.Distance(td, mount) < 60f);
+        if (built) return td;
+        if (last_ok && (!mount_ok || System.Numerics.Vector3.Distance(last, mount) < 60f)) return last;
+        return mount_ok ? mount : td;
+    }
+
+    /// <summary>CR-2: bob smoothing only for the steered mount: the parent is actor 0 (the chocobo takes actor 0 and is steered,
+    /// the 3 Nov logs). Cutscene carries, lifts and throws attach the followed actor too and must follow the bone unfiltered.</summary>
+    public static bool SmoothApplies(int mode, float ms, bool mount_ok, int mount_idx) => mode > 0 && ms > 0f && mount_ok && mount_idx == 0;
+
     /// <summary>The eye base while riding (game space): the rider's drawn root with its offset from the mount's drawn root
     /// low-passed (mode 1: the height only, mode 2: all three axes), so the bird's running bob is filtered while the eye never
     /// trails the bird (the mount's root glides at the drawn rate). s / valid are the filter's state (x, y, z).</summary>
     public static System.Numerics.Vector3 EyeBase(System.Numerics.Vector3 rider, System.Numerics.Vector3 mount, int mode, float dt, float tau,
                                                   ref System.Numerics.Vector3 s, ref bool vx, ref bool vy, ref bool vz) {
-        const float snap = 20f;   // units: a jump of the offset this big is a re-seat, not a bob
+        const float snap = 6f;   // units (CR-2): three times a running bob (about +-2); a bigger jump is a re-seat or a scripted move: snap
         System.Numerics.Vector3 o = rider - mount, e = rider;
         if (mode >= 1) { s.Y = Lpf(s.Y, ref vy, o.Y, dt, tau, snap); e.Y = mount.Y + s.Y; } else vy = false;
         if (mode >= 2) { s.X = Lpf(s.X, ref vx, o.X, dt, tau, snap); s.Z = Lpf(s.Z, ref vz, o.Z, dt, tau, snap); e.X = mount.X + s.X; e.Z = mount.Z + s.Z; }
@@ -87,6 +105,10 @@ public sealed unsafe partial class FFXVRModule {
     private bool    _ride_was; private int _ride_log_rider = -1, _ride_log_mount = -1;   // what the last riding line was about
     private int     _ride_check_in = -1, _ride_mount_key = -1;       // frames until the one "riding check:" line after a mount
     private Vector3 _ride_s; private bool _ride_vx, _ride_vy, _ride_vz; private long _ride_t;
+    private bool    _ride_built;               // CR-1: this frame's rider root was built (else the last good one or the mount's)
+    private Vector3 _ride_last; private bool _ride_last_ok; private int _ride_last_rider = -1; private nint _ride_last_parent;   // the last good rider root
+    private int     _ride_unbuilt_n;           // frames with an unbuilt rider root (the riding check line)
+    private long    _ride_log_t;               // N1: the last riding line (at most one a second while riding)
 
     private bool ride_parse(string k, string v) {
         switch (k) {
@@ -117,13 +139,19 @@ public sealed unsafe partial class FFXVRModule {
         Vector3 td;
         if (!read(a + 0x200, out td) || !finite(td)) return false;   // no drawn root to use: keep +0x0C (as before)
         _fn_safe_read(a + 0x1A0, &bone, 4);
-        _ride_att = true; _ride_parent = par; _ride_rider = td; _ride_rider_idx = pick; _ride_bone = bone;
         int mi = RideLogic.ParentIndex((long)actors, (long)par, sizeof(Actor), 48, pick);
-        if (mi >= 0 && read(actors + mi, out Actor m) && live(m) && read((byte*)(actors + mi) + 0x200, out Vector3 mt) && finite(mt) && Vector3.Distance(mt, td) < 60f) {
-            _ride_mount_idx = mi; _ride_mount = mt; _ride_mount_ok = true;
+        bool mok = false; Vector3 mt = default;
+        if (mi >= 0 && read(actors + mi, out Actor m) && live(m) && read((byte*)(actors + mi) + 0x200, out mt) && finite(mt)) {
+            mok = true;
             int mk = (mi << 16) | m.chr_id;
             if (mk != _ride_mount_key) { _ride_mount_key = mk; _ride_mount_name = actor_name(m.chr_name); }   // R22: the name is read once per mount, not per frame
         }
+        bool last_ok = _ride_last_ok && _ride_last_rider == pick && _ride_last_parent == par;
+        Vector3 rr = RideLogic.RiderRoot(td, mok, mt, last_ok, _ride_last, out bool built);   // CR-1
+        if (!built && !mok && !last_ok) { _ride_last_ok = false; return false; }   // nothing to stand on: +0x0C as before, for this frame
+        _ride_att = true; _ride_parent = par; _ride_rider = rr; _ride_rider_idx = pick; _ride_bone = bone; _ride_built = built;
+        if (mok) { _ride_mount_idx = mi; _ride_mount = mt; _ride_mount_ok = true; }
+        if (built) { _ride_last = td; _ride_last_ok = true; _ride_last_rider = pick; _ride_last_parent = par; } else _ride_unbuilt_n++;
         return true;
     }
     private static bool finite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z) && MathF.Abs(v.X) < 1e5f && MathF.Abs(v.Y) < 1e5f && MathF.Abs(v.Z) < 1e5f;
@@ -134,7 +162,8 @@ public sealed unsafe partial class FFXVRModule {
         _ride_rider = pos;
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
         float dt = _ride_t != 0 ? (float)((now - _ride_t) / (double)System.Diagnostics.Stopwatch.Frequency) : 0f; _ride_t = now;
-        if (!_ride_mount_ok || _ride_smooth == 0 || _ride_smooth_ms <= 0f) { _ride_vx = _ride_vy = _ride_vz = false; return; }
+        if (_ride_built) _ride_last = pos;   // the last good root as used (the snapshot's when fresh)
+        if (!RideLogic.SmoothApplies(_ride_smooth, _ride_smooth_ms, _ride_mount_ok, _ride_mount_idx)) { _ride_vx = _ride_vy = _ride_vz = false; return; }   // CR-2
         Vector3 e = RideLogic.EyeBase(pos, _ride_mount, _ride_smooth, dt, _ride_smooth_ms * 0.001f, ref _ride_s, ref _ride_vx, ref _ride_vy, ref _ride_vz);
         Vector3 corr = e - pos;
         pos = e; head += corr;
@@ -144,21 +173,24 @@ public sealed unsafe partial class FFXVRModule {
     /// and once per change the status text and the riding line (nothing is formatted on the frames in between, R22).</summary>
     private void ride_push() {
         bool on = _ride_att;
-        if (!on) { _ride_vx = _ride_vy = _ride_vz = false; _ride_t = 0; }
+        if (!on) { _ride_vx = _ride_vy = _ride_vz = false; _ride_t = 0; _ride_last_ok = false; }
         int flags = on ? 1 | (_ride_mount_ok ? 2 : 0) | (_ride_hide_mount ? 4 : 0) : 0;
         if (_fn_ride_set != null)
             _ride_counts = _fn_ride_set(flags, -_ride_rider.X, -_ride_rider.Y, _ride_rider.Z, -_ride_mount.X, -_ride_mount.Y, _ride_mount.Z, _ride_hide_cap);
         if (on) {
             int mk = _ride_mount_ok ? _ride_mount_key : -1;
-            if (!_ride_was || _ride_rider_idx != _ride_log_rider || mk != _ride_log_mount) {
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            // N1: a new rider, or a new known mount (a mount check flickering to "unknown" is not a change); at most one line a second
+            bool change = !_ride_was || _ride_rider_idx != _ride_log_rider || (mk != -1 && mk != _ride_log_mount);
+            if (change && (!_ride_was || now - _ride_log_t >= System.Diagnostics.Stopwatch.Frequency)) {
                 string map = map_name();
-                _ride_was = true; _ride_log_rider = _ride_rider_idx; _ride_log_mount = mk; _ride_check_in = 90;
+                _ride_was = true; _ride_log_rider = _ride_rider_idx; _ride_log_mount = mk; _ride_check_in = 90; _ride_log_t = now;
                 Actor* actors = Globals.actors;
                 _ride_rider_name = actors != null && read(actors + _ride_rider_idx, out Actor ra) ? actor_name(ra.chr_name) : "?";
                 string mount = _ride_mount_ok ? $"'{_ride_mount_name}' (actor {_ride_mount_idx}, bone {_ride_bone})" : $"something outside the actor table (+0x19C {(uint)_ride_parent:X8})";
                 _ride_status = _ride_mount_ok ? $"riding: {_ride_mount_name} (actor {_ride_mount_idx})" : "attached (the parent is outside the actor table)";
                 _logger.Info($"riding: '{_ride_rider_name}' (actor {_ride_rider_idx}) is attached to {mount} on map {map}: the eyes use the rider's drawn root (+0x200), not +0x0C" +
-                             $" | rider root ({_ride_rider.X:F1}, {_ride_rider.Y:F1}, {_ride_rider.Z:F1})" + (_ride_mount_ok ? $" bird root ({_ride_mount.X:F1}, {_ride_mount.Y:F1}, {_ride_mount.Z:F1}), {_ride_mount.Y - _ride_rider.Y:F1} units above it" : "") +
+                             $" | rider root ({_ride_rider.X:F1}, {_ride_rider.Y:F1}, {_ride_rider.Z:F1}){(_ride_built ? "" : " (not built yet: the last good one or the bird's)")}" + (_ride_mount_ok ? $" bird root ({_ride_mount.X:F1}, {_ride_mount.Y:F1}, {_ride_mount.Z:F1}), {_ride_mount.Y - _ride_rider.Y:F1} units above it" : "") +
                              $" | bob smoothing {(_ride_smooth == 0 ? "off" : _ride_smooth == 1 ? "height" : "height + sideways")} {_ride_smooth_ms:F0} ms, hide the bird {(_ride_hide_mount ? "on" : "off")}, hide cap {_ride_hide_cap:F1}");
             }
             if (_ride_check_in > 0 && --_ride_check_in == 0) ride_check_log();
@@ -180,7 +212,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_world_positions == null) return;
         float* wp = stackalloc float[128 * 3]; int nwp = _fn_world_positions(wp, 128);
         _logger.Info($"riding check: map {map_name()} | nearest skinned draw to the rider's root {ride_nearest(wp, nwp, _ride_rider):F2} units" + (_ride_mount_ok ? $", to the bird's root {ride_nearest(wp, nwp, _ride_mount):F2}" : "") +
-                     $" (of {nwp}) | first person matched last frame: rider parts {_ride_counts & 0xFFFF}, bird parts {_ride_counts >> 16} ({(_ride_hide_mount ? "hidden" : "kept")})" +
+                     $" (of {nwp}) | frames with an unbuilt rider root so far {_ride_unbuilt_n} | first person matched last frame: rider parts {_ride_counts & 0xFFFF}, bird parts {_ride_counts >> 16} ({(_ride_hide_mount ? "hidden" : "kept")})" +
                      $" | view {(_fp_mode == 1 ? "first person" : _fp_mode == 3 ? "third person" : _fp_mode == 2 ? "diorama" : "seat")} | smooth anchor: {_sa_status}");
     }
 
@@ -193,7 +225,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("off##rs", ref _ride_smooth, 0); ImGui.SameLine();
         ImGui.RadioButton("height##rs", ref _ride_smooth, 1); ImGui.SameLine();
         ImGui.RadioButton("height + sideways##rs", ref _ride_smooth, 2); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("ms##rsms", ref _ride_smooth_ms, 0f, 500f, "%.0f");
+        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("ms##rsms", ref _ride_smooth_ms, 0f, 1000f, "%.0f");
         ImGui.Checkbox("first person: also hide the chocobo (if its head and neck are in the way)", ref _ride_hide_mount); ImGui.SameLine();
         ImGui.SetNextItemWidth(120); ImGui.SliderFloat("hide radius cap while riding", ref _ride_hide_cap, 0.5f, 12f, "%.1f");
     }

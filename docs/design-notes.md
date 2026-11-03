@@ -3582,6 +3582,7 @@ game knowledge, not captures: take an actor-table log, one image and a frame cen
   the eyes to the summoner: check only the scale), overdrives (above).
 - **Special screens:** the airship destination map and its coordinate search, the sphere grid (a 3D view), the Monster
   Arena menus.
+
 ## Chocobo rides: how the game does it, and first person on the bird (branch `chocobo`, 3 Nov 2026)
 
 The owner's first ride (Calm Lands, `na/nagi0000`): three actor-table dumps a few seconds apart while moving the bird, a frame
@@ -3624,14 +3625,30 @@ off. This answers the questions left open in "Chocobo rides, expected VR problem
   cut to about 40 %). Mode 2 also filters the sideways / fore-aft sway. 0 = off. It applies to every view that follows the
   player (first person, third person, the diorama: all anchor on ffxvr_player_set's position).
 - **Body hide**: ffxvr_ride_set (ABI 32) gives native the rider's drawn root (the hide centre, since player_set may now
-  carry the smoothed eye base) and the bird's. While riding the step margin is capped (`ride_hide_cap`, 3 units; at chocobo
-  speed `0.75 + 1.5 * step` reached about 10 units and NPCs beside the path), and a draw nearer the bird's root than the
+  carry the smoothed eye base) and the bird's. While riding the step margin is capped (`ride_hide_cap`, 3 units: the margin
+  `0.75 + 1.5 * step` grows with speed; the three dumps give the bird about 14-36 units/s, 0.25-0.6 units a Present, so the
+  cap is a guard for a fast sprint or a hitch, not a measured problem), and a draw nearer the bird's root than the
   rider's is the bird's and never hidden as the player's. The bird is drawn (you see its neck and back in front of you) unless
   "first person: also hide the chocobo" (`ride_hide_mount`) is on; its shadow then goes too with fp_self_shadow 0. The body
   modes (whole body hidden, head parts with the VR hands) apply to the rider as on foot.
+- **The mount moment, rider root (review CR-1)**: Tidus comes back in a fresh slot, and his +0x200 is written only by the
+  logic job, so the first Present can see about (0, 0, 0) or the previous occupant's root. A root that is about zero, or 60+
+  units from the bird's, is "not built": that frame uses the last good root (same rider, same parent) or the bird's root,
+  with no head (the eye is that root + eye height). The snapshot's root is also refused when it is more than 16 units from
+  the one read at Present (as SM-1 on foot), and is not mixed with a bird root read at Present (one source for the offset).
+  The riding check line counts the unbuilt frames.
+- **Which attachments are smoothed (CR-2)**: only a parent at actor 0, the steered bird. Cutscene carries, lifts and throws
+  attach the followed actor the same way and follow the bone unfiltered. The filter snaps when the offset jumps more than 6
+  units (three times a running bob of about +-2), not 20.
+- **The re-pick jump (N4)**: when the attached flag changes, ffxvr_ride_set zeroes the body-hide step margin, so the bird
+  -> rider and rider -> Tidus jumps do not widen the hide radius for two frames (that flashed the bird or an NPC beside Tidus).
+- **Logs (N1)**: the riding line is written for a new rider or a new known mount (a mount check dropping to "unknown" is not
+  a change), at most once a second.
 - **The mount moment**: a script-hidden party model now ranks after actor 0 (`RideLogic.FpScore`: 200000 + chr_id), so the
   second without `c001` follows the bird at actor 0 instead of jumping to Yuna at the origin. A visible follower still beats
-  actor 0; a hidden one is still taken when nothing else is live.
+  actor 0; a hidden one is still taken when nothing else is live. So, generally (FP-1 / FP-2 rule): a script-hidden party
+  model is now a last resort below actor 0, and as a score of 100000+ it is rescanned every frame, so an un-hidden one is
+  taken back at once.
 - **Logs**: once per change, `riding: 'c001' (actor 28) is attached to 'f051' (actor 0, bone N) on map ...` with both roots
   and the settings; 1.5 s later one `riding check:` line (nearest skinned draw to each root: the rider's should be about 0, so
   the hide matches; the counts the hide matched last frame); `riding: off` on dismount. The actor table has an `att` column
@@ -3646,4 +3663,5 @@ off. This answers the questions left open in "Chocobo rides, expected VR problem
 - The chocobo mini-games (Calm Lands training, the races) are untested: if they are ordinary field control the above holds;
   if they run scripted cameras, the seat view is the fallback.
 - The seat height while riding comes from the head bone (`fp_head_anchor` 1, the default). With `fp_head_anchor` 0 (fixed
-  eye height) the eye is the rider's root + 18, unsmoothed (the smoothing moves the head, which that mode ignores).
+  eye height) the eye is the rider's (smoothed) root + `fp_eye_height` (18). The rider's root is the seat, not the feet, so
+  that eye sits roughly a seat height above his head: keep the head-bone height for riding.

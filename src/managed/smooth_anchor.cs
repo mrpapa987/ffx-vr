@@ -43,6 +43,7 @@ public sealed unsafe partial class FFXVRModule {
         else if ((_r7j.flags & 2) != 0) why = "script matrix (+0x10C): the 30 Hz logic position";
         else if (((_r7j.flags & 1) != 0) != attached) why = attached ? "riding: the rider's drawn root read at Present (attached since the snapshot)" : "the attachment just ended: the 30 Hz logic position for a frame";
         else if (_sa_age < 0 || _sa_age > 2) why = attached ? "riding, snapshot too old: the rider's drawn root read at Present" : "snapshot too old: the 30 Hz logic position";   // (the age is shown separately)
+        else if (attached && !_ride_built) why = "riding: the rider's root is not built yet: the last good root or the bird's";   // CR-1
         else if (attached) {
             // The rider's drawn root at the post-join point is what this frame draws; his sub-positions are from the tick, so they
             // get the mount's interpolation d = drawn - (logic + chr_offset) (a non-attached bird: its root is +0x0C + +0x6C).
@@ -50,6 +51,8 @@ public sealed unsafe partial class FFXVRModule {
             bool pok = _r7j.pvalid != 0 && _r7j.parent == _ride_parent && finite(_r7j.ptd) && Vector3.Distance(_r7j.ptd, _r7j.td) < 60f;
             if (pok) { dm = _r7j.ptd - (_r7j.ppos + _r7j.poff); if (dm.LengthSquared() > k_sa_max_d * k_sa_max_d) { dm = default; _sa_rejects++; } }
             if (!finite(_r7j.td)) why = "riding: the snapshot's root is not a position: the rider's drawn root read at Present";
+            else if (Vector3.Distance(_r7j.td, pos) > k_sa_max_d) { _sa_rejects++; why = "riding: the snapshot's root is far from the one read at Present (not built then?): the Present one"; }   // CR-1, as SM-1
+            else if (_ride_mount_ok && !pok) why = "riding: the bird is missing from the snapshot: both roots read at Present";   // N6: one source for the offset
             else {
                 pos = _r7j.td;
                 if (_r7j.head_ok != 0) head = _r7j.head + dm; else have_head = false;   // SM-4

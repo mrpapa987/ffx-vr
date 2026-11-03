@@ -9676,7 +9676,12 @@ extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, fl
 /// Returns last frame's first-person matches: rider parts in the low 16 bits, mount parts in the high 16.
 extern "C" __declspec(dllexport) uint32_t ffxvr_ride_set(int flags, float rx, float ry, float rz, float mx, float my, float mz, float cap) {
     const bool ok = std::isfinite(rx) && std::isfinite(ry) && std::isfinite(rz) && std::isfinite(mx) && std::isfinite(my) && std::isfinite(mz);
-    g_ride_flags = ok ? (flags & 7) : 0;
+    const int nf = ok ? (flags & 7) : 0;
+    // N4: mounting and dismounting re-pick the followed actor (bird -> rider, rider -> Tidus on foot), a jump under the 50-unit warp
+    // rule that ffxvr_player_set (called just before) counted as a step: it would widen the hide radius for two frames and flash-hide
+    // the bird or an NPC beside Tidus. Not a step: the margin starts again from 0.
+    if ((nf & 1) != (g_ride_flags & 1)) { g_fp_step_hide = 0.f; g_fp_d_prev = 0.f; }
+    g_ride_flags = nf;
     g_ride_rider[0] = rx; g_ride_rider[1] = ry; g_ride_rider[2] = rz; g_ride_mount[0] = mx; g_ride_mount[1] = my; g_ride_mount[2] = mz;
     g_ride_cap = std::isfinite(cap) ? (cap < 0.5f ? 0.5f : cap > 12.f ? 12.f : cap) : 3.f;
     return g_ride_report;

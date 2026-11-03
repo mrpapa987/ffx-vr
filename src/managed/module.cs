@@ -2513,6 +2513,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
             bool att = !in_battle && ride_probe(actors, pick);
+            if (att && !_ride_built) have = false;   // CR-1: the rider's root is not built yet, nor his sub-positions: the eye is the stand-in root + eye height
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
             // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low).
             if (have && !att && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
