@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "name": "Generic hand",
+  "author": "FFX VR contributors",
+  "licence": "MIT",
+  "source": "tools/hands/make-generic-hand.py (procedural, no third-party art)",
+  "right": "right.glb",
+  "left": null,
+  "mirror": true,
+  "scale": 1.0,
+  "wrist_offset_m": [
+    0,
+    0,
+    0
+  ],
+  "wrist_rotation_deg": [
+    0,
+    0,
+    0
+  ]
+}
