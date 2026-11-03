@@ -9,7 +9,8 @@
 #       mod\ffxvr\             ffxvr.dll (+ deps/runtimeconfig/manifest json), ffxvr_native.dll,
 #                              openxr_loader.dll, hands\generic-glove\ and hands\generic\ (our generic hand packs, MIT:
 #                              an allowlist, tools\paths.ps1 $FfxvrHandPacks; a guard below fails on anything else there)
-#       tools\                 install-mod.ps1 (from packaging\), paths.ps1, run-ffx.ps1,
+#       tools\                 install-mod.ps1 (from packaging\), paths.ps1, run-ffx.ps1, import-hands.ps1 and
+#                              hands\{import-hands,objio,handlib,preview-pack}.py (VR hands: make a pack from your own model),
 #                              game-settings.ps1, import-steam-saves.ps1, export-save-to-steam.ps1,
 #                              install-texture-pack.ps1, set-logging.ps1
 #   dist\ffx-vr-<label>.zip.sha256
@@ -171,6 +172,20 @@ foreach ($f in 'paths.ps1', 'run-ffx.ps1', 'game-settings.ps1', 'import-steam-sa
     Copy-Item $p -Destination $toolsDst
 }
 Copy-Item (Join-Path $proj 'packaging\install-mod.ps1') -Destination $toolsDst
+# VR hands S3: the importer for a player's own model (the scripts only, by name: never a pack, a model or a cache).
+Copy-Item (Join-Path $PSScriptRoot 'import-hands.ps1') -Destination $toolsDst
+New-Item -ItemType Directory -Force -Path (Join-Path $toolsDst 'hands') | Out-Null
+foreach ($f in 'import-hands.py', 'objio.py', 'handlib.py', 'preview-pack.py') {
+    $p = Join-Path $PSScriptRoot "hands\$f"
+    if (-not (Test-Path -LiteralPath $p)) { Fail "tools\hands\$f is missing" }
+    Copy-Item -LiteralPath $p -Destination (Join-Path $toolsDst 'hands')
+}
+# Guard over the whole staged tree: no private marker anywhere, and no .glb outside the shipped hand packs.
+foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File)) {
+    $rel = $f.FullName.Substring($root.Length + 1)
+    if ($f.Name -eq 'PRIVATE-do-not-share.txt' -or $f.Name -like '*.private.glb') { Fail "$rel is marked private" }
+    if ($f.Extension -eq '.glb' -and -not $f.FullName.StartsWith($handsDst + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Fail "${rel}: a .glb outside mod\$modId\hands\" }
+}
 
 foreach ($f in 'LICENSE', 'THIRD-PARTY-NOTICES') {
     $p = Join-Path $proj $f
