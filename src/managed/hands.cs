@@ -31,10 +31,14 @@ namespace FFXVR;
 //                       mesh, 4 one placement line per drawn frame in ffxvr_diag.log (300 at most per switch-on); 8 is the "log
 //                       one pose dump" button's one-shot.
 //   Tap build (design-notes "Hands: the tap gesture"; native ffxvr_hands2_tap_set, hv_tap_update):
-//   vr_hands_tap          0/1, default 1: with VR hands drawn in first person, a quick forward jab of a pointing hand presses
-//                         the game's confirm button (only in the field: never in battle, the sphere grid, the save screen,
-//                         blitzball, a menu or a movie, nor while a text box is up unless vr_hands_tap_dialogue=1).
-//   vr_hands_tap_sens     0.50..2.00, default 1.00: the forward peak speed a tap needs is 0.70 m/s / this.
+//   vr_hands_tap          0/1, default 1: with VR hands drawn in first person, squeezing the grip arms that hand and pushing it
+//                         forward about a hand's width toward what you face presses the game's confirm button (only in the
+//                         field: never in battle, the sphere grid, the save screen, blitzball, a menu or a movie, nor while a text
+//                         box is up unless vr_hands_tap_dialogue=1).
+//   vr_hands_tap_sens     0.50..2.00, default 1.00: the push that taps is 10 cm / this (0.5: 20 cm, 2: 5 cm).
+//   vr_hands_tap_point    0/1, default 0: also require a pointing finger (the index off the trigger) to arm.
+//   vr_hands_tap_hold_grip 0/1, default 0: don't pass the grips (LB / RB) to the game while a tap can fire (the field, first
+//                         person); in battle and menus they always go through.
 //   vr_hands_tap_dialogue 0/1, default 0: also while a text box is up (advances the text; a choice box takes the highlighted
 //                         answer, so off until the text box signal is confirmed in play).
 //   vr_hands_tap_haptic   0/1, default 1: a short tick on that hand when a tap presses.
@@ -54,8 +58,8 @@ public sealed unsafe partial class FFXVRModule {
     private const int k_h2_status_n = 21;           // ffxvr_hands2_status's values (ABI 29)
     [StructLayout(LayoutKind.Sequential)]
     private struct VrTapCfg { public int bytes, flags; public float sens; public int button, game, press_ms; }   // = native VrTapCfg (ABI 30; 24 bytes)
-    private const int k_tap_status_n = 15;          // ffxvr_hands2_tap_status's values (ABI 30)
-    private bool   _vr_hands_tap = true, _vr_hands_tap_dialogue = false, _vr_hands_tap_haptic = true;
+    private const int k_tap_status_n = 18;          // ffxvr_hands2_tap_status's values (ABI 31)
+    private bool   _vr_hands_tap = true, _vr_hands_tap_dialogue = false, _vr_hands_tap_haptic = true, _vr_hands_tap_point = false, _vr_hands_tap_hold_grip = false;
     private float  _vr_hands_tap_sens = 1.00f;
     private string _vr_hands_tap_button = "a";
     private int    _vr_hands_tap_press_ms = 100;
@@ -117,6 +121,8 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_hands_tap_sens":     pf(k, v, ref _vr_hands_tap_sens, 0.5f, 2f); return true;
             case "vr_hands_tap_dialogue": pb(k, v, ref _vr_hands_tap_dialogue); return true;
             case "vr_hands_tap_haptic":   pb(k, v, ref _vr_hands_tap_haptic); return true;
+            case "vr_hands_tap_point":    pb(k, v, ref _vr_hands_tap_point); return true;
+            case "vr_hands_tap_hold_grip": pb(k, v, ref _vr_hands_tap_hold_grip); return true;
             case "vr_hands_tap_button":   { string t = v.Trim().ToLowerInvariant(); if (t == "a" || t == "b" || t == "x" || t == "y") _vr_hands_tap_button = t; else _ini_bad.Add($"{k}='{v}'"); } return true;
             case "vr_hands_tap_press_ms": pi(k, v, ref _vr_hands_tap_press_ms, 60, 300); return true;
             default: return false;
@@ -144,6 +150,8 @@ public sealed unsafe partial class FFXVRModule {
             $"vr_hands_tap_sens={_vr_hands_tap_sens.ToString("F2", ci)}\n" +
             $"vr_hands_tap_dialogue={(_vr_hands_tap_dialogue ? 1 : 0)}\n" +
             $"vr_hands_tap_haptic={(_vr_hands_tap_haptic ? 1 : 0)}\n" +
+            $"vr_hands_tap_point={(_vr_hands_tap_point ? 1 : 0)}\n" +
+            $"vr_hands_tap_hold_grip={(_vr_hands_tap_hold_grip ? 1 : 0)}\n" +
             $"vr_hands_tap_button={_vr_hands_tap_button}\n" +
             $"vr_hands_tap_press_ms={_vr_hands_tap_press_ms.ToString(ci)}\n";
     }
@@ -256,7 +264,7 @@ public sealed unsafe partial class FFXVRModule {
         bool on = _vr_hands && _vr_hands_tap;
         int game = on ? hands2_tap_game() : 0;
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
-        var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0),
+        var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0) | (_vr_hands_tap_point ? 8 : 0) | (_vr_hands_tap_hold_grip ? 16 : 0),
                                sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };
         _fn_hands2_tap_set(&t, sizeof(VrTapCfg));
         if (!on) { _tap_game_last = -1; return; }
@@ -479,21 +487,25 @@ public sealed unsafe partial class FFXVRModule {
     /// point pose, the gate, the last tap and near miss, the counters).</summary>
     private void hands2_tap_ui() {
         if (_fn_hands2_tap_set == null || !ImGui.TreeNode("gestures##h2g")) return;
-        ImGui.Checkbox("tap to press action (point, then a quick jab forward)##h2tap", ref _vr_hands_tap);
+        ImGui.Checkbox("tap to press action (squeeze the grip and push your hand forward)##h2tap", ref _vr_hands_tap);
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("tap sensitivity##h2ts", ref _vr_hands_tap_sens, 0.5f, 2f, "%.2f"); ImGui.SameLine();
         _vr_hands_tap_sens = float.IsFinite(_vr_hands_tap_sens) ? Math.Clamp(_vr_hands_tap_sens, 0.5f, 2f) : 1f;   // review N2: Ctrl+click typing
-        ImGui.TextDisabled(I($"(a tap peaks above {0.70f / _vr_hands_tap_sens:F2} m/s forward)")); ImGui.SameLine();
+        ImGui.TextDisabled(I($"(tap distance: a push of {10f / _vr_hands_tap_sens:F0} cm)")); ImGui.SameLine();
         if (ImGui.SmallButton("default##h2ts")) _vr_hands_tap_sens = 1.00f;
         ImGui.Checkbox("also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
         ImGui.Checkbox("haptic tick##h2taph", ref _vr_hands_tap_haptic);
-        ImGui.TextDisabled(esc("Hold the grip with your index finger off the trigger (point), then poke forward and stop, as if pressing a button in the air (a natural poke of 10-30 cm is fine, a small wind-up too). "
+        ImGui.Checkbox("require a pointing finger (index off the trigger)##h2tapp", ref _vr_hands_tap_point); ImGui.SameLine();
+        ImGui.Checkbox("don't pass the grip to the game while a tap can fire (LB / RB)##h2tapg", ref _vr_hands_tap_hold_grip);
+        ImGui.TextDisabled(esc("Squeeze the grip and push your hand forward about a hand's width (" + (10f / _vr_hands_tap_sens).ToString("F0", CI) + " cm) toward what you are facing. "
                            + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + (_vr_hands_tap_button == "a" ? " (confirm: talk, examine, open)" : " (vr_hands_tap_button in the ini; A is confirm)") + ". Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
-                           + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up."));
+                           + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up. A reach with the grip squeezed presses too: let go of the grip when you don't mean it."));
         if (_fn_hands2_tap_status != null) {
             float* v = stackalloc float[k_tap_status_n];
+            for (int i = 0; i < k_tap_status_n; i++) v[i] = 0f;
             byte* line = _fn_hands2_tap_status(v, k_tap_status_n);
             string ln = line != null ? Marshal.PtrToStringAnsi((nint)line) ?? "" : "";
-            ImGui.Text(I($"fingertip forward speed: L {v[0],5:F2}  R {v[1],5:F2} m/s | point pose: L {(v[2] > 0.5f ? "yes" : "no ")}  R {(v[3] > 0.5f ? "yes" : "no ")}{(v[8] > 0.5f ? " | PRESSING" : "")}"));
+            string arm = v[2] > 0.5f && v[3] > 0.5f ? "armed (grip L + R)" : v[3] > 0.5f ? "armed (grip R)" : v[2] > 0.5f ? "armed (grip L)" : "not armed (squeeze a grip)";
+            ImGui.Text(esc(I($"{arm} | push forward: L {v[15] * 100f,4:F1}  R {v[16] * 100f,4:F1} cm of {v[7] * 100f:F0} cm{(v[8] > 0.5f ? " | PRESSING" : "")}{(v[17] > 0.5f ? " | grips held back from the game" : "")}")));
             ImGui.TextDisabled(esc(ln));
             ImGui.TextDisabled(esc(I($"taps: L {v[5]:F0} R {v[6]:F0}, not taps {v[9]:F0} | game: {(_vr_hands && _vr_hands_tap ? hands2_tap_game_text(_tap_game_last < 0 ? 0 : _tap_game_last) : "-")} | text boxes: {(_tap_text_info.Length > 0 ? _tap_text_info : "-")}")));
         }

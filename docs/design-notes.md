@@ -3439,6 +3439,53 @@ prototype, adopted as is (htrv2_t/r2_proto.diff):
 - Tests: the reviewer's adversarial cases are a judged test now (htapchk/tap_test_adv.cpp: 78 judged lines, 37 reported):
   ALL OK at 0.6 / 1 / 1.5 / 2; the branch test (92) ALL OK at all four.
 
+### The owner's second headset round: the tap redesigned around the grip (3 Nov 2026)
+
+With de2d735: 9 taps, ~50 rejected: ~20 "sideways" from R3's turn rule (his push ends with the hand dropping, elevation -27
+to -44, so the speed stays high at the "stop": taken for a sweep; net direction only 11-36 deg off), ~25 pose blocks (the index
+still on the trigger, or the point formed < 80 ms before), a few "shake" (a 6-38 cm back stroke, then the jab). The owner: "I'm
+not 100% sure the exact gesture I need to make to register", and "I think we should be more lenient about allowing a tap
+because it should only work with the controller grip activated". Agreed: the grip is a deliberate act, so it is the guard,
+and the motion rule becomes one sentence: **squeeze the grip and push your hand forward about a hand's width toward what
+you're facing**. ABI 31.
+- **Armed**: that hand's grip above 0.7 (off below 0.5). "require a pointing finger (index off the trigger)", off by
+  default, also needs the raw touch bit off for 30 ms. No pose hold. The touch sensors are needed only with that option.
+- **Fire**: a push starts when the fingertip's speed relative to the head along the head's 3-D forward exceeds 0.30 m/s (over
+  >= 25 ms); it taps as soon as the fingertip has moved **10 cm / sensitivity** forward from there within 0.5 s, the net
+  displacement within **60 deg** of the forward (no elevation limit beyond that cone). Kept: the one-sample step check
+  (review 2 R1) and raw speed > 5 m/s (tracking jumps), the fingertip's own forward travel >= half the distance (review S2:
+  the head moving back alone), the head fast / the stick or Numpad turning, the 0.4 s cooldown (and across the hands), and
+  re-arming only once the forward speed has dropped below 0.15 m/s (a long reach taps once). Dropped: the stop, the
+  per-sample direction, the elevation limit (R2), the turn rule (R3), the shake rule (S1 / R4), the pose hold. The press, its
+  release guarantees, the game gate and the logging caps are unchanged.
+- **The grip is LB / RB.** Our pad mapping forwards the grips as LB / RB (PS2 L1 / R1, the pad word's 4 / 8). Neither
+  design-notes nor exe-analysis records a field action for L1 / R1 (they page lists in the menus and are used in battle);
+  not verified in the exe this round. Nothing new: the grips have gone through since phase 1, and the first tap build's point
+  pose needed the grip too. Added anyway, cheap and safe: "don't pass the grip to the game while a tap can fire" (ini
+  `vr_hands_tap_hold_grip`), **off by default** (it changes what the game sees, for a risk not seen): while the gate is open
+  on a drawn first-person frame the hook leaves the grips' LB / RB out; it only ever removes those bits, and it is cleared
+  at once when the gate shuts, the hands are not drawn, or the option or the tap goes off (in battle and menus the grips go
+  through; a grip still held as a battle starts reaches the game then).
+- **F8** (gestures): `armed (grip R)` and `push forward: L 0.0  R 6.3 cm of 10 cm`, the two new options, the distance by the
+  sensitivity slider. **Log**: a tap gives how far it was pushed (and the hand itself), its peak, direction and elevation; a
+  near miss (half the distance or more) its reason ("short", "reach", "sideways", "head", "glitch", "grip") and the same
+  numbers with the grip / trigger / touch inputs; a push while not armed the grip value.
+- No fingertip glow while armed: the hand's lighting constants are per eye and shared by both hands (a shader change).
+- **Tests**: tap_test.cpp rewritten (65 lines: 59 judged, 6 reported) and tap_test_adv.cpp (115: 48 judged, 67 reported),
+  ALL OK at 0.6 / 1 / 1.5 / 2 (ASan + UBSan). Must tap: the grid's pushes of >= 13 cm at 0.5-4 m/s within 0.8 s (0 / 280
+  missed at 1); the owner's 27 logged jabs (round 1's 14 and 13 of round 2's "sideways") x 6 under 4 clocks (162 / 162 each)
+  and the reviewer's 13 x 6 under 6 clocks (78 / 78); pushes 30 deg up / down / 45 deg aside, along a 40 deg-down gaze, steep
+  pokes at the floor; a push right as the grip is squeezed; re-pushes after a pause; a long reach once. Must not: pushes <=
+  7 cm or slower than 0.25 m/s (0 / 300), 70 deg off, sideways swings, chops, pull backs, the head moving back (S2, 6-15
+  cm), leans with the arm carried, head turns and a push during one, walking, nodding, the stick turning, the gate shut,
+  the grip released (a push, a reach, a shake, mid-push), tracking steps 4-15 cm (60 Hz and the game's 72 / 120 Hz clocks),
+  holding still with 2 mm noise. **Reported, by design (the grip is the guard)**: brisk reaches with the grip squeezed (30-45 cm
+  in 0.45-0.8 s: 10 / 10), a shake with the grip (a tap every 0.4-0.5 s), sweeps into the front, talking with the hands
+  with the grip held (~400 taps / 10 min), everyday repositioning with the grip held (78 / 10 min), raising the hand into
+  view or dropping it along the gaze. **Changed expectations** (review 2's adversarial cases): the 8 cm / 2 Hz shakes, B2
+  talking, B4b the lean-in reach, B6 drops, B7 raises, B8 sweeps went from judged 0 to reported; the grid's "not a tap" class
+  is now distance / speed only.
+
 ## Hands: ideas parked (3 Nov 2026)
 
 The owner: "I think much more could get difficult ... just take a note of the other ideas for now". One line each, with

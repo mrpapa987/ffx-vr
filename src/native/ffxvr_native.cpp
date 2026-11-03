@@ -1210,6 +1210,7 @@ bool     g_vrpad_suppress = false;           // a mod gesture is using the contr
 volatile LONG g_tap_press = 0;
 volatile LONG g_tap_press_t0 = 0, g_tap_press_polls = 0, g_tap_press_ms = 100;   // GetTickCount at the press; new packets the game got with it; the length asked for
 volatile LONG g_tap_released_ms = -1, g_tap_released_polls = 0, g_tap_released_n = 0;   // the last press as the hook let it go (logged at the next frame end)
+volatile LONG g_tap_grip_hold = 0;                     // 1: the hook leaves the grips' LB / RB out (the tap's "don't pass the grip" option, gate open)
 HvTapHook g_tap_hook;                                   // the input thread's press state (the last packet, a release still to reach the game)
 // Diorama gestures (seat view, not first person): a grip grabs the world -
 // one hand pans, two hands pan with the midpoint, rotate with the angle
@@ -1268,7 +1269,7 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     WORD b = 0;
     if (R.primary) b |= XINPUT_GAMEPAD_A;  if (R.secondary) b |= XINPUT_GAMEPAD_B;
     if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
-    if (L.squeeze > 0.5f) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (R.squeeze > 0.5f) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+    if (!g_tap_grip_hold) { if (L.squeeze > 0.5f) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (R.squeeze > 0.5f) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER; }   // tap build: the grips held back while a tap can fire (opt-in)
     if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
@@ -4476,7 +4477,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 30;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture)
+constexpr int FFXVR_ABI = 31;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -8258,12 +8259,13 @@ int  g_h2_dbg_lines = 0; bool g_h2_dump_prev = false;   // debug bit 4: per-fram
 // S2: the fingers (per hand, across frames) and the display time of the last solve (the smoothing's dt)
 HvFingerState g_h2_fs[2]; int64_t g_h2_T_prev = 0; bool g_h2_put_down_seen[2] = { false, false };
 
-// Tap build (ABI 30; design-notes "Hands: the tap gesture"): a quick forward jab of a pointing hand presses the game's confirm
+// Tap build (ABI 30, 31; design-notes "Hands: the tap gesture"): a push of a hand with its grip squeezed (armed) toward what you
+// face presses the game's confirm
 // button (XInput A: the game's pad poll 0x62DBA0 stores A in the cross slot +0x399, the second of the PS2-order square, cross,
 // circle, triangle bytes; cross is confirm in the PC build). The detector (hv_tap_update, ffxvr_hands.cpp) runs per hand in
 // hands_draw_frame, so only on frames our hands are drawn (that already excludes screen frames: FMVs, menus, the save screen,
 // loads; the stereo screen; painted backdrops; battle transitions; the dream filter; the frozen view), and only in first
-// person. On top: the touch sensors bound (the point pose needs the trigger's touch), the session focused, the VR pad on, no
+// person. On top: (with "require a pointing finger") the touch sensors bound, the session focused, the VR pad on, no
 // chord or grab in progress (g_vrpad_suppress), the stick not turning, and managed's game gate (ffxvr_hands2_tap_set every
 // frame: battle, the sphere grid, Fahrenheit's save / load screen, a text box (unless "also advance dialogue"), blitzball).
 // The press: the button is ORed into the VR pad's state in the game's XInputGetState (vrpad_apply, the game's input thread)
@@ -8278,13 +8280,13 @@ enum TapGate { TG_OPEN = 0, TG_OFF, TG_VIEW, TG_NO_TOUCH, TG_FOCUS, TG_PAD, TG_C
 static const char* const k_tap_gate[TG_N] = { "open", "off", "not first person", "no touch sensors", "headset not focused", "VR pad off", "a chord or grab",
     "no game state", "battle", "sphere grid", "save / load screen", "a text box", "blitzball", "game state not readable", "hands not drawn" };
 HvTapState g_tap[2]; HvTapCfg g_tap_c;
-struct TapPoseDb { double t = 0.0; float on_s = 0.f, off_s = 0.f; bool finger_off = false; };   // the point pose from the raw bits, debounced (tap_sample)
+struct TapPoseDb { double t = 0.0; float on_s = 0.f, off_s = 0.f; bool finger_off = false, grip = false; };   // armed from the raw bits: the grip (hysteresis), the finger (debounced) (tap_sample)
 TapPoseDb g_tap_pose_db[2];
 int  g_tap_gate_now = TG_OFF;                            // the gate at the last draw (or TG_HIDDEN when the hands were not drawn)
 LONG g_tap_released_seen = 0;                            // g_tap_released_n when last logged
 int  g_tap_buzz = 0;                                     // bit per hand: a tick at hands_frame_end
 float g_tap_pose[2] = {};                                // the point pose this frame (1 / 0) per hand, for F8
-uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0, g_tap_log_pose_n = 0, g_tap_log_shake_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
+uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0, g_tap_log_pose_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
 uint32_t g_tap_w_taps = 0, g_tap_w_not = 0, g_tap_w_drawn = 0, g_tap_w_open = 0;  // the 10 s window (the verbose line)
 uint32_t g_tap_w_not_by[HV_TAP_N] = {}, g_tap_w_blk[HV_TAP_N] = {};
 ULONGLONG g_tap_last_t = 0, g_tap_last_not_t = 0;       // GetTickCount64 of the last tap / the last near miss
@@ -8699,7 +8701,7 @@ static int tap_gate_now(int mode) {
     const int gm = g_tapcfg.game;
     if (!(g_tapcfg.flags & 1)) g = TG_OFF;
     else if (mode != 1) g = TG_VIEW;
-    else if (!g_hs.touch) g = TG_NO_TOUCH;                  // the point pose needs the trigger's touch sensor (else a finger resting on it looks pointed)
+    else if (!g_hs.touch && (g_tapcfg.flags & 8)) g = TG_NO_TOUCH;   // "require a pointing finger" needs the trigger's touch sensor (the grip alone does not)
     else if (!xr_focused()) g = TG_FOCUS;
     else if (!g_vrpad_enabled) g = TG_PAD;
     else if (g_vrpad_suppress) g = TG_CHORD;
@@ -8722,27 +8724,32 @@ static void tap_release(const char* why) {
 /// One sample of hand h (tip: the index fingertip in reference space, null = this hand is not drawn or not tracked).
 static void tap_sample(int h, int gate, const float* tip) {
     HvTapState& st = g_tap[h];
-    // The point pose (owner's round: from the raw controller bits, not the drawn fingers, whose touch fades out over ~160 ms):
-    // the grip held (squeeze > 0.5), the trigger released (< 0.05) and the index off the trigger's touch sensor for 30 ms; it
-    // ends when the finger is back on the sensor for 40 ms (a flicker of the sensor mid-jab does not abort it). The thumb may be
-    // anywhere. hd: the latched controller.
+    // ARMED (owner's second round: "it should only work with the controller grip activated"): the grip squeezed, on above 0.7,
+    // off below 0.5. With "require a pointing finger" (flags 8) also the index off the trigger: the trigger released (< 0.05)
+    // and its touch sensor off for 30 ms (back on for 40 ms ends it). No pose hold. hd: the latched controller.
     TapPoseDb& pd = g_tap_pose_db[h];
     const XrHand& hd = g_hs.hand[h];
     const double tnow = static_cast<double>(g_hs.T) * 1e-9;
     const float pdt = (pd.t > 0.0 && tnow > pd.t && tnow - pd.t < 0.25) ? static_cast<float>(tnow - pd.t) : 0.f; pd.t = tnow;
     if (hd.trigger_touch) { pd.on_s += pdt; pd.off_s = 0.f; } else { pd.off_s += pdt; pd.on_s = 0.f; }
     if (pd.off_s >= 0.030f) pd.finger_off = true; else if (pd.on_s >= 0.040f) pd.finger_off = false;
-    if (tip == nullptr) { pd.finger_off = false; pd.on_s = pd.off_s = 0.f; }
-    const bool pose = tip != nullptr && pd.finger_off && hd.trigger < 0.05f && hd.squeeze > 0.50f;
-    g_tap_pose[h] = pose ? 1.f : 0.f;
+    if (hd.squeeze >= 0.70f) pd.grip = true; else if (hd.squeeze < 0.50f) pd.grip = false;
+    if (tip == nullptr) { pd.finger_off = false; pd.grip = false; pd.on_s = pd.off_s = 0.f; }
+    const bool point_ok = !(g_tapcfg.flags & 8) || (pd.finger_off && hd.trigger < 0.05f);
+    const bool armed = tip != nullptr && pd.grip && point_ok;
+    g_tap_pose[h] = armed ? 1.f : 0.f;
+    // "don't pass the grip to the game while a tap can fire" (flags 16): the hook leaves LB / RB out while the gate is open on a
+    // drawn first-person frame (both hands; cleared at once when the gate shuts or the hands are not drawn: never a stuck bit,
+    // the hook only removes the grip's own bit)
+    if (h == 1) { const LONG want = ((g_tapcfg.flags & 16) && gate == TG_OPEN) ? 1 : 0; if (g_tap_grip_hold != want) InterlockedExchange(&g_tap_grip_hold, want); }
     if (gate == TG_OFF) { st = HvTapState(); return; }
     HvTapIn in = {};
-    in.t = static_cast<double>(g_hs.T) * 1e-9;
+    in.t = tnow;
     in.valid = tip != nullptr && g_hs.T != 0;
     if (tip) memcpy(in.tip, tip, sizeof(in.tip));
     memcpy(in.head_p, g_hs.head_p, sizeof(in.head_p));
     float M[9]; quat_to_mat(g_hs.head_q, M); in.head_fwd[0] = -M[2]; in.head_fwd[1] = -M[5]; in.head_fwd[2] = -M[8];
-    in.pose = pose; in.gate = gate == TG_OPEN;
+    in.pose = armed; in.gate = gate == TG_OPEN;
     in.turning = (g_turn_stick && fabsf(g_hs.hand[1].stick[0]) > 0.5f) || g_turn_key != 0.f;   // the right stick past half deflection, or the turn keys (review N3)
     const int r = hv_tap_update(&st, g_tap_c, in);
     const char* hn = h ? "R" : "L";
@@ -8758,37 +8765,33 @@ static void tap_sample(int h, int gate, const float* tip) {
         g_tap_last_t = GetTickCount64(); g_tap_last_h = h; g_tap_last_peak = st.last_peak; g_tap_last_travel = st.last_travel; g_tap_last_dur = st.last_dur;
         g_tap_log_letgo = g_tap_log_press_n < 200;   // review S4: the pressed / let-go pair, 200 a session
         if (g_tap_log_letgo) g_tap_log_press_n++;
-        if (g_tap_log_letgo) diag("hands: tap %s: %s pressed (peak %.2f m/s forward, %.0f mm in %.0f ms, %.0f deg off forward, worst sample %.0f; fires at %.2f m/s) | text box %s | taps L %u R %u%s", hn, tap_button_name(g_tapcfg.button),
-             st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, st.last_net_deg, st.last_worst_deg, g_tap_c.v_on, (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1], g_tap_log_press_n == 200 ? " (no more pressed / let-go lines this session)" : "");
+        if (g_tap_log_letgo) diag("hands: tap %s: %s pressed (pushed %.0f mm forward in %.0f ms, the hand itself %.0f mm, peak %.2f m/s, %.0f deg off forward, elevation %+.0f; tap distance %.0f mm) | text box %s | taps L %u R %u%s",
+             hn, tap_button_name(g_tapcfg.button), st.last_travel * 1000.f, st.last_dur * 1000.f, st.last_world * 1000.f, st.last_peak, st.last_net_deg, st.last_net_elev, g_tap_c.tap_dist * 1000.f,
+             (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1], g_tap_log_press_n == 200 ? " (no more pressed / let-go lines this session)" : "");
     }
     else if (r > HV_TAP_FIRED && r < HV_TAP_N) {
         g_tap_not[r]++; g_tap_w_not++; g_tap_w_not_by[r]++;
-        if (r != HV_TAP_GAP && st.last_peak >= 0.6f * g_tap_c.v_on) {   // a near miss: shown in F8, the first 30 logged
+        if (r != HV_TAP_GAP && st.last_travel >= 0.5f * g_tap_c.tap_dist) {   // a near miss (half the distance or more): shown in F8, the first 30 logged
             g_tap_last_not_t = GetTickCount64(); g_tap_last_not_h = h; g_tap_last_not_why = r; g_tap_last_not_peak = st.last_peak; g_tap_last_not_travel = st.last_travel;
-            if (g_tap_log_n < 30) {   // owner's round: enough to tell why (direction, pose) from the log alone
+            if (g_tap_log_n < 30) {
                 g_tap_log_n++;
-                diag("hands: tap %s: not a tap (%s: peak %.2f m/s, %.0f mm in %.0f ms; net direction %.0f deg off forward (yaw %+.0f, pitch %+.0f; elevation %+.0f against level), worst sample %.0f deg;"
-                     " pose: grip %.2f trigger %.2f touch %d off %.0f ms)%s", hn, hv_tap_why[r], st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f,
-                     st.last_net_deg, st.last_net_yaw, st.last_net_pitch, st.last_net_elev, st.last_worst_deg, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0, pd.off_s * 1000.f,
+                diag("hands: tap %s: not a tap (%s: pushed %.0f of %.0f mm in %.0f ms, the hand itself %.0f mm, peak %.2f m/s; net direction %.0f deg off forward (yaw %+.0f, pitch %+.0f; elevation %+.0f against level);"
+                     " grip %.2f trigger %.2f touch %d)%s", hn, hv_tap_why[r], st.last_travel * 1000.f, g_tap_c.tap_dist * 1000.f, st.last_dur * 1000.f, st.last_world * 1000.f, st.last_peak,
+                     st.last_net_deg, st.last_net_yaw, st.last_net_pitch, st.last_net_elev, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0,
                      g_tap_log_n == 30 ? " (no more of these lines this session: see the hands: tap line with diag_verbose)" : "");
             }
         }
     }
     if (st.blocked > HV_TAP_FIRED && st.blocked < HV_TAP_N) {
         g_tap_blk[st.blocked]++; g_tap_w_blk[st.blocked]++;
-        if (st.blocked == HV_TAP_POSE && hd.squeeze > 0.5f && g_tap_log_pose_n < 15) {   // owner's round: a gripping hand's jab blocked by the pose: its inputs
+        if (st.blocked == HV_TAP_POSE && hd.squeeze > 0.5f && g_tap_log_pose_n < 15) {   // a push with the grip half held, or (with the finger rule) the finger on the trigger
             g_tap_log_pose_n++;
-            diag("hands: tap %s: a jab with the grip held but no point pose (%.2f m/s forward): trigger %.2f, touch %d (on %.0f ms / off %.0f ms), pose held %.0f ms of %.0f%s",
-                 hn, st.v_f, hd.trigger, hd.trigger_touch ? 1 : 0, pd.on_s * 1000.f, pd.off_s * 1000.f, st.pose_s * 1000.f, g_tap_c.pose_hold * 1000.f,
+            diag("hands: tap %s: a push while not armed (%.2f m/s forward): grip %.2f (arms at 0.70), trigger %.2f, touch %d (on %.0f ms / off %.0f ms)%s%s",
+                 hn, st.v_f, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0, pd.on_s * 1000.f, pd.off_s * 1000.f, (g_tapcfg.flags & 8) ? ", a pointing finger required" : "",
                  g_tap_log_pose_n == 15 ? " (no more of these lines this session)" : "");
         }
-        if (st.blocked == HV_TAP_SHAKE && g_tap_log_shake_n < 10) {
-            g_tap_log_shake_n++;
-            diag("hands: tap %s: a jab right after a forward-back stroke (a shake, %.2f m/s forward; the back stroke %.0f mm, ended %.0f ms ago, %.0f ms after the forward one): nothing pressed%s",
-                 hn, st.v_f, st.last_back_len * 1000.f, st.last_back_ago * 1000.f, st.last_back_turn * 1000.f, g_tap_log_shake_n == 10 ? " (no more of these lines this session)" : "");
-        }
-        if (st.blocked == HV_TAP_GATE && g_tap_log_gate_n < 10) {   // review S4: a pointing jab (the pose is checked first), its own budget
-            g_tap_log_gate_n++; diag("hands: tap %s: a pointing jab with the gate shut (%s): nothing pressed%s", hn, k_tap_gate[gate], g_tap_log_gate_n == 10 ? " (no more of these lines this session)" : "");
+        if (st.blocked == HV_TAP_GATE && g_tap_log_gate_n < 10) {   // review S4: an armed push, its own budget
+            g_tap_log_gate_n++; diag("hands: tap %s: an armed push with the gate shut (%s): nothing pressed%s", hn, k_tap_gate[gate], g_tap_log_gate_n == 10 ? " (no more of these lines this session)" : "");
         }
     }
 }
@@ -9068,6 +9071,7 @@ static void hands_frame_end() {
                         : (el > 500 || el < 0) ? "500 ms without the game polling" : nullptr;
         if (why) tap_release(why);
     }
+    if (g_h2_drawn_frame != g_frames && g_tap_grip_hold) InterlockedExchange(&g_tap_grip_hold, 0);   // not drawn: the grips go to the game again
     if (g_h2_drawn_frame != g_frames && (g_tap[0].have || g_tap[1].have)) {   // not drawn: the next drawn frame starts over (a gap is never a jab)
         HvTapIn none = {};
         for (int h = 0; h < 2; ++h) hv_tap_update(&g_tap[h], g_tap_c, none);
@@ -9111,8 +9115,8 @@ static void hands_frame_end() {
             if (g_tap_w_not_by[k]) { const size_t l = strlen(nb); snprintf(nb + l, sizeof(nb) - l, "%s%s %u", l ? ", " : "", hv_tap_why[k], g_tap_w_not_by[k]); }
             if (g_tap_w_blk[k]) { const size_t l = strlen(bb); snprintf(bb + l, sizeof(bb) - l, "%s%s %u", l ? ", " : "", hv_tap_why[k], g_tap_w_blk[k]); }
         }
-        diagv("hands: tap | taps %u (on-session L %u R %u) | not taps %u (%s) | starts blocked (%s) | gate open in %u of %u first-person drawn frames, now %s | sensitivity %.2f: fires at %.2f m/s, %s %d ms%s",
-              g_tap_w_taps, g_tap_taps[0], g_tap_taps[1], g_tap_w_not, nb[0] ? nb : "-", bb[0] ? bb : "-", g_tap_w_open, g_tap_w_drawn, k_tap_gate[g_tap_gate_now], g_tapcfg.sens, g_tap_c.v_on,
+        diagv("hands: tap | taps %u (on-session L %u R %u) | not taps %u (%s) | starts blocked (%s) | gate open in %u of %u first-person drawn frames, now %s | sensitivity %.2f: a push of %.0f mm, %s %d ms%s",
+              g_tap_w_taps, g_tap_taps[0], g_tap_taps[1], g_tap_w_not, nb[0] ? nb : "-", bb[0] ? bb : "-", g_tap_w_open, g_tap_w_drawn, k_tap_gate[g_tap_gate_now], g_tapcfg.sens, g_tap_c.tap_dist * 1000.f,
               tap_button_name(g_tapcfg.button), g_tapcfg.press_ms, (g_tapcfg.flags & 2) ? " | also in text boxes" : "");
     }
     g_tap_w_taps = g_tap_w_not = g_tap_w_drawn = g_tap_w_open = 0; memset(g_tap_w_not_by, 0, sizeof(g_tap_w_not_by)); memset(g_tap_w_blk, 0, sizeof(g_tap_w_blk));
@@ -9236,42 +9240,46 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands2_pack_error() {
     return s;
 }
 
-/// Tap build (ABI 30): the tap's settings and managed's game gate, every frame from push_all (render thread). bytes: native
-/// reads min(bytes, its size) and defaults the rest. flags: 1 tap on, 2 also while a text box is up, 4 the haptic tick; sens
-/// 0.5..2 (the forward peak needed is 0.70 m/s / sens); button: the XInput bit to press (A 0x1000, B, X or Y; else A); game:
+/// Tap build (ABI 30; 31: flags 8 and 16): the tap's settings and managed's game gate, every frame from push_all (render thread).
+/// bytes: native reads min(bytes, its size) and defaults the rest. flags: 1 tap on, 2 also while a text box is up, 4 the haptic
+/// tick, 8 require a pointing finger (index off the trigger) as well as the grip, 16 don't pass the grips (LB / RB) to the game
+/// while a tap can fire; sens 0.5..2 (the push that taps is 10 cm / sens); button: the XInput bit to press (A 0x1000, B, X or Y; else A); game:
 /// 1 battle, 2 the sphere grid, 4 Fahrenheit's save / load screen, 8 a text box is up, 16 blitzball, 0x100 not readable;
 /// press_ms 60..300.
 extern "C" __declspec(dllexport) void ffxvr_hands2_tap_set(const VrTapCfg* c, int bytes) {
     VrTapCfg n = { static_cast<int>(sizeof(VrTapCfg)), 0, 1.f, 0x1000, 0, 100 };
     if (c != nullptr && bytes > 0) memcpy(&n, c, static_cast<size_t>(bytes) < sizeof(n) ? static_cast<size_t>(bytes) : sizeof(n));
-    n.bytes = static_cast<int>(sizeof(VrTapCfg)); n.flags &= 7;
+    n.bytes = static_cast<int>(sizeof(VrTapCfg)); n.flags &= 31;
     n.sens = std::isfinite(n.sens) ? fmaxf(0.5f, fminf(2.f, n.sens)) : 1.f;
     if (n.button != 0x1000 && n.button != 0x2000 && n.button != 0x4000 && n.button != 0x8000) n.button = 0x1000;
     n.press_ms = n.press_ms < 60 ? 60 : n.press_ms > 300 ? 300 : n.press_ms;
-    if ((n.flags & 1) != (g_tapcfg.flags & 1) || ((n.flags & 1) && ((n.flags ^ g_tapcfg.flags) & 2)))
-        diag("hands: tap %s (sensitivity %.2f: fires at %.2f m/s forward; button %s for %d ms; also in text boxes %d; haptic tick %d)", (n.flags & 1) ? "on" : "off", n.sens, 0.70f / n.sens,
-             tap_button_name(n.button), n.press_ms, (n.flags & 2) ? 1 : 0, (n.flags & 4) ? 1 : 0);
+    if ((n.flags & 1) != (g_tapcfg.flags & 1) || ((n.flags & 1) && ((n.flags ^ g_tapcfg.flags) & 26)))
+        diag("hands: tap %s (sensitivity %.2f: armed by the grip, a push of %.0f mm toward what you face%s; button %s for %d ms; also in text boxes %d; haptic tick %d; grips passed to the game %s)",
+             (n.flags & 1) ? "on" : "off", n.sens, 100.f / n.sens, (n.flags & 8) ? ", the index off the trigger" : "", tap_button_name(n.button), n.press_ms, (n.flags & 2) ? 1 : 0, (n.flags & 4) ? 1 : 0,
+             (n.flags & 16) ? "no (while a tap can fire)" : "yes");
     if (!(n.flags & 1) && g_tap_press != 0) tap_release("tap off");
+    if (!(n.flags & 1) || !(n.flags & 16)) InterlockedExchange(&g_tap_grip_hold, 0);
     g_tapcfg = n; g_tapcfg_frame = g_frames;
-    g_tap_c.v_on = 0.70f / n.sens;
+    g_tap_c.tap_dist = 0.10f / n.sens;
 }
 
-/// Tap build (ABI 30): the F8 readout. out (n floats): [0] / [1] the left / right fingertip's forward speed at the last
-/// sample (m/s), [2] / [3] the point pose (1 / 0), [4] the gate (TapGate: 0 open), [5] / [6] taps this on-session, [7] the
-/// forward peak needed (m/s), [8] the button held now (1 / 0), [9] jabs that were not taps this on-session, [10] seconds
+/// Tap build (ABI 30; 31: 18 values): the F8 readout. out (n floats): [0] / [1] the left / right fingertip's forward speed at
+/// the last sample (m/s), [2] / [3] armed (1 / 0), [4] the gate (TapGate: 0 open), [5] / [6] taps this on-session, [7] the
+/// push that taps (m), [8] the button held now (1 / 0), [9] jabs that were not taps this on-session, [10] seconds
 /// since the last tap (-1 none), [11] its peak (m/s), [12] its travel (m), [13] the last press's length (ms, -1 none),
-/// [14] the new pad packets it was seen in. Returns one line: the gate, the last tap, the last near miss (a static buffer).
+/// [14] the new pad packets it was seen in, [15] / [16] the left / right push in progress (m, 0 idle), [17] the grips held
+/// back from the game now (1 / 0). Returns one line: the gate, the last tap, the last near miss (a static buffer).
 extern "C" __declspec(dllexport) const char* ffxvr_hands2_tap_status(float* out, int n) {
     static char s[400];
     const ULONGLONG now = GetTickCount64();
     uint32_t nots = 0; for (int k = HV_TAP_SLOW; k < HV_TAP_N; ++k) nots += g_tap_not[k];
-    const float v[15] = { g_tap[0].v_f, g_tap[1].v_f, g_tap_pose[0], g_tap_pose[1], static_cast<float>(g_tap_gate_now), static_cast<float>(g_tap_taps[0]), static_cast<float>(g_tap_taps[1]),
-                          g_tap_c.v_on, g_tap_press != 0 ? 1.f : 0.f, static_cast<float>(nots), g_tap_last_t ? static_cast<float>((now - g_tap_last_t) / 1000.0) : -1.f, g_tap_last_peak, g_tap_last_travel,
-                          static_cast<float>(g_tap_released_ms), static_cast<float>(g_tap_released_polls) };
-    if (out) for (int k = 0; k < n && k < 15; ++k) out[k] = v[k];
+    const float v[18] = { g_tap[0].v_f, g_tap[1].v_f, g_tap_pose[0], g_tap_pose[1], static_cast<float>(g_tap_gate_now), static_cast<float>(g_tap_taps[0]), static_cast<float>(g_tap_taps[1]),
+                          g_tap_c.tap_dist, g_tap_press != 0 ? 1.f : 0.f, static_cast<float>(nots), g_tap_last_t ? static_cast<float>((now - g_tap_last_t) / 1000.0) : -1.f, g_tap_last_peak, g_tap_last_travel,
+                          static_cast<float>(g_tap_released_ms), static_cast<float>(g_tap_released_polls), g_tap[0].push, g_tap[1].push, g_tap_grip_hold ? 1.f : 0.f };
+    if (out) for (int k = 0; k < n && k < 18; ++k) out[k] = v[k];
     char a[150] = "no tap yet", b[150] = "";
-    if (g_tap_last_t) snprintf(a, sizeof(a), "last tap: %s %.2f m/s, %.0f mm in %.0f ms, %.0f s ago", g_tap_last_h ? "R" : "L", g_tap_last_peak, g_tap_last_travel * 1000.f, g_tap_last_dur * 1000.f, (now - g_tap_last_t) / 1000.0);
-    if (g_tap_last_not_t) snprintf(b, sizeof(b), " | last near miss: %s %s (%.2f m/s, %.0f mm), %.0f s ago", g_tap_last_not_h ? "R" : "L", hv_tap_why[g_tap_last_not_why], g_tap_last_not_peak, g_tap_last_not_travel * 1000.f, (now - g_tap_last_not_t) / 1000.0);
+    if (g_tap_last_t) snprintf(a, sizeof(a), "last tap: %s pushed %.0f mm in %.0f ms, %.0f s ago", g_tap_last_h ? "R" : "L", g_tap_last_travel * 1000.f, g_tap_last_dur * 1000.f, (now - g_tap_last_t) / 1000.0);
+    if (g_tap_last_not_t) snprintf(b, sizeof(b), " | last near miss: %s %s (pushed %.0f mm), %.0f s ago", g_tap_last_not_h ? "R" : "L", hv_tap_why[g_tap_last_not_why], g_tap_last_not_travel * 1000.f, (now - g_tap_last_not_t) / 1000.0);
     snprintf(s, sizeof(s), "gate: %s | %s%s", (g_tap_gate_now >= 0 && g_tap_gate_now < TG_N) ? k_tap_gate[g_tap_gate_now] : "?", a, b);
     return s;
 }

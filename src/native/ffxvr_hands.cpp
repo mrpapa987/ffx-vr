@@ -775,31 +775,29 @@ void hv_test_inputs(int which, HvCtrl* c) {
 
 // -- the tap gesture (branch hands-tap; ffxvr_hands.h) ----------------------------------------------------------------
 
-const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "slow", "short", "long", "reach", "sideways", "pose", "head", "turn", "gate", "glitch", "gap", "cooldown", "shake" };
+const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "head", "short", "long", "reach", "sideways", "grip", "head moving", "turn", "gate", "glitch", "gap", "cooldown", "shake" };
 
 int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     s->blocked = HV_TAP_NONE;
     auto fin3 = [](const float* v) { return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]); };
-    auto end = [&](int why, const float* rel, double t) {   // a jab ended: remember how (the whole jab's numbers); wait for the forward speed to drop
-        float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
+    auto end = [&](int why, const float* rel, const float* tip, double t) {   // a push ended: remember its numbers; wait for the hand to slow
+        float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] }, dw[3] = { tip[0] - s->tip0[0], tip[1] - s->tip0[1], tip[2] - s->tip0[2] };
         const float tr = v3dot(d, s->f), dl = sqrtf(v3dot(d, d));
-        s->last_why = why; s->last_peak = s->peak_s; s->last_travel = tr; s->last_dur = static_cast<float>(t - s->t0);
+        s->last_why = why; s->last_peak = s->peak_s; s->last_travel = tr; s->last_world = v3dot(dw, s->f); s->last_dur = static_cast<float>(t - s->t0);
         s->last_net_deg = dl > 1e-6f ? acosf(clampf(tr / dl, -1.f, 1.f)) / k_deg : 0.f;
-        float fh[3] = { s->f[0], 0.f, s->f[2] }; float rt[3] = { -fh[2], 0.f, fh[0] };   // the forward's level part and its right (y up)
+        float fh[3] = { s->f[0], 0.f, s->f[2] }; float rt[3] = { 1.f, 0.f, 0.f };
         if (v3norm(fh)) { rt[0] = -fh[2]; rt[2] = fh[0]; }
         const float dh = v3dot(d, fh), dr = v3dot(d, rt);
         s->last_net_yaw = atan2f(dr, dh) / k_deg;
-        s->last_net_pitch = atan2f(d[1], sqrtf(dh * dh + dr * dr)) / k_deg - asinf(clampf(s->f[1], -1.f, 1.f)) / k_deg;
-        s->last_worst_deg = s->worst_deg;
-        s->last_net_elev = dl > 1e-6f ? asinf(clampf(d[1] / dl, -1.f, 1.f)) / k_deg : 0.f;   // review 2 N3
-        s->phase = 2;
+        s->last_net_elev = dl > 1e-6f ? asinf(clampf(d[1] / dl, -1.f, 1.f)) / k_deg : 0.f;
+        s->last_net_pitch = s->last_net_elev - asinf(clampf(s->f[1], -1.f, 1.f)) / k_deg;
+        s->phase = 2; s->push = 0.f;
         return why;
     };
     if (!in.valid || !std::isfinite(in.t) || !fin3(in.tip) || !fin3(in.head_p) || !fin3(in.head_fwd)) {
         int r = HV_TAP_NONE;
-        if (s->phase == 1) { r = end(HV_TAP_GAP, s->rel_prev, s->t_prev); }
-        if (s->in_fwd) s->t_fwd_end = s->t_prev;   // review 2 N2: a stroke cut by the reset still ended (the shake rule sees it)
-        s->have = false; s->have_v = false; s->phase = 0; s->pose_s = 0.f; s->v_f = s->v_abs = 0.f; s->in_fwd = s->in_back = false;
+        if (s->phase == 1) r = end(HV_TAP_GAP, s->rel_prev, s->tip_prev, s->t_prev);
+        s->have = false; s->have_v = false; s->phase = 0; s->v_f = s->v_abs = 0.f; s->push = 0.f;
         return r;
     }
     const float rel[3] = { in.tip[0] - in.head_p[0], in.tip[1] - in.head_p[1], in.tip[2] - in.head_p[2] };
@@ -807,111 +805,85 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
         s->t_prev = in.t; memcpy(s->tip_prev, in.tip, sizeof(s->tip_prev)); memcpy(s->rel_prev, rel, sizeof(rel)); memcpy(s->head_prev, in.head_p, sizeof(s->head_prev)); memcpy(s->fwd_prev, in.head_fwd, sizeof(s->fwd_prev));
         s->have = true;
     };
-    if (!s->have) { store(); s->have_v = false; s->pose_s = 0.f; s->phase = 0; return HV_TAP_NONE; }
+    if (!s->have) { store(); s->have_v = false; s->phase = 0; return HV_TAP_NONE; }
     const double dtd = in.t - s->t_prev;
     if (dtd == 0.0) return HV_TAP_NONE;                 // the same poses again (no new display time)
     if (!(dtd > 0.0) || dtd > 0.1) {                    // time went back, or a gap (a menu, a load, the hands hidden): start over
         int r = HV_TAP_NONE;
-        if (s->phase == 1) r = end(HV_TAP_GAP, s->rel_prev, s->t_prev);
-        if (s->in_fwd) s->t_fwd_end = s->t_prev;   // review 2 N2
-        s->phase = 0; s->pose_s = 0.f; s->have_v = false; s->in_fwd = s->in_back = false; store();
+        if (s->phase == 1) r = end(HV_TAP_GAP, s->rel_prev, s->tip_prev, s->t_prev);
+        s->phase = 0; s->have_v = false; s->push = 0.f; store();
         return r;
     }
     const float dt = static_cast<float>(dtd);
-    const float v[3] = { (rel[0] - s->rel_prev[0]) / dt, (rel[1] - s->rel_prev[1]) / dt, (rel[2] - s->rel_prev[2]) / dt };
-    // the speeds the start, the stop, the peaks and the strokes use: the newest sample against the latest one >= v_span older
-    // (2 frames back at 60-72 Hz, 3 at 90-120 Hz), so a sample's noise counts the same at any rate
-    float vs[3], vws[3], vhs[3], head_w = 0.f;
+    const float v[3] = { (rel[0] - s->rel_prev[0]) / dt, (rel[1] - s->rel_prev[1]) / dt, (rel[2] - s->rel_prev[2]) / dt };   // raw: a tracking jump is one frame's
+    // the speeds the start, the slowing, and the head use: the newest sample against the latest one >= v_span older (2 frames back at
+    // 60-72 Hz, 3 at 90-120 Hz), so a sample's noise counts the same at any rate
+    float vs[3], vhs[3], head_w = 0.f;
     {
-        if (!s->have_v) { s->ring_n = 0; s->ring_i = 0; s->have_v = true; s->ring_t[0] = s->t_prev; memcpy(s->ring_rel[0], s->rel_prev, 12); memcpy(s->ring_tip[0], s->tip_prev, 12);
-                          memcpy(s->ring_head[0], s->head_prev, 12); memcpy(s->ring_fwd[0], s->fwd_prev, 12); s->ring_n = 1; s->ring_i = 1; }
+        if (!s->have_v) { s->have_v = true; s->ring_t[0] = s->t_prev; memcpy(s->ring_rel[0], s->rel_prev, 12); memcpy(s->ring_head[0], s->head_prev, 12); memcpy(s->ring_fwd[0], s->fwd_prev, 12); s->ring_n = 1; s->ring_i = 1; }
         int k = -1;
         for (int j = 1; j <= s->ring_n; ++j) { const int q = (s->ring_i - j + 8) % 8; k = q; if (in.t - s->ring_t[q] >= c.v_span) break; }
         const float dk = static_cast<float>(in.t - s->ring_t[k]);
-        for (int i = 0; i < 3; ++i) { vs[i] = (rel[i] - s->ring_rel[k][i]) / dk; vws[i] = (in.tip[i] - s->ring_tip[k][i]) / dk; vhs[i] = (in.head_p[i] - s->ring_head[k][i]) / dk; }   // vws: the fingertip's own (S2)
-        const float* f0 = s->ring_fwd[k];   // review 2 N1: the head's speed and turn rate over the same window as the hand's
-        const float cw = clampf(v3dot(f0, in.head_fwd) / fmaxf(1e-6f, sqrtf(v3dot(f0, f0) * v3dot(in.head_fwd, in.head_fwd))), -1.f, 1.f);
-        head_w = acosf(cw) / dk;
-        s->ring_t[s->ring_i] = in.t; memcpy(s->ring_rel[s->ring_i], rel, 12); memcpy(s->ring_tip[s->ring_i], in.tip, 12);
-        memcpy(s->ring_head[s->ring_i], in.head_p, 12); memcpy(s->ring_fwd[s->ring_i], in.head_fwd, 12);
+        for (int i = 0; i < 3; ++i) { vs[i] = (rel[i] - s->ring_rel[k][i]) / dk; vhs[i] = (in.head_p[i] - s->ring_head[k][i]) / dk; }
+        const float* f0 = s->ring_fwd[k];
+        head_w = acosf(clampf(v3dot(f0, in.head_fwd) / fmaxf(1e-6f, sqrtf(v3dot(f0, f0) * v3dot(in.head_fwd, in.head_fwd))), -1.f, 1.f)) / dk;
+        s->ring_t[s->ring_i] = in.t; memcpy(s->ring_rel[s->ring_i], rel, 12); memcpy(s->ring_head[s->ring_i], in.head_p, 12); memcpy(s->ring_fwd[s->ring_i], in.head_fwd, 12);
         s->ring_i = (s->ring_i + 1) % 8; if (s->ring_n < 8) s->ring_n++;
     }
-    const float va = sqrtf(v3dot(v, v)), vsa = sqrtf(v3dot(vs, vs));
-    s->v_abs = vsa; s->head_v = sqrtf(v3dot(vhs, vhs)); s->head_w = head_w;
-    // the forward: the head's, its pitch kept within pitch_min..pitch_max (looking straight up or down: the last one's heading)
-    float fw[3];
-    {
-        float h[3] = { in.head_fwd[0], 0.f, in.head_fwd[2] };
-        if (!v3norm(h)) { h[0] = s->fw_last[0]; h[1] = 0.f; h[2] = s->fw_last[2]; if (!v3norm(h)) { h[0] = 0.f; h[2] = -1.f; } }
-        const float p = clampf(asinf(clampf(in.head_fwd[1], -1.f, 1.f)), c.pitch_min_deg * k_deg, c.pitch_max_deg * k_deg);
-        fw[0] = h[0] * cosf(p); fw[1] = sinf(p); fw[2] = h[2] * cosf(p);
-        memcpy(s->fw_last, fw, sizeof(fw));
-    }
-    s->pose_s = in.pose ? s->pose_s + dt : 0.f;
+    const float va = sqrtf(v3dot(v, v));
+    s->v_abs = sqrtf(v3dot(vs, vs)); s->head_v = sqrtf(v3dot(vhs, vhs)); s->head_w = head_w;
+    float fw[3] = { in.head_fwd[0], in.head_fwd[1], in.head_fwd[2] };   // the head's 3-D forward
+    if (!v3norm(fw)) { fw[0] = 0.f; fw[1] = 0.f; fw[2] = -1.f; }
     const bool head_bad = s->head_v > c.head_v || s->head_w > c.head_w;
-    // strokes (S1, retuned): a forward stroke and a backward one, by the two-frame forward speed beyond +-0.6 v_start
-    {
-        const float vf = v3dot(vs, fw);
-        if (vf > 0.6f * c.v_start) s->in_fwd = true; else if (s->in_fwd && vf < 0.2f * c.v_start) { s->in_fwd = false; s->t_fwd_end = in.t; }   // review 2 R4: hysteresis (ends at +0.2 v_start)
-        if (vf < -0.6f * c.v_start) { const float pr = v3dot(rel, fw); if (!s->in_back) { s->in_back = true; s->t_back_start = in.t; s->back_r0 = pr; s->back_len = 0.f; } s->back_len = fmaxf(s->back_len, s->back_r0 - pr); s->t_back_end = in.t; }
-        else if (s->in_back && vf < -0.2f * c.v_start) {}   // review 2 R4: hysteresis (ends at -0.2 v_start): the same stroke; t_back_end stays at its last -0.6 v_start sample
-        else s->in_back = false;
-    }
-    int r = HV_TAP_NONE;
+    int r = HV_TAP_NONE; bool started = false;
     if (s->phase == 0) {
         const float vf = v3dot(vs, fw); s->v_f = vf;
         if (vf > c.v_start) {
-            // a shake: this forward stroke comes right after a backward one (back_lock) that itself turned round from a forward one
-            // (shake_gap): forward, back, forward with no pause. A wind-up (a lone pull back) before a poke is not one.
-            const bool shake = in.t - s->t_back_end < c.back_lock && s->t_back_start >= s->t_fwd_end && s->t_back_start - s->t_fwd_end < c.shake_gap && s->back_len >= c.shake_back_min;
             int why = HV_TAP_NONE;
             if (va > c.v_glitch) why = HV_TAP_GLITCH;
-            else if (!in.pose || s->pose_s < c.pose_hold) why = HV_TAP_POSE;   // review S4: the pose first, so "gate" means a pointing jab
+            else if (!in.pose) why = HV_TAP_POSE;      // not armed (the grip)
             else if (!in.gate) why = HV_TAP_GATE;
             else if (in.turning) why = HV_TAP_TURN;
             else if (head_bad) why = HV_TAP_HEAD;
             else if (in.t < s->cool_until) why = HV_TAP_COOLDOWN;
-            else if (shake) { why = HV_TAP_SHAKE; s->last_back_len = s->back_len; s->last_back_ago = static_cast<float>(in.t - s->t_back_end); s->last_back_turn = static_cast<float>(s->t_back_start - s->t_fwd_end); }
-            if (why != HV_TAP_NONE) { s->blocked = why; s->phase = 2; }   // not later in this stroke either (a pose formed mid-swing, the cooldown ending)
+            if (why != HV_TAP_NONE) { s->blocked = why; s->phase = 2; }   // not later in this stroke either
             else {
-                s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->f, fw, sizeof(s->f));
-                s->peak_s = vf; s->peak_raw = v3dot(v, fw); s->peak_w = v3dot(vws, fw); s->n = 1; s->step_max = v3dot(v, fw) * dt;
-                s->worst_deg = vsa > 1e-6f ? acosf(clampf(vf / vsa, -1.f, 1.f)) / k_deg : 0.f;
+                s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->tip0, s->tip_prev, sizeof(s->tip0)); memcpy(s->f, fw, sizeof(s->f));
+                s->peak_s = vf; s->step_max = fmaxf(0.f, v3dot(v, fw) * dt); s->n = 1; s->fail = HV_TAP_NONE; started = true;
             }
         }
     }
-    else if (s->phase == 1) {
-        const float vf = v3dot(vs, s->f); s->v_f = vf; s->n++;
+    if (s->phase == 1 && !started) {
+        const float vf = v3dot(vs, s->f); s->v_f = vf;
+        s->n++;
         int why = HV_TAP_NONE;
         if (va > c.v_glitch) why = HV_TAP_GLITCH;
         else if (!in.gate) why = HV_TAP_GATE;
-        else if (!in.pose) why = HV_TAP_POSE;
+        else if (!in.pose) why = HV_TAP_POSE;          // the grip released
         else if (in.turning) why = HV_TAP_TURN;
         else if (head_bad) why = HV_TAP_HEAD;
-        else if (in.t - s->t0 > c.max_dur) why = HV_TAP_REACH;
-        if (why != HV_TAP_NONE) r = end(why, rel, in.t);
+        if (why != HV_TAP_NONE) r = end(why, rel, in.tip, in.t);
         else {
             if (vf > s->peak_s) s->peak_s = vf;
-            const float vr = v3dot(v, s->f); if (vr > s->peak_raw) s->peak_raw = vr; if (vr * dt > s->step_max) s->step_max = vr * dt;
-            const float vfw = v3dot(vws, s->f); if (vfw > s->peak_w) s->peak_w = vfw;
-            if (vf > c.v_start && vsa > 1e-6f) { const float a = acosf(clampf(vf / vsa, -1.f, 1.f)) / k_deg; if (a > s->worst_deg) s->worst_deg = a; }   // for the log only
-            if (vf < c.stop_frac * s->peak_s) {              // the stop (or the retraction): was the whole jab a tap?
-                const float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
-                const float travel = v3dot(d, s->f), dl = sqrtf(v3dot(d, d));
-                const double dur = in.t - s->t0;
-                if (s->peak_s < c.v_on || s->peak_w < c.world_frac * c.v_on) why = HV_TAP_SLOW;   // S2: the head moving back alone is no jab
-                else if (travel < c.min_travel) why = HV_TAP_SHORT;
-                else if (dl > 1e-6f && travel < cosf(c.dir_max_deg * k_deg) * dl) why = HV_TAP_SIDEWAYS;   // the net displacement off the forward
-                else if (dl > 1e-6f && (d[1] > sinf(c.elev_up_deg * k_deg) * dl || d[1] < -sinf(c.elev_down_deg * k_deg) * dl)) why = HV_TAP_SIDEWAYS;   // review 2 R2: a raise / a drop (elevation against level)
-                else if (vsa > c.turn_frac * s->peak_s) why = HV_TAP_SIDEWAYS;   // review 2 R3: it turned (a sweep), it did not stop
-                else if (travel > c.max_travel) why = HV_TAP_LONG;
-                else if (dur < c.min_dur || s->n < 3 || s->peak_raw > c.jolt_ratio * s->peak_s || s->step_max > c.step_frac * travel) why = HV_TAP_GLITCH;   // a jolt of a frame or two: a tracking step
-                else { why = HV_TAP_FIRED; s->cool_until = in.t + c.cooldown; }
-                r = end(why, rel, in.t);
+            { const float st = v3dot(v, s->f) * dt; if (st > s->step_max) s->step_max = st; }
+            const float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
+            const float dw[3] = { in.tip[0] - s->tip0[0], in.tip[1] - s->tip0[1], in.tip[2] - s->tip0[2] };
+            const float travel = v3dot(d, s->f), dl = sqrtf(v3dot(d, d)), world = v3dot(dw, s->f);
+            s->push = fmaxf(0.f, travel);
+            if (travel >= c.tap_dist) {
+                if (dl > 1e-6f && travel < cosf(c.dir_max_deg * k_deg) * dl) s->fail = HV_TAP_SIDEWAYS;   // the net displacement off the forward
+                else if (world < c.world_frac * c.tap_dist) s->fail = HV_TAP_SLOW;                     // the head moved back, not the hand
+                else if (s->step_max > c.step_frac * travel) s->fail = HV_TAP_GLITCH;                  // one sample did most of it: a tracking step
+                else if (s->n < c.min_samples) s->fail = HV_TAP_GLITCH;
+                else { s->cool_until = in.t + c.cooldown; r = end(HV_TAP_FIRED, rel, in.tip, in.t); }
+            }
+            if (r == HV_TAP_NONE) {
+                if (vf < 0.5f * c.v_start) r = end(s->fail != HV_TAP_NONE ? s->fail : HV_TAP_SHORT, rel, in.tip, in.t);        // slowed or came back
+                else if (in.t - s->t0 > c.max_time) r = end(s->fail != HV_TAP_NONE ? s->fail : HV_TAP_REACH, rel, in.tip, in.t);   // not there in time
             }
         }
     }
-    else {   // after a jab: the next may start once the hand has stopped or come back
+    else if (s->phase == 2) {   // after a push: the next may start once the hand has slowed or come back
         const float vf = v3dot(vs, fw); s->v_f = vf;
         if (vf < 0.5f * c.v_start) s->phase = 0;
     }

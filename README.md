@@ -98,12 +98,13 @@ F8 > **VR hands (experimental)** > tick **VR hands** draws a pair of hands at yo
 if you tick them, in the diorama, third person and the seat view). The fingers follow the trigger, the grip and the
 touch sensors. It is off by default while it is being tested.
 
-**Tap to press action** (F8 > VR hands > gestures, on with VR hands): make a pointing hand (hold the grip, index finger
-off the trigger) and poke forward, then stop, as if pressing a button in the air (a natural poke of 10-30 cm is fine): it presses
-confirm (A: talk, examine, open) with a short tick on that controller. Only in first person in the field: never in
+**Tap to press action** (F8 > VR hands > gestures, on with VR hands): **squeeze the grip and push your hand forward about a
+hand's width (10 cm) toward what you're facing**: it presses confirm (A: talk, examine, open) with a short tick on that
+controller. The grip is what arms it: a reach with the grip squeezed presses too, so let go of the grip when you don't mean
+it (tick **require a pointing finger** to also need the index off the trigger). Only in first person in the field: never in
 battle, a menu, the sphere grid, the save screen, a movie or blitzball, while you turn with the stick or move your head
-fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** makes a slower jab
-count (2.0: about half the speed) or only a sharper one (0.5).
+fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** sets the distance
+(2.0: 5 cm, 0.5: 20 cm); F8 shows "armed" and how far you have pushed.
 
 **hand model** lists every pack in the mod folder's `hands\` folder: the two that ship with the mod (our own generic
 hand, MIT: a dark glove and a bare hand) and any you make yourself. **rescan** reads the folder again after you add one.
