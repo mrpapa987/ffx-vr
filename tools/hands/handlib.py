@@ -233,6 +233,7 @@ def write_glb(path, prims, P, R, name="hand", generator="ffxvr handlib", copyrig
             a["max"] = [float(x) for x in arr.reshape(arr.shape[0], -1).max(0)]
         accs.append(a); return len(accs) - 1
     images, textures, materials, gprims, samplers = [], [], [], [], []
+    seen_img = {}
     for pr in prims:
         attrs = {
             "POSITION": add_acc(pr["pos"].astype(np.float32), 5126, "VEC3", 34962, minmax=True),
@@ -244,12 +245,15 @@ def write_glb(path, prims, P, R, name="hand", generator="ffxvr handlib", copyrig
             "baseColorFactor": list(pr.get("color", (1, 1, 1, 1))), "metallicFactor": 0.0, "roughnessFactor": 0.8}}
         if pr.get("uv") is not None:
             attrs["TEXCOORD_0"] = add_acc(pr["uv"].astype(np.float32), 5126, "VEC2", 34962)
-        if pr.get("texture_png") is not None:
+        if pr.get("texture_png") is not None:   # PNG or JPEG bytes (the name is historical); one image per distinct file
             if not samplers: samplers.append({"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497})
-            iv = add_view(pr["texture_png"])
-            images.append({"bufferView": iv, "mimeType": "image/png", "name": pr.get("name", "tex")})
-            textures.append({"sampler": 0, "source": len(images) - 1})
-            mat["pbrMetallicRoughness"]["baseColorTexture"] = {"index": len(textures) - 1}
+            data = bytes(pr["texture_png"])
+            if data not in seen_img:
+                iv = add_view(data)
+                mime = "image/jpeg" if data[:2] == b"\xff\xd8" else "image/png"
+                images.append({"bufferView": iv, "mimeType": mime, "name": pr.get("name", "tex")})
+                textures.append({"sampler": 0, "source": len(images) - 1}); seen_img[data] = len(textures) - 1
+            mat["pbrMetallicRoughness"]["baseColorTexture"] = {"index": seen_img[data]}
         materials.append(mat)
         idx = pr["idx"].astype(np.uint16 if pr["pos"].shape[0] < 65536 else np.uint32)
         ia = add_acc(idx, 5123 if idx.dtype == np.uint16 else 5125, "SCALAR", 34963)
