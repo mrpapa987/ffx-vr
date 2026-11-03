@@ -92,6 +92,35 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
 - Blitzball uses a stereo screen rather than a full VR view; chocobo riding has had no VR work yet.
 - Only Virtual Desktop (VDXR) on a Quest 3 has been tested.
 
+## VR hands (experimental) and your own hands
+
+F8 > **VR hands (experimental)** > tick **VR hands** draws a pair of hands at your controllers in first person (and,
+if you tick them, in the diorama, third person and the seat view). The fingers follow the trigger, the grip and the
+touch sensors. It is off by default while it is being tested.
+
+**hand model** lists every pack in the mod folder's `hands\` folder: the two that ship with the mod (our own generic
+hand, MIT: a dark glove and a bare hand) and any you make yourself. **rescan** reads the folder again after you add one.
+
+**Your own hands, from a model you own.** `tools\import-hands.ps1` turns a character model you have (a Wavefront `.obj`
+with its `.mtl` and textures beside it: a full body in a T or A pose, Y up) into a hand pack: it finds both hands, cuts
+them at the wrist or cuff, rigs the fingers and carries the textures over. It needs Python 3 and numpy (it tells you how
+to install numpy if it is missing).
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "D:\models\My Character.obj" -Name mine
+```
+
+It writes `<game>\fahrenheit\mods\ffxvr\hands\mine\`. In game: F8 > VR hands > hand model > **rescan**, pick it.
+If a hand looks wrong: `-CutRight 0.095` / `-CutLeft` move the wrist cut, `-FlipRight` / `-FlipLeft` swap a palm and
+back, `-Only right` mirrors one hand, `-Tip "x,y,z"` picks a hand by hand, `-DebugImages` shows what it found (the
+script's header lists everything). `hand.json` in the pack folder holds the per-pack fit (`wrist_offset_m`,
+`wrist_rotation_deg`, `scale`, `tint`, `rest_curl`; see `src/managed/hand_pack.cs`).
+
+**A pack made from a model stays on your PC: do not share it.** Most character models, a game's above all, are someone
+else's copyright. The importer marks every pack it makes as private (`"private": true` and a
+`PRIVATE-do-not-share.txt`), refuses to write into a git checkout, and FFX VR's tools never copy, package or upload such
+a pack (`install-mod.ps1 -Uninstall` keeps it; `-Purge` names it before deleting it). FFX VR itself ships no game data.
+
 ## Reporting bugs
 
 Please report problems **here, in this repository's [Issues](https://github.com/mrpapa987/ffx-vr/issues)**,
@@ -141,7 +170,10 @@ This mod only works because of other people's projects:
     src/managed/   C# Fahrenheit module: camera hook, mode detection, settings, the F8 overlay
     src/native/    C++ DLL: D3D11 hooks, OpenXR session, per-eye render, UI panels
     tools/         Build, install and diagnostic scripts
-    assets/hands/  The generic VR hand packs (ours, MIT; regenerate with python tools/hands/make-generic-hand.py)
+    assets/hands/  The generic VR hand packs (ours, MIT; regenerate with python tools/hands/make-generic-hand.py).
+                   Only generic/ and generic-glove/ belong here: .gitignore keeps any other pack out of git
+    tools/hands/   The hand-pack tools: the generator, the importer (import-hands.py, objio.py; tools/import-hands.ps1),
+                   handlib.py, preview-pack.py
     packaging/     The release zip's installer and README
     docs/          Design notes
 

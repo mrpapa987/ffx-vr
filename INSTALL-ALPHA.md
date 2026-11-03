@@ -158,6 +158,7 @@ closed (deleted while the game runs, it is written again at your next settings c
 | **VR render resolution**: 2560×1440 instead of 4K; much lighter on the GPU. (Anti-aliasing is handled by the mod: 4× by default, in the overlay's View section) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` restores yours) |
 | **Re-Remastered texture pack**: download it yourself from [Nexus](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244). Do **not** install its External File Loader; Fahrenheit serves the files instead | `.\tools\install-texture-pack.ps1 -Archive "<path to the .7z>"` (`-Compress` halves the disk use, `-Uninstall` removes it) |
 | **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
+| **Your own VR hands** from a model you own (Python 3 + numpy; README.md, "VR hands (experimental) and your own hands"). The pack goes into the game's mod folder, never into this repository: the importer refuses a git checkout | `.\tools\import-hands.ps1 "<model>.obj" -Name mine` |
 
 Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 

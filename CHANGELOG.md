@@ -36,6 +36,11 @@ recommended.
   runs).
 - **Installer** (`tools\install-mod.ps1`) that checks every requirement, and `tools\run-ffx.ps1` that
   starts the game and collects the logs for a bug report.
+- **VR hands (experimental, off by default)**: your hands drawn at the controllers in first person (optionally in
+  the diorama, third person and the seat view), depth-tested in both eyes, fingers following the trigger, grip and
+  touch sensors. F8 > VR hands > **hand model** picks the look: our generic dark glove or bare hand (MIT), or a pack
+  you make from a model you own with `tools\import-hands.ps1` (Python 3 + numpy). Such a pack is marked private and
+  stays on your PC; the mod's tools never package, copy or delete it.
 - **Small logs by default**: one `ffxvr_diag.log` per session, at most 4 MB; the diagnostics for bug
   hunting are off; `tools\set-logging.ps1 -Profile Verbose` turns on a fuller log for a bug report, and
   `-Profile Release` turns it off again.

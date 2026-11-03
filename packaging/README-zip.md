@@ -20,6 +20,7 @@ Tested on one setup only: Windows 11, an RTX 3080 Ti, and a **Quest 3 over Virtu
 | `tools\run-ffx.ps1` | Starts the game through Fahrenheit and collects logs for bug reports |
 | `tools\set-logging.ps1` | Turns the mod's verbose log on for a bug report (`-Profile Verbose`) and every diagnostic off again (`-Profile Release`) |
 | `tools\game-settings.ps1`, `import-steam-saves.ps1`, `export-save-to-steam.ps1`, `install-texture-pack.ps1` | Optional extras (section 6) |
+| `tools\import-hands.ps1`, `tools\hands\` | VR hands: make a hand pack from a model you own (section 6) |
 | `LICENSE`, `THIRD-PARTY-NOTICES` | Licences (MIT for FFX VR; Apache-2.0 for the bundled OpenXR loader) |
 
 Extract it **anywhere outside the game folder**, e.g. `Documents`. Inside you'll find a folder
@@ -159,6 +160,27 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 |---|---|
 | **Lighter render resolution**: 2560x1440 instead of 4K, much easier on the GPU (the mod does its own anti-aliasing) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` puts yours back) |
 | **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
+
+### VR hands (experimental), and your own hands
+
+F8 > **VR hands (experimental)** > tick **VR hands**: a pair of hands at your controllers in first person, fingers
+following the trigger, grip and touch sensors. **hand model** picks the look: our generic glove or bare hand, or a pack
+you made yourself (**rescan** after adding one).
+
+To make your own from a character model you own (a Wavefront `.obj` with its `.mtl` and textures beside it, full body,
+T or A pose, Y up), install [Python 3](https://www.python.org/downloads/) and numpy (the script tells you how), then:
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "<path to the .obj>" -Name mine
+```
+
+It writes the pack into the mod's `hands\mine\` folder; in game: F8 > VR hands > hand model > rescan, pick it. Options
+for a hand that comes out wrong are listed at the top of `tools\import-hands.ps1` (`-CutRight 0.095`, `-FlipLeft`,
+`-Only right`, ...).
+
+**Keep such a pack on your PC; do not share it.** It is made from someone else's model (a game's character, most
+likely), so it is marked private, and the installer and the release tools never copy or delete it
+(`install-mod.ps1 -Uninstall` keeps it; `-Purge` names it before deleting it).
 
 ### Later, if you like: HD textures
 
