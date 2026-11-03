@@ -92,7 +92,7 @@ bool hv_cal_capture(int h, const float grip_R[9], const float grip_p[3], bool ot
     if (!v3norm(f)) return false;
     float t[3];
     if (other_valid) { for (int i = 0; i < 3; ++i) t[i] = other_p[i] - grip_p[i]; }
-    else { t[0] = (h == 0) ? 1.f : -1.f; t[1] = 0.f; t[2] = 0.f; }   // one controller: toward the heading's right (left hand) / left
+    else { const float sg = (h == 0) ? 1.f : -1.f; t[0] = sg * c; t[1] = 0.f; t[2] = -sg * s; }   // one controller: Ry(yaw) (+-1, 0, 0), the head's right (left hand) / left
     { const float d = v3dot(t, f); for (int i = 0; i < 3; ++i) t[i] -= d * f[i]; }
     if (!v3norm(t)) return false;
     // The target hand frame: Z = -f (proximal), X = -t for the right hand (the thumb, toward the other hand, is -X there) and

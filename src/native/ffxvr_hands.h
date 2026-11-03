@@ -41,7 +41,7 @@ void hv_xform_mul(const HvXform& a, const HvXform& b, HvXform* o);   // o = a . 
 
 /// Calibration capture (spec 2 row 1b), all in reference space: the arms straight out in front, palms down, fingers forward.
 /// The fingers point from an estimated shoulder (head + yaw . (-+0.17, -0.13, +0.04) m) through the grip; the thumb side
-/// points at the other hand (or along +-x with one controller). Writes the grip -> hand rotation (Rg^T Rt) and returns false
+/// points at the other hand (or along the head's yaw-turned +-x with one controller). Writes the grip -> hand rotation (Rg^T Rt) and returns false
 /// on a degenerate pose (the hand at the shoulder, both hands in one spot).
 bool hv_cal_capture(int h, const float grip_R[9], const float grip_p[3], bool other_valid, const float other_p[3],
                     const float head_p[3], float head_yaw, float out_R[9]);

@@ -38,6 +38,8 @@ public sealed unsafe partial class FFXVRModule {
     private double _h2_cal_at = -1;              // the calibration countdown's end (_now), -1: none
     private bool   _h2_migrate_done;
     private int    _h2_dump_frames;              // "log one pose dump": debug bit 8 held for this many frames (native acts on its rising edge)
+    private int    _h2_cancels_seen = -1;        // native's cancelled-calibration count when last seen (SF-2)
+    private double _h2_cancel_note_until = -1;   // show "cancelled" in the header until this _now
     private delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void> _fn_pre_resolve;   // ABI 27
     private delegate* unmanaged[Cdecl]<VrHandsCfg*, int, void> _fn_hands2_set;               // ABI 27
     private delegate* unmanaged[Cdecl]<int*, int, byte*> _fn_hands2_status;                  // ABI 27: (out, n) -> the status line
@@ -134,7 +136,16 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_hands2_cal != null) {
             float* rc = stackalloc float[18];
             if (_h2_cal_pushed != _vr_hands_cal) {
-                if (hands2_parse18(_vr_hands_cal, rc)) _fn_hands2_cal(rc, 1);
+                if (hands2_parse18(_vr_hands_cal, rc)) {
+                    bool had0 = false, had1 = false; for (int i = 0; i < 9; i++) { had0 |= rc[i] != 0f; had1 |= rc[9 + i] != 0f; }
+                    _fn_hands2_cal(rc, 1);
+                    _fn_hands2_cal(rc, 0);   // N10: what native accepted (a rejected hand reads 9 zeros), so a bad value is not saved again
+                    bool got0 = false, got1 = false; for (int i = 0; i < 9; i++) { got0 |= rc[i] != 0f; got1 |= rc[9 + i] != 0f; }
+                    if ((had0 && !got0) || (had1 && !got1)) {
+                        _logger.Warning($"settings: vr_hands_cal: the {(had0 && !got0 ? "left" : "right")} hand's value is not a rotation; that hand uses the default placement");
+                        _vr_hands_cal = hands2_fmt18(rc);
+                    }
+                }
                 else {
                     _fn_hands2_cal(null, 1);   // the default for both hands
                     if (_vr_hands_cal.Length > 0) { _logger.Warning($"settings: vr_hands_cal is not 18 numbers; the default placement is used ({_vr_hands_cal})"); _vr_hands_cal = ""; }
@@ -160,11 +171,11 @@ public sealed unsafe partial class FFXVRModule {
         _fn_hands2_set(&c, sizeof(VrHandsCfg));
     }
 
-    /// <summary>The native status line ("drawing | eye1 1198 eye2 1198 / 1200 frames (last 10 s) | last hidden: ..."), and v[0..8].</summary>
+    /// <summary>The native status line ("drawing | eye1 1198 eye2 1198 / 1200 frames (last 10 s) | last hidden: ..."), and v[0..10].</summary>
     private string hands2_status(int* v) {
-        for (int i = 0; i < 9; i++) v[i] = 0;
+        for (int i = 0; i < 11; i++) v[i] = 0;
         if (_fn_hands2_status == null) return "";
-        byte* s = _fn_hands2_status(v, 9);
+        byte* s = _fn_hands2_status(v, 11);
         return s != null ? Marshal.PtrToStringAnsi((nint)s) ?? "" : "";
     }
 
@@ -173,25 +184,34 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_hands2_set == null) return;
         if (!ImGui.CollapsingHeader("VR hands (experimental)##h2")) return;
         ImGui.Checkbox("VR hands: boxes at your controllers (first person)##h2on", ref _vr_hands);
-        int* v = stackalloc int[9];
+        int* v = stackalloc int[11];
         string st = hands2_status(v);
         if (st.Length > 0) { ImGui.SameLine(); ImGui.TextDisabled(esc(st)); }
         bool body = _fp_body_mode != 0 || !_fp_hide_body || (_hands_dev && _hands_on);
         if (_vr_hands && body) {
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
-            ImGui.TextWrapped("Not drawn while your body is shown: pick \"hide my whole body\" (Debug > First person / follow) to see the hands.");
+            ImGui.TextWrapped("Not drawn while your body is shown: pick \"hide my whole body\" and tick \"hide the player's body\" (Debug > First person / follow) to see the hands"
+                              + (_hands_dev && _hands_on ? ", and turn the old bone hands off." : "."));
             ImGui.PopStyleColor(1);
         }
         ImGui.TextDisabled("Only in first person with your body hidden; not on screens, menus, FMVs, battle transitions or under the dream filter.");
         if (_fn_hands2_cal != null) {
+            if (_h2_cancels_seen >= 0 && v[10] != _h2_cancels_seen) _h2_cancel_note_until = _now + 10.0;   // SF-2: native dropped a late request
+            _h2_cancels_seen = v[10];
             if (_h2_cal_at > 0) {
                 ImGui.Text(I($"{(int)Math.Ceiling(_h2_cal_at - _now)} ... hold both arms STRAIGHT OUT IN FRONT, shoulder width, PALMS DOWN, fingers forward"));
                 ImGui.SameLine(); if (ImGui.SmallButton("cancel##h2cal")) _h2_cal_at = -1;
             }
+            else if (v[9] != 0) ImGui.Text("capturing ...");
             else if (ImGui.Button("calibrate: 10 s countdown##h2cal")) _h2_cal_at = _now + 10.0;
             ImGui.SameLine(); if (ImGui.SmallButton("reset calibration##h2cal")) _vr_hands_cal = "";   // hands2_push sends the default
             ImGui.SameLine();
             ImGui.TextDisabled(I($"calibrated: left {((v[7] & 1) != 0 ? "yes" : "no (default)")}, right {((v[7] & 2) != 0 ? "yes" : "no (default)")}"));
+            if (_now < _h2_cancel_note_until) {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
+                ImGui.TextWrapped("The last calibration was cancelled: the countdown ended without a 3D frame and a tracked controller (a menu, a movie or a load?). Nothing changed; try again in the field.");
+                ImGui.PopStyleColor(1);
+            }
         }
         if (ImGui.TreeNode("fine tune##h2ft")) {
             ImGui.SetNextItemWidth(110); ImGui.SliderFloat("yaw##h2", ref _vr_hands_yaw, -45f, 45f, "%.0f deg"); ImGui.SameLine();

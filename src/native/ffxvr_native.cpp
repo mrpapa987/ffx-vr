@@ -973,8 +973,10 @@ float   g_hb_mv[3] = {}; int g_hb_mode = -1;                              // VR 
 // reserved: the owner's rule is first person only, with the body hidden) and the inputs latched at the frame's tick.
 struct VrHandsCfg { int bytes, on, views, debug; float trim_rad[3], trim_off_m[3]; };
 VrHandsCfg g_h2cfg = { static_cast<int>(sizeof(VrHandsCfg)), 0, 0, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f } };
-struct HandsSnap { bool valid; uint32_t frame, pkt; XrHand hand[2]; float ref_q[4], ref_p[3]; float Pj[16]; };
+struct HandsSnap { bool valid; uint32_t frame, pkt; XrHand hand[2]; float ref_q[4], ref_p[3]; float head_p[3]; float Pj[16]; };
 HandsSnap g_hs = {};
+uint32_t g_h2_drawn_frame = 0xFFFFFFFFu;     // the frame the hands were last drawn in (uid_depth_pass reads it: SF-3)
+uint32_t g_h2_uid_early = 0, g_h2_uid_skip = 0;   // the adaptive panel's depth measured before the hands were drawn / skipped because they were (10 s window)
 static void hands_latch(const float* Pj);   // write_camera, at the tick (under g_mutex)
 static void hands_frame_end();              // begin_frame, before the frame counter moves on
 float   g_hands_sh_w = 0.17f, g_hands_sh_down = 0.13f, g_hands_sh_back = 0.04f;   // shoulder half-width, drop below the eyes, behind them (metres)
@@ -7449,6 +7451,7 @@ static float uid_cur() { return (g_uid_cur > 0.f && g_uid_cur <= g_ui_dist) ? g_
 /// 1(a). At the depth-only clear that opens the UI pass (before the game's clear): the depth tiles of this frame.
 static void uid_depth_pass(void* view, unsigned flags, float clear_d) {
     if (!g_uid_on || g_uid_a_frame == g_frames) return;   // once a frame: a second opener (a resolve in between) finds the depth already cleared
+    if (g_h2_drawn_frame == g_frames) { g_h2_uid_skip++; return; }   // VR hands v2 (SF-3): our hands are in this depth; measured before them (hands_draw_frame) or not at all this frame
     if (!g_xr_want || !xr_active() || !g_xr_active || !g_ui_enabled || g_ovr_suspend || g_xr_screen_now || g_screen3d_now || bt_no_split() || g_dream_gate) return;
     if (!g_xr_fov_applied) {   // UD-12: the footprint needs the FOV the eyes were rendered with
         if (!g_xr_use_fov && !g_uid_logged_fov) { g_uid_logged_fov = true; diag("uidepth: the headset field of view is off (headset_fov=0): no adaptive distance while it is"); }
@@ -8194,22 +8197,25 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 // line with diag_verbose only; the frame census gets HANDS lines.
 
 enum H2Why { H2_NONE = 0, H2_OFF, H2_NO_XR, H2_SUSPEND, H2_SCREEN3D, H2_BACKDROP, H2_BT, H2_DREAM, H2_FREEZE, H2_VIEW, H2_BODY,
-             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_N };
+             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_N };
 static const char* const k_h2_why[H2_N] = { "", "off", "xr", "suspend", "screen3d", "backdrop", "bt", "dream", "freeze", "view", "body",
-                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt" };
+                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev" };
 static const char* const k_h2_why_long[H2_N] = { "", "off", "the headset is off", "a screen frame (FMV, menu, save screen)", "the stereo screen",
     "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "not first person",
     "your body is shown (fp_body_mode)", "no camera this frame", "the shader pass is not ready", "no scene projection this frame",
-    "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve" };
-struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2]; float pv_diff; bool pv_done; };
+    "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve",
+    "the first scene resolve was not last frame's scene target" };
+struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2]; float pv_diff, pv_diff2; bool pv_done; };
 H2Stat g_h2w = {}, g_h2_last = {}, g_h2_tot = {};       // the live 10 s window, the last complete one, this on-session
 bool g_h2_last_valid = false;
-uint32_t g_h2_res_frame = 0xFFFFFFFFu, g_h2_drawn_frame = 0xFFFFFFFFu; int g_h2_why_frame = H2_NONE, g_h2_last_why = H2_NONE;
+uint32_t g_h2_res_frame = 0xFFFFFFFFu, g_h2_notprev_frame = 0xFFFFFFFFu; int g_h2_why_frame = H2_NONE, g_h2_last_why = H2_NONE;
 uint32_t g_h2_seen_skips = 0;                           // bit per H2Why (and 1 << 30: no twin DSV): the first of each kind is logged as an event
 int  g_h2_grips_last = 0;                               // bit 0 left, bit 1 right: tracked at the last draw
 // calibration (Cal_h): the grip -> hand rotation per controller, captured at the tick by ffxvr_hands2_cal(op 2)
 float g_h2_cal[2][9] = {}; bool g_h2_cal_set[2] = { false, false }; volatile LONG g_h2_cal_req = 0; uint32_t g_h2_cal_count = 0;
-int  g_h2_cal_buzz = 0; bool g_h2_cal_wait_logged = false;
+int  g_h2_cal_buzz = 0; ULONGLONG g_h2_cal_req_t = 0; uint32_t g_h2_cal_cancels = 0;   // SF-2: a request older than k_h2_cal_max_ms is dropped
+static const ULONGLONG k_h2_cal_max_ms = 500;
+D3D11_VIEWPORT g_h2_vp_used = {};   // SF-4: the viewport of the last draw (the game's, else the whole target)
 // the pass
 ID3D11VertexShader* g_h2_vs = nullptr; ID3D11PixelShader* g_h2_ps = nullptr; ID3D11InputLayout* g_h2_il = nullptr;
 ID3D11Buffer* g_h2_vb = nullptr; ID3D11Buffer* g_h2_cb[2] = { nullptr, nullptr }; ID3D11DepthStencilState* g_h2_dss = nullptr; ID3D11RasterizerState* g_h2_rs = nullptr;
@@ -8266,9 +8272,11 @@ static void hands_pass_init() {
     g_device->CreateRasterizerState(&rd, &g_h2_rs);
     g_h2_ok = g_h2_vs && g_h2_ps && g_h2_il && g_h2_vb && g_h2_cb[0] && g_h2_cb[1] && g_h2_dss && g_h2_rs;
     QueryPerformanceCounter(&t1); g_h2_compile_ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / (double)fq.QuadPart;
-    if (g_h2_ok) diag("hands: pass ready (vs+ps compiled %.1f ms at Present) | boxes, first person with the body hidden, vertex %u B", g_h2_compile_ms, static_cast<unsigned>(sizeof(HvVertex)));
-    else diag("hands: pass FAILED: a D3D object could not be made (vs %d ps %d il %d vb %d cb %d/%d dss %d rs %d)", g_h2_vs != nullptr, g_h2_ps != nullptr, g_h2_il != nullptr,
+    if (g_h2_ok) { diag("hands: pass ready (vs+ps compiled %.1f ms at Present) | boxes, first person with the body hidden, vertex %u B", g_h2_compile_ms, static_cast<unsigned>(sizeof(HvVertex))); return; }
+    diag("hands: pass FAILED: a D3D object could not be made (vs %d ps %d il %d vb %d cb %d/%d dss %d rs %d)", g_h2_vs != nullptr, g_h2_ps != nullptr, g_h2_il != nullptr,
               g_h2_vb != nullptr, g_h2_cb[0] != nullptr, g_h2_cb[1] != nullptr, g_h2_dss != nullptr, g_h2_rs != nullptr);
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };   // N8: nothing half-made is kept
+    drop(g_h2_vs); drop(g_h2_ps); drop(g_h2_il); drop(g_h2_vb); drop(g_h2_cb[0]); drop(g_h2_cb[1]); drop(g_h2_dss); drop(g_h2_rs);
 }
 
 /// The head's yaw in reference space (forward = R(q) . -z).
@@ -8292,13 +8300,12 @@ static void hands_latch(const float* Pj) {
     g_hs.frame = g_frames; g_hs.pkt = g_vrpad_packet; g_hs.valid = g_vrpad.ready;
     g_hs.hand[0] = g_vrpad.hand[0]; g_hs.hand[1] = g_vrpad.hand[1];
     memcpy(g_hs.ref_q, g_xr_ref_q, sizeof(g_hs.ref_q)); memcpy(g_hs.ref_p, g_xr_ref_p, sizeof(g_hs.ref_p));
+    memcpy(g_hs.head_p, g_xr_p, sizeof(g_hs.head_p));
     memcpy(g_hs.Pj, Pj, sizeof(g_hs.Pj));
     if (g_h2_cal_req == 0) return;
-    if (!g_xr_active || !g_vrpad.ready || (!g_vrpad.hand[0].grip_valid && !g_vrpad.hand[1].grip_valid)) {
-        if (!g_h2_cal_wait_logged) { g_h2_cal_wait_logged = true; diag("hands: calibration waits for a 3D frame with the headset on and a controller tracked"); }
-        return;
-    }
-    InterlockedExchange(&g_h2_cal_req, 0); g_h2_cal_wait_logged = false;
+    if (GetTickCount64() - g_h2_cal_req_t > k_h2_cal_max_ms) return;   // too old: hands_frame_end cancels it (SF-2)
+    if (!g_xr_active || !g_vrpad.ready || (!g_vrpad.hand[0].grip_valid && !g_vrpad.hand[1].grip_valid)) return;   // a later tick within the limit may still take it
+    InterlockedExchange(&g_h2_cal_req, 0);
     HvXform gr[2]; for (int h = 0; h < 2; ++h) hands_grip_ref(g_vrpad.hand[h], g_xr_ref_q, g_xr_ref_p, &gr[h]);
     const float head[3] = { g_xr_p[0] + 0.5f * g_xr_eye_off[0], g_xr_p[1] + 0.5f * g_xr_eye_off[1], g_xr_p[2] + 0.5f * g_xr_eye_off[2] };   // between the eyes
     const float yaw = hands_head_yaw();
@@ -8330,7 +8337,8 @@ static int hands_hide_why() {
     if (g_fp_body_mode != 0 || !g_fp_hide_body || g_hands_on) return H2_BODY;   // no "show my body" with our hands (the owner's rule); the old bone hands show Tidus's arms
     if (g_view_tick_frame != g_frames || g_hs.frame != g_frames) return H2_NO_TICK;
     if (!g_h2_ok) return H2_NO_PASS;
-    if (!std::isfinite(g_hs.Pj[0]) || !std::isfinite(g_hs.Pj[5]) || fabsf(g_hs.Pj[0]) <= 0.2f || fabsf(g_hs.Pj[5]) <= 0.2f) return H2_NO_PROJ;
+    if (!std::isfinite(g_hs.Pj[0]) || !std::isfinite(g_hs.Pj[5]) || fabsf(g_hs.Pj[0]) <= 0.2f || fabsf(g_hs.Pj[5]) <= 0.2f
+        || fabsf(g_hs.Pj[14] + 1.f) >= 1e-3f || fabsf(g_hs.Pj[15]) >= 1e-3f) return H2_NO_PROJ;   // a perspective camera only (N3: never a light camera's ortho slot)
     return H2_NONE;
 }
 /// The first of each kind of skip this on-session is an event line; the rest are counted (the 10 s line).
@@ -8379,7 +8387,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
     if (rtv[0] == nullptr || texture_of(rtv[0]) != src) { hands_skip_event(H2_WRONG_RT, "the scene target is not rtv0 at its resolve"); rel(); return H2_WRONG_RT; }
     if (dsv == nullptr) { hands_skip_event(H2_NO_DSV, "no depth target bound at the scene resolve"); rel(); return H2_NO_DSV; }
     // Views and the base, from the tick's view; one sample for both eyes and both hands.
-    float V[2][16], I[16], Pn[3], P[3], Rb[9], sc, mvp[3]; int mode; float pv_last[16]; bool have_pv;
+    float V[2][16], I[16], Pn[3], P[3], Rb[9], sc, mvp[3]; int mode; float pv_last[16], pv_last2[16]; bool have_pv;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         float v[12]; memcpy(v, g_tick_v, sizeof(v));
@@ -8388,7 +8396,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         memcpy(P, g_hb_P, sizeof(P)); memcpy(Rb, g_hb_Rb, sizeof(Rb)); sc = g_hb_sc; memcpy(mvp, g_hb_mv, sizeof(mvp)); mode = g_hb_mode;
         g_eye_shift = 1e-6f; build_override_view(v, V[1], I, Pn, false);  // eye 2: the headset's right-eye offset (non-zero marks eye 2)
         g_eye_shift = es;
-        have_pv = g_have_PV; memcpy(pv_last, g_last_PVn, sizeof(pv_last));
+        have_pv = g_have_PV; memcpy(pv_last, g_last_PVn, sizeof(pv_last)); memcpy(pv_last2, g_last_PVn2, sizeof(pv_last2));
     }
     if (mode != 1) { rel(); return H2_VIEW; }
     if (!(sc > 1e-3f) || !std::isfinite(sc)) { rel(); return H2_NO_PROJ; }
@@ -8403,6 +8411,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         const XrHand& hd = g_hs.hand[h];
         if (!g_hs.valid || !hd.grip_valid) { g_h2w.grip_lost[h]++; g_h2_tot.grip_lost[h]++; continue; }
         HvXform grip; hands_grip_ref(hd, g_hs.ref_q, g_hs.ref_p, &grip);
+        if (!g_xr_translate) for (int i = 0; i < 3; ++i) grip.t[i] -= g_hs.head_p[i];   // N1: head_position=0 keeps the eye at the base: the hands follow it, relative to the (left) eye
         HvXform G; hv_default_grip_to_hand(h, &G);
         if (g_h2_cal_set[h]) memcpy(G.R, g_h2_cal[h], sizeof(G.R));   // the calibration replaces the default's rotation; its offset stays
         HvXform T; hv_trim(h, g_h2cfg.trim_rad, g_h2cfg.trim_off_m, &T);
@@ -8430,8 +8439,9 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
     }
     if (!g_h2w.pv_done && have_pv) {   // once per 10 s window: our eye-1 VP against the last uploaded product (last upload wins)
         g_h2w.pv_done = true;
-        float mx = 0.f, mb = 0.f; for (int i = 0; i < 16; ++i) { mx = fmaxf(mx, fabsf(cb[0].VP[i] - pv_last[i])); mb = fmaxf(mb, fabsf(pv_last[i])); }
-        g_h2w.pv_diff = mb > 1e-6f ? mx / mb : mx; g_h2_tot.pv_diff = fmaxf(g_h2_tot.pv_diff, g_h2w.pv_diff);
+        auto rel_diff = [](const float* a, const float* b) { float mx = 0.f, mb = 0.f; for (int i = 0; i < 16; ++i) { mx = fmaxf(mx, fabsf(a[i] - b[i])); mb = fmaxf(mb, fabsf(b[i])); } return mb > 1e-6f ? mx / mb : mx; };
+        g_h2w.pv_diff = rel_diff(cb[0].VP, pv_last); g_h2w.pv_diff2 = rel_diff(cb[1].VP, pv_last2);   // N4: eye 2 against g_last_PVn2
+        g_h2_tot.pv_diff = fmaxf(g_h2_tot.pv_diff, fmaxf(g_h2w.pv_diff, g_h2w.pv_diff2));
     }
     // Eye 2's targets: the twins (no depth twin: eye 2 skips, never drawn unoccluded).
     ID3D11RenderTargetView* rtv2 = twin_rtv(rtv[0]);
@@ -8445,10 +8455,24 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
             ok = SUCCEEDED(g_orig_map(g_ctx, g_h2_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) && ms.pData != nullptr;
             if (ok) { memcpy(ms.pData, &cb[e], sizeof(H2Cb)); g_orig_unmap(g_ctx, g_h2_cb[e], 0); }
         }
-        if (!ok) { hands_skip_event(H2_NO_PASS, "a buffer could not be mapped"); rel(); return H2_NO_PASS; }
+        if (!ok) { hands_skip_event(27, "a buffer could not be mapped"); rel(); return H2_NO_PASS; }
+    }
+    // SF-3: the adaptive UI panel's depth is measured here, before the hands go into it (uid_depth_pass runs once a frame; at the
+    // UI pass's depth clear it then returns at once). Only when the last frame had a UI pass: on other frames it would be spent
+    // for nothing; the first UI frame after one without is skipped by uid_depth_pass instead (the hands are never measured).
+    if (g_uid_on && g_ui_last_frame_had_pass && !g_uid_logged_clear) {
+        uid_depth_pass(dsv, D3D11_CLEAR_DEPTH, 1.f);
+        if (g_uid_a_frame == g_frames) g_h2_uid_early++;
     }
     // Save, draw both eyes, restore.
     UidSaved s; uid_save(s);
+    {   // SF-4: the game's bound viewport (its rect and depth range are what the projection and the depth test were made for), if sane
+        D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(td.Width); vp.Height = static_cast<float>(td.Height); vp.MaxDepth = 1.f;
+        const D3D11_VIEWPORT& g = s.vp[0];
+        if (s.nvp >= 1 && g.Width >= 1.f && g.Height >= 1.f && g.TopLeftX >= 0.f && g.TopLeftY >= 0.f && g.TopLeftX + g.Width <= td.Width + 0.5f
+            && g.TopLeftY + g.Height <= td.Height + 0.5f && g.MinDepth >= 0.f && g.MaxDepth <= 1.f && g.MinDepth < g.MaxDepth) vp = g;
+        g_h2_vp_used = vp;
+    }
     ID3D11Buffer* o_cb = nullptr; g_ctx->VSGetConstantBuffers(0, 1, &o_cb);
     ID3D11Buffer* o_vb = nullptr; UINT o_stride = 0, o_off = 0; g_ctx->IAGetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
     bool e2 = false;
@@ -8459,8 +8483,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         const UINT stride = sizeof(HvVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_h2_vb, &stride, &off);
         g_ctx->IASetInputLayout(g_h2_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(g_h2_dss, 0); g_ctx->RSSetState(g_h2_rs);
-        D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(td.Width); vp.Height = static_cast<float>(td.Height); vp.MaxDepth = 1.f;
-        g_ctx->RSSetViewports(1, &vp);
+        g_ctx->RSSetViewports(1, &g_h2_vp_used);
         auto draw = [&](ID3D11RenderTargetView* r, ID3D11DepthStencilView* d, int e) {
             ID3D11RenderTargetView* rts[1] = { r };
             g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, d, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
@@ -8487,8 +8510,10 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         hands_census(t);
     }
     if (g_h2_tot.e1 == 1)
-        diag("hands: first drawn at frame %u: eye 1 into %p %ux%u x%u (dsv %p), eye 2 %s | grips %s%s, scale %.2f units/m",
-             g_frames, static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count, static_cast<void*>(texture_of(dsv)), e2 ? "into the twins" : "SKIPPED", (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", sc);
+        diag("hands: first drawn at frame %u: eye 1 into %p %ux%u x%u (dsv %p), eye 2 %s | grips %s%s, scale %.2f units/m | viewport %gx%g at %g,%g depth %g..%g%s",
+             g_frames, static_cast<void*>(src), td.Width, td.Height, td.SampleDesc.Count, static_cast<void*>(texture_of(dsv)), e2 ? "into the twins" : "SKIPPED", (grips & 1) ? "L" : "-", (grips & 2) ? "R" : "-", sc,
+             g_h2_vp_used.Width, g_h2_vp_used.Height, g_h2_vp_used.TopLeftX, g_h2_vp_used.TopLeftY, g_h2_vp_used.MinDepth, g_h2_vp_used.MaxDepth,
+             (s.nvp >= 1 && memcmp(&s.vp[0], &g_h2_vp_used, sizeof(D3D11_VIEWPORT)) == 0) ? " (the game's)" : " (the whole target: the game's was not usable)");
     const bool dump = (g_h2cfg.debug & 8) != 0 && !g_h2_dump_prev; g_h2_dump_prev = (g_h2cfg.debug & 8) != 0;
     if (dump || ((g_h2cfg.debug & 4) != 0 && g_h2_dbg_lines < 300)) {
         if (!dump) g_h2_dbg_lines++;
@@ -8510,12 +8535,19 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
 extern "C" __declspec(dllexport) void ffxvr_pre_resolve(void* dst_res, unsigned dst_sub, void* src_res, unsigned src_sub, unsigned fmt) {
     (void)dst_res; (void)dst_sub; (void)src_sub; (void)fmt;
     if (!g_h2cfg.on || g_in_eye2 || g_ctx == nullptr || src_res == nullptr) return;
+    if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return;   // N2: g_hs, g_h2*, g_eye_shift are render-thread state
     if (g_scene_live_tex == nullptr || g_scene_live_draws < 20 || g_h2_res_frame == g_frames) return;
     ID3D11Texture2D* src = nullptr; static_cast<ID3D11Resource*>(src_res)->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&src));
     if (src == nullptr) return;
     if (src == g_scene_live_tex) {
-        g_h2_res_frame = g_frames;   // the first scene resolve of the frame decides, drawn or not: a later one is post-processing
-        g_h2_why_frame = hands_draw_frame(src);
+        if (g_scene_tex != nullptr && src != g_scene_tex) {   // SF-1: not last frame's scene target (a pre-scene MSAA pass, or a new target): not latched,
+            g_h2_notprev_frame = g_frames;                    // so the real scene target can still qualify at its own resolve this frame
+            hands_skip_event(28, "the first resolve with 20+ draws was not last frame's scene target (a pre-scene pass, or the target was re-made)");
+        }
+        else {
+            g_h2_res_frame = g_frames;   // the first scene resolve of the frame decides, drawn or not: a later one is post-processing
+            g_h2_why_frame = hands_draw_frame(src);
+        }
     }
     src->Release();
 }
@@ -8525,6 +8557,10 @@ namespace {   // as hands_latch: declared in the anonymous namespace for begin_f
 /// calibration buzz, and every 10 s the hands: line (diag_verbose only).
 static void hands_frame_end() {
     if (g_h2_cal_buzz) { for (int h = 0; h < 2; ++h) if (g_h2_cal_buzz & (1 << h)) xr_haptic(h, 0.8f, 0.15f); g_h2_cal_buzz = 0; }
+    if (g_h2_cal_req != 0 && GetTickCount64() - g_h2_cal_req_t > k_h2_cal_max_ms) {   // SF-2: never a capture seconds later, in whatever pose
+        InterlockedExchange(&g_h2_cal_req, 0); g_h2_cal_cancels++;
+        diag("hands: calibration cancelled: no 3D frame with a tracked controller within %u ms of the countdown (a menu, a screen frame, a load?); nothing changed", static_cast<unsigned>(k_h2_cal_max_ms));
+    }
     static ULONGLONG next = 0;
     if (!g_h2cfg.on) { next = 0; return; }
     const ULONGLONG now = GetTickCount64();
@@ -8532,20 +8568,21 @@ static void hands_frame_end() {
     g_h2w.frames++; g_h2_tot.frames++;
     if (g_h2_drawn_frame != g_frames) {
         int why = (g_h2_res_frame == g_frames) ? g_h2_why_frame : hands_hide_why();
-        if (why == H2_NONE) why = H2_NO_RESOLVE;
+        if (why == H2_NONE) why = (g_h2_notprev_frame == g_frames) ? H2_NOT_PREV : H2_NO_RESOLVE;
         if (why > H2_NONE && why < H2_N) { g_h2w.why[why]++; g_h2_tot.why[why]++; g_h2_last_why = why; }
     }
     if (now < next) return;
     next = now + 10000;
     const H2Stat& w = g_h2w;
     char grip[2][24]; for (int h = 0; h < 2; ++h) { if (w.grip_lost[h]) snprintf(grip[h], sizeof(grip[h]), "lost %u", w.grip_lost[h]); else strcpy_s(grip[h], "ok"); }
-    diagv("hands: drawn e1 %u e2 %u / %u frames | hidden suspend %u screen3d %u backdrop %u bt %u dream %u freeze %u view %u body %u no_tick %u no_proj %u no_resolve %u no_grips %u xr %u"
-          " | skip no_dsv %u wrong_rt %u no_twin_dsv %u no_twin %u | grips L %s R %s | pv_diff %.1e%s | pkt_mismatch %u | calibrated L %d R %d | last hidden %s",
+    diagv("hands: drawn e1 %u e2 %u / %u frames | hidden suspend %u screen3d %u backdrop %u bt %u dream %u freeze %u view %u body %u no_tick %u no_pass %u no_proj %u no_resolve %u no_grips %u xr %u"
+          " | skip no_dsv %u wrong_rt %u not_prev %u no_twin_dsv %u no_twin %u | grips L %s R %s | pv_diff e1 %.1e e2 %.1e%s | pkt_mismatch %u | ui depth measured before the hands %u, skipped %u"
+          " | calibrated L %d R %d | last hidden %s",
           w.e1, w.e2, w.frames, w.why[H2_SUSPEND], w.why[H2_SCREEN3D], w.why[H2_BACKDROP], w.why[H2_BT], w.why[H2_DREAM], w.why[H2_FREEZE], w.why[H2_VIEW], w.why[H2_BODY],
-          w.why[H2_NO_TICK], w.why[H2_NO_PROJ], w.why[H2_NO_RESOLVE], w.why[H2_NO_GRIPS], w.why[H2_NO_XR], w.why[H2_NO_DSV], w.why[H2_WRONG_RT], w.no_twin_dsv, w.no_twin,
-          grip[0], grip[1], w.pv_diff, w.pv_done ? "" : " (not measured)", w.pkt_mismatch, g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0,
-          (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why[g_h2_last_why] : "-");
-    g_h2_last = g_h2w; g_h2_last_valid = true; g_h2w = {};
+          w.why[H2_NO_TICK], w.why[H2_NO_PASS], w.why[H2_NO_PROJ], w.why[H2_NO_RESOLVE], w.why[H2_NO_GRIPS], w.why[H2_NO_XR], w.why[H2_NO_DSV], w.why[H2_WRONG_RT], w.why[H2_NOT_PREV],
+          w.no_twin_dsv, w.no_twin, grip[0], grip[1], w.pv_diff, w.pv_diff2, w.pv_done ? "" : " (not measured)", w.pkt_mismatch, g_h2_uid_early, g_h2_uid_skip,
+          g_h2_cal_set[0] ? 1 : 0, g_h2_cal_set[1] ? 1 : 0, (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why[g_h2_last_why] : "-");
+    g_h2_last = g_h2w; g_h2_last_valid = true; g_h2w = {}; g_h2_uid_early = g_h2_uid_skip = 0;
 }
 }  // namespace
 
@@ -8568,8 +8605,8 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int 
         }
         else {
             const H2Stat& t = g_h2_tot;
-            diag("hands: off | while on: drawn e1 %u e2 %u of %u frames; skips no_dsv %u wrong_rt %u no_twin_dsv %u; pkt_mismatch %u; pv_diff max %.1e",
-                 t.e1, t.e2, t.frames, t.why[H2_NO_DSV], t.why[H2_WRONG_RT], t.no_twin_dsv, t.pkt_mismatch, t.pv_diff);
+            diag("hands: off | while on: drawn e1 %u e2 %u of %u frames; skips no_dsv %u wrong_rt %u not_prev %u no_twin_dsv %u; pkt_mismatch %u; pv_diff max %.1e",
+                 t.e1, t.e2, t.frames, t.why[H2_NO_DSV], t.why[H2_WRONG_RT], t.why[H2_NOT_PREV], t.no_twin_dsv, t.pkt_mismatch, t.pv_diff);
         }
     }
     g_h2cfg = n;
@@ -8577,15 +8614,16 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int 
 
 /// The F8 status line, and numbers: out[0] 0 off / 1 drawing / 2 hidden, [1] eye-1 frames, [2] eye-2 frames, [3] frames (the
 /// last 10 s, else the live window), [4] captures, [5] pass (-1 failed, 0 not built, 1 ready), [6] grips drawn (bit 0 L,
-/// bit 1 R), [7] calibrated (bit 0 L, bit 1 R), [8] the last hide reason (H2Why). Returns the count filled.
+/// bit 1 R), [7] calibrated (bit 0 L, bit 1 R), [8] the last hide reason (H2Why), [9] a calibration request pending, [10]
+/// calibrations cancelled (SF-2). Returns the status line (a static buffer, valid until the next call).
 extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n) {
     static char s[256];
     const H2Stat& w = g_h2_last_valid ? g_h2_last : g_h2w;
     const bool drawing = g_h2cfg.on && g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 2;
     const int pass = g_h2_ok ? 1 : g_h2_tried ? -1 : 0;
-    const int v[9] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
-                       g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why };
-    int k = 0; if (out) for (; k < n && k < 9; ++k) out[k] = v[k];
+    const int v[11] = { !g_h2cfg.on ? 0 : drawing ? 1 : 2, static_cast<int>(w.e1), static_cast<int>(w.e2), static_cast<int>(w.frames), static_cast<int>(g_h2_cal_count), pass,
+                        g_h2_grips_last, (g_h2_cal_set[0] ? 1 : 0) | (g_h2_cal_set[1] ? 2 : 0), g_h2_last_why, g_h2_cal_req != 0 ? 1 : 0, static_cast<int>(g_h2_cal_cancels) };
+    if (out) for (int k = 0; k < n && k < 11; ++k) out[k] = v[k];
     const char* last = (g_h2_last_why > H2_NONE && g_h2_last_why < H2_N) ? k_h2_why_long[g_h2_last_why] : "nothing yet";
     if (!g_h2cfg.on) snprintf(s, sizeof(s), "off");
     else if (pass < 0) snprintf(s, sizeof(s), "the shader pass could not be built (see ffxvr_diag.log)");
@@ -8597,7 +8635,8 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands2_status(int* out, int n
 
 /// The calibration (ABI 27): op 0 reads both hands' grip -> hand rotations into rc18 (9 floats each, row-major; a hand not
 /// calibrated reads as 9 zeros), op 1 writes them (9 zeros, or a non-rotation, = that hand's default; rc18 null resets both),
-/// op 2 asks for a capture at the next tick with a controller tracked (arms straight out, palms down). Returns the capture count.
+/// op 2 asks for a capture at the next tick with a controller tracked (arms straight out, palms down), within 0.5 s or not at
+/// all. Returns the capture count.
 extern "C" __declspec(dllexport) uint32_t ffxvr_hands2_cal(float* rc18, int op) {
     if (op == 0 && rc18 != nullptr) {
         for (int h = 0; h < 2; ++h) for (int i = 0; i < 9; ++i) rc18[h * 9 + i] = g_h2_cal_set[h] ? g_h2_cal[h][i] : 0.f;
@@ -8612,7 +8651,7 @@ extern "C" __declspec(dllexport) uint32_t ffxvr_hands2_cal(float* rc18, int op) 
             memcpy(g_h2_cal[h], R, sizeof(R)); g_h2_cal_set[h] = true;
         }
     }
-    else if (op == 2) { InterlockedExchange(&g_h2_cal_req, 1); g_h2_cal_wait_logged = false; }
+    else if (op == 2) { g_h2_cal_req_t = GetTickCount64(); InterlockedExchange(&g_h2_cal_req, 1); }   // dropped after k_h2_cal_max_ms without a capture (SF-2)
     return g_h2_cal_count;
 }
 
