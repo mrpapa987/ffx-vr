@@ -3531,3 +3531,54 @@ the catch.
   catch is the cost (more vertices skinned per frame is fine, but a 4x texture is 16x the memory in a 32-bit process) and
   that smoothing rounds off the model's own silhouette.
 
+
+### JKXR's touch-to-use, compared (3 Nov 2026; research/jkxr-touch.md in the session scratchpad)
+
+Team Beef's JKXR (GPL-2.0: design only, no code) fires "use" when a hand is more than 0.35 m out from the headset,
+repeating every 250 ms; its real guard is their rewritten game code (use only works when a short trace from the hand hits
+something usable). FFX decides confirm itself from Tidus's facing and each object's talk range, and many examine spots
+(signs, doors) have no actor, so the grip + push + text-box gate stays our design; the owner (who played JKXR a lot)
+agreed. Parked, in order of value: (1) a second haptic tick when the game actually responds (a text box opens; the
+"last interaction" field Fahrenheit names at +0x1E8 is a guess: log it first); (2) ignore taps ~0.5 s after a text box,
+battle or menu closes; (3) log Tidus's body heading against the head yaw per tap (a tap that does nothing may be Tidus
+facing elsewhere); (4) turn Tidus toward the gaze before pressing A, only if (3) shows that; (5) an optional slow-reach
+trigger (grip held, hand ~40 cm out, fires once). Not recommended: touching the actual target, dwell / hold-to-repeat,
+dropping the grip. Also from JKXR: their menu pointer maps controller angles straight to a cursor, the cheap route to the
+parked F8 laser pointer.
+
+## Overdrives in VR: ideas parked (3 Nov 2026)
+
+The owner: "we'll come back to that when I run out of important stuff to work on". Most overdrives are timed controller
+inputs, and the tap gesture's pad injection (hv_tap_hook, the gate, the release guarantees) already turns a gesture into
+a game input. The controller always keeps working, so a missed gesture costs no more than a missed press.
+
+| Overdrive | The game wants | VR version | Effort |
+|---|---|---|---|
+| Lulu, Fury | spin the right stick as often as possible | draw circles with a hand: its angle about a centre point becomes the stick angle | small |
+| Tidus, Swordplay | a press while the cursor is in the bar's zone | swing the controller like a sword: the swing is the press (the tap's detector with an arc) | small |
+| Wakka, Slots | a press per reel | a punch or throw per reel | small |
+| Auron, Bushido | a button sequence shown on screen, against the clock | a slash per arrow (up / down / left / right), a left / right thrust for the shoulder buttons; the player reads the prompt | medium |
+| Auron, "Beat Saber" | (same) | read the sequence from memory and draw one 3D target per input to slash through (the hands S1 box renderer can draw them) | large |
+| Kimahri, Rikku, Yuna, aeons | menu choices | nothing worth doing | - |
+
+What every one needs first: a reliable "an overdrive minigame is running, and which" signal (a gate like the tap's battle
+and text-box checks), and for Auron the expected sequence if it is readable. Plan when picked up: one research round
+(FFXDataParser, Fahrenheit's battle structs, a capture of each overdrive: start it, log the frame census and the actor
+table), then Lulu's circles and Tidus's swing, then Auron's slashes, and the Beat Saber version only if the sequence is
+in memory. Haptic feedback on every gesture that counts.
+
+## Special views to check in play (3 Nov 2026)
+
+Places where the player is not simply Tidus walking around; the chocobo case (Tidus attached to the bird's bone, branch
+`chocobo`) gave a general "the followed actor is attached to another actor" rule that should cover the first group. From
+game knowledge, not captures: take an actor-table log, one image and a frame census at each when reached.
+- **Rides / attachment:** the shoopuf on the Moonflow (may play as a cutscene), the Bevelle Cloister glyph track, lifts
+  and elevators (Mushroom Rock Road, Home, temples), the airship bridge and deck, the SS Liki / Winno decks.
+- **Minigames with their own cameras:** the Calm Lands chocobo training games and the Remiem race (the notes said: treat
+  as cutscenes unless they are field control; the riding rule may now catch them), Thunder Plains lightning dodging
+  (field control, a screen-flash cue), the Macalania butterfly hunt, Cactuar hide-and-seek, the Jecht Shot, blitzball.
+- **Swimming:** Baaj, the Besaid swim, Via Purifico, the Gagazet underwater passage (eye height is already a backlog item).
+- **Battles:** Evrae on the airship deck (the distance changes), big bosses from the summoner's view (aeons already hand
+  the eyes to the summoner: check only the scale), overdrives (above).
+- **Special screens:** the airship destination map and its coordinate search, the sphere grid (a 3D view), the Monster
+  Arena menus.
