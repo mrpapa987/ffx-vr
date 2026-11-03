@@ -3245,3 +3245,25 @@ fingers". ABI 29.
   zone. `vr_hands_rest_curl` stays 0.20 (an ini keeps its value; raise it in F8 if the idle hand looks too open).
 - **Not done in S3:** the pack's `preview` image in F8; per-hand (left vs right) wrist offsets for asymmetric two-handed
   packs; the retire commit of the old bone hands; the game's lights (S4).
+
+### Review fixes (hands-s3-review.md: B1, B2, SF-1..SF-3, N1-N7, N9)
+
+- **B1**: a lone surrogate escape (`"\ud800"`) in any hand.json threw past the parser (System.Text.Json unescapes
+  lazily) and emptied the pack list. Now that pack alone is unusable with the reason; the scan catches per folder; the
+  list and "scanned" are set only after a scan returns.
+- **B2**: `--preview` follows the pack's rules: a bare name goes into the pack folder, a path inside a git checkout or
+  another (non-private) pack folder is refused; `.gitignore` also ignores `preview*.png` / `debug-preview.png`.
+- **SF-1**: the importer welds identical corners (Tidus right 1806 -> 430 vertices) and checks the runtime's caps:
+  > 65535 vertices or > 393216 indices a hand, or a glb over 32 MB, is an `error:`; a texture over 2048 px is shrunk to
+  1024 with Pillow (else warned, flat colour); more than 4 textures a hand is warned by name.
+- **SF-2**: previews decode JPEG by content (Pillow); a preview failure never fails a written pack.
+- **SF-3**: the worker reads, parses and frees one glb at a time (hv_pack_parse with a read callback).
+- **The fuzz found** cgltf_validate reading a misaligned uint16 index accessor before our own alignment check: every
+  accessor, sparse accessors and the binary chunk are now checked before cgltf_validate.
+- **Hand length**: the two hands' wrist estimates differed (Tidus: 0.198 vs 0.181 m wrist -> middle tip, the bracelet
+  moves the narrowest section). Both wrists are now moved along their hands so wrist -> middle tip = `--hand-length`
+  (right -8.2 mm, left +9.4 mm on Tidus); `--keep-proportions` keeps the model's.
+- Nits: N1 `##` runs, N2 notes capped at 16 and keys cleaned, N3 a 255-char `vr_hands_pack`, N4 `images_dropped` from the
+  rig, N5 face / thumbrest holds exclusive, N6 `-OutDir` / `-Preview` trailing `\` trimmed and `"` refused in `-Title`,
+  N7 no trailing space or dot in a name, N9 an OSError is an `error:` line. Skipped: N8 (a rescan with the selection still
+  broken reloads the fallback pack once: harmless, about 1 ms).

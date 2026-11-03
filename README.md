@@ -112,8 +112,9 @@ powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "D:\models\My 
 
 It writes `<game>\fahrenheit\mods\ffxvr\hands\mine\`. In game: F8 > VR hands > hand model > **rescan**, pick it.
 If a hand looks wrong: `-CutRight 0.095` / `-CutLeft` move the wrist cut, `-FlipRight` / `-FlipLeft` swap a palm and
-back, `-Only right` mirrors one hand, `-Tip "x,y,z"` picks a hand by hand, `-DebugImages` shows what it found (the
-script's header lists everything). `hand.json` in the pack folder holds the per-pack fit (`wrist_offset_m`,
+back, `-Only right` mirrors one hand, `-Tip "x,y,z"` picks a hand by hand, `-DebugImages` shows what it found,
+`-Preview preview.png` renders the poses into the pack folder (the script's header lists everything). Both hands are
+made 0.19 m from wrist to middle fingertip (`-HandLength`; `-KeepProportions` keeps the model's own wrists). `hand.json` in the pack folder holds the per-pack fit (`wrist_offset_m`,
 `wrist_rotation_deg`, `scale`, `tint`, `rest_curl`; see `src/managed/hand_pack.cs`).
 
 **A pack made from a model stays on your PC: do not share it.** Most character models, a game's above all, are someone
