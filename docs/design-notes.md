@@ -3408,6 +3408,37 @@ build rejected them as he saw (sideways, reach, shake). The causes and the chang
   stay at 0; grid 0 / 320 missed, 0 / 480 false at the default. Above the default a slow 6 cm / 1.5 Hz shake (0.57 m/s)
   taps about once a cycle (a 0.16 s lockout would stop it but costs pokes every 0.35 s).
 
+### Review 2 of the retune (hands-tap-review2.md: R1-R5, N1-N5)
+
+The retune let the owner's jabs through (78 / 78 under every clock the reviewer tried: 60 / 144 Hz samples, the game's 60
+fps latching 72 / 120 / 144 Hz display times, repeated display times) but opened four holes, closed with the reviewer's
+prototype, adopted as is (htrv2_t/r2_proto.diff):
+- **R1, tracking steps at the real clocks** (14 / 30 on "game 60 on 72 Hz": a 27.8 ms frame is longer than the 25 ms window,
+  so the raw-vs-window jolt check could not fire): the jab's largest one-sample forward step above 0.7 x its travel is a
+  glitch (a real jab spreads its travel over >= 4-5 samples). 0 / 30 at every clock.
+- **R2, raises and drops** (the pitched forward's 50 deg cone reached a hand raised into view, or dropped while looking
+  down): the net displacement's elevation against level within +35 / -70 deg. Raises and drops 0 at every gaze; steep pokes
+  at the floor (30-65 deg down, looking 35-60 deg down) still tap 10 / 10.
+- **R3, sweeps** (a turn passed as a stop: its forward speed fell, its speed did not): at the stop the whole speed must be
+  below 0.7 x the peak. Sweeps 0 / 10; "talking with the hands" with the point held 38 -> 8 taps / 10 min.
+- **R4, the shake rule**: a shake's back stroke must travel >= 4.5 cm (a wind-up is 3-5 cm, shortened by the window), and
+  the strokes end with hysteresis (+-0.2 v_start). Raise into view + wind-up + poke: 0 -> 10 / 10; the noisy 120 Hz shake 0.
+- **N1**: the head's speed and turn rate over the same >= 25 ms window as the hand's (one-frame head noise aborted jabs at
+  120 Hz: 1.5 mm noise 60 -> 77 / 78). **N2**: a reset ends an open forward stroke (the shake rule sees it). **N3**: the shake
+  line gives the back stroke's length, ms since it ended and ms after the forward one; near misses the elevation against
+  level. **N4**: the fingertip is the drawn index tip, whose extension animation (50 ms hold, 50 ms time constant) can still
+  run when the raw-bit pose turns valid (30 + 80 ms after the lift): up to ~0.15 m/s more forward at the start; harmless at
+  the default (it helps), and not a detector bug if sensitivity 2 behaves oddly right after forming the point. **N5**: the
+  wind-up wording holds after R4.
+- **R5, the cost (by design, an owner test step)**: with the point pose held, a real 30-45 cm reach in 0.45 s taps (in 0.55 s
+  35 cm 2 / 10; 0.65 s or more 0), a deictic point at the screen / an NPC 20 / 20, everyday repositioning ~20 taps / 10 min.
+  These are his poke kinematically; the pose is the guard. If they bother him, the levers are pose_hold or a slightly
+  higher v_on, not the direction rules.
+- Known and reported, not judged: 3 mm head / hand noise at 120 Hz (6x Quest's) splits strokes beyond the hysteresis
+  (an 8 cm / 2 Hz shake: 4-6 taps in 18 s) and costs a third of the jabs.
+- Tests: the reviewer's adversarial cases are a judged test now (htapchk/tap_test_adv.cpp: 78 judged lines, 37 reported):
+  ALL OK at 0.6 / 1 / 1.5 / 2; the branch test (92) ALL OK at all four.
+
 ## Hands: ideas parked (3 Nov 2026)
 
 The owner: "I think much more could get difficult ... just take a note of the other ideas for now". One line each, with

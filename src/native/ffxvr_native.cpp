@@ -8767,9 +8767,9 @@ static void tap_sample(int h, int gate, const float* tip) {
             g_tap_last_not_t = GetTickCount64(); g_tap_last_not_h = h; g_tap_last_not_why = r; g_tap_last_not_peak = st.last_peak; g_tap_last_not_travel = st.last_travel;
             if (g_tap_log_n < 30) {   // owner's round: enough to tell why (direction, pose) from the log alone
                 g_tap_log_n++;
-                diag("hands: tap %s: not a tap (%s: peak %.2f m/s, %.0f mm in %.0f ms; net direction %.0f deg off forward (yaw %+.0f, pitch %+.0f), worst sample %.0f deg;"
+                diag("hands: tap %s: not a tap (%s: peak %.2f m/s, %.0f mm in %.0f ms; net direction %.0f deg off forward (yaw %+.0f, pitch %+.0f; elevation %+.0f against level), worst sample %.0f deg;"
                      " pose: grip %.2f trigger %.2f touch %d off %.0f ms)%s", hn, hv_tap_why[r], st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f,
-                     st.last_net_deg, st.last_net_yaw, st.last_net_pitch, st.last_worst_deg, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0, pd.off_s * 1000.f,
+                     st.last_net_deg, st.last_net_yaw, st.last_net_pitch, st.last_net_elev, st.last_worst_deg, hd.squeeze, hd.trigger, hd.trigger_touch ? 1 : 0, pd.off_s * 1000.f,
                      g_tap_log_n == 30 ? " (no more of these lines this session: see the hands: tap line with diag_verbose)" : "");
             }
         }
@@ -8784,7 +8784,8 @@ static void tap_sample(int h, int gate, const float* tip) {
         }
         if (st.blocked == HV_TAP_SHAKE && g_tap_log_shake_n < 10) {
             g_tap_log_shake_n++;
-            diag("hands: tap %s: a jab right after a forward-back stroke (a shake, %.2f m/s forward): nothing pressed%s", hn, st.v_f, g_tap_log_shake_n == 10 ? " (no more of these lines this session)" : "");
+            diag("hands: tap %s: a jab right after a forward-back stroke (a shake, %.2f m/s forward; the back stroke %.0f mm, ended %.0f ms ago, %.0f ms after the forward one): nothing pressed%s",
+                 hn, st.v_f, st.last_back_len * 1000.f, st.last_back_ago * 1000.f, st.last_back_turn * 1000.f, g_tap_log_shake_n == 10 ? " (no more of these lines this session)" : "");
         }
         if (st.blocked == HV_TAP_GATE && g_tap_log_gate_n < 10) {   // review S4: a pointing jab (the pose is checked first), its own budget
             g_tap_log_gate_n++; diag("hands: tap %s: a pointing jab with the gate shut (%s): nothing pressed%s", hn, k_tap_gate[gate], g_tap_log_gate_n == 10 ? " (no more of these lines this session)" : "");

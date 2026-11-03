@@ -195,6 +195,12 @@ struct HvTapCfg {
     float back_lock = 0.12f;   // s (review S1): a start this soon after a backward stroke (> 0.6 x v_start toward the head) ...
     float shake_gap = 0.30f;   // s ... that itself followed a forward stroke within this: a shake (forward, back, forward)
     float v_span = 0.025f;     // s: the speeds are measured over at least this (the newest sample against one >= this old)
+    float step_frac = 0.70f;   // review 2 R1: one sample's forward step above this x the jab's travel is a tracking step (the 25 ms window
+                               // smears a step over 2-3 samples; a real jab spreads its travel over >= 4-5, its largest step <= 0.3 of it)
+    float elev_up_deg = 35.f, elev_down_deg = 70.f;   // review 2 R2: the net displacement no steeper than this above / below LEVEL (a raise
+                                                      // into view, a drop while looking down; the pitched forward alone let them in)
+    float turn_frac = 0.70f;   // review 2 R3: at the stop the hand's whole speed below this x the peak (it stopped; a sweep keeps its speed)
+    float shake_back_min = 0.045f;   // review 2 R4: a shake's backward stroke travels at least this (a wind-up is 3-5 cm, shortened by the window)
     float world_frac = 0.50f;  // review S2: the fingertip itself (not only relative to the head) must peak at >= this x v_on forward
 };
 struct HvTapIn {
@@ -215,14 +221,16 @@ struct HvTapState {
     bool   have = false;       // a previous sample
     double t_prev = 0.0, cool_until = -1e9, t0 = 0.0;
     float  rel_prev[3] = {}, head_prev[3] = {}, fwd_prev[3] = {}, r0[3] = {}, f[3] = {}, fw_last[3] = { 0.f, 0.f, -1.f };
-    bool   have_v = false; double ring_t[8] = {}; float ring_rel[8][3] = {}, ring_tip[8][3] = {}; int ring_n = 0, ring_i = 0;   // the last samples: the speeds used
+    bool   have_v = false; double ring_t[8] = {}; float ring_rel[8][3] = {}, ring_tip[8][3] = {}, ring_head[8][3] = {}, ring_fwd[8][3] = {}; int ring_n = 0, ring_i = 0;   // the last samples: the speeds used
                                                                  // span >= 25 ms (2 frames at 60-72 Hz, 3 at 90-120 Hz: the same noise at any rate)
     float  tip_prev[3] = {};
     float  peak_s = 0.f, peak_raw = 0.f, peak_w = 0.f;           // in the jab: the forward peak (two-frame), the raw one, the fingertip's own (S2)
     float  worst_deg = 0.f;                                       // in the jab: the largest angle of the (two-frame) velocity from the forward, for the log
     bool   in_fwd = false, in_back = false;                       // stroke episodes (two-frame forward speed beyond +-0.6 v_start), for the shake rule
     double t_fwd_end = -1e9, t_back_start = -1e9, t_back_end = -1e9;
-    float  pose_s = 0.f;
+    float  pose_s = 0.f, step_max = 0.f, back_r0 = 0.f, back_len = 0.f;   // review 2: the jab's largest one-sample forward step (R1); the back stroke's start and length (R4)
+    float  last_back_len = 0.f, last_back_ago = 0.f, last_back_turn = 0.f;   // review 2 N3: at a shake block, for the log (m, s, s)
+    float  last_net_elev = 0.f;                                   // review 2 N3: the last jab's net elevation against level (deg, + up)
     int    n = 0;
     // the last sample and the last outcome, for the F8 readout and the log
     float  v_f = 0.f, v_abs = 0.f, head_v = 0.f, head_w = 0.f;
