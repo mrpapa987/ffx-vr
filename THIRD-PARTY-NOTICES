@@ -15,6 +15,16 @@ Copyright (c) The Khronos Group Inc.
 Licensed under the Apache License, Version 2.0 (full text below).
 The DLL is shipped unmodified.
 
+cgltf 1.15, compiled into ffxvr_native.dll (the VR hands' glTF loader).
+https://github.com/jkuhlmann/cgltf  (tag v1.15, commit 360db1a95480fe102ae9c69b27c5d101167ff5ba)
+Copyright (c) 2018-2021 Johannes Kuhlmann
+Licensed under the MIT License (full text below). Vendored unmodified in
+src/native/third_party/cgltf/.
+
+The generic hand packs (mod\ffxvr\hands\generic-glove\, hands\generic\)
+are FFX VR's own work, made by tools/hands/make-generic-hand.py with no
+third-party art, under FFX VR's MIT licence (LICENSE).
+
 ===============================================================================
 2. Used but not redistributed (credited; install them separately)
 ===============================================================================
@@ -242,3 +252,15 @@ Apache License, Version 2.0 (applies to the OpenXR Loader)
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+===============================================================================
+MIT License (applies to cgltf)
+===============================================================================
+
+Copyright (c) 2018-2021 Johannes Kuhlmann
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

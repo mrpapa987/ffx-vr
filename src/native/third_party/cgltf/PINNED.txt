@@ -1,0 +1,10 @@
+cgltf, vendored unmodified for the VR hands pack loader (src/native/ffxvr_hands.cpp; CGLTF_IMPLEMENTATION there only).
+
+  project   https://github.com/jkuhlmann/cgltf
+  release   v1.15 (tag object bbeb5b0b070ddacddac6852fb72143eb68454937)
+  commit    360db1a95480fe102ae9c69b27c5d101167ff5ba  (2025-02-09, "Update version number to 1.15.")
+  files     cgltf.h  sha256 e378a21c084bf1f288bb799de827bb26906efb024255f1ecf1705ea13f11c6ec
+            LICENSE  sha256 f619925f80ef862497aaf8e8155ef218fa6a2190055129523ca3df9119a9ba95
+  licence   MIT, "Copyright (c) 2018-2021 Johannes Kuhlmann" (LICENSE, as in the release; also in THIRD-PARTY-NOTICES)
+
+To update: replace both files from a tagged release, update this file and the THIRD-PARTY-NOTICES entry (check the year line).
