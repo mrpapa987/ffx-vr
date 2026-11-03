@@ -277,11 +277,12 @@ def rig_hand(hd, height, debug, flip=False):
     # order the other four by distance of their base from the thumb base
     rest.sort(key=lambda f: np.linalg.norm(f["base"] - thumb["base"]))
     named = dict(zip(FINGER_ORDER, [thumb] + rest))
-    # MCPs: extend each centreline back from its base, along the line fitted through the whole centreline (hands-tap build:
+    # MCPs: extend each centreline back from its base, along the line fitted through its base two thirds (hands-tap build:
     # the direction of its first two rings bent toward a neighbour at the web, so the Tidus model's right middle knuckle sat
     # 12 mm from the index and 36 mm from the ring, and its fist showed a gap between middle and ring; fitted: 20 / 23 / 21 mm)
     for n in FINGER_ORDER[1:]:
-        f = named[n]; c = f["cl"]; d = np.linalg.svd(c - c.mean(0), full_matrices=False)[2][0]
+        f = named[n]; c = f["cl"][:max(3, int(round(len(f["cl"]) * 2 / 3)))]   # the base 2/3 (review N7: a curled bind pose's chord)
+        d = np.linalg.svd(c - c.mean(0), full_matrices=False)[2][0]
         if np.dot(d, c[0] - c[-1]) < 0: d = -d                # toward the base
         vis = np.linalg.norm(f["tip"] - f["cl"][0])
         f["mcp"] = f["cl"][0] + d * MCP_BACK * vis

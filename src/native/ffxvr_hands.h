@@ -185,6 +185,8 @@ struct HvTapCfg {
     float head_w = 1.75f;      // rad/s (100 deg/s): the head turning faster blocks a jab
     float v_glitch = 5.0f;     // m/s: faster is a tracking jump, not a hand
     float pose_hold = 0.10f;   // s: the point pose held before a jab may start
+    float back_lock = 0.12f;   // s (review S1): no start this soon after a backward stroke (> 0.6 x v_start toward the head): a shake
+    float world_frac = 0.50f;  // review S2: the fingertip itself (not only relative to the head) must peak at >= this x v_on forward
 };
 struct HvTapIn {
     double t;                  // seconds (the display time of the poses)
@@ -197,7 +199,7 @@ struct HvTapIn {
     bool turning;              // the stick is turning the view
 };
 enum HvTapWhy { HV_TAP_NONE = 0, HV_TAP_FIRED, HV_TAP_SLOW, HV_TAP_SHORT, HV_TAP_LONG, HV_TAP_REACH, HV_TAP_SIDEWAYS, HV_TAP_POSE, HV_TAP_HEAD,
-                HV_TAP_TURN, HV_TAP_GATE, HV_TAP_GLITCH, HV_TAP_GAP, HV_TAP_COOLDOWN, HV_TAP_N };
+                HV_TAP_TURN, HV_TAP_GATE, HV_TAP_GLITCH, HV_TAP_GAP, HV_TAP_COOLDOWN, HV_TAP_SHAKE, HV_TAP_N };
 extern const char* const hv_tap_why[HV_TAP_N];   // short names for the log ("slow", "short", ...)
 struct HvTapState {
     int    phase = 0;          // 0 idle, 1 in a jab, 2 waiting for the forward speed to drop (after a tap or a non-tap)
@@ -206,6 +208,8 @@ struct HvTapState {
     float  rel_prev[3] = {}, head_prev[3] = {}, fwd_prev[3] = {}, r0[3] = {}, f[3] = {};
     float  v_prev[3] = {}; bool have_v = false;                  // the last velocity: the PEAK is taken from the mean of two (noise halved;
     float  peak_s = 0.f;                                          // a one-frame tracking step stays one frame in the rest of the logic)
+    double t_back = -1e9;                                         // review S1: the last sample moving back toward the head faster than v_start
+    float  tip_prev[3] = {}, peak_w = 0.f;                        // review S2: the fingertip in reference space, and its own forward peak in the jab
     float  pose_s = 0.f, peak = 0.f;
     int    n = 0;
     // the last sample and the last outcome, for the F8 readout and the log
@@ -217,6 +221,16 @@ struct HvTapState {
 /// One sample. Returns HV_TAP_FIRED on the sample that completes a tap, else HV_TAP_NONE, or the reason a jab just ended
 /// without one (st->last_why holds it too).
 int hv_tap_update(HvTapState* st, const HvTapCfg& c, const HvTapIn& in);
+
+/// Review S5: the held button in the game's XInputGetState (the input thread), one call per poll of pad 0. The game's pad poll
+/// (0x62DBA0) ignores a state whose packet number did not change, so: a press is ORed in until press_ms has passed AND the
+/// game got 3 new packets with it, never at or past k_hv_tap_cap_ms (or with a clock that went back); after a release, one new
+/// packet without the button must reach the game before the next press is ORed (so two presses never merge, review N6).
+/// polls: the new packets counted so far for this press (the caller keeps it, adding 1 on HV_HOOK_COUNT).
+enum { HV_HOOK_HOLD = 1, HV_HOOK_RELEASE = 2, HV_HOOK_COUNT = 4 };
+enum { k_hv_tap_cap_ms = 400 };
+struct HvTapHook { uint32_t pkt = 0; bool need_clear = false; };
+int hv_tap_hook(HvTapHook* h, bool pressed, uint32_t pkt, int32_t el_ms, int32_t press_ms, int32_t polls);
 
 /// The open / point / fist test poses for the previews and the unit test (the same code path as the runtime).
 void hv_test_inputs(int which, HvCtrl* c);   // 0 open (nothing touched), 1 rest on the trigger, 2 trigger pulled, 3 point (grip, thumb on),

@@ -1210,7 +1210,7 @@ bool     g_vrpad_suppress = false;           // a mod gesture is using the contr
 volatile LONG g_tap_press = 0;
 volatile LONG g_tap_press_t0 = 0, g_tap_press_polls = 0, g_tap_press_ms = 100;   // GetTickCount at the press; new packets the game got with it; the length asked for
 volatile LONG g_tap_released_ms = -1, g_tap_released_polls = 0, g_tap_released_n = 0;   // the last press as the hook let it go (logged at the next frame end)
-uint32_t g_tap_hook_pkt = 0;                           // the packet number of the game's last poll (input thread): a press counts the polls with a new one
+HvTapHook g_tap_hook;                                   // the input thread's press state (the last packet, a release still to reach the game)
 // Diorama gestures (seat view, not first person): a grip grabs the world -
 // one hand pans, two hands pan with the midpoint, rotate with the angle
 // between them and zoom with their distance, all about the midpoint. The
@@ -1270,14 +1270,14 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
     if (L.squeeze > 0.5f) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (R.squeeze > 0.5f) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
     if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
-    const bool new_pkt = g_vrpad_packet != g_tap_hook_pkt; g_tap_hook_pkt = g_vrpad_packet;
-    if (const LONG tb = g_tap_press) {   // tap build: held for press_ms and >= 3 new packets (the game ignores a poll with an unchanged packet), never past 400 ms
-        if (new_pkt) InterlockedIncrement(&g_tap_press_polls);
-        const LONG el = static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_tap_press_t0));
-        if ((el >= g_tap_press_ms && g_tap_press_polls >= 3) || el >= 400 || el < 0) {
-            if (InterlockedCompareExchange(&g_tap_press, 0, tb) == tb) { g_tap_released_ms = el; g_tap_released_polls = g_tap_press_polls; InterlockedIncrement(&g_tap_released_n); }
-        }
-        else b |= static_cast<WORD>(tb);
+    {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
+        // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
+        const LONG tb = g_tap_press;
+        const LONG el = tb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_tap_press_t0)) : 0;
+        const int hk = hv_tap_hook(&g_tap_hook, tb != 0, g_vrpad_packet, el, g_tap_press_ms, g_tap_press_polls);
+        if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_tap_press_polls);
+        if (hk & HV_HOOK_HOLD) b |= static_cast<WORD>(tb);
+        else if ((hk & HV_HOOK_RELEASE) && InterlockedCompareExchange(&g_tap_press, 0, tb) == tb) { g_tap_released_ms = el; g_tap_released_polls = g_tap_press_polls; InterlockedIncrement(&g_tap_released_n); }
     }
     g.wButtons |= b;
     const BYTE lt = (BYTE)(L.trigger * 255.f), rt = (BYTE)(R.trigger * 255.f);
@@ -8282,7 +8282,7 @@ int  g_tap_gate_now = TG_OFF;                            // the gate at the last
 LONG g_tap_released_seen = 0;                            // g_tap_released_n when last logged
 int  g_tap_buzz = 0;                                     // bit per hand: a tick at hands_frame_end
 float g_tap_pose[2] = {};                                // the point pose this frame (1 / 0) per hand, for F8
-uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
+uint32_t g_tap_taps[2] = {}, g_tap_not[HV_TAP_N] = {}, g_tap_blk[HV_TAP_N] = {}, g_tap_log_n = 0, g_tap_log_gate_n = 0, g_tap_log_press_n = 0; bool g_tap_log_letgo = false;   // this on-session: taps, jabs that were not taps by reason, starts blocked by reason
 uint32_t g_tap_w_taps = 0, g_tap_w_not = 0, g_tap_w_drawn = 0, g_tap_w_open = 0;  // the 10 s window (the verbose line)
 uint32_t g_tap_w_not_by[HV_TAP_N] = {}, g_tap_w_blk[HV_TAP_N] = {};
 ULONGLONG g_tap_last_t = 0, g_tap_last_not_t = 0;       // GetTickCount64 of the last tap / the last near miss
@@ -8733,12 +8733,12 @@ static void tap_sample(int h, int gate, const float* tip) {
     memcpy(in.head_p, g_hs.head_p, sizeof(in.head_p));
     float M[9]; quat_to_mat(g_hs.head_q, M); in.head_fwd[0] = -M[2]; in.head_fwd[1] = -M[5]; in.head_fwd[2] = -M[8];
     in.pose = pose; in.gate = gate == TG_OPEN;
-    in.turning = g_turn_stick && fabsf(g_hs.hand[1].stick[0]) > 0.5f;   // the right stick turning the view (past half deflection)
+    in.turning = (g_turn_stick && fabsf(g_hs.hand[1].stick[0]) > 0.5f) || g_turn_key != 0.f;   // the right stick past half deflection, or the turn keys (review N3)
     const int r = hv_tap_update(&st, g_tap_c, in);
     const char* hn = h ? "R" : "L";
     if (r == HV_TAP_FIRED && (g_tap_press != 0 || (g_tap_last_t != 0 && GetTickCount64() - g_tap_last_t < 400))) {   // the other hand tapped < 400 ms ago: one
         g_tap_not[HV_TAP_COOLDOWN]++; g_tap_w_not_by[HV_TAP_COOLDOWN]++; g_tap_w_not++;                                    // cooldown for both (the game must see a release)
-        if (g_tap_log_n < 30) { g_tap_log_n++; diag("hands: tap %s: dropped (the other hand tapped less than 400 ms ago)", hn); }
+        if (g_tap_log_gate_n < 10) { g_tap_log_gate_n++; diag("hands: tap %s: dropped (the other hand tapped less than 400 ms ago)", hn); }
     }
     else if (r == HV_TAP_FIRED) {
         g_tap_press_ms = g_tapcfg.press_ms; g_tap_press_t0 = static_cast<LONG>(GetTickCount()); g_tap_press_polls = 0;
@@ -8746,8 +8746,10 @@ static void tap_sample(int h, int gate, const float* tip) {
         if (g_tapcfg.flags & 4) g_tap_buzz |= 1 << h;
         g_tap_taps[h]++; g_tap_w_taps++;
         g_tap_last_t = GetTickCount64(); g_tap_last_h = h; g_tap_last_peak = st.last_peak; g_tap_last_travel = st.last_travel; g_tap_last_dur = st.last_dur;
-        diag("hands: tap %s: %s pressed (peak %.2f m/s forward, %.0f mm in %.0f ms; fires at %.2f m/s) | text box %s | taps L %u R %u", hn, tap_button_name(g_tapcfg.button),
-             st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, g_tap_c.v_on, (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1]);
+        g_tap_log_letgo = g_tap_log_press_n < 200;   // review S4: the pressed / let-go pair, 200 a session
+        if (g_tap_log_letgo) g_tap_log_press_n++;
+        if (g_tap_log_letgo) diag("hands: tap %s: %s pressed (peak %.2f m/s forward, %.0f mm in %.0f ms; fires at %.2f m/s) | text box %s | taps L %u R %u%s", hn, tap_button_name(g_tapcfg.button),
+             st.last_peak, st.last_travel * 1000.f, st.last_dur * 1000.f, g_tap_c.v_on, (g_tapcfg.game & 8) ? "up (also advance dialogue on)" : "none", g_tap_taps[0], g_tap_taps[1], g_tap_log_press_n == 200 ? " (no more pressed / let-go lines this session)" : "");
     }
     else if (r > HV_TAP_FIRED && r < HV_TAP_N) {
         g_tap_not[r]++; g_tap_w_not++; g_tap_w_not_by[r]++;
@@ -8758,7 +8760,9 @@ static void tap_sample(int h, int gate, const float* tip) {
     }
     if (st.blocked > HV_TAP_FIRED && st.blocked < HV_TAP_N) {
         g_tap_blk[st.blocked]++; g_tap_w_blk[st.blocked]++;
-        if (st.blocked == HV_TAP_GATE && g_tap_log_n < 30) { g_tap_log_n++; diag("hands: tap %s: a jab with the gate shut (%s): nothing pressed", hn, k_tap_gate[gate]); }
+        if (st.blocked == HV_TAP_GATE && g_tap_log_gate_n < 10) {   // review S4: a pointing jab (the pose is checked first), its own budget
+            g_tap_log_gate_n++; diag("hands: tap %s: a pointing jab with the gate shut (%s): nothing pressed%s", hn, k_tap_gate[gate], g_tap_log_gate_n == 10 ? " (no more of these lines this session)" : "");
+        }
     }
 }
 
@@ -9027,7 +9031,7 @@ static void hands_frame_end() {
     if (g_tap_buzz) { for (int h = 0; h < 2; ++h) if (g_tap_buzz & (1 << h)) xr_haptic(h, 0.45f, 0.03f); g_tap_buzz = 0; }
     if (g_tap_released_n != g_tap_released_seen) {
         g_tap_released_seen = g_tap_released_n;
-        diag("hands: tap: %s let go after %ld ms, seen in %ld new pad packets%s", tap_button_name(g_tapcfg.button), static_cast<long>(g_tap_released_ms), static_cast<long>(g_tap_released_polls),
+        if (g_tap_log_letgo) diag("hands: tap: %s let go after %ld ms, seen in %ld new pad packets%s", tap_button_name(g_tapcfg.button), static_cast<long>(g_tap_released_ms), static_cast<long>(g_tap_released_polls),
              g_tap_released_polls < 3 ? " (fewer than 3: the game polled slowly, the 400 ms limit let it go)" : "");
     }
     if (g_tap_press != 0) {

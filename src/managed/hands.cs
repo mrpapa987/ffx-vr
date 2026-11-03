@@ -286,17 +286,38 @@ public sealed unsafe partial class FFXVRModule {
         if (_in_blitz) g |= 16;
         // Text boxes: TOMesWinWork[bank * 8 + i] at FhUtil 0xF26D70 (0x2C bytes each), the bank a signed byte at FhUtil 0xF26B82
         // (getter 0x86BE90). The game's own per-frame loop (0x871F30) copies each window's state into +0x14 (u16; 4 = closed is
-        // written back as 0) and counts a window with a non-zero state and +0x1D bit 1 as one the player waits on. Any non-zero
-        // state counts here (the stricter reading of "a text box is up").
-        if (!read(FhUtil.ptr_at<sbyte>(0xF26B82), out sbyte bank) || bank < 0 || bank > 15) { g |= 0x100; _tap_text_info = "the text box bank is not readable"; return g; }
+        // written back as 0) and counts a window with a non-zero state and +0x1D bit 1 as one the player waits on; it writes that
+        // result into bit 2 of byte +1 of the current Atel controller ([FhUtil 0xF26B28], Fahrenheit Atel.current_controller;
+        // 0x872025..0x87204C). Review S3: either signal gates (any non-zero state: the stricter reading; or the game's own bit).
+        if (!read(FhUtil.ptr_at<sbyte>(0xF26B82), out sbyte bank) || bank < 0 || bank > 15) { g |= 0x100; tap_text_set(-1, 0, 0, 0, false); return g; }
         byte* w0 = FhUtil.ptr_at<byte>(0xF26D70) + bank * 8 * 0x2C;
-        var sb = new System.Text.StringBuilder();
+        ulong st8 = 0; uint fl8 = 0; int open = 0;   // 8 states (16 bits each would not fit: the low byte of each is kept for the signature) and flags
         for (int i = 0; i < 8; i++) {
             if (!read(w0 + i * 0x2C + 0x14, out ushort st) || !read(w0 + i * 0x2C + 0x1D, out byte fl)) { g |= 0x100; break; }
-            if (st != 0) { g |= 8; if (sb.Length > 0) sb.Append(", "); sb.Append(I($"#{i} state {st} flags 0x{fl:X2}")); }
+            if (st != 0) { g |= 8; open |= 1 << i; st8 |= (ulong)(st & 0xFF) << (i * 8); fl8 ^= (uint)fl << (i % 4 * 8); }
         }
-        _tap_text_info = sb.Length > 0 ? I($"bank {bank}: {sb}") : I($"bank {bank}: none");
+        bool wait = false;   // the game's own "a window waits on the player" bit (null controller: no event running, nothing to read)
+        if (read(FhUtil.ptr_at<uint>(0xF26B28), out uint ctl) && ctl != 0 && read((byte*)(nint)ctl + 1, out byte cb1)) wait = (cb1 & 4) != 0;
+        if (wait) g |= 8;
+        tap_text_set(bank, open, st8, fl8, wait);
         return g;
+    }
+    // Review N4: the F8 / log text of the text boxes is rebuilt only when what was read changes (no per-frame strings).
+    private long _tap_text_sig = long.MinValue;
+    private void tap_text_set(int bank, int open, ulong st8, uint fl8, bool wait) {
+        long sig = (long)((ulong)bank & 0xFF) ^ ((long)open << 8) ^ (long)(st8 * 31) ^ ((long)fl8 << 17) ^ (wait ? 1L << 62 : 0);
+        if (sig == _tap_text_sig) return;
+        _tap_text_sig = sig;
+        if (bank < 0) { _tap_text_info = "the text box bank is not readable"; return; }
+        var sb = new System.Text.StringBuilder();
+        byte* w0 = FhUtil.ptr_at<byte>(0xF26D70) + bank * 8 * 0x2C;
+        for (int i = 0; i < 8; i++) {
+            if ((open & (1 << i)) == 0) continue;
+            read(w0 + i * 0x2C + 0x14, out ushort st); read(w0 + i * 0x2C + 0x1D, out byte fl);
+            if (sb.Length > 0) sb.Append(", ");
+            sb.Append(I($"#{i} state {st} flags 0x{fl:X2}"));
+        }
+        _tap_text_info = I($"bank {bank}: {(sb.Length > 0 ? sb.ToString() : "none")} | the game's waiting bit {(wait ? "set" : "clear")}");
     }
 
     /// <summary>S3: reads <mod>\hands\ (every pack folder, its hand.json; hand_pack.cs) and logs what it found. At the first
@@ -460,12 +481,13 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_hands2_tap_set == null || !ImGui.TreeNode("gestures##h2g")) return;
         ImGui.Checkbox("tap to press action (point, then a quick jab forward)##h2tap", ref _vr_hands_tap);
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("tap sensitivity##h2ts", ref _vr_hands_tap_sens, 0.5f, 2f, "%.2f"); ImGui.SameLine();
+        _vr_hands_tap_sens = float.IsFinite(_vr_hands_tap_sens) ? Math.Clamp(_vr_hands_tap_sens, 0.5f, 2f) : 1f;   // review N2: Ctrl+click typing
         ImGui.TextDisabled(I($"(a tap peaks above {0.70f / _vr_hands_tap_sens:F2} m/s forward)")); ImGui.SameLine();
         if (ImGui.SmallButton("default##h2ts")) _vr_hands_tap_sens = 1.00f;
         ImGui.Checkbox("also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
         ImGui.Checkbox("haptic tick##h2taph", ref _vr_hands_tap_haptic);
         ImGui.TextDisabled(esc("Hold the grip with your index finger off the trigger (point), then jab the fingertip about 10 cm forward and stop, as if pressing a button in the air. "
-                           + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + " (confirm: talk, examine, open). Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
+                           + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + (_vr_hands_tap_button == "a" ? " (confirm: talk, examine, open)" : " (vr_hands_tap_button in the ini; A is confirm)") + ". Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
                            + "while you turn with the stick or move your head fast, or (unless ticked above) while a text box is up."));
         if (_fn_hands2_tap_status != null) {
             float* v = stackalloc float[k_tap_status_n];

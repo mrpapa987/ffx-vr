@@ -3319,7 +3319,7 @@ the game: a quick forward jab of a pointing hand presses confirm in the field.
 - **Feedback**: a 30 ms, 0.45 haptic tick on that hand (`hands_frame_end`, like calibration's; `vr_hands_tap_haptic`). No
   fingertip flash: the hand's constant buffer is per eye and shared by both hands, so a per-hand tint is a shader change.
 - **Logging**: events always (`hands: tap R: A pressed (peak 1.12 m/s forward, 96 mm in 140 ms ...)`, `hands: tap: A let
-  go after 117 ms, seen in 7 new pad packets`, an early release with its reason, the first 30 near misses and jabs with the
+  go after 117 ms, seen in 7 new pad packets`, an early release with its reason, the first 30 near misses, 10 pointing jabs with the
   gate shut, the game gate changes (200 a session), on / off); the 10 s `hands: tap |` line (taps, not-taps by reason,
   blocked starts by reason, how often the gate was open) with diag_verbose only.
 - **The unit test** (scratchpad htapchk/tap_test.cpp, 44 cases, ASan + UBSan): single pokes of 3-30 cm in 0.10-0.70 s
@@ -3329,8 +3329,8 @@ the game: a quick forward jab of a pointing hand presses confirm in the field.
   not; slow reaches, a gentle nudge, a 60 cm thrust do not, a fast 40 cm punch does; the stick turning, the gate shut or
   shutting mid-jab, an open hand, the pose changing mid-jab or formed 40 ms before do not, formed 150 ms before does;
   pokes every 0.25 / 0.35 s fire every other one (the cooldown), every 0.5 / 0.8 s all six; tracking steps of 4-10 cm,
-  tracking lost mid-jab, holding still with 2 mm noise do not. The known false positive: a vigorous forward-back shake of
-  the pointing hand (8 cm at 2 Hz, 1 m/s) taps about every 0.5-1 s, as a deliberate jab would.
+  tracking lost mid-jab, holding still with 2 mm noise do not. (The first version's false positive, a forward-back shake
+  of the pointing hand, is fixed in the review round below; the test now has 63 cases, judged at every sensitivity.)
 - **The fist fix** (shared finger code, every pack). As a finger curls past 0.25 (smoothstepped to a full curl), its
   bones turn sideways back onto the hand's long axis: `HvMesh::abd[f][3]`, measured at load about the wrist's +Y (the
   proximal bone from the wrist's -Z, the intermediate and distal from their parent), applied as a yaw before each joint's
@@ -3341,6 +3341,37 @@ the game: a quick forward jab of a pointing hand presses confirm in the field.
   extended back along the direction of the finger's first two centreline rings, which bend toward a neighbour at the web.
   `import-hands.py` now extends along the line fitted through the whole centreline: knuckles 20 / 23 / 21 mm apart (left
   23 / 22 / 21), fist spacing 20-27 mm on both hands (was 12-41 mm). An existing pack needs the importer run again.
+
+### Review round (hands-tap-review.md: S1-S5, nits)
+
+- **S1, shakes.** A forward-back shake of the pointing hand fired about once a second (the known false positive). A jab
+  may not start within 0.12 s of a backward stroke (the two-frame mean of the forward speed below -0.6 x 0.35 m/s): a tap
+  starts from rest or a slow approach, a shake's forward stroke follows its back stroke within 30-60 ms. New reason
+  "shake". Shakes of 4-8 cm at 2-4 Hz: 0 taps at every sensitivity (were 30-54 in 30 s); six pokes every 0.35 / 0.5 / 0.8 s
+  still give 3 / 6 / 6, every 0.25 s now 1. Left as is: above the default a slow 6 cm / 1.5 Hz shake (0.57 m/s, itself a
+  jab at that sensitivity) taps now and then (a 0.15 s lockout would catch it but costs the 0.35 s cadence).
+- **S2, the head moving back.** The jab speed is fingertip minus head, so straightening up (the head back at 0.45 m/s,
+  under head_v) with the hand still fired at sensitivity 2 (20 / 20). The fingertip's own forward peak (reference space)
+  must now reach 0.5 x v_on too: 0 at every sensitivity, the poke grid unchanged.
+- **S3, text boxes.** The gate also takes the game's own result of the 0x871F30 loop: bit 2 of byte +1 of the current
+  Atel controller (`[FhUtil 0xF26B28]`, null: no event, nothing to read); either it or a non-zero window state gates. The
+  F8 / log text shows both. Seeing it change in a choice box is now a must-pass owner test step. Known gap: managed reads
+  the gate at frame N's Present and the hands use it in N+1, so a box an event opens in N+1 can take a tap fired in that
+  frame (a deliberate jab in a 16-33 ms window). Follow-up: count the menu finger (TkMn2DrawCrossCursor 0x8C0670 type 0)
+  per frame, which appears whenever a choice is pending (a new detour; not this build).
+- **S4, logging.** The pose is checked before the gate, so "a jab with the gate shut" is a pointing jab; those lines have
+  their own budget (10), the near misses 30, the pressed / let-go pair 200 a session.
+- **S5, the press as a pure function.** `hv_tap_hook` (ffxvr_hands.cpp) decides per poll: hold, release, count a new
+  packet; vrpad_apply only applies it. It also makes one new packet without the button reach the game after a release
+  before the next press is ORed (review N6: two presses never merge). Unit-tested against a model of the game's poll
+  (a repeated packet keeps the old state) and its 30 Hz logic: polls at 30 / 60 / 120 / 144 Hz, a press between polls,
+  two presses 405-420 ms apart, poll stalls, the clock going back, and the release-before-press sequence.
+- **N5.** The press is not let go when the gate shuts mid-press (a text box opening because of the tap itself): it is no
+  longer than a real A press, and FFX acts on the edge.
+- Nits: the help text says "(confirm ...)" only for A; the sensitivity is clamped after the slider (Ctrl+click typing);
+  the Numpad turn keys block a jab like the stick; the text-box text is rebuilt only when what was read changes; the
+  importer fits the base two thirds of each centreline (a curled bind pose's chord would pull the knuckle palmward; Tidus
+  unchanged within 1 mm); exe-analysis.md: the TOMesWinWork bank is a signed byte.
 
 ## Hands: ideas parked (3 Nov 2026)
 

@@ -620,7 +620,7 @@ BtlWindow (base 0x133C950 / 0xF3C950, stride 0xF0, 8 windows, stack top `[0x23CC
 | gva | FhUtil | What | Conf. |
 |---|---|---|---|
 | [0xCDED3C] | 0x8DED3C | sFMVPlayerManager (PhyFMVPlayerManager; getter 0x6D73A0). Playing = byte +0x6D0 or +0x6D2. Frames go to a texture (callback 0x6D71B0) drawn by Video.cgfx (0x6DA300). List `/FFX_Data/GameData/PS3Data/Video/<region>/FFX_VideoList.txt` | H |
-| 0x1326D70 | 0xF26D70 | TOMesWinWork[8] × 0x2C per bank (bank u16 0x1326B82): +0 x, +2 y (512x416), +0x1C anchor, set by the script handler 0x8580C0. No speaker field | H |
+| 0x1326D70 | 0xF26D70 | TOMesWinWork[8] × 0x2C per bank (bank: signed byte 0x1326B82, `movsx` in the getter 0x86BE90): +0 x, +2 y (512x416), +0x1C anchor, set by the script handler 0x8580C0. No speaker field | H |
 | 0x7EC470 | 0x3EC470 | op_ot_draw: 4 layers of registered draw callbacks; slot order 0x11A0960 (0xDA0960), entries 0x11A09E0 (0xDA09E0) {fn, a1, a2, u16 ttl}, registered by 0x7EB500. Drawn after 3D, before the menus (blitzball overlay lead) | H (blitz role L) |
 | 0x112D67C | 0xD2D67C | scenario (story) flag u16 (0x787360) | H |
 | r+0xFAF4 | | current map id (0x641DA0 / 0x65DE90) | H |

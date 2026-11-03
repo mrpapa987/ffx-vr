@@ -775,7 +775,7 @@ void hv_test_inputs(int which, HvCtrl* c) {
 
 // -- the tap gesture (branch hands-tap; ffxvr_hands.h) ----------------------------------------------------------------
 
-const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "slow", "short", "long", "reach", "sideways", "pose", "head", "turn", "gate", "glitch", "gap", "cooldown" };
+const char* const hv_tap_why[HV_TAP_N] = { "", "tap", "slow", "short", "long", "reach", "sideways", "pose", "head", "turn", "gate", "glitch", "gap", "cooldown", "shake" };
 
 int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     s->blocked = HV_TAP_NONE;
@@ -794,7 +794,7 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     }
     const float rel[3] = { in.tip[0] - in.head_p[0], in.tip[1] - in.head_p[1], in.tip[2] - in.head_p[2] };
     auto store = [&]() {
-        s->t_prev = in.t; memcpy(s->rel_prev, rel, sizeof(rel)); memcpy(s->head_prev, in.head_p, sizeof(s->head_prev)); memcpy(s->fwd_prev, in.head_fwd, sizeof(s->fwd_prev));
+        s->t_prev = in.t; memcpy(s->tip_prev, in.tip, sizeof(s->tip_prev)); memcpy(s->rel_prev, rel, sizeof(rel)); memcpy(s->head_prev, in.head_p, sizeof(s->head_prev)); memcpy(s->fwd_prev, in.head_fwd, sizeof(s->fwd_prev));
         s->have = true;
     };
     if (!s->have) { store(); s->have_v = false; s->pose_s = 0.f; s->phase = 0; return HV_TAP_NONE; }
@@ -817,6 +817,8 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
     float fh[3] = { in.head_fwd[0], 0.f, in.head_fwd[2] };
     const bool fh_ok = fabsf(in.head_fwd[1]) < 0.95f && v3norm(fh);   // looking straight up or down: no horizontal forward
     s->pose_s = in.pose ? s->pose_s + dt : 0.f;
+    const float vw[3] = { (in.tip[0] - s->tip_prev[0]) / dt, (in.tip[1] - s->tip_prev[1]) / dt, (in.tip[2] - s->tip_prev[2]) / dt };   // S2: the fingertip's own velocity
+    const bool back_now = fh_ok && v3dot(vs, fh) < -0.6f * c.v_start;   // S1: moving back toward the head (0.6 x the start speed, two-frame mean: a slow shake, not noise)
     const bool head_bad = s->head_v > c.head_v || s->head_w > c.head_w;
     int r = HV_TAP_NONE;
     if (s->phase == 0) {
@@ -824,13 +826,14 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
         if (vf > c.v_start && vf >= c.cos_dir * va) {
             int why = HV_TAP_NONE;
             if (va > c.v_glitch) why = HV_TAP_GLITCH;
+            else if (!in.pose || s->pose_s < c.pose_hold) why = HV_TAP_POSE;   // review S4: the pose first, so "gate" means a pointing jab
             else if (!in.gate) why = HV_TAP_GATE;
-            else if (!in.pose || s->pose_s < c.pose_hold) why = HV_TAP_POSE;
             else if (in.turning) why = HV_TAP_TURN;
             else if (head_bad) why = HV_TAP_HEAD;
             else if (in.t < s->cool_until) why = HV_TAP_COOLDOWN;
+            else if (in.t - s->t_back < c.back_lock) why = HV_TAP_SHAKE;      // review S1: a backward stroke just before: a shake, not a tap from rest
             if (why != HV_TAP_NONE) { s->blocked = why; s->phase = 2; }   // not later in this stroke either (a pose formed mid-swing, the cooldown ending)
-            else { s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->f, fh, sizeof(s->f)); s->peak = vf; s->peak_s = v3dot(vs, fh); s->n = 1; }
+            else { s->phase = 1; s->t0 = s->t_prev; memcpy(s->r0, s->rel_prev, sizeof(s->r0)); memcpy(s->f, fh, sizeof(s->f)); s->peak = vf; s->peak_s = v3dot(vs, fh); s->peak_w = v3dot(vw, fh); s->n = 1; }
         }
     }
     else if (s->phase == 1) {
@@ -847,11 +850,12 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
         else {
             if (vf > s->peak) s->peak = vf;
             const float vfs = v3dot(vs, s->f); if (vfs > s->peak_s) s->peak_s = vfs;
+            const float vfw = v3dot(vw, s->f); if (vfw > s->peak_w) s->peak_w = vfw;
             if (vf < c.stop_frac * s->peak) {                // the stop (or the retraction): was it a tap?
                 const float d[3] = { rel[0] - s->r0[0], rel[1] - s->r0[1], rel[2] - s->r0[2] };
                 const float travel = v3dot(d, s->f);
                 const double dur = in.t - s->t0;
-                if (s->peak_s < c.v_on) why = HV_TAP_SLOW;
+                if (s->peak_s < c.v_on || s->peak_w < c.world_frac * c.v_on) why = HV_TAP_SLOW;   // S2: the head moving back alone is no jab
                 else if (travel < c.min_travel) why = HV_TAP_SHORT;
                 else if (travel > c.max_travel) why = HV_TAP_LONG;
                 else if (dur < c.min_dur || s->n < 3) why = HV_TAP_GLITCH;   // a jolt of a frame or two: a tracking step, not an arm
@@ -864,6 +868,17 @@ int hv_tap_update(HvTapState* s, const HvTapCfg& c, const HvTapIn& in) {
         const float vf = fh_ok ? v3dot(v, fh) : 0.f; s->v_f = vf;
         if (vf < 0.5f * c.v_start) s->phase = 0;
     }
+    if (back_now) s->t_back = in.t;
     store();
     return r;
+}
+
+int hv_tap_hook(HvTapHook* h, bool pressed, uint32_t pkt, int32_t el_ms, int32_t press_ms, int32_t polls) {
+    const bool new_pkt = pkt != h->pkt; h->pkt = pkt;
+    if (!pressed) { if (new_pkt) h->need_clear = false; return 0; }   // a state without the button reached the game
+    if (el_ms < 0 || el_ms >= k_hv_tap_cap_ms) { h->need_clear = !new_pkt; return HV_HOOK_RELEASE; }   // the cap, or a clock that went back
+    if (h->need_clear) { if (new_pkt) h->need_clear = false; return 0; }   // the last press's release first (this new packet carries it)
+    const int count = new_pkt ? HV_HOOK_COUNT : 0;
+    if (el_ms >= press_ms && polls >= 3) { h->need_clear = !new_pkt; return HV_HOOK_RELEASE; }   // 3 new packets delivered: this poll goes out without it
+    return HV_HOOK_HOLD | count;
 }
