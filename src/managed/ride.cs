@@ -45,6 +45,18 @@ internal static class RideLogic {
         return idx == 0 ? 100000 : -1;
     }
 
+    /// <summary>name_is's test on the 16 bytes read at the name pointer: want (1..15 characters) followed by a NUL.</summary>
+    public static bool NameMatch(System.ReadOnlySpan<byte> b, string want) {
+        if (want.Length == 0 || want.Length > 15 || b.Length < 16) return false;
+        for (int i = 0; i < want.Length; i++) if (b[i] != want[i]) return false;   // a NUL before the end mismatches here
+        return b[want.Length] == 0;
+    }
+    /// <summary>cpu-lean (e): the first name of the list NameMatch accepts (score_of's loop), -1 none.</summary>
+    public static int NameRank(System.ReadOnlySpan<byte> b, string[] names) {
+        for (int r = 0; r < names.Length; r++) if (NameMatch(b, names[r])) return r;
+        return -1;
+    }
+
     /// <summary>What a score means, for the "first person: following" line.</summary>
     public static string FpHow(int best, string[] names) {
         if (best < 500) return "model " + names[best];

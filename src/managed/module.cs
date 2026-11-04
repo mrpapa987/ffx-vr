@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 38;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's return, tap game bits 0x200 / 0x400)
+    private const int k_abi = 38;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -422,7 +422,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_head_set");
             _fn_ride_set     = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float, float, uint>)req("ffxvr_ride_set");   // ABI 32: riding (ride.cs)
             _fn_ride_stats   = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ride_stats");   // ABI 33
-            _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, void>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs)
+            _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, int>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs); ABI 38: + its return
             _fn_fp_others_set = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_fp_others_set");
             _fn_cpu_report   = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_cpu_report");   // ABI 38: the cpu: line's managed sections (cpu_report.cs)
             _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
@@ -2200,8 +2200,33 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         byte* b = stackalloc byte[16];
         if (_fn_safe_read(p, b, 16) == 0)
             for (int i = 0; i < 16; i++) { if (_fn_safe_read((byte*)p + i, b + i, 1) == 0) return false; if (b[i] == 0) break; }
-        for (int i = 0; i < want.Length; i++) if (b[i] != want[i]) return false;   // a NUL before the end mismatches here
-        return b[want.Length] == 0;
+        return RideLogic.NameMatch(new ReadOnlySpan<byte>(b, 16), want);   // a NUL before the end mismatches
+    }
+    // cpu-lean (e): the follow pick's name test, once per slot. fp_name_rank = the first fp_actor name the slot's model name
+    // matches (name_is's test for each, in order), -1 none, from one read of the name; kept per slot while the slot's name
+    // pointer, chr_id and the list are the same (the name is the model's: a slot showing another model has another chr_id),
+    // and read again every 30 scan ticks (with the periodic rescan). A failed read is never kept (the next frame tries again,
+    // as name_is did).
+    private readonly nint[] _fpn_ptr = new nint[48]; private readonly int[] _fpn_id = new int[48], _fpn_rank = new int[48];
+    private string[] _fpn_names; private bool _fpn_frame_clear;
+    private int fp_name_rank(int i, char* p, int chr_id, string[] names) {
+        if (_fpn_frame_clear || !ReferenceEquals(names, _fpn_names)) { Array.Clear(_fpn_ptr, 0, _fpn_ptr.Length); _fpn_names = names; _fpn_frame_clear = false; }
+        if (p != null && _fpn_ptr[i] == (nint)p && _fpn_id[i] == chr_id) return _fpn_rank[i];
+        int r = name_rank(p, names, out bool ok);
+        if (ok && p != null) { _fpn_ptr[i] = (nint)p; _fpn_id[i] = chr_id; _fpn_rank[i] = r; } else _fpn_ptr[i] = 0;
+        return r;
+    }
+    /// <summary>name_is for every name of the list at once: the same read (16 bytes, byte by byte if that fails), the same test.
+    /// ok = false when the name could not be read (then no name matches, as with name_is).</summary>
+    private int name_rank(char* p, string[] names, out bool ok) {
+        ok = false;
+        if (p == null || _fn_safe_read == null) return -1;
+        if (names.Length == 0) { ok = true; return -1; }   // (name_is was not called at all: nothing to read)
+        byte* b = stackalloc byte[16];
+        if (_fn_safe_read(p, b, 16) == 0)
+            for (int i = 0; i < 16; i++) { if (_fn_safe_read((byte*)p + i, b + i, 1) == 0) return -1; if (b[i] == 0) break; }
+        ok = true;
+        return RideLogic.NameRank(new ReadOnlySpan<byte>(b, 16), names);
     }
     private string actor_name(char* p) {
         if (p == null) return "";
@@ -2494,22 +2519,33 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // Tidus (c101, actor 12) plays the scene.
             // Chocobo: a party model the game hides (c002..c007 parked at (0, 0, 0) while Tidus is swapped onto the bird) ranks
             // after actor 0 (RideLogic.FpScore).
+            // cpu-lean (e): the scan reads the frame's snapshot of the table (tbl_snap: one guarded read, shared with the body
+            // hide) instead of one read per slot, and a slot's name rank is kept while its name pointer, chr_id and the list are
+            // the same (fp_name_rank). The rule, the order and the cadence are unchanged: the actor-0 last resort, a hidden
+            // listed model and a hidden party model still rescan every frame, they just cost no reads when nothing changed.
+            Actor* snap = null;
             int score_of(in Actor a, int i, Actor* tbl) {
-                for (int r = 0; r < names.Length; r++) if (name_is(a.chr_name, names[r])) return RideLogic.FpScore(r, script_hidden(tbl + i), (int)a.chr_id, i);
+                if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
+                int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
+                if (r >= 0) return RideLogic.FpScore(r, slot_hidden(tbl, snap, i), (int)a.chr_id, i);
                 int cid = (int)a.chr_id;
-                return RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && script_hidden(tbl + i), cid, i);
+                return RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
             }
             int cur_score = -1;
             if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
             _fp_scan_tick++;
+            if ((_fp_scan_tick % 30) == 0) _fpn_frame_clear = true;   // the name ranks are read again with the 30-frame rescan (a backstop)
             if (cur_score == 0 || (cur_score > 0 && cur_score < 100000 && (cur_score < 500 || cur_score >= 1000) && (_fp_scan_tick % 30) != 0)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
             else {
                 int best = int.MaxValue, best_i = -1;
                 if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor
+                snap = tbl_snap(actors);
+                Actor slot = default;
                 for (int i = 0; i < 48; i++) {
-                    if (!read(actors + i, out Actor a)) break;
-                    if (!live(a) || i == best_i) continue;
-                    int s = score_of(a, i, actors);
+                    Actor* ap = snap != null ? snap + i : &slot;
+                    if (snap == null && !read(actors + i, out slot)) break;
+                    if (!live(*ap) || i == best_i) continue;
+                    int s = score_of(*ap, i, actors);
                     if (s >= 0 && s < best) { best = s; best_i = i; }
                 }
                 pick = best_i;
