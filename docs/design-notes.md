@@ -4411,20 +4411,26 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     over 250 ms kept out, each frame's run time (0x62E340, its waits on the render thread included), frames that started
     without a sleep (already due); `limiter Sleep`: calls, Sleep(0) count, asked vs took, oversleep (> 1 / > 2 ms).
     The job join could not give the frame starts: it does not run in the grid (no join calls there).
-  - How it is measured: the frame call's rel32 is redirected to a plain cdecl wrapper (0x62E340 takes no arguments and
-    returns in eax) with one aligned 8-byte compare-exchange, as sr_patch; FFX.exe's import slot of kernel32!Sleep points at
-    a wrapper that times only the call returning to 0x62F3C1 and passes FFX.exe's seven other Sleep callers straight to the
-    slot's previous value. Both sites are checked against the exe's bytes first (refused and logged otherwise). Never
-    removed (the DLL stays loaded); limiter_probe=0 later only stops the recording. FFX-60fps writes only K (data) there.
+  - How it is measured: FFX.exe's import slot of kernel32!Sleep (a data write) points at a wrapper that times only the call
+    returning to 0x62F3C1 and passes the slot's other users straight to its previous value (7 more call sites, a jmp thunk,
+    and two places that copy the pointer into edi: a copy taken after the swap is our wrapper, whose return address never
+    matches). The frame call's rel32 is redirected to a plain cdecl wrapper (0x62E340 takes no arguments and returns in eax)
+    with one aligned 8-byte compare-exchange. That exchange is done by the main thread itself, inside the first limiter
+    Sleep after the bytes were checked, where it provably is not at 0x62F350: self-modifying code on one thread, as
+    sr_patch's (cross-modifying it from the render thread would need the executing core to serialize). A `timer:` line
+    says when it happened. Both sites are checked against the exe's bytes first (refused and logged otherwise). Never
+    removed (the DLL stays loaded); limiter_probe=0 later only stops the recording and the window sampling (its off
+    switch). FFX-60fps writes only K (data) there.
   - Reading it: with a 1 ms timer the oversleep stays under about 1 ms and frame starts within about 1 ms of the period;
     the game's 5 ms gives oversleeps up to 4-5 ms and frames up to 20 ms at 60; the 15.6 ms default gives oversleeps up to
     15 ms and frames of 25-31 ms (a scratch model of the loop, grid-timer notes). Lateness with small oversleeps and long
     frame runs points to the frame itself (or the render thread it waits on); covered / minimized samples together with
     big oversleeps point to the timer.
-  - `timer_fix` (ini, default 1): SetProcessInformation(ProcessPowerThrottling) adds the timer-resolution and execution-
+  - `timer_fix` (ini, default 0): SetProcessInformation(ProcessPowerThrottling) adds the timer-resolution and execution-
     speed opt-out to whatever policy is set (read first with GetProcessInformation where Windows allows it), plus
     timeBeginPeriod(1) for the session; all looked up at run time, harmless where missing (if Windows refuses the
-    timer flag, as older builds may: the execution-speed opt-out alone), logged once (`timer:` line). It duplicates PERF-001 when FFX-60fps runs it;
-    it matters with PERF-001 off or a build without it. 1 -> 0 at run time releases our 1 ms request only; the opt-out
+    timer flag, as older builds may: the execution-speed opt-out alone), logged once (`timer:` line). Off by default: it
+    duplicates PERF-001 when FFX-60fps runs it, and without FFX-60fps it would move the game's limiter from its own 5 ms
+    timer to 1 ms, a pacing change; it is there for the A/B with PERF-001=0. 1 -> 0 at run time releases our 1 ms request only; the opt-out
     stays until the game restarts. The game's Sleep itself is not replaced.
   - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, ABI 38.
