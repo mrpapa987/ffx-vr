@@ -9,11 +9,14 @@
 // game-state gates and overdrive minigame state"); no code from any of them.
 //   player actor     dword 0x1300788 (Sg_GetPlayer 0x82D860; 0 = the player has no control)
 //   field menu       dword 0x1340824 (1 at 0x8A9D8A when the TkMenu loop opens, cleared at 0x8A9FCB)
-//   text box waiting byte  0xC5A03C (0x8B6B70; its image value is 0xFF, so it counts only with a window shown, below)
+//   window shown     byte  0xC5A03C (0x8B6B70; its image value is 0xFF, so it counts only with a window shown, below)
 //   message windows  [0x18676F0 + i*4], i < 8: +0x00 u16 1 = open (0x8B8560), +0x2C u16 state (2 = shown, 3 = closing)
 //   choice cursors   [0x1868A90 + i*4]: +0x01 1 = a choice cursor up (0x8B6004, only at window state 2; 2 = confirmed),
 //                    +0x02 s8 the highlighted row
-//   movie            dword 0x112A008 1 = a skippable movie runs (0x76EB62 / 0x76EBC0); dword 0xC40E28 the movie id (-1 none)
+//   movie            dword 0x112A008 1 = a skippable movie was started (0x76EB62 / 0x76EBC0; it can linger after the movie:
+//                    review B1), so only with the movie player playing: byte [[0xCDED3C] + 0x6D0] (1 at 0x6D9159, 0 at
+//                    0x6D6A89 / 0x6D7884 / 0x6D9559), as the game's own readers pair them (0x6D947D, 0x6DA4B3, 0x6DAC06);
+//                    dword 0xC40E28 the movie id (-1 none, F8 only)
 //   overdrives       s16 0x133D734 Tidus, 0x133D6F4 Auron, 0x133D708 Lulu, u8 0x133C93F Wakka (the HUD's own test 0x89B38D);
 //                    the shared timer dword 0x133F77C (0 off, 1 armed, 2 running) and f32 0x133F790 (seconds left);
 //                    Tidus: cursor s16 0x133D742, hit zone s16 0x133D73C .. 0x133D73E (inclusive, 0x8923CD..0x8923E8)
@@ -38,14 +41,16 @@ enum : int {
     GB_MENU = 0x80,          // [0x1340824] != 0
     GB_UNREADABLE = 0x100, GB_NONE_READ = 0x200, GB_VIEW_ONLY = 0x400,   // a read failed / nothing read / only the view bits read
     GB_CHOICE = 0x800,       // a choice cursor is up on a shown window
-    GB_TEXT_WAIT = 0x1000,   // [0xC5A03C] != 0 and a window is open and shown (state 2)
-    GB_MOVIE = 0x2000,       // [0x112A008] != 0
+    GB_TEXT_WAIT = 0x1000,   // a render-side message window open and shown (state 2: the typewriter done), with [0xC5A03C] != 0
+    GB_MOVIE = 0x2000,       // [0x112A008] != 0 and the movie player playing ([[0xCDED3C] + 0x6D0] != 0)
 };
 
 /// The game part of the tap gate (after the view, sensors, focus, pad, chord and staleness checks). First match wins; every
 /// shut reason shuts (the older gates and the direct ones are ORed). A choice box always shuts: a confirm there takes the
-/// highlighted answer. No player control shuts too, with one exception: "also advance dialogue" with a text box that waits for
-/// the confirm by both signals (the Atel window bank, bit 8, and the render-side window shown, 0x1000) and no choice box.
+/// highlighted answer. No player control shuts too. A text box shuts unless "also advance dialogue" is on and the line is
+/// fully shown: the Atel window bank has a window (bit 8) and a render-side window is in state 2, the typewriter done (0x1000;
+/// the byte 0xC5A03C adds little: left at 0xFF it reduces to "some window is in state 2", review N2), with or without control
+/// (review SF1); that is also the one way past "no control".
 inline int tap_game_gate(int gm, bool dialogue) {
     if (gm & (GB_UNREADABLE | GB_NONE_READ | GB_VIEW_ONLY)) return TG_READ;
     if (gm & GB_BATTLE) return TG_BATTLE;
@@ -59,16 +64,17 @@ inline int tap_game_gate(int gm, bool dialogue) {
     const bool text = (gm & (GB_TEXT | GB_TEXT_WAIT)) != 0;
     const bool waits = (gm & GB_TEXT) != 0 && (gm & GB_TEXT_WAIT) != 0;
     if ((gm & GB_NO_CONTROL) && !(dialogue && waits)) return text ? TG_TEXT : TG_NO_CONTROL;
-    if (text && !dialogue) return TG_TEXT;
+    if (text && !(dialogue && waits)) return TG_TEXT;   // SF1: a line still typing shuts with control too
     return TG_OPEN;
 }
 
 /// The hands' game hide rule (hands_hide_why, with a fresh gate): 1 battle (or nothing read: hidden as in battle, as before),
-/// 2 a movie, 3 a field menu, 0 none. The owner's rule: never in battle, menus or FMVs.
+/// 2 a field menu, 0 none. The owner's rule: never in battle, menus or FMVs. A movie is not a reason here (review N6): a
+/// frame that is the movie itself is a screen frame (hidden earlier) or has no 3D camera (no tick / no projection), and
+/// the movie-camera scenes that draw 3D over a playing movie (0x76EFC0: ids 0x20, 0x2E, 0x46, 0x48) keep the hands.
 inline int hands_game_hide(int gm) {
     if (gm & (GB_BATTLE | GB_NONE_READ)) return 1;
-    if (gm & GB_MOVIE) return 2;
-    if (gm & GB_MENU) return 3;
+    if (gm & GB_MENU) return 2;
     return 0;
 }
 

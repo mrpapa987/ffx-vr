@@ -5489,7 +5489,7 @@ static void slow_dump_build() {
 // column of the 600-frame dump.
 static od::Raw g_od;                 // this Present's read (ok = false outside battle)
 static od::Log g_od_log;
-volatile LONG g_od_active = 0;       // "an overdrive minigame is up" (the game's own test, 0x89B38D), for later users; 0 outside battle
+static volatile LONG g_od_active = 0;   // "an overdrive minigame is up" (the game's own test, 0x89B38D), for later users; 0 outside battle
 static void od_frame(uintptr_t base, LONG bst, double now) {
     od::Raw r;
     if (bst > 0) {
@@ -5502,13 +5502,13 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
                 od::parse_timer(r, tb);
         }
     }
-    if (bst <= 0 || !r.ok) {
+    if (bst <= 0) {   // the battle is over: one line when a minigame state was the last seen
         if (g_od_log.reset() && diag_profile_on()) {
             char b[160]; od::brief(b, sizeof(b), g_od, 1);
-            diag("od: frame %u: %s, the last minigame state seen: %s", g_frames, bst <= 0 ? "the battle is over" : "the state is not readable", b);
+            diag("od: frame %u: the battle is over, the last minigame state seen: %s", g_frames, b);
         }
     }
-    else {
+    else if (r.ok) {   // (review N3) a failed read in battle logs nothing and keeps the tracker's state: the next good read decides
         uint32_t dropped = 0;
         if (g_od_log.step(r, now, dropped) == od::Log::LOG && diag_profile_on()) {
             char b[160]; od::brief(b, sizeof(b), r, bst);
@@ -9251,15 +9251,15 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 // kind, calibration); the 10 s hands: line with diag_verbose only; the frame census gets HANDS lines.
 
 enum H2Why { H2_NONE = 0, H2_OFF, H2_NO_XR, H2_SUSPEND, H2_SCREEN3D, H2_BACKDROP, H2_BT, H2_DREAM, H2_FREEZE, H2_VIEW, H2_BODY,
-             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_BATTLE, H2_MOVIE, H2_MENU, H2_N };
+             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_BATTLE, H2_MENU, H2_N };
 static const char* const k_h2_why[H2_N] = { "", "off", "xr", "suspend", "screen3d", "backdrop", "bt", "dream", "freeze", "view", "body",
-                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down", "battle", "movie", "menu" };
+                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down", "battle", "menu" };
 static const char* const k_h2_why_long[H2_N] = { "", "off", "the headset is off", "a screen frame (FMV, menu, save screen)", "the stereo screen",
     "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "a view the hands are not set to show in",
     "your body is shown (fp_body_mode)", "no camera this frame", "the shader pass is not ready", "no scene projection this frame",
     "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve",
     "the first scene resolve was not last frame's scene target", "the controllers are put down", "a battle (hands are hidden in battle)",
-    "a movie (the game's skippable-movie flag)", "a field menu (the game's menu flag)" };
+    "a field menu (the game's menu flag)" };
 struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2], put_down[2], mode_drawn[4], mesh_frames; float pv_diff, pv_diff2; bool pv_done; };
 H2Stat g_h2w = {}, g_h2_last = {}, g_h2_tot = {};       // the live 10 s window, the last complete one, this on-session
 bool g_h2_last_valid = false;
@@ -9682,14 +9682,14 @@ static int hands_hide_why() {
     // frames: managed not running) is not read as a battle.
     // cpu-lean (b): managed reads the game state only when this frame can draw the hands (ffxvr_hands2_set's return); bit 0x200
     // = nothing read: hidden as in battle (never reached when the prediction holds: an earlier rule already hid the frame).
-    // gates (4 Nov): and a movie or a field menu by the game's own flags (managed's bits 0x2000 / 0x80, read with the battle bit
-    // on every frame that can draw the hands; the owner's rule: never in battle, menus or FMVs; most of those are screen frames,
-    // hidden above already).
+    // gates (4 Nov): and a field menu by the game's own flag (managed's bit 0x80, read with the battle bit on every frame that
+    // can draw the hands; the owner's rule: never in battle, menus or FMVs). A movie is not a hide reason (review N6): the movie
+    // itself is a screen frame (H2_SUSPEND above) or has no 3D camera (H2_NO_TICK / H2_NO_PROJ below); a movie-camera scene
+    // drawing 3D over a playing movie keeps the hands, as a cutscene does.
     if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3) {
         const int gh = gates::hands_game_hide(g_tapcfg.game);
         if (gh == 1) return H2_BATTLE;
-        if (gh == 2) return H2_MOVIE;
-        if (gh == 3) return H2_MENU;
+        if (gh == 2) return H2_MENU;
     }
     if (g_dream_gate) return H2_DREAM;
     if (g_ovr_freeze) return H2_FREEZE;
@@ -9749,7 +9749,7 @@ static int tap_gate_now(int mode) {
     // The game part (ffxvr_gates.h tap_game_gate): 0x100 a read failed; cpu-lean (b): 0x200 nothing read, 0x400 only the view bits
     // read (the gate stays shut); battle, the sphere grid, the save screen, blitzball, riding (the owner, 3 Nov: you cannot touch
     // anyone from the bird; press A); gates (4 Nov): a movie, a field menu, a choice box (always: a confirm takes the highlighted
-    // answer), no player control (except "also advance dialogue" with a text box waiting for the confirm); a text box.
+    // answer), no player control; a text box (both pass only with "also advance dialogue" and the line fully shown).
     else g = gates::tap_game_gate(gm, (g_tapcfg.flags & 2) != 0);
     if (g != TG_OFF && mode == 1) { g_tap_w_drawn++; if (g == TG_OPEN) g_tap_w_open++; }
     if (g == TG_CHOICE && g_tap_press != 0) tap_release("a choice box is up");   // never hold the confirm into a choice
