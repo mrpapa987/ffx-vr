@@ -987,6 +987,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "slow_guard_restart": pb(k, v, ref _slow_guard_restart); break;      // ... its last step, the VR session restart (default 1)
                 case "timer_fix":         pb(k, v, ref _timer_fix); break;                // grid-timer: 1 ms timer + no timer throttling (default 0; cpu_report.cs)
                 case "limiter_probe":     pb(k, v, ref _limiter_probe); break;            // grid-timer: time the game's frame limiter for the cpu: line (default 1)
+                case "fast_reads":        pb(k, v, ref _fast_reads); break;               // vq-lean: the guarded reads' per-frame run cache (default 1; cpu_report.cs)
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
                 case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
                 case "fh_dpi_fix":        pb(k, v, ref _fh_dpi_fix); break;                   // FH-1: Fahrenheit's ImGui text ignores the Windows display scale, as Fahrenheit #376 (default 1; applies at once)
@@ -1346,6 +1347,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"slow_guard_restart={(_slow_guard_restart ? 1 : 0)}\n" +
             $"timer_fix={(_timer_fix ? 1 : 0)}\n" +
             $"limiter_probe={(_limiter_probe ? 1 : 0)}\n" +
+            $"fast_reads={(_fast_reads ? 1 : 0)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
             $"fh_menu_on_screen={(_fh_menu_on_screen ? 1 : 0)}\n" +
             $"fh_dpi_fix={(_fh_dpi_fix ? 1 : 0)}\n" +

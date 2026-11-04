@@ -14,12 +14,17 @@ namespace FFXVR;
 //   limiter_probe (ini, default 1): the main loop's frame call and the limiter's Sleep are timed for the cpu: line (two
 //     redirects in FFX.exe, checked against its bytes; installed once, never removed; 0 later stops the recording and the
 //     game-window sampling).
+// vq-lean: a third setting rides after them (native reads v[M_N + 2]; same export):
+//   fast_reads (ini, default 1): the render thread's guarded reads keep the memory runs VirtualQuery found readable until
+//     the next Present and copy outside FFX.exe's image with ReadProcessMemory (fails instead of faulting); 0: a VirtualQuery
+//     before every read, as before. Its numbers (kernel copies, base probes) are on the cpu: line.
 public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float*, int, void> _fn_cpu_report;   // ABI 38
 
-    private const int k_cpu_n = 15, k_cpu_settings = 2;   // the timings, then timer_fix and limiter_probe
+    private const int k_cpu_n = 15, k_cpu_settings = 3;   // the timings, then timer_fix, limiter_probe and fast_reads
     private bool _timer_fix = false, _limiter_probe = true;   // ini timer_fix (default 0), limiter_probe (default 1) (grid-timer)
+    private bool _fast_reads = true;                          // ini fast_reads (default 1) (vq-lean)
     // the frame's stamps (render thread)
     private long _cpu_t_top, _cpu_t_bf0, _cpu_t_bf1, _cpu_t_win0, _cpu_t_win1, _cpu_t_push0, _cpu_t_push1, _cpu_t_end;
     // accumulated inside push_all (a section can run more than once a frame: body_hide_push has three call sites)
@@ -61,13 +66,15 @@ public sealed unsafe partial class FFXVRModule {
         v[12] = g0 - _cpu_gc0; v[13] = g1 - _cpu_gc1; v[14] = g2 - _cpu_gc2;
         _cpu_gc0 = g0; _cpu_gc1 = g1; _cpu_gc2 = g2;
         v[15] = _timer_fix ? 1f : 0f; v[16] = _limiter_probe ? 1f : 0f;   // grid-timer: native acts on a change only
+        v[17] = _fast_reads ? 1f : 0f;                                     // vq-lean: applies from the next read
         _fn_cpu_report(v, k_cpu_n + k_cpu_settings);
     }
 
-    /// <summary>Debug (F8): the two grid-timer settings; their numbers are on the cpu: line.</summary>
+    /// <summary>Debug (F8): the two grid-timer settings and fast_reads; their numbers are on the cpu: line.</summary>
     private void timer_debug_ui() {
         ImGui.Checkbox("1 ms timer, no Windows timer throttling (timer_fix)##tfix", ref _timer_fix); ImGui.SameLine();
-        ImGui.Checkbox("time the game's frame limiter (limiter_probe)##lprobe", ref _limiter_probe);
+        ImGui.Checkbox("time the game's frame limiter (limiter_probe)##lprobe", ref _limiter_probe); ImGui.SameLine();
+        ImGui.Checkbox("fast guarded reads (fast_reads)##freads", ref _fast_reads);
         ImGui.SameLine(); ImGui.TextDisabled("(cpu: line in ffxvr_diag.log)");
     }
 }
