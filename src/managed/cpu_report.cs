@@ -17,7 +17,10 @@ namespace FFXVR;
 // vq-lean: a third setting rides after them (native reads v[M_N + 2]; same export):
 //   fast_reads (ini, default 1): the render thread's guarded reads keep the memory runs VirtualQuery found readable until
 //     the next Present and copy outside FFX.exe's image with ReadProcessMemory (fails instead of faulting); 0: a VirtualQuery
-//     before every read, as before. Its numbers (kernel copies, base probes) are on the cpu: line.
+//     before every read, as before. Its numbers (kernel copies, base probes) are on the cpu: line. Native starts with it off;
+//     the three settings also go alone (ffxvr_cpu_report(v, -3), review SF1) right after the native loads, before any frame
+//     reads, and on every frame whose report is not sent (render_imgui faulted or begin_frame did not run), so the switch
+//     never waits on a frame finishing.
 public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float*, int, void> _fn_cpu_report;   // ABI 38
@@ -44,9 +47,20 @@ public sealed unsafe partial class FFXVRModule {
         _cpu_done = false;
     }
 
-    /// <summary>End of render_imgui (after PopFont): one report, when begin_frame ran and the frame got to its end.</summary>
+    /// <summary>vq-lean (review SF1): timer_fix, limiter_probe and fast_reads alone (n = -3: no timings; natives before vq-lean
+    /// ignore n &lt;= 0). From init right after load_native, and from cpu_frame_report when the frame's report is not sent.</summary>
+    private void cpu_settings_push() {
+        if (_fn_cpu_report == null) return;
+        float* v = stackalloc float[k_cpu_settings];
+        v[0] = _timer_fix ? 1f : 0f; v[1] = _limiter_probe ? 1f : 0f; v[2] = _fast_reads ? 1f : 0f;
+        _fn_cpu_report(v, -k_cpu_settings);
+    }
+
+    /// <summary>End of render_imgui (after PopFont): one report, when begin_frame ran and the frame got to its end; else the
+    /// settings alone.</summary>
     private void cpu_frame_report() {
-        if (!_cpu_done || _fn_cpu_report == null || _cpu_t_bf1 == 0) return;
+        if (_fn_cpu_report == null) return;
+        if (!_cpu_done || _cpu_t_bf1 == 0) { cpu_settings_push(); return; }
         long end = cpu_now();
         int g0 = GC.CollectionCount(0), g1 = GC.CollectionCount(1), g2 = GC.CollectionCount(2);
         if (_cpu_gc0 < 0) { _cpu_gc0 = g0; _cpu_gc1 = g1; _cpu_gc2 = g2; }

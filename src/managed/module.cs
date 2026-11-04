@@ -348,6 +348,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _logger.Info($"FFX VR {s_mod_version} module initialized (Fahrenheit {s_fh_version}).");
         settings_load();
         load_native(mod_context);
+        if (_native_ok) cpu_settings_push();   // vq-lean (review SF1): fast_reads before any frame reads (cpu_report.cs)
         if (_fn_haptics_set != null) _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);   // before ffxvr_init, which installs the XInputSetState hook only if haptics or build 7 are on
         diag7_init();   // build 7 (log only): game-function hooks must be queued here, at init (diag7.cs)
         ld_init();      // load diagnostics (load_diag.cs): queued after build 7's hooks (the job join included), so a failure here cannot take them with it (LD-7)
@@ -2197,7 +2198,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private bool read<T>(void* src, out T value) where T : unmanaged {
         T tmp = default;
         bool ok = _fn_safe_read != null && _fn_safe_read(src, &tmp, (uint)sizeof(T)) != 0;
-        value = tmp;
+        value = ok ? tmp : default;   // vq-lean (review N2): a failed kernel copy over 256 B may leave tmp partly written
         return ok;
     }
 
