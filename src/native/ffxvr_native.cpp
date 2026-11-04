@@ -31,6 +31,7 @@
 #include "ffxvr_xr.h"
 #include "ffxvr_hands.h"   // VR hands v2: the CPU half (box mesh, placement, calibration)
 #include "ffxvr_slow.h"    // od-guard: the slow-GPU guard's decisions (pure logic)
+#include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -763,23 +764,21 @@ static void ride_d2(const float* w, float* dr, float* dm) {
     if (g_ride_flags & 2) { const float bx = w[0] - g_ride_mount[0], by = w[1] - g_ride_mount[1], bz = w[2] - g_ride_mount[2]; *dm = bx*bx + by*by + bz*bz; }
 }
 /// The body hide's test for one draw's world translation: 0 not the player's, 1 one of the player's own parts (the rider's
-/// while riding), 2 one of the mount's (riding only). On foot: within hide_radius + 1.5 * step of g_fp_pos, as before.
+/// while riding), 2 one of the mount's (riding only). The rules are in ffxvr_fpown.h.
+/// On foot: within hide_radius + min(1.5 * step, 4) of g_fp_pos (the margin was unbounded until 4 Nov 2026: scripted moves under
+/// the 50-unit warp rule, re-picks of the followed actor and 30 fps logic widened it to several units, and an NPC beside Tidus
+/// in a cutscene was hidden whole).
 /// Riding: within a fixed radius (ride_hide_radius, default 6) of the rider's drawn root, and a draw nearer the mount's root
 /// than the rider's is the mount's (its parts sit on its root, a seat's height below). The radius is fixed, not the on-foot
 /// step margin: the first headset round showed Tidus about half the time, because the rider's root moves with the bird's
 /// bone at the 30 Hz ticks (the stride) while the margin followed the bob-smoothed eye base (0.75 + 1.5 x a small step).
 /// Nothing else is at the seat's height within 6 units: an NPC's root is on the ground, a seat height (15 units) below.
-static int fp_part_of(const float* w) {
+static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
     if ((g_ride_flags & 1) == 0) {
-        const float r0 = g_fp_hide_radius + 1.5f * g_fp_step_hide;
-        const float dx = w[0] - g_fp_pos[0], dy = w[1] - g_fp_pos[1], dz = w[2] - g_fp_pos[2];
-        return dx*dx + dy*dy + dz*dz < r0 * r0 ? 1 : 0;
+        fpown::Foot f; f.centre = g_fp_pos; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        return fpown::on_foot(w, f, why);
     }
-    const float r = fmaxf(g_fp_hide_radius, g_ride_radius);
-    float dr, dm; ride_d2(w, &dr, &dm);
-    if (dr < r * r && dr <= dm) return 1;
-    if (dm < r * r) return 2;
-    return 0;
+    return fpown::riding(w, g_ride_flags, g_ride_rider, g_ride_mount, g_fp_hide_radius, g_ride_radius);
 }
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
