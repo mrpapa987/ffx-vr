@@ -2431,6 +2431,11 @@ static_assert(cpu::k_mem_commit == MEM_COMMIT && cpu::k_mem_image == MEM_IMAGE &
 static uint32_t g_cpu_sr_calls = 0;       // ffxvr_safe_read calls this frame (render thread)
 static cpu::RangeStats g_cpu_rr = {};     // this frame's VirtualQuery calls / cache hits in range_readable (render thread)
 static LONGLONG g_cpu_rr_q = 0;           // this frame's QPC ticks inside range_readable (render thread)
+// cpu-lean (a): range_readable's region cache (ffxvr_cpu.h RegionCache): the render thread's last four readable page runs of
+// FFX.exe's own image, cleared at every Present (cpu_frame_roll). Other threads, and every heap, mapped or other-module region,
+// query as before.
+static cpu::RegionCache<4> g_cpu_rcache;
+static uintptr_t g_cpu_exe_base = 0;
 static inline LONGLONG cpu_q() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
 static cpu::Mbi cpu_vq(uintptr_t q) {
     MEMORY_BASIC_INFORMATION mbi; cpu::Mbi m;
@@ -2442,13 +2447,16 @@ static cpu::Mbi cpu_vq(uintptr_t q) {
 
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
 /// access violation fatal even inside __try, so this check, not SEH, is what keeps a stale pointer harmless.
-/// (cpu-lean: the loop is cpu::range_check, ffxvr_cpu.h, the same test; on the render thread it is timed and counted.)
+/// (cpu-lean: the loop is cpu::range_check, ffxvr_cpu.h, the same test; on the render thread it is timed and counted, and a
+/// range inside a page run of FFX.exe's image already seen readable this frame is answered from the region cache: the exe is
+/// never unloaded and its sections never decommitted, so such a run cannot be freed between the query and the read.)
 static bool range_readable(const void* p, size_t len) {
     const uintptr_t a = reinterpret_cast<uintptr_t>(p);
     if (g_render_tid == 0 || GetCurrentThreadId() != g_render_tid)
-        return cpu::range_check<cpu::Mbi (&)(uintptr_t), 1>(a, len, cpu_vq, nullptr, 0, nullptr);
+        return cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq, nullptr, 0, nullptr);
+    if (g_cpu_exe_base == 0) g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const LONGLONG t0 = cpu_q();
-    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 1>(a, len, cpu_vq, nullptr, 0, &g_cpu_rr);
+    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
     g_cpu_rr_q += cpu_q() - t0;
     return ok;
 }
@@ -5206,6 +5214,7 @@ static void cpu_frame_roll() {
     if (g_cpu_win_t0 == 0) g_cpu_win_t0 = GetTickCount64();
     g_cpu_srn.add(g_cpu_sr_calls); g_cpu_vqn.add(g_cpu_rr.queries); g_cpu_hitn.add(g_cpu_rr.hits); g_cpu_rrms.add(cpu_ms(g_cpu_rr_q));
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
+    g_cpu_rcache.clear();   // (a): a cached page run lives one frame at most
 }
 /// End of ffxvr_begin_frame: its sections; the "after our hook" clock starts (ffxvr_cpu_report moves it to managed's end).
 static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LONGLONG q4, LONGLONG wait, LONGLONG slow) {
