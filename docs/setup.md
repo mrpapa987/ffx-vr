@@ -90,7 +90,7 @@ re-maps the addresses again.
 | `tools/package-release.ps1` | Builds (`build-mod.ps1 -NoDeploy`) and packs the player zip into `dist\` with its README and installer; see `docs/release.md` §1 |
 | `tools/paths.ps1` | Shared by all scripts: repository root, game folder (env var / local file / Steam) |
 | `tools/run-ffx.ps1` | Launches via Fahrenheit, captures console and game-side logs |
-| `tools/convert-fmv-depth.ps1` | Makes FMV depth (`fmvdepth\*.fvd`) from your own game copy on your GPU; see "FMV depth" below |
+| `tools/convert-fmv-depth.ps1` | (Experimental) Makes FMV depth (`fmvdepth\*.fvd`) from your own game copy on your GPU; see "FMV depth" below |
 
 The old managed-only `tools/build-fahrenheit.ps1` was deleted on 30 October 2026:
 it reset `_ext\fahrenheit` to main and rebuilt it, which silently replaced the
@@ -187,7 +187,10 @@ turn on NTFS compression (about half the size). `-Uninstall` removes it. The
 Fahrenheit file-loader log lists every replaced file at launch, which is the
 check that the files are being served.
 
-## FMV depth (the converter, stage S1; 3 Nov 2026)
+## FMV depth (the converter, stage S1; 3 Nov 2026) - experimental
+
+**Experimental:** the converter has not yet had its first run on a real PC (the GPU setup, the model download and
+Windows' compression are untested), and the mod does not use the depth yet. Treat it as a developer tool for now.
 
 `tools\convert-fmv-depth.ps1` makes 8-bit relative depth for every frame of the game's FMVs, for a later
 "relief screen" (FMVs shown with depth in VR). It runs **on your own PC, against your own copy**: each video is
