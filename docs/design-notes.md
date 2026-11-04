@@ -4092,6 +4092,62 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   (the phantom centre), N3 (and its documented limit). sf1_test drives the extracted diagnostics: ten minutes of running write
   no line; refusals write about one a second and the 10 s lines. Not verified: MSVC build, the headset.
 
+### Shared scene anchors: ties resolved by model identity (branch `npc-anchor`, 4 Nov 2026)
+
+- **What the owner saw.** mi/mihn0100, an in-engine cutscene on the Mi'ihen Highroad, first person following actor 0 'c101'
+  (the event Tidus): Yuna, sitting on the ground, was invisible in first person only and came back with "hide the player's
+  body" unticked; F8's "draws hidden" kept growing.
+- **The logs.** The actor table (18:04:51Z): actor 0 c101 and actor 1 c102 both at (-188.0, -18.8, -176.0), the scene anchor;
+  c003 and f051 far off. The motion lines: the drawn root = logic = the snapshot = (188, 18.8, -176) render space, "rendered
+  ... d 0.0". No `body hide:` line at all (nothing refused, every match at 0 from the player: the line's triggers never fired).
+  perf: hidden grew by 68,400 per 30 s = 38 draws a frame, steady. The censuses (12:04:26, :31, :32, :34) cannot list hidden
+  draws: the body hide returns before the census's scene-draw line, so they show only as gaps in the frame draw numbers (25
+  before the first visible character, 13 more among the blended draws in every census). They do show that every part of one
+  character samples one PS slot-0 texture (Auron's 13 draws 28B1EDA4, an NPC's 5 draws 407A9924; nagi0000's Tidus 13 draws
+  3DFB9564; the Luca NPCs each their own), and that the VS constant buffers and shaders are shared between models.
+- **The mechanism.** Both event models stand on the anchor; their animations place the bodies through the bone palette. The
+  skinned buffers' world translation (+640) is the root for every part of both, so every draw of either is 0 from the player
+  and 0 from the other root: a tie, and ties go to the player (the safe side for his own body). Yuna's whole model was hidden.
+  The first-person eye was right all along: it comes from the head sub-position (chr_optpos, built by the game from c101's own
+  bones x root, 0x8350F0; the highest one is the head bone's origin), so it sits in Tidus's head, wherever his animation puts it.
+- **The discriminator: model identity, by texture and head.** A matched draw tied with another actor's root (within the 0.5
+  tolerance, not refused) is resolved by the model it belongs to (`ffxvr_fpown.h`, `fp_tie_resolve`):
+  - the model key is the draw's PS slot-0 texture (the atlas); identical NPC models share one, which is harmless;
+  - the draw's palette is world space (M = W_joint x Bind^-1). Its head points (the bind axis at y = -14.5, -15.8 (Tidus's
+    neck joint), -17.0, -18.2) are compared with the player's head sub-position and with the tied actor's (managed now sends each
+    other actor's head with its root, ABI 39). The frame's nearest distances per texture step a score at Present: +1 when the
+    player's head is within 3 of the model's head points and 1.5 nearer than the other's; -1 when the other's head is, AND the
+    player's is more than 4.5 away (`k_head_far`: a wrong -1 would show his body);
+  - score >= 2: the player's model; <= -3 (three frames from nothing): another actor's; a draw clear of every other root by 3
+    units (normal play) makes its texture the player's (every 16th frame);
+  - a tied draw of another actor's model is kept visible; of the player's, or of a model not yet known, hidden as before.
+  The identity is used only to turn a hide into a show: nothing the old rule showed is hidden. The table is cleared with a new
+  re-pick key (the Luca c001 -> c101 swaps) and entries expire after 600 frames unseen. The light-camera hide (fp_self_shadow 0)
+  uses the same verdict. bones_capture / bones_record (the palette work in the upload hook, which has no texture) keep the
+  positional rule.
+- **Why not the alternatives.** A signature learned only on frames with no other root near (the owner's suggestion) cannot
+  start here: the two share the anchor from the scene's first frame, so it is kept only as a second source of evidence. Vertex
+  / index buffers or the actor's model handle (+0x830) would need the Phyre mesh structures mapped to D3D objects (not done;
+  nothing in the logs to check it against). The draw order follows the actor table for the opaque pass only.
+- **Limits.** Heads closer than about 4.5 units are often unresolved (hidden, the old behaviour): the scratch test resolves
+  every tie with heads 6+ units apart in 97% of scenes, 4-6 units in 60%, under 4 rarely. A first tie shows the other model
+  after three to five frames. The test models the head sub-position as within 3 units of the bind axis; Tidus stays hidden with
+  it up to 6 units off (without `k_head_far` only up to about 4). Untested in the headset.
+- **Diagnostics.** The `body hide:` line (1/s, 200 a session) now also fires on a tie: "... | N draws tied with another actor's
+  root (same anchor, within 0.50): resolved by model identity (...): K kept visible as another actor's, P hidden as the
+  player's, U unresolved (hidden, the tie rule) | the player's head sub-position D from the centre | models: <texture> player /
+  other / ? (score, head p / q)". The 10 s line adds the tie frames, draws and those kept visible. F8's "NPC parts kept visible"
+  counts them. A frame census lists every body-hidden draw ("body hide: frame draw N HIDDEN as the player's part | world ... |
+  s0 ... | from the player ..., the nearest other root ... (tied) | model v") and every tie kept visible.
+- **ABI 39:** ffxvr_fp_others_set(xyz, heads, n).
+- **Tests (container):** anc_chk/tests/anchor_test (the header and the native glue and draw-site block extracted verbatim): the
+  owner's scene (Tidus standing, Yuna sitting, one anchor: Tidus hidden on every frame, Yuna shown from the fifth, nothing hidden
+  that the old rule showed), 3000 random shared-anchor scenes (two or three models, sitting / standing, 0-15 units apart: Tidus
+  never shown), no heads sent = the old rule, the Luca double (one pose on one root: both hidden), the re-pick reset, normal play
+  (equal to the old rule; his texture learned), riding (200,000 cases equal to the old rule). Mutations caught: no margin, a
+  one-frame verdict, the player's head alone, every matched draw counted as tied, the neck point alone. The npc-hide fpown and
+  SF1 tests pass unchanged against the new code; the cpu-lean CpuTests check the heads (live and snapshot walks).
+
 ## Battle-start banners in double (4 Nov 2026)
 
 - **What the owner saw.** In battles that start with a message ("Preemptive Strike!", "Ambushed!") the 2D UI is not on the
