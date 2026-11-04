@@ -4140,3 +4140,61 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   handle's tail, a replay of window 5 (release at 26520), no shards detected (26570, AFTER with handle 0), a stray
   capture-sampling draw, a capture candidate every frame, no camera, a non-encounter window. Not verified: MSVC build, the
   headset, which logged battles had a banner.
+
+## Sphere grid frame pacing and CPU timings (4 Nov 2026)
+
+- **What the owner saw.** The sphere grid no longer holds 60 fps in the headset (it did on 2 Nov). The GPU span there is 2-3 ms;
+  the render thread reaches its ring wait after the headset slot has passed (`sr:` "skipped by us: past the deadline" 30-80/s),
+  so frames come out at 3-5 slots of 8.33 ms. The main menu (also the virtual screen) holds in the same session. The culprit
+  is not proven: this build makes the render thread's CPU time visible and removes the per-frame work found in the window
+  that was plainly wasted (research grid-cpu.md). Nothing else changes.
+- **The `cpu:` line.** Logged with every `perf:` line (the same `diag()` call, so the same cadence and the same logging
+  profile: every 30 s, 5 s while slow, also in the release profile). Every field is avg/max per frame over the window since
+  the last line (not the `perf:` line's last 60 frames). QPC only, fixed storage, nothing logged per frame, always on.
+  - `begin_frame` and its sections: `head` (the stamps, the frame clock, pick, C3, the hands' frame end), `pre` (the capture
+    lock, tick, the camera read, the cache sweeps, the GPU span's end), `xr wait` (our xrWaitFrame with the load-lock release
+    and re-take around it: the pacing wait, not work), `xr rest` (the rest of xr_tick: copies, submit, xrEndFrame, Begin,
+    sync, locate, input), `perf` (C2, the pointer sprites, perf_tick), `slow` (slow_frame), `tail`.
+  - `managed` (ffxvr_cpu_report, once a frame at the end of render_imgui): `total`, `before begin_frame`, `begin_frame call`
+    (includes the native sections above), `mid` (hotkeys, hover, gestures), `window` (F8), `push_all` = `player` [`body
+    hide`, `ride`] + `hands` [`tap gate`] + `rest`, `after`; `gc 0/1/2` = collections in the window.
+  - `safe_read` calls, `VirtualQuery` calls, `cache hits` and `range_readable` ms per frame (render thread).
+  - `after our hook to the ring wait`: from the end of our managed hook to the render thread's next ring wait (Fahrenheit's
+    later ImGui work, the real Present, the rest of the Present list); how many of those entries were past the open slot's
+    deadline and by how much, how many by more than the margin (those slots are lost), and `skipped by us` (the `sr:` line's
+    skip_ours) over the same window, with a per-second rate to compare with the `sr:` line's 10 s counts. "not measured"
+    when stick reprojection's ring wait is not installed.
+- **The savings (each keeps the result; scratch tests in the cpu-lean notes).**
+  - (a) range_readable: on the render thread, a range inside a page run of FFX.exe's own image (MEM_IMAGE, the exe's
+    allocation base) that VirtualQuery reported readable earlier in the frame skips the query (4 runs, cleared at every
+    Present). Only the exe is cached because it is the one region that cannot be freed mid-frame; heap, mapped and other
+    modules' regions (the game's magic_*.dll unload mid-session) and every other thread query on every read, as before.
+    The page rule is unchanged. Assumption: nothing makes an exe page PAGE_GUARD / NOACCESS mid-frame (a debugger's memory
+    breakpoint would).
+  - (b) the tap gate: `ffxvr_hands2_set` returns whether the coming frame can draw the hands (on, headset wanted, not the
+    virtual screen, the stereo screen or a backdrop room: hands_hide_why's rules before the battle rule, fixed from push_all
+    to the next Present). Managed reads every game bit only when the tap is on in first person, only the battle bit
+    (`| 0x400`, gate shut) when the hands can be drawn otherwise, nothing (`0x200`: hidden as in battle, gate shut) when they
+    cannot. The hands stay hidden in every battle. Side effect: no `hands: tap gate (game)` line from the virtual screen (the
+    sphere grid's "sphere grid" line goes; the gate is shut there anyway).
+  - (c) the body hide: `ffxvr_fp_self_set` returns 0 when the frame goes to the virtual screen (g_ovr_suspend: the menus,
+    the sphere grid); every user of the other roots (the two body-hide draw sites and maybe_override's bone record) needs the
+    override live, so nothing is walked. Elsewhere the walk runs every frame as before, but from one guarded read of the whole
+    table (48 x 0x880 bytes), else slot by slot.
+    The owner asked for a short list refreshed every 8-10 frames, with a full walk on (1) a match beyond 0.75 last frame, (2) a
+    radius over 1.5, (3) a re-pick, map change, battle end or reload, (4) a live-count change. The snapshot makes that
+    unnecessary: a full walk from it costs no extra reads and nothing in it is stale. It also closes a gap the triggers leave:
+    (1) is the previous frame's, so an NPC placed by script 0.75..1.5 from Tidus between refreshes (inside the radius, outside
+    the 0.75 never-refused core) would be hidden for its first frame. The scratch test replays 16 000 such placements: kept
+    visible from the first frame, and 1.95 M draws get the same hide decision as the walk of 521d237.
+  - (d) diag_on(): log_push built a List and an interpolated string every frame; diag_any() is the same test without them.
+  - (e) the follow pick: the rescan (every frame for the actor-0 last resort, a hidden listed model and a hidden party model)
+    reads the same snapshot, and a slot's name rank is kept while its name pointer, chr_id and fp_actor are the same (read
+    again every 30 scan ticks). Same result, cadence and tie rule; the hidden-party fallback no longer costs 48+ reads a frame.
+    Assumption: the name under an unchanged pointer and chr_id does not change (the name is the model's).
+  - Untouched: "keep characters drawn", the distance culls and every cull patch, the pacing (stickrep, lock release).
+- **ABI 38:** + ffxvr_cpu_report; ffxvr_hands2_set and ffxvr_fp_self_set return int; tap game bits 0x200 / 0x400.
+- **Reading the A/B.** If the grid's `cpu:` line shows `push_all` or `range_readable` in milliseconds before this build's
+  savings take effect, H1/H2 of the research hold; if begin_frame and managed are small while `after our hook to the ring wait`
+  is large, the time is outside our hook (Fahrenheit's ImGui, the real Present, the game's list) and the savings will not
+  move the grid.
