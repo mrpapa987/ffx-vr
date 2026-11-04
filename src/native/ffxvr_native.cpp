@@ -5081,11 +5081,13 @@ static double g_acc_gpu = 0, g_acc_gpu_max = 0; static int g_acc_gpu_n = 0;
 // od-guard: the span read at this Present (g_gpu_last_ok: one was read; it is k_gpuq_ring - 1 frames old), for the slow guard.
 static double g_gpu_last_ms = 0; static bool g_gpu_last_ok = false;
 static uint8_t g_gpuq_mode[k_gpuq_ring] = {}; static uint8_t g_gpu_last_mode = 0;   // (review N8) the view of each slot's frame
+static bool g_gpuq_excl[k_gpuq_ring] = {}; static bool g_gpu_last_excl = false;     // (review 2 N2) ... and whether it was excluded
 // od-guard (e), the GPU canary: two timestamps back to back at the very start of the Present hook, in the same disjoint
 // query as the span, read with it (non-blocking, k_gpuq_ring - 1 frames late). WEAK evidence, a raw number (review SF3):
 // they sit in the same command stream with no flush between them, so another process's GPU work shows up only when the
-// scheduler preempts or switches exactly between them. Far apart (over 2 ms) does mean the GPU was shared at that moment;
-// close together says nothing either way (a time-sliced GPU delays the frame's work, i.e. the span, far more often).
+// scheduler preempts or switches exactly between them. Far apart (over 2 ms) suggests the GPU was busy with other work at
+// that moment (another process, or this one's own paging if the driver split the buffer there); close together says
+// nothing either way (a time-sliced GPU delays the frame's work, i.e. the span, far more often).
 static ID3D11Query* g_gpuq_c0[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_c1[k_gpuq_ring] = {}; static bool g_gpuq_c_set[k_gpuq_ring] = {};
 static double g_can_last_ms = 0; static bool g_can_last_ok = false;
 static double g_acc_can = 0, g_acc_can_max = 0; static int g_acc_can_n = 0; static uint32_t g_acc_can_over = 0;
@@ -5135,7 +5137,7 @@ static void gpu_timing_tick() {
         if (dj_ok && g_ctx->GetData(g_gpuq_t0[next], &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && g_ctx->GetData(g_gpuq_t1[next], &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && t1 >= t0) {
             const double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
             g_acc_gpu += ms; if (ms > g_acc_gpu_max) g_acc_gpu_max = ms; g_acc_gpu_n++;
-            g_gpu_last_ms = ms; g_gpu_last_ok = true; g_gpu_last_mode = g_gpuq_mode[next];
+            g_gpu_last_ms = ms; g_gpu_last_ok = true; g_gpu_last_mode = g_gpuq_mode[next]; g_gpu_last_excl = g_gpuq_excl[next];
         }
         UINT64 c0 = 0, c1 = 0;
         if (dj_ok && g_gpuq_c_set[next] && g_ctx->GetData(g_gpuq_c0[next], &c0, sizeof(c0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
@@ -5485,11 +5487,15 @@ static void slow_event(const slow::Out& o, double now) {
             else diag("slow: %s off: not measured twice: skipped, back on (it does not count as a step)", item_name(o.item));
             break;
         case EV_PRE_CHECK:
-            diag("slow: %d steps measured and none helped: everything is back on; measuring the slow state once more before a session restart", g.measured_steps);
+            diag("slow: %d steps measured and none helped: everything is back on; the slow state is measured in 3 s windows until it is 60 s old, then a session restart if the last one is still slow", g.measured_steps);
+            break;
+        case EV_REBASE:   // review 2 SF2: spans over 2 x the baseline for 10 min of watching: a new steady state
+            diag("slow: the %s baseline is now %.1f ms (was %.1f): spans over twice the old one made up 75 %% of the watched frames for 10 min (a heavier map or new settings)",
+                 o.item == 1 ? "screen" : "3D", o.span_avg, o.end_avg);
             break;
         case EV_RECOVERED:
             if (g.last_fix == FIX_PASSED && g.last_fix_item < 0) diag("slow: recovered after %.1f s (by itself: with everything back on the frames are fast, %d of %d; no restart)", g.last_dur / 1000.0, o.fast, o.n);
-            else if (g.last_fix == FIX_RESTART) diag("slow: recovered after %.1f s (by the session restart; fast frames %d of %d, gpu avg %.1f ms, xrEndFrame avg %.1f ms)", g.last_dur / 1000.0, o.fast, o.n, o.span_avg, o.end_avg);
+            else if (g.last_fix == FIX_RESTART) diag("slow: recovered after the session restart, %.1f s after the onset (the cause may have ended by itself; fast frames %d of %d, gpu avg %.1f ms, xrEndFrame avg %.1f ms)", g.last_dur / 1000.0, o.fast, o.n, o.span_avg, o.end_avg);
             else diag("slow: recovered after %.1f s (by %s off; it is back on and the frames stay fast (%d of %d): the cause had passed)", g.last_dur / 1000.0, item_name(g.last_fix_item), o.fast, o.n);
             break;
         case EV_LATCHED:     diag("slow: recovered after %.1f s (by %s off; slow again with it back on, fast frames %d of %d: it stays off for 5 min)", g.last_dur / 1000.0, item_name(o.item), o.fast, o.n); break;
@@ -5516,7 +5522,10 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
     // (VISIBLE: the Quest or Virtual Desktop menu is over the game and the runtime throttles it by design; the 10-26 case)
     const bool focused = g_xr_want && xr_running() && xr_focused();
     const bool excluded = g_bt_phase != BT_IDLE || pf_phase_live() || g_slowmo_ms > 0 || (g_xr_want && xr_running() && !focused);
-    if (g_gpuq_cur >= 0) g_gpuq_mode[g_gpuq_cur] = mode;   // (N8) the view of the frame the slot just begun will time
+    if (g_gpuq_cur >= 0) {   // (N8) the view of the frame the slot just begun will time; (review 2 N2) excluded at its start or its end
+        g_gpuq_mode[g_gpuq_cur] = mode; g_gpuq_excl[g_gpuq_cur] = excluded;
+        g_gpuq_excl[(g_gpuq_cur + k_gpuq_ring - 1) % k_gpuq_ring] |= excluded;
+    }
     {
         SlowFr& r = g_slow_ring[g_slow_ring_n % k_slow_ring]; g_slow_ring_n++;
         r.t = now; r.frame = g_frames; r.fm = (float)fm; r.gpu = (float)g_gpu_last_ms; r.can = (float)g_can_last_ms; r.wait = (float)wait_ms; r.end = (float)end_ms;
@@ -5530,7 +5539,8 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
             diag("census: frame %u: the session's first live battle frame in the headset: the next frame goes to ffxvr_frame_auto.log (once a session; a baseline for a slow-state census)", g_frames);
     }
     slow::In in;
-    in.now = now; in.frame_ms = fm; in.span_ok = g_gpu_last_ok; in.span = g_gpu_last_ms; in.end = end_ms;
+    in.now = now; in.frame_ms = fm; in.span = g_gpu_last_ms; in.end = end_ms;
+    in.span_ok = g_gpu_last_ok && !g_gpu_last_excl;   // (review 2 N2) a span timed inside a load / transition / menu is neither measured nor learnt
     in.screen = g_gpu_last_mode == 2;   // (N8) the span's own frame's view, not this Present's
     in.running = g_xr_want && xr_running(); in.focused = focused; in.wanted = g_xr_user_on; in.excluded = excluded; in.avail = slow_avail();
     in.enabled = g_slow_on; in.restart_ok = g_slow_restart_on;
@@ -5578,7 +5588,8 @@ static const char* slow_status_text() {
     if (g.episodes == 0) { slow_text_add(len, " | never triggered"); return g_slow_text; }
     char fix[64];
     if (!g.last_ended) snprintf(fix, sizeof(fix), "under way");
-    else if (g.last_fix == FIX_RESTART) snprintf(fix, sizeof(fix), "fixed by the session restart");
+    else if (g.last_fix == FIX_RESTART) snprintf(fix, sizeof(fix), "fast after the session restart");
+    else if (g.last_fix == FIX_UNVERIFIED) snprintf(fix, sizeof(fix), "%s off helped, re-check unmeasured", item_name(g.last_fix_item));
     else if (g.last_fix == FIX_PASSED && g.last_fix_item < 0) snprintf(fix, sizeof(fix), "passed by itself");
     else if (g.last_fix == FIX_PASSED) snprintf(fix, sizeof(fix), "passed (with %s off)", item_name(g.last_fix_item));
     else if (g.last_fix == FIX_NOTHING) snprintf(fix, sizeof(fix), "nothing helped");

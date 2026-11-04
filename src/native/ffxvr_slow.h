@@ -11,7 +11,7 @@
 // = the cause had passed; slow again = the item stays off for 5 min (LATCHED).
 // Only measured windows decide (review B1-B3): a window that ends with fewer than min_samples measured frames (all frames
 // excluded: the Quest menu, a load phase, a transition window) is repeated once, then skipped (a step) or ends the episode
-// with everything back on (a verify); the restart needs 2 measured steps and the slow state measured right before it.
+// with everything back on (a verify); the restart needs 2 measured steps, the slow state 60 s old and measured right before.
 // Without a learnt baseline for the view (B2: a GPU-bound setup, the first seconds of a view) a slow run is only logged.
 // Every path ends in COOL (30 s, or 5 min after giving up), at most 6 episodes a session: nothing can loop.
 #pragma once
@@ -34,15 +34,22 @@ struct Cfg {   // milliseconds unless named otherwise
     double fast_frac = 0.75, slow_frac = 0.75; int min_samples = 8; // a window "helped" with 75 % fast frames; "still slow" with
                                                                     // 75 % slow ones; a window needs 8 measured frames to decide
     double census_wait = 1000.0, settle = 500.0, measure = 2000.0, step_wall = 8000.0;
-    double hold = 10000.0, verify_measure = 2500.0, latch = 300000.0, pre_measure = 1500.0, arm_wait = 5000.0;
+    double hold = 10000.0, verify_measure = 2500.0, latch = 300000.0, pre_measure = 3000.0, arm_wait = 5000.0;
+    double restart_min_age = 60000.0;   // (review 2 SF1) the restart only once the slow state has lasted 60 s since the onset
     int    restart_min_steps = 2;
     double restart_gap = 300000.0; int restarts_max = 3; double restart_wait = 15000.0, restart_up = 1000.0, restart_settle = 1500.0;
     double cool_ok = 30000.0, cool_fail = 300000.0, cool_abort = 30000.0;
     int    episodes_max = 6; double spent_gap = 60000.0, unlearnt_gap = 600000.0;
-    // The baseline (review B2): the median of the measured spans outside episodes, from a histogram (0.5 ms bins up to
-    // 120 ms) that halves once it holds 8192 frames (so it reflects the last ~1-2 min at 120 Hz). No 25 ms cap: a setup
-    // that always runs at 36 ms learns 36 and is never "slow" against itself. Learnt once it holds base_min frames.
+    // The baseline (review B2): the median of the measured spans while WATCHing, from a histogram (0.5 ms bins up to
+    // 120 ms) that halves once it holds 8192 frames, so it holds the last 4096-8191 measured frames (34-68 s at 120 Hz,
+    // 45-90 s at 90 Hz, 4.5-9 min at 15 fps). No 25 ms cap: a setup that always runs at 36 ms learns 36 and is never
+    // "slow" against itself. Learnt once it holds base_min frames.
+    // Review 2 SF2: nothing is learnt during an episode or the cool-down after it, and once learnt a span over 2 x the
+    // baseline is kept out; it goes to a shadow histogram instead, which replaces the baseline's when such spans make 75 %
+    // of every 10 s of WATCH time for 10 min (a heavier map or new settings: a new steady state). The one exception is the
+    // cool-down after a restart that did not help: that state is learnt as it is (the guard has done what it can).
     double bin_ms = 0.5; int bins = 240; int base_halve = 8192, base_min = 600;
+    double hi_mult = 2.0, hi_bucket = 10000.0, hi_frac = 0.75, hi_adopt = 600000.0;
 };
 
 struct In {
@@ -62,9 +69,10 @@ struct In {
 };
 
 enum Ev { EV_NONE = 0, EV_ONSET, EV_ITEM_OFF, EV_ITEM_RESULT, EV_HOLD_END, EV_RECOVERED, EV_LATCHED, EV_UNLATCHED, EV_RESTART, EV_GAVE_UP,
-          EV_ABORT, EV_SPENT, EV_UNMEASURED, EV_PRE_CHECK, EV_LOG_ONLY };
+          EV_ABORT, EV_SPENT, EV_UNMEASURED, EV_PRE_CHECK, EV_LOG_ONLY, EV_REBASE };   // EV_REBASE: a new steady state adopted (item = the view)
 enum St { ST_OFF = 0, ST_WATCH, ST_CENSUS, ST_ITEM, ST_HOLD, ST_VERIFY, ST_PRE_RESTART, ST_RESTART_ARM, ST_RESTART_WAIT, ST_RESTART_MEASURE, ST_COOL };
-enum Fix { FIX_NONE = -1, FIX_RESTART = 100, FIX_PASSED = 101, FIX_NOTHING = 102, FIX_ABORTED = 103 };   // or an Item: it helped
+enum Fix { FIX_NONE = -1, FIX_RESTART = 100, FIX_PASSED = 101, FIX_NOTHING = 102, FIX_ABORTED = 103, FIX_UNVERIFIED = 104 };   // or an Item: it helped
+// FIX_UNVERIFIED (review 2 N1): last_fix_item helped, but its re-check could not be measured twice (it is back on)
 enum Why { WHY_NONE = 0, WHY_HEADSET_OFF, WHY_DISABLED, WHY_NO_RESTART, WHY_RESTARTS_MAX, WHY_RESTART_GAP, WHY_NOT_BACK, WHY_STILL_SLOW,
            WHY_FEW_STEPS, WHY_PRE_UNMEASURED, WHY_NOT_SLOW_NOW, WHY_NO_FOCUS, WHY_VERIFY_UNMEASURED, WHY_AFTER_UNMEASURED,
            WHY_REPEAT, WHY_SKIPPED, WHY_UNLEARNT };
@@ -79,7 +87,7 @@ inline const char* why_text(int w) {
         case WHY_STILL_SLOW:        return "still slow after the session restart";
         case WHY_FEW_STEPS:         return "fewer than 2 steps could be measured (frames excluded: a menu, a load, a transition): no restart on that";
         case WHY_PRE_UNMEASURED:    return "the slow state could not be measured right before the restart: no restart";
-        case WHY_NOT_SLOW_NOW:      return "with everything back on it is no longer clearly slow: no restart";
+        case WHY_NOT_SLOW_NOW:      return "with everything back on it is no longer clearly slow 60 s after the onset: no restart";
         case WHY_NO_FOCUS:          return "no FOCUSED frame outside a transition window or load phase within 5 s: no restart";
         case WHY_VERIFY_UNMEASURED: return "the re-check with the item back on could not be measured twice: it stays on";
         case WHY_AFTER_UNMEASURED:  return "the frames after the restart could not be measured";
@@ -137,7 +145,10 @@ public:
             latched = 0; off = 0; emit(EV_ABORT).why = WHY_HEADSET_OFF; end_episode(in.now, c.cool_abort, FIX_ABORTED);   // (N3) all on
             return n_out;
         }
-        if (!active() && in.span_ok && !in.excluded && in.running) learn(in.screen ? 1 : 0, in.span);
+        if (in.span_ok && !in.excluded && in.running) {   // review 2 SF2: WATCH only (plus the cool-down after a restart that did not help)
+            if (st == ST_WATCH) watch_learn(in);
+            else if (st == ST_COOL && learn_all) learn(in.screen ? 1 : 0, in.span);
+        }
         switch (st) {
             case ST_COOL:  if (in.now >= cool_until) { st = ST_WATCH; reset_run(); } break;
             case ST_WATCH: watch(in); break;
@@ -163,7 +174,7 @@ public:
                 const int it = item; Out r; fill(r, it);
                 if (w.n < c.min_samples) {   // B3: not measured: once more, then the item simply stays on (no latch)
                     if (!repeated) { repeated = true; Out& u = emit(EV_UNMEASURED); u = r; u.ev = EV_UNMEASURED; u.why = WHY_REPEAT; w.start(in.now); }
-                    else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_VERIFY_UNMEASURED; end_episode(in.now, c.cool_ok, FIX_NOTHING); }
+                    else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_VERIFY_UNMEASURED; end_episode(in.now, c.cool_ok, FIX_UNVERIFIED); last_fix_item = it; }
                     break;
                 }
                 if (r.helped) { Out& e = emit(EV_RECOVERED); e = r; e.ev = EV_RECOVERED; end_episode(in.now, c.cool_ok, FIX_PASSED); last_fix_item = it; }
@@ -172,11 +183,15 @@ public:
                     Out& e = emit(EV_LATCHED); e = r; e.ev = EV_LATCHED; end_episode(in.now, c.cool_ok, it);
                 }
             } break;
-            case ST_PRE_RESTART: {   // B1 (d): everything is back on; is it measurably still slow?
-                if (!sample_done(in, c.settle, c.pre_measure)) break;
+            case ST_PRE_RESTART: {   // B1 (d): everything is back on; is it measurably still slow? In 3 s windows until the slow
+                                     // state is 60 s old (review 2 SF1); the restart needs the last one 75 % slow
+                if (!sample_done(in, pre_first ? c.settle : 0.0, c.pre_measure)) break;
                 Out r; fill(r, -1);
-                if (w.n < c.min_samples) { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_PRE_UNMEASURED; end_episode(in.now, c.cool_fail, FIX_NOTHING); break; }
+                const bool old = in.now - t_onset >= c.restart_min_age;
+                pre_first = false;
                 if (r.helped) { Out& e = emit(EV_RECOVERED); e = r; e.ev = EV_RECOVERED; end_episode(in.now, c.cool_ok, FIX_PASSED); last_fix_item = -1; break; }
+                if (!old) { w.start(in.now); break; }   // not 60 s yet: the next window (an unmeasured or mixed one is just waited past)
+                if (w.n < c.min_samples) { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_PRE_UNMEASURED; end_episode(in.now, c.cool_fail, FIX_NOTHING); break; }
                 if (w.slow < c.slow_frac * w.n) { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_NOT_SLOW_NOW; end_episode(in.now, c.cool_fail, FIX_NOTHING); break; }
                 st = ST_RESTART_ARM; t_state = in.now;
             } // fall through: the restart may go out on this very frame
@@ -196,7 +211,7 @@ public:
                 Out r; fill(r, -1);
                 if (w.n < c.min_samples) { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_AFTER_UNMEASURED; end_episode(in.now, c.cool_fail, FIX_NOTHING); }
                 else if (r.helped) { Out& e = emit(EV_RECOVERED); e = r; e.ev = EV_RECOVERED; end_episode(in.now, c.cool_ok, FIX_RESTART); }
-                else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_STILL_SLOW; end_episode(in.now, c.cool_fail, FIX_NOTHING); }
+                else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_STILL_SLOW; end_episode(in.now, c.cool_fail, FIX_NOTHING); learn_all = true; }
             } break;
             default: break;
         }
@@ -206,6 +221,9 @@ public:
 private:
     Out* o = nullptr; int n_out = 0, o_max = 0; Out spare;
     uint32_t hist[2][240] = {}; int hist_total[2] = { 0, 0 }, hist_since[2] = { 0, 0 };
+    uint32_t shadow[2][240] = {}; int shadow_total[2] = { 0, 0 };          // spans over 2 x the baseline (SF2), WATCH only
+    double hi_acc[2] = { 0, 0 }, bkt_ms[2] = { 0, 0 }; int bkt_n[2] = { 0, 0 }, bkt_hi[2] = { 0, 0 };
+    bool learn_all = false; bool pre_first = true;
     Out& emit(Ev e) {
         if (n_out < o_max && o != nullptr) { o[n_out] = Out(); o[n_out].ev = e; return o[n_out++]; }
         spare = Out(); spare.ev = e; return spare;
@@ -216,10 +234,35 @@ private:
     void learn(int m, double span) {
         if (!(span >= 0)) return;
         int b = static_cast<int>(span / c.bin_ms); if (b >= c.bins) b = c.bins - 1; if (b > 239) b = 239;
-        hist[m][b]++; hist_total[m]++;
-        if (hist_total[m] >= c.base_halve) { hist_total[m] = 0; for (int i = 0; i < 240; ++i) { hist[m][i] >>= 1; hist_total[m] += (int)hist[m][i]; } }
+        hist_add(hist[m], hist_total[m], b, c.base_halve);
         if (++hist_since[m] < 16 && learnt[m]) return;   // the median every 16 frames once learnt
         hist_since[m] = 0;
+        learn_median(m);
+    }
+    static void hist_add(uint32_t* h, int& total, int b, int halve) {
+        h[b]++; total++;
+        if (total >= halve) { total = 0; for (int i = 0; i < 240; ++i) { h[i] >>= 1; total += (int)h[i]; } }
+    }
+    /// WATCH, a measured frame: learnt, or (over 2 x a learnt baseline) kept in the shadow; 10 min of mostly such frames
+    /// (75 % of every 10 s of WATCH time) adopt the shadow as the baseline's histogram (review 2 SF2).
+    void watch_learn(const In& in) {
+        const int m = in.screen ? 1 : 0;
+        const bool hi = learnt[m] && in.span > c.hi_mult * base[m];
+        if (!hi) learn(m, in.span);
+        else { int b = static_cast<int>(in.span / c.bin_ms); if (b > 239) b = 239; if (b < 0) b = 0; hist_add(shadow[m], shadow_total[m], b, c.base_halve); }
+        bkt_n[m]++; if (hi) bkt_hi[m]++; bkt_ms[m] += in.frame_ms > 0 && in.frame_ms < 1000 ? in.frame_ms : 0;
+        if (bkt_ms[m] < c.hi_bucket) return;
+        if (bkt_n[m] >= c.min_samples && bkt_hi[m] >= c.hi_frac * bkt_n[m]) hi_acc[m] += bkt_ms[m];
+        else { hi_acc[m] = 0; shadow_total[m] = 0; for (int i = 0; i < 240; ++i) shadow[m][i] = 0; }
+        bkt_ms[m] = 0; bkt_n[m] = bkt_hi[m] = 0;
+        if (hi_acc[m] < c.hi_adopt || shadow_total[m] < c.base_min) return;
+        for (int i = 0; i < 240; ++i) { hist[m][i] = shadow[m][i]; shadow[m][i] = 0; }
+        hist_total[m] = shadow_total[m]; shadow_total[m] = 0; hi_acc[m] = 0; hist_since[m] = 16;
+        const double was = base[m];
+        learn_median(m);
+        Out& e = emit(EV_REBASE); e.item = m; e.span_avg = base[m]; e.end_avg = was;
+    }
+    void learn_median(int m) {
         if (hist_total[m] < c.base_min) { learnt[m] = false; return; }
         const int half = (hist_total[m] + 1) / 2; int acc = 0;
         for (int i = 0; i < 240; ++i) { acc += (int)hist[m][i]; if (acc >= half) { base[m] = (i + 0.5) * c.bin_ms; break; } }
@@ -246,7 +289,7 @@ private:
             return;
         }
         episodes++; t_onset = in.now; item = -1; st = ST_CENSUS; t_state = in.now; last_fix = FIX_NONE; last_ended = false; last_fix_item = -1;
-        measured_steps = 0; repeated = false;
+        measured_steps = 0; repeated = false; learn_all = false;
         Out& e = emit(EV_ONSET); e.span_avg = last_span; e.end_avg = last_end; e.n = last_frames;
     }
     void next_item(const In& in) {
@@ -263,7 +306,7 @@ private:
         else if (restarts >= c.restarts_max) why = WHY_RESTARTS_MAX;
         else if (in.now - last_restart < c.restart_gap) why = WHY_RESTART_GAP;
         if (why != WHY_NONE) { emit(EV_GAVE_UP).why = why; end_episode(in.now, c.cool_fail, FIX_NOTHING); return; }
-        st = ST_PRE_RESTART; w.start(in.now); emit(EV_PRE_CHECK);
+        st = ST_PRE_RESTART; w.start(in.now); pre_first = true; emit(EV_PRE_CHECK);
     }
     /// Samples a frame into the window (after `settle`, frames with a span and not excluded); true when it is complete.
     bool sample_done(const In& in, double settle, double measure) {
