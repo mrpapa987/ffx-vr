@@ -5455,25 +5455,72 @@ static uint32_t g_slow_census_n = 0, g_slow_dumps = 0; static bool g_slow_bcensu
 constexpr uint32_t k_slow_census_max = 2;
 static uint32_t slow_dumps_max() { return diag_profile_on() ? 3u : 1u; }   // (review SF2) the Release profile: one 600-frame dump a session
 
-// (c) The last 600 frames, dumped at the trigger (render thread only; 600 x 40 bytes, a plain array).
-struct SlowFr { double t; uint32_t frame; float fm, gpu, can, wait, end; uint16_t draws, e2; uint8_t mode, gmode, flags; int16_t bst; };   // gmode: the span's frame's view; flags: 1 gpu read, 2 canary read, 4 excluded
+// (c) The last 600 frames, dumped at the trigger (render thread only; 600 x 48 bytes, a plain array).
+// gates (4 Nov): + od / odt, the overdrive minigame (od::ring_code: who and its state; the shared timer's state), in the padding.
+struct SlowFr { double t; uint32_t frame; float fm, gpu, can, wait, end; uint16_t draws, e2; uint8_t mode, gmode, flags; int16_t bst; uint8_t od, odt; };   // gmode: the span's frame's view; flags: 1 gpu read, 2 canary read, 4 excluded
+static_assert(sizeof(void*) != 4 || sizeof(SlowFr) == 48, "SlowFr: the two overdrive bytes fit the padding");
 constexpr int k_slow_ring = 600;
 static SlowFr g_slow_ring[k_slow_ring]; static uint32_t g_slow_ring_n = 0;
-static char g_slow_dump[k_slow_ring * 72 + 512]; static bool g_slow_dump_pending = false; static int g_slow_dump_tries = 0;
+static char g_slow_dump[k_slow_ring * 84 + 640]; static bool g_slow_dump_pending = false; static int g_slow_dump_tries = 0;
 static const char k_slow_mode_ch[4] = { 'F', '3', 'S', 's' };   // flat (no headset), 3D, the mono screen, the stereo screen
 
 static void slow_dump_build() {
     const uint32_t n = g_slow_ring_n < (uint32_t)k_slow_ring ? g_slow_ring_n : (uint32_t)k_slow_ring;
-    size_t len = (size_t)snprintf(g_slow_dump, sizeof(g_slow_dump), "slow: the last %u frames, oldest first: frame | t s (QPC) | frame ms | gpu span ms and the view of the frame it timed (5 frames earlier) | canary ms | xr wait ms | xr end ms | draws | eye2 draws | view (F flat, 3 3D, S screen, s stereo screen) | battle_state | x = excluded (transition window, load phase, session not focused)", n);
+    size_t len = (size_t)snprintf(g_slow_dump, sizeof(g_slow_dump), "slow: the last %u frames, oldest first: frame | t s (QPC) | frame ms | gpu span ms and the view of the frame it timed (5 frames earlier) | canary ms | xr wait ms | xr end ms | draws | eye2 draws | view (F flat, 3 3D, S screen, s stereo screen) | battle_state | overdrive minigame (- none; T Tidus, A Auron, L Lulu, W Wakka, its state word, / the shared timer: 0 off, 1 armed, 2 running) | x = excluded (transition window, load phase, session not focused)", n);
     for (uint32_t k = 0; k < n && len + 96 < sizeof(g_slow_dump); ++k) {
         const SlowFr& r = g_slow_ring[(g_slow_ring_n - n + k) % k_slow_ring];
         char g[16] = "-", c[16] = "-";
         if (r.flags & 1) snprintf(g, sizeof(g), "%.1f%c", r.gpu, k_slow_mode_ch[r.gmode & 3]);
         if (r.flags & 2) snprintf(c, sizeof(c), "%.2f", r.can);
-        len += (size_t)snprintf(g_slow_dump + len, sizeof(g_slow_dump) - len, "\n  %u %.3f %.1f %s %s %.1f %.1f %u %u %c %d%s",
-                                r.frame, r.t / 1000.0, r.fm, g, c, r.wait, r.end, r.draws, r.e2, k_slow_mode_ch[r.mode & 3], r.bst, (r.flags & 4) ? " x" : "");
+        char o[16] = "-";
+        if (r.od != 0) snprintf(o, sizeof(o), "%c%u/%u", od::ring_who(r.od), (unsigned)(r.od & 31), (unsigned)r.odt);
+        len += (size_t)snprintf(g_slow_dump + len, sizeof(g_slow_dump) - len, "\n  %u %.3f %.1f %s %s %.1f %.1f %u %u %c %d %s%s",
+                                r.frame, r.t / 1000.0, r.fm, g, c, r.wait, r.end, r.draws, r.e2, k_slow_mode_ch[r.mode & 3], r.bst, o, (r.flags & 4) ? " x" : "");
     }
     g_slow_dump_pending = true; g_slow_dump_tries = 0;
+}
+
+// gates (4 Nov 2026): the overdrive minigame state, as diagnostics for the Slice & Dice freeze (overdrive-freeze.md: the
+// onset is bracketed only to a 10 s window). In battle only (battle_state > 0), every Present: the state words of Tidus,
+// Auron and Lulu with Tidus's cursor and hit zone (one 0x54-byte guarded read of 0x133D6F2..), the Wakka byte (one), and
+// while a minigame is up (or the shared timer was not off last frame) the timer block (one). The image's pages are in
+// range_readable's region cache, so these are copies. Outside battle nothing is read. ffxvr_gates.h has the layout and
+// the tracker; an od: line per change (diagnostic profile only, rate-limited), the state in the slow: onset line and a
+// column of the 600-frame dump.
+static od::Raw g_od;                 // this Present's read (ok = false outside battle)
+static od::Log g_od_log;
+volatile LONG g_od_active = 0;       // "an overdrive minigame is up" (the game's own test, 0x89B38D), for later users; 0 outside battle
+static void od_frame(uintptr_t base, LONG bst, double now) {
+    od::Raw r;
+    if (bst > 0) {
+        uint8_t blk[od::k_blk_len]; uint8_t wk = 0;
+        if (ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_blk_va - 0x400000u)), blk, od::k_blk_len)
+            && ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_wakka_va - 0x400000u)), &wk, 1)) {
+            od::parse_state(r, blk, wk);
+            uint8_t tb[od::k_timer_len];
+            if ((od::active(r) || (g_od.timer_ok && g_od.timer != 0)) && ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_timer_va - 0x400000u)), tb, od::k_timer_len))
+                od::parse_timer(r, tb);
+        }
+    }
+    if (bst <= 0 || !r.ok) {
+        if (g_od_log.reset() && diag_profile_on()) {
+            char b[160]; od::brief(b, sizeof(b), g_od, 1);
+            diag("od: frame %u: %s, the last minigame state seen: %s", g_frames, bst <= 0 ? "the battle is over" : "the state is not readable", b);
+        }
+    }
+    else {
+        uint32_t dropped = 0;
+        if (g_od_log.step(r, now, dropped) == od::Log::LOG && diag_profile_on()) {
+            char b[160]; od::brief(b, sizeof(b), r, bst);
+            char dn[80] = "";
+            if (dropped) snprintf(dn, sizeof(dn), " | %u changes not logged before this line (the rate limit)", dropped);
+            diag("od: frame %u, battle_state %ld: %s | words Tidus %d Auron %d Lulu %d Wakka %u, timer %d | result bytes Tidus %u Auron %u%s",
+                 g_frames, (long)bst, b, r.tidus, r.auron, r.lulu, (unsigned)r.wakka, r.timer_ok ? r.timer : 0, (unsigned)r.res_tidus, (unsigned)r.res_auron, dn);
+            if (g_od_log.lines == g_od_log.per_session) diag("od: %u lines this session: no more od: lines (the 600-frame dump and the slow: line still carry the state)", g_od_log.lines);
+        }
+    }
+    g_od = r;
+    InterlockedExchange(&g_od_active, od::active(r) ? 1 : 0);
 }
 
 // (b) DLL loads and unloads after init (LdrRegisterDllNotification). The callback runs under the loader lock on the loading
@@ -5730,15 +5777,16 @@ static void slow_event(const slow::Out& o, double now) {
                 if ((r.flags & 1) && r.gpu > gm) gm = r.gpu;
             }
             char map[16] = ""; read_map_name(map, sizeof(map));
+            char odb[160]; od::brief(odb, sizeof(odb), g_od, g_slow_bst);   // gates: the overdrive minigame at the onset
             char census[128];
             if (g_slow_census_n >= k_slow_census_max) snprintf(census, sizeof(census), "no frame census (%u a session already)", k_slow_census_max);
             else if (frame_arm_auto("the slow GPU guard: a slow state started")) { g_slow_census_n++; snprintf(census, sizeof(census), "frame census armed (ffxvr_frame_auto.log, %u of %u a session)", g_slow_census_n, k_slow_census_max); }
             else snprintf(census, sizeof(census), "no frame census (another automatic one is waiting)");
             const bool dump = g_slow_dumps < slow_dumps_max();
             diag("slow: GPU-slow for %d frames (%.1f s) in %s: gpu span avg %.1f ms, max %.0f (baseline %.1f, trigger over %.1f), xrEndFrame avg %.1f ms, frame %.1f ms | "
-                 "canary avg %.2f ms, max %.1f, over %.0f ms in %d of %d frames | draws %u, eye2 %u | battle_state %ld, map '%s' | episode %d of at most %d: %s, %s; then the optional work goes off one item at a time",
+                 "canary avg %.2f ms, max %.1f, over %.0f ms in %d of %d frames | draws %u, eye2 %u | battle_state %ld, map '%s', overdrive minigame: %s | episode %d of at most %d: %s, %s; then the optional work goes off one item at a time",
                  o.n, g.last_dur / 1000.0, g.last_screen ? "SCREEN" : "3D", o.span_avg, gm, g.last_base, g.thr_slow(g.last_screen), o.end_avg, g.last_frame,
-                 cn ? cs / cn : 0.0, cm, k_can_far_ms, cover, cn, (unsigned)g_draw_in_frame, g_eye2_draws, (long)g_slow_bst, map, g.episodes, g.c.episodes_max, census,
+                 cn ? cs / cn : 0.0, cm, k_can_far_ms, cover, cn, (unsigned)g_draw_in_frame, g_eye2_draws, (long)g_slow_bst, map, odb, g.episodes, g.c.episodes_max, census,
                  dump ? "the last 600 frames below" : "no frame dump (the session's dumps are used up)");
             if (dump) { g_slow_dumps++; slow_dump_build(); }
             pdh_kick();
@@ -5790,6 +5838,7 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
     InterlockedExchange(&g_slow_bst, bst);
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
+    od_frame(base, bst, now);   // gates: the overdrive minigame state (battle only), before the ring takes it
     const uint8_t mode = !g_xr_want ? 0 : g_xr_screen_now ? 2 : g_screen3d_now ? 3 : 1;
     // not counted: a battle transition window, a load phase, the pick tool's slow motion, and a session that is not FOCUSED
     // (VISIBLE: the Quest or Virtual Desktop menu is over the game and the runtime throttles it by design; the 10-26 case)
@@ -5804,6 +5853,7 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
         r.t = now; r.frame = g_frames; r.fm = (float)fm; r.gpu = (float)g_gpu_last_ms; r.can = (float)g_can_last_ms; r.wait = (float)wait_ms; r.end = (float)end_ms;
         r.draws = (uint16_t)(g_draw_in_frame > 0xFFFF ? 0xFFFF : g_draw_in_frame); r.e2 = (uint16_t)(g_eye2_draws > 0xFFFF ? 0xFFFF : g_eye2_draws);
         r.mode = mode; r.gmode = g_gpu_last_mode; r.bst = (int16_t)bst; r.flags = (uint8_t)((g_gpu_last_ok ? 1 : 0) | (g_can_last_ok ? 2 : 0) | (excluded ? 4 : 0));
+        r.od = od::ring_code(g_od); r.odt = (uint8_t)(g_od.timer_ok ? (g_od.timer < 0 ? 255 : g_od.timer > 254 ? 254 : g_od.timer) : 0);
     }
     if (g_dll_w != g_dll_r || g_dll_dropped) dll_drain();
     if (g_slow_on && diag_profile_on() && !g_slow_bcensus_done && (bst == 1 || bst == 2) && mode != 0 && g_bt_phase == BT_IDLE && xr_running()) {   // (d) a baseline for a slow census (slow_guard=1 and a diagnostic key on: SF2)
