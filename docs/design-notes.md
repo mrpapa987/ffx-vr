@@ -4161,6 +4161,41 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   one-frame verdict, the player's head alone, every matched draw counted as tied, the neck point alone. The npc-hide fpown and
   SF1 tests pass unchanged against the new code; the cpu-lean CpuTests check the heads (live and snapshot walks).
 
+### Round 2: the exact owner by index buffer, and the review fixes (4 Nov 2026)
+
+- **The chain to D3D** (research/fh-structs.md 1a; checked in the disassembly, not at runtime). actor +0x830 -> model object
+  {+0 count | 0x80000000, +4 PMeshInstance*[]} (0x63C540 fills it with what 0x66F7D0 returns: the PMeshInstance clone) ->
+  instance +0 PMesh (shared per model) -> {+0 count, +4 segments, 0x6C each} -> the index block inline at segment +0x30:
+  +0x08 index count, +0x14 buffer count (inline entry when 1, else a pointer at +0x18; entries 0x14 bytes, ID3D11Buffer* at
+  +0), +0x2C byte offset, +0x30 bit 0 "has a GPU buffer". 0x592C60 binds exactly that: IASetIndexBuffer(entry k's buffer,
+  R32 if +0x0C == 8 else R16, +0x2C) and DrawIndexed(count, 0, 0). So a draw's bound index buffer + offset name its segment,
+  hence its model; per model, not per actor (two actors of one model share the PMesh).
+- **The rule.** Managed (body_hide.cs `body_hide_ib`, `IbChain.Walk`) walks the followed actor's chain and those of the live,
+  drawn actors within 6 units and sends ffxvr_fp_ib_set (ABI 40) (buffer, offset, count, owner) entries every frame; rebuilt
+  when the set of actors, an actor's +0x830 or +0x1C4, the pick or the scene changes, and every 30 frames while a chain did
+  not read whole (+0x830 is 0 for a few frames after a load: that actor adds nothing until set). Native, for a matched draw on
+  foot only: IAGetIndexBuffer; in the table, the owner decides (the player's: hidden; another actor's: shown); a key with
+  both owners (identical models) or not in the table: the texture + head rule, then the positional rule. The table is used
+  only in the frame after a call. Still only a hide turned into a show: refused or unmatched draws are never looked up.
+- **Review fixes.** SF1: a negative texture score gets +1 on any frame with the player's head within 3 units of the model's
+  head points, and is clamped at -4 (a transient no longer latches Tidus visible). SF2: the re-pick key carries a scene
+  generation (map name, event id, the followed actor's +0x830): a map change or load clears the texture table. N3: an
+  attached actor's head is never folded onto its +0x0C. N4: tie-only lines have their own budget (120, one every 2 s).
+- **Diagnostics.** The `body hide:` line: "IB table (N entries, build B): matched draws decided D (the player's P, another
+  actor's O), a key of both (identical models) K, not in it M, count differs C" and, in a tie, "(T by the IB table ...)". Each
+  build: "body hide: IB table build B on map M: N entries | actor 0 'c101' the player's: +0x830 ..., +0x1C4 ..., S segments,
+  K keys ib+offset/count ... | actor 1 'c102' another actor's ..." in the module log (30 a session). The census lists every
+  body-hidden or kept draw with "ib XXXXXXXX +offset fmt F, DrawIndexed n from start base b | IB table <owner>": one census
+  proves whether the table's keys are what the draws bind (SF3: the texture-per-model assumption is then no longer needed).
+- **Not verified.** The chain at runtime (layout, the buffer index k, whether every character draw goes through 0x592C60
+  with start 0); a "count differs" figure above 0 would say the caller draws a different count than the block's.
+- **Tests.** anchor_test 50 checks: the IB table with heads too close for the head rule (Tidus hidden, Yuna shown from the
+  first frame; without the table she stays hidden), a table without the player's keys, a table of neither model (the same
+  decisions as none), identical models (nothing decided), a stale table (unused from the second frame without a call), a new
+  build replacing a wrong owner, refused NPCs never looked up, SF1 (a 4-frame head transient beside Yuna's head: 0 of 100
+  scenes latched), SF2 (a new scene generation clears the table). CpuTests: IbChain.Walk on a fake chain (inline and array
+  entries, no-GPU segments, the cap, a failed read, no model yet) and HeadOf for attached actors.
+
 ## Battle-start banners in double (4 Nov 2026)
 
 - **What the owner saw.** In battles that start with a message ("Preemptive Strike!", "Ambushed!") the 2D UI is not on the
