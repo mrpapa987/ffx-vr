@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 38;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report)
+    private const int k_abi = 38;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's return, tap game bits 0x200 / 0x400)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -207,6 +207,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// markers, hover labels) relative to its default size, 20 px x the Windows display scale.</summary>
     private float _overlay_text_scale = 1f;
     private float _our_px = k_fh_font_px;                         // FH-2: this frame's pushed size, computed before the push
+    private uint _save_st;        // cpu-lean: this frame's save_screen_state(), read once in push_all
     private bool _fh_menu_open;   // latched: set at OPEN (2: Fahrenheit draws the menu, from a full-screen black), cleared at CLOSED (0)
     /// <summary>Fahrenheit's save-screen state word (FhSavePal is internal; FhSavePal.pal_addr_screen_state, FFX: 0x8CB994, a DWORD in
     /// FFX.exe's .data, VA 0xCCB994): 0 closed, 1 opening, 2 open, 3 / 4 unnamed. A guarded read (native, VirtualQuery first):
@@ -529,7 +530,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_sr_set = (delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void>)req("ffxvr_sr_set"); _fn_sr_gate = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_sr_gate");   // ABI 25: stickrep
             _fn_sr_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_sr_status"); _fn_turn_keys = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_turn_keys");
             _fn_log_config = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_log_config"); _fn_build_info = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_build_info");   // ABI 26: release prep (logging.cs)
-            _fn_pre_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)req("ffxvr_pre_resolve"); _fn_hands2_set = (delegate* unmanaged[Cdecl]<VrHandsCfg*, int, void>)req("ffxvr_hands2_set");   // ABI 27: VR hands v2 (hands.cs)
+            _fn_pre_resolve = (delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void>)req("ffxvr_pre_resolve"); _fn_hands2_set = (delegate* unmanaged[Cdecl]<VrHandsCfg*, int, int>)req("ffxvr_hands2_set");   // ABI 27: VR hands v2 (hands.cs); ABI 38: returns whether the coming frame can draw them
             _fn_hands2_status = (delegate* unmanaged[Cdecl]<int*, int, byte*>)req("ffxvr_hands2_status"); _fn_hands2_cal = (delegate* unmanaged[Cdecl]<float*, int, uint>)req("ffxvr_hands2_cal");
             _fn_hands2_pack = (delegate* unmanaged[Cdecl]<VrHandsPackDesc*, int, void>)req("ffxvr_hands2_pack");   // ABI 28: VR hands v2 S2, the hand pack
             _fn_hands2_pack_error = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_hands2_pack_error");   // ABI 29: VR hands v2 S3, user packs
@@ -2121,6 +2122,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         {   // saveui: one guarded read of the save-screen state a frame; the menu flag is latched from OPEN to CLOSED (no flapping
             // through the unnamed states 1 / 3 / 4), so the switch to the screen comes with Fahrenheit's first frame of the menu
             uint st = save_screen_state();
+            _save_st = st;   // cpu-lean: the tap gate's bit 4 uses this frame's read (hands2_tap_game ran its own until now)
             if (st == 2) _fh_menu_open = true; else if (st == 0) _fh_menu_open = false;
             // menu: 0 not latched; latched: 1 | (the raw state << 8), so native can tell the frames Fahrenheit draws the menu in
             // (state 2) from the latched ones without it (3 / 4 at a close, 1 in a reopen: SU-1's black-out, SU-2's watchdog)

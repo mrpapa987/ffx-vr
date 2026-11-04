@@ -4648,7 +4648,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 38;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line)
+constexpr int FFXVR_ABI = 38;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -9464,7 +9464,9 @@ static int hands_hide_why() {
     // The owner (3 Nov): hide the hands in every battle ("distracting, and look bad when showing this off"). Battle = Btl.battle_state != 0,
     // the game-gate bit 1 managed pushes every frame while VR hands are on (ffxvr_hands2_tap_set). A stale gate (no push for 3+
     // frames: managed not running) is not read as a battle.
-    if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3 && (g_tapcfg.game & 1)) return H2_BATTLE;
+    // cpu-lean (b): managed reads the game state only when this frame can draw the hands (ffxvr_hands2_set's return); bit 0x200
+    // = nothing read: hidden as in battle (never reached when the prediction holds: an earlier rule already hid the frame).
+    if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3 && (g_tapcfg.game & 0x201)) return H2_BATTLE;
     if (g_dream_gate) return H2_DREAM;
     if (g_ovr_freeze) return H2_FREEZE;
     if (!hands_view_ok(g_fp_mode) && !hands_view_ok(0)) return H2_VIEW;   // the exact view (first person may fall back to the seat) is checked at the draw
@@ -9520,7 +9522,7 @@ static int tap_gate_now(int mode) {
     else if (!g_vrpad_enabled) g = TG_PAD;
     else if (g_vrpad_suppress) g = TG_CHORD;
     else if (g_tapcfg_frame == 0xFFFFFFFFu || g_frames - g_tapcfg_frame > 3) g = TG_STALE;
-    else if (gm & 0x100) g = TG_READ;
+    else if (gm & 0x700) g = TG_READ;   // 0x100 a read failed; cpu-lean (b): 0x200 nothing read, 0x400 only the battle bit read (the gate stays shut)
     else if (gm & 1) g = TG_BATTLE;
     else if (gm & 2) g = TG_SPHERE;
     else if (gm & 4) g = TG_SAVE;
@@ -9945,7 +9947,12 @@ static void hands_frame_end() {
 
 static void h2_cfg_apply(const VrHandsCfg& n);
 /// The settings (ABI 28), every frame from push_all: the native side reads min(bytes, its size) and defaults the rest.
-extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int bytes) {
+/// cpu-lean (b, ABI 38): returns 1 when the frame about to render can draw the hands (hands on, the headset wanted, neither the
+/// virtual screen nor the stereo screen nor a backdrop room), 0 when hands_hide_why will hide it before its battle rule. Those
+/// facts are set at Present (xr_tick, slow_apply) and by push_all before this call, and nothing changes them until the next
+/// Present, so the answer holds for the frame that uses the game bits ffxvr_hands2_tap_set gets next: managed reads them only
+/// then. (The view and a battle transition are left out on purpose: they are decided later, and reading costs only time.)
+extern "C" __declspec(dllexport) int ffxvr_hands2_set(const VrHandsCfg* c, int bytes) {
     VrHandsCfg n = { static_cast<int>(sizeof(VrHandsCfg)), 0, 1, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, 0.20f, 1.f };
     if (c != nullptr && bytes > 0) memcpy(&n, c, static_cast<size_t>(bytes) < sizeof(n) ? static_cast<size_t>(bytes) : sizeof(n));
     n.bytes = static_cast<int>(sizeof(VrHandsCfg)); n.on = n.on ? 1 : 0; n.views = (n.views & 14) | 1; n.debug &= 15;
@@ -9959,6 +9966,7 @@ extern "C" __declspec(dllexport) void ffxvr_hands2_set(const VrHandsCfg* c, int 
     g_h2_user = n;                                   // od-guard: the user's; the slow guard's vr_hands item switches the hands off
     if (slow_is_off(slow::IT_HANDS)) n.on = 0;
     h2_cfg_apply(n);
+    return (g_h2cfg.on && g_xr_want && !g_ovr_suspend && !g_xr_screen_now && !g_screen3d_now && !g_backdrop_room) ? 1 : 0;
 }
 /// The checked settings in effect (ffxvr_hands2_set, slow_apply): an on / off change starts / ends the hands: lines.
 static void h2_cfg_apply(const VrHandsCfg& n) {
@@ -10071,7 +10079,8 @@ extern "C" __declspec(dllexport) const char* ffxvr_hands2_pack_error() {
 /// bytes: native reads min(bytes, its size) and defaults the rest. flags: 1 tap on, 2 also while a text box is up, 4 the haptic
 /// tick, 8 require a pointing finger (index off the trigger) as well as the grip, 16 don't pass the grips (LB / RB) to the game
 /// while a tap can fire; sens 0.5..2 (the push that taps is 10 cm / sens); button: the XInput bit to press (A 0x1000, B, X or Y; else A); game:
-/// 1 battle, 2 the sphere grid, 4 Fahrenheit's save / load screen, 8 a text box is up, 16 blitzball, 32 riding (ABI 33), 0x100 not readable;
+/// 1 battle, 2 the sphere grid, 4 Fahrenheit's save / load screen, 8 a text box is up, 16 blitzball, 32 riding (ABI 33), 0x100 not readable,
+/// 0x200 nothing read (the hands cannot be drawn this frame: hidden, gate shut), 0x400 only bit 1 read (not first person: gate shut) (ABI 38);
 /// press_ms 60..300.
 extern "C" __declspec(dllexport) void ffxvr_hands2_tap_set(const VrTapCfg* c, int bytes) {
     VrTapCfg n = { static_cast<int>(sizeof(VrTapCfg)), 0, 1.f, 0x1000, 0, 100 };

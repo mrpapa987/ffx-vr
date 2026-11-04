@@ -89,11 +89,12 @@ public sealed unsafe partial class FFXVRModule {
     private uint   _h2_cal_seen;                 // native's capture count when last read
     private double _h2_cal_at = -1;              // the calibration countdown's end (_now), -1: none
     private bool   _h2_migrate_done;
+    private bool   _h2_can_draw;   // cpu-lean (b): ffxvr_hands2_set's answer this frame (hands2_tap_push reads the game state only then)
     private int    _h2_dump_frames;              // "log one pose dump": debug bit 8 held for this many frames (native acts on its rising edge)
     private int    _h2_cancels_seen = -1;        // native's cancelled-calibration count when last seen (SF-2)
     private double _h2_cancel_note_until = -1;   // show "cancelled" in the header until this _now
     private delegate* unmanaged[Cdecl]<nint, uint, nint, uint, uint, void> _fn_pre_resolve;   // ABI 27
-    private delegate* unmanaged[Cdecl]<VrHandsCfg*, int, void> _fn_hands2_set;               // ABI 27
+    private delegate* unmanaged[Cdecl]<VrHandsCfg*, int, int> _fn_hands2_set;                // ABI 27; ABI 38: 1 = the coming frame can draw the hands
     private delegate* unmanaged[Cdecl]<int*, int, byte*> _fn_hands2_status;                  // ABI 27: (out, n) -> the status line
     private delegate* unmanaged[Cdecl]<float*, int, uint> _fn_hands2_cal;                    // ABI 27: op 0 read, 1 write, 2 capture -> captures
     private delegate* unmanaged[Cdecl]<VrHandsPackDesc*, int, void> _fn_hands2_pack;        // ABI 28: the pack to draw (null: none, the boxes)
@@ -249,7 +250,7 @@ public sealed unsafe partial class FFXVRModule {
             yaw = _vr_hands_yaw * d2r, pitch = _vr_hands_pitch * d2r, roll = _vr_hands_roll * d2r,
             off_r = _vr_hands_off_r, off_u = _vr_hands_off_u, off_b = _vr_hands_off_b,
             rest_curl = _vr_hands_rest_curl, scale = _vr_hands_scale };
-        _fn_hands2_set(&c, sizeof(VrHandsCfg));
+        _h2_can_draw = _fn_hands2_set(&c, sizeof(VrHandsCfg)) != 0;
         hands2_pack_push();
         hands2_tap_push();
     }
@@ -257,19 +258,24 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Tap build: the tap's settings and the game gate to native, every frame (native treats a gate older than 3
     /// frames as shut). Bits: 1 battle (Btl.battle_state != 0), 2 the sphere grid (Fahrenheit Globals.SphereGrid.is_open),
     /// 4 Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), 8 a text box is up (a TOMesWinWork window of
-    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed. Reads while VR hands are on (native
-    /// hides the hands in battle from bit 1, and the tap uses the rest): hands off costs nothing.</summary>
+    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed.
+    /// cpu-lean (b): read only when native can use them (TapPlan): all of them when the tap is on in first person and the frame
+    /// can draw the hands; bit 1 alone (| 0x400) when the frame can draw them otherwise (native hides the hands in battle from
+    /// it); nothing (0x200) when it cannot draw them (the virtual screen: menus, the sphere grid; the stereo screen; a backdrop
+    /// room). Hands off costs nothing, as before.</summary>
     private void hands2_tap_push() {
         if (_fn_hands2_tap_set == null) return;
         bool on = _vr_hands && _vr_hands_tap;
         long t_tap = cpu_now();
-        int game = _vr_hands ? hands2_tap_game() : 0;   // read whenever VR hands are on: native also hides the hands in battle (bit 1), tap or not
+        int plan = TapPlan.Of(_vr_hands, on, _h2_can_draw, _fp_mode);
+        int game = plan == TapPlan.k_full ? hands2_tap_game() : plan == TapPlan.k_battle ? hands2_battle_bit() | 0x400 : plan == TapPlan.k_none ? 0x200 : 0;
         _cpu_tap += cpu_now() - t_tap;
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
         var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0) | (_vr_hands_tap_point ? 8 : 0) | (_vr_hands_tap_hold_grip ? 16 : 0),
                                sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };
         _fn_hands2_tap_set(&t, sizeof(VrTapCfg));
         if (!on) { _tap_game_last = -1; return; }
+        if ((game & 0x600) != 0) return;   // not read this frame: no event line, the last gate read is kept (F8 shows it)
         if (game != _tap_game_last) {   // a change of the game gate: an event line (200 at most a session), so a test shows what the gate saw
             if (_tap_game_last >= 0 && _tap_game_logs < 200) {
                 _tap_game_logs++;
@@ -286,13 +292,17 @@ public sealed unsafe partial class FFXVRModule {
         if ((g & 8) != 0) l.Add("a text box"); if ((g & 16) != 0) l.Add("blitzball"); if ((g & 32) != 0) l.Add("riding"); if ((g & 0x100) != 0) l.Add("not readable");
         return string.Join(", ", l);
     }
+    /// <summary>Bit 1 of the gate alone: Btl.battle_state (byte at +0x10; 1 the battle is live, 0 none); 0x100 not readable.</summary>
+    private int hands2_battle_bit() {
+        if (_fn_safe_read == null) return 0x100;
+        return !read((byte*)Globals.Battle.btl + 0x10, out byte bstate) ? 0x100 : bstate != 0 ? 1 : 0;
+    }
     /// <summary>The game gate bits (hands2_tap_push). Every read guarded (native safe_read).</summary>
     private int hands2_tap_game() {
-        int g = 0;
         if (_fn_safe_read == null) return 0x100;
-        if (!read((byte*)Globals.Battle.btl + 0x10, out byte bstate)) g |= 0x100; else if (bstate != 0) g |= 1;   // Btl.battle_state (byte at +0x10; 1 the battle is live, 0 none)
+        int g = hands2_battle_bit();
         if (!read(FhUtil.ptr_at<byte>(0x1685F70), out byte sg)) g |= 0x100; else if (sg != 0) g |= 2;   // Fahrenheit Globals.SphereGrid.is_open (FhUtil 0x1685F70)
-        if (save_screen_state() != 0 || _fh_menu_open) g |= 4;
+        if (_save_st != 0 || _fh_menu_open) g |= 4;   // cpu-lean: push_all's read of this frame (save_screen_state)
         if (_in_blitz) g |= 16;
         if (_ride_att) g |= 32;   // riding (ride.cs, push_player runs first): no taps from the bird (the owner, 3 Nov: press A; you cannot touch anyone from up there)
         // Text boxes: TOMesWinWork[bank * 8 + i] at FhUtil 0xF26D70 (0x2C bytes each), the bank a signed byte at FhUtil 0xF26B82
@@ -562,4 +572,17 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.Checkbox("a placement line per drawn frame in ffxvr_diag.log (300 at most)##h2d4", ref lines)) _vr_hands_debug = lines ? _vr_hands_debug | 4 : _vr_hands_debug & ~4;
         ImGui.SameLine(); if (ImGui.SmallButton("log one pose dump##h2d8")) _h2_dump_frames = 120;   // the next drawn frame within about 2 s
     }
+}
+
+/// <summary>cpu-lean (b): which of the tap gate's game bits hands2_tap_push reads this frame. Native uses them only on a frame
+/// that can draw the hands (can_draw: ffxvr_hands2_set's answer; otherwise an earlier hide rule decides): bit 1 for the battle
+/// hide, and the rest for the tap, whose gate is open only in first person (native's view is fp_set's mode, which push_all
+/// sends after this with the same _fp_mode). Kept free of game types for the scratch test.</summary>
+internal static class TapPlan {
+    public const int k_off = 0;      // VR hands off: 0, as before
+    public const int k_none = 1;     // nothing read: 0x200 (native hides the hands and keeps the gate shut)
+    public const int k_battle = 2;   // only the battle bit: | 0x400 (native keeps the gate shut)
+    public const int k_full = 3;     // every bit, as before
+    public static int Of(bool vr_hands, bool tap_on, bool can_draw, int fp_mode) =>
+        !vr_hands ? k_off : !can_draw ? k_none : tap_on && fp_mode == 1 ? k_full : k_battle;
 }
