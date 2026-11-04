@@ -115,6 +115,23 @@ if ($OutDir) {
     $out = Join-Path $mod $FfxvrFmvDepthDir
 }
 Write-Host "  output: $out"
+# A first, cheap check of the same refusals convert.py makes (it repeats them later with junctions resolved, before
+# anything is written): not inside a git checkout, not inside the game's data folder. Here, before the long install.
+function Test-UnderDir([string]$Child, [string]$Parent) {
+    $c = [IO.Path]::GetFullPath($Child).TrimEnd('\') + '\'
+    $p = [IO.Path]::GetFullPath($Parent).TrimEnd('\') + '\'
+    return $c.StartsWith($p, [StringComparison]::OrdinalIgnoreCase)
+}
+$probe = [IO.Path]::GetFullPath($out)
+while ($probe) {
+    if (Test-Path -LiteralPath (Join-Path $probe '.git')) {
+        Fail "the output folder $out is inside a git checkout ($probe): depth made from the game's videos must never go near a repository."
+    }
+    $up = Split-Path -Parent $probe
+    if (-not $up -or $up -eq $probe) { break }
+    $probe = $up
+}
+if (Test-UnderDir $out ([IO.Path]::Combine($game, 'data'))) { Fail "the output folder $out is inside the game's data folder: never write there." }
 if ((Get-FfxvrGameProcess).Count -gt 0) { Write-Host '  NOTE: the game is running. That works (the archive is only read), but the GPU is shared: close it for full speed.' }
 # (The write test comes after convert.py --check-out has refused a git checkout or the game's data folder, below.)
 
@@ -207,10 +224,11 @@ $marker = Join-Path $venv 'ffxvr-deps.txt'
 $have = if (Test-Path -LiteralPath $marker) { [IO.File]::ReadAllText($marker).Trim() } else { '' }
 if ($have -ne $DepsSpec) {
     Write-Host '  installing the pinned packages (PyTorch with CUDA is a ~2.5 GB download; this takes a while) ...'
-    # Binary wheels only for the big ones (no surprise source build without a compiler); easydict may be an sdist.
-    & $vpy -m pip install --disable-pip-version-check --no-input --only-binary=numpy,opencv-python-headless,tqdm @PyPiPins
+    # Binary wheels only (no surprise source build without a compiler): for the big PyPI packages here (easydict may
+    # be an sdist), and for everything on the PyTorch line (the cu124 index serves wheels only).
+    & $vpy -m pip install --disable-pip-version-check --no-input '--only-binary=numpy,opencv-python-headless,tqdm' @PyPiPins
     if ($LASTEXITCODE -ne 0) { Fail 'pip could not install numpy / opencv / einops / easydict / tqdm (see above).' }
-    & $vpy -m pip install --disable-pip-version-check --no-input --only-binary=torch,torchvision,numpy @TorchPins --index-url $TorchIndex
+    & $vpy -m pip install --disable-pip-version-check --no-input '--only-binary=:all:' @TorchPins --index-url $TorchIndex
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install PyTorch from $TorchIndex (see above)." }
     [IO.File]::WriteAllText($marker, $DepsSpec, $FfxvrUtf8)
 } else { Write-Host '  packages: as pinned' }
@@ -326,6 +344,19 @@ if (-not (Test-Path -LiteralPath $wPath)) {
         Remove-Item -LiteralPath $part -Force
         Fail "the downloaded weights have SHA-256 $h, expected $WeightsSha256. Not used."
     }
+    # Not pinned: a re-download must still match what this PC recorded the first time (resolve/main can move).
+    if (-not $WeightsSha256 -and (Test-Path -LiteralPath $wRec)) {
+        $rec = ([IO.File]::ReadAllText($wRec).Trim() -split '\s+')[0].ToLowerInvariant()
+        if ($rec -and $h -ne $rec) {
+            Remove-Item -LiteralPath $part -Force
+            Write-Host "  The new download has SHA-256 $h; this PC recorded $rec for its first download ($wRec)."
+            Write-Host '  So the file on Hugging Face has changed (or the download is damaged). It was NOT used.'
+            Write-Host "  Deleting $wRec means: trust whatever the next download is, from then on (finished videos made with"
+            Write-Host '  the old file would then be converted again). Only do that if you know the model was updated on purpose,'
+            Write-Host '  and please tell the FFX VR developers.'
+            Fail 'the downloaded weights differ from the recorded ones.'
+        }
+    }
     # Hugging Face's own record of the file, when its headers gave one: a mismatch means a broken or changed download.
     $le = "$($info['X-Linked-Etag'])".ToLowerInvariant()
     if ($le -match '^[0-9a-f]{64}$' -and $le -ne $h) {
@@ -352,7 +383,16 @@ if (-not $expect) {
     Write-Host "  no recorded hash: recorded $wHash"
     $expect = $wHash
 }
-if ($wHash -ne $expect) { Fail "$wPath has SHA-256 $wHash, expected $expect. Delete it (and $WeightsName.sha256 if you are sure) and run this again." }
+if ($wHash -ne $expect) {
+    $src = if ($WeightsSha256) { 'pinned in this script' } else { "recorded by this PC in $wRec" }
+    Write-Host "  $wPath has SHA-256 $wHash; the hash $src is $expect."
+    Write-Host '  Delete the .pth file and run this again: it is downloaded again and must match that hash.'
+    if (-not $WeightsSha256) {
+        Write-Host "  (Deleting $WeightsName.sha256 as well means trusting whatever the next download is: only if you know the"
+        Write-Host '  model was updated on purpose.)'
+    }
+    Fail 'the model weights do not match.'
+}
 Write-Host ('  {0}  {1:N1} MB  sha256 {2}{3}' -f $wPath, ($wLen / 1MB), $wHash, $(if ($WeightsSha256) { ' (pinned)' } else { ' (recorded on this PC; NOT pinned)' }))
 if (-not $WeightsSha256) { Show-Unpinned $wHash $wLen (Read-KeyValues $wInfo) }
 
