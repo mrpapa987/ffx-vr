@@ -3858,3 +3858,71 @@ and tie each pack to its character's chr_id (the battle follow already knows who
 already handles a full-body T/A-pose OBJ; the per-character packs stay private (made from the player's own models). Needs:
 a pack-per-character mapping in hand.json or the ini, the F8 list per character, and Kimahri's and Lulu's sleeves/claws
 checked by the importer's limits.
+
+## FMV depth converter (3 Nov 2026)
+
+Branch `fmv-depth`. Stages S0 (quality check) and S1 (converter v0) of the FMV "relief screen" research; no runtime or
+mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/FORMAT.md.
+
+- **What the game has** (measured read-only on the owner's copy). The FMVs are WebM: VP8 + Vorbis, 29.97 fps
+  (30000/1001), no colour metadata (treated as BT.601 limited range), inside `data\FFX_Data.vbf` under
+  `ffx_data/gamedata/ps3data/video/` (95 .webm, flat). Per-region lists `video/<us|jp|asia|cn>/ffx_videolist.txt`, lines
+  `<id>:,<file>,<file>` (both names always equal), mixed case (`OPN_us.webm`, `WithoutEvent_480.webm`). The US list: 61
+  videos, 86,353 frames, 2,881 s, 2,624 MB; 6 of them 640x480 (ids 106-116), the rest 1280x720. END_us alone is 24,828
+  frames. Bink is not involved: any FFmpeg decodes VP8 natively. `cn` names .mp4 files that are not in this archive.
+- **Pipeline** (tools/fmvdepth/convert.py), per video, streaming: `vbf.py` inflates the 64 KiB blocks (raw, 0 = 65,536
+  raw, or zlib) into ffmpeg's stdin -> `scale=WxH:flags=bicubic:in_color_matrix=bt601:in_range=tv`, rgb24, every
+  decoded frame once (`-fps_mode passthrough`, `-vsync passthrough` on FFmpeg < 5.1) -> Video-Depth-Anything-Small in
+  fp16 autocast, DINOv2 attention swapped for `scaled_dot_product_attention` (same maths; the plain version builds
+  ~2.4k x 2.4k score matrices per head and frame at 518x924) -> area-downscale to 320x180 on the GPU -> optional edge
+  filter -> per-shot normalisation -> left predictor -> XPRESS_HUFF -> `<name>.fvd.part`, renamed when complete.
+  Model input as VDA's own Resize: 924x518 (16:9) / 686x518 (4:3) at 518, 700x392 / 518x392 at 392.
+- **Windowing** (window.py): upstream `infer_video_depth` keeps all frames and full-size float depth in RAM (END_us:
+  ~160 GB), so it is re-implemented as a generator with the same maths: windows of 32 (frames 0..31, then the previous
+  window's KEYFRAMES [0,12,24..31] + 22 new frames, padding with the last frame, ceil(n/22) windows), a least-squares
+  scale/shift per window from slots 0/1 against the reference depths of the same frames, the 8 shared frames
+  cross-faded 0..1, clamps at 0. Slot 0 is video frame 0 for the whole video, as upstream. Frames leave 8 frames late;
+  at most two windows of input frames are alive. One deliberate difference: the fit and cross-fade run on the 320x180
+  maps (linear per pixel; only the fit's sample set changes). A test checks the generator against a batch
+  re-statement of upstream on 19 lengths (0-333 frames) to 2e-5.
+- **Normalisation**: `q = 255 * clamp((d - lo) / (hi - lo))`, 0 far ... 255 near (relative disparity), lo/hi = p2/p98
+  EMA-smoothed (alpha 0.9 on the past) within a shot and reset at a cut. Cut = mean absolute luma change of 64x36
+  thumbnails >= 28 levels and >= 3x the recent average (+1), so fades and pans do not flag every frame. Raw p2/p98
+  and the lo/hi used go into the index; the runtime picks strength and pivot itself.
+- **.fvd v1**: 128-byte header (magic `FVD1`, version, size, frame count, fps, codec, predictor, model, flags, input
+  size, settings hash, index/thumbnail offsets, source size + VBF offset + name), payloads, then the index (32 B a frame:
+  u64 offset, u32 size, u16 flags cut/stored, f32 p2, p98, lo, hi) and a 16x9 (12x9) luma thumbnail per frame at the end,
+  so the writer can stream; the header is rewritten with HF_COMPLETE last. XPRESS_HUFF in buffer mode (not
+  COMPRESS_RAW), via ctypes to cabinet.dll; zlib (codec 1) for tests and non-Windows; a frame that does not shrink is
+  stored (FF_STORED). The writer decodes every payload again and compares, so a codec fault on the owner's PC cannot
+  produce a bad file silently. Reading needs one ReadFile + one Decompress per frame; END_us's index is 0.79 MB.
+- **Resume / manifest**: `manifest.json` per video (status, source size, VBF offset, model, weights SHA-256, settings and
+  their hash, converter version, frames, seconds, bytes, cuts, peak VRAM). A video is skipped when the manifest says done
+  with the same source and settings hash and the .fvd header agrees; `--force` redoes it. A crash leaves only a .part,
+  deleted on the next attempt. Out of VRAM: a plain message suggesting `-InputSize 392`, exit 3.
+- **Pins**: VDA code at 4f5ae23 (GitHub zip; the 18 imported files + LICENSE checked by SHA-256), Small weights only
+  (Base and Large are CC-BY-NC-4.0 and are not offered), torch 2.6.0 / torchvision 0.21.0 (cu124 index), numpy 2.1.3,
+  opencv-python-headless 4.10.0.84, einops 0.8.0, easydict 1.13, tqdm 4.67.1; no xformers. The weights' SHA-256 is not
+  known yet (Hugging Face was unreachable while writing): recorded on the first download, printed, checked on later
+  runs; `$WeightsSha256` in the script is the TODO to pin it.
+- **Protection** (like the private hand packs): PRIVATE-do-not-share.txt in `fmvdepth\` and `fmvdepth\preview\`;
+  package-release fails on any fmvdepth path, .fvd, .part, video or preview; install-mod never deletes it (-Purge keeps
+  it and names it); build-mod reports it separately; run-ffx does not collect it; .gitignore; the converter refuses a
+  git checkout and the game's data folder as output. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
+- **For the runtime later** (static analysis of FFX.exe, not yet confirmed in game): manager `*(void**)0xCDED3C`
+  (FhUtil 0x8DED3C); playing = byte mgr+0x6D2; file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, "" when idle); id =
+  int mgr+0x6DC; the player object is embedded at mgr+0x38 and its u32 +0x100 counts uploaded frames, so the frame on
+  screen is that count - 1 = the .fvd frame index (clamp to the frame count). Depth file: `fmvdepth\<name lower-cased
+  without .webm>.fvd`. If the decoder drops frames that count under-counts: the per-frame thumbnails allow a content
+  check (+-3 frames). Ids 32/46/70/72 (MST_us, FAR_us, GGM_us, SNS_jp) have `<id>.dat` files and upload on the render
+  thread: probably FMV backgrounds behind real-time 3D, where the relief does not apply.
+- **Not verified here** (needs the owner's PC): CUDA torch install and import, VDA load with `strict=True`, fp16 + SDPA
+  on Windows, VRAM and speed at 518 / 392, cabinet.dll XPRESS_HUFF through ctypes, the GitHub zip's file hashes, the HF
+  download, every PowerShell 5.1 path of the launcher, Windows ffmpeg pipes, frame counts on the real files (the research
+  table: e.g. OPN_us 4,750, END_us 24,828). Tested in the container: the .fvd round trip (zlib/stored), normalisation, cuts,
+  the windowing against upstream and its constant memory, vbf.py on a synthetic archive, and end to end with synthetic
+  VP8 clips in a synthetic VBF and a fake model (resume, --force, previews). vbf.py was also run read-only on the real
+  archive's index: the US list resolves to 61 videos / 2,624.4 MB and the archive has 95 .webm, as in the research.
+- **Next**: S0 exit = the owner judges SIN_us / BTS_us depth plausible and notes VRAM and frames/s; S1 exit = the whole US
+  list converted with total time, peak VRAM and GB measured (pin the weights hash then); S2 = the read-only sync probe in
+  the mod.

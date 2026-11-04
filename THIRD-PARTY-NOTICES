@@ -43,6 +43,18 @@ third-party art, under FFX VR's MIT licence (LICENSE).
   be redistributed, and none is.  https://github.com/topher-au/Farplane
 - Re-Remastered texture pack (HitokageWorshipper) - optional, installed
   from the user's own download by tools/install-texture-pack.ps1.
+- Video-Depth-Anything (ByteDance) - the FMV depth converter's model,
+  downloaded on the user's PC by tools/convert-fmv-depth.ps1: its code
+  at commit 4f5ae23 (Apache-2.0) from
+  https://github.com/DepthAnything/Video-Depth-Anything, and only the
+  Video-Depth-Anything-Small weights (Apache-2.0) from Hugging Face. The
+  Base and Large weights are CC-BY-NC-4.0 and are not used. tools/fmvdepth/
+  window.py re-implements its windowed inference (our code, MIT).
+- PyTorch (BSD-3-Clause; its CUDA wheels carry NVIDIA's runtime under
+  NVIDIA's licence), numpy, OpenCV, einops, easydict, tqdm - installed by
+  pip into the converter's own venv on the user's PC.
+- FFmpeg (LGPL-2.1+ / GPL, by build) - installed by the user; run as a
+  separate program by the converter.
 
 No game files, assets or extracted content of FINAL FANTASY X/X-2 HD
 Remaster are included in this repository or its releases.

@@ -90,6 +90,7 @@ re-maps the addresses again.
 | `tools/package-release.ps1` | Builds (`build-mod.ps1 -NoDeploy`) and packs the player zip into `dist\` with its README and installer; see `docs/release.md` §1 |
 | `tools/paths.ps1` | Shared by all scripts: repository root, game folder (env var / local file / Steam) |
 | `tools/run-ffx.ps1` | Launches via Fahrenheit, captures console and game-side logs |
+| `tools/convert-fmv-depth.ps1` | Makes FMV depth (`fmvdepth\*.fvd`) from your own game copy on your GPU; see "FMV depth" below |
 
 The old managed-only `tools/build-fahrenheit.ps1` was deleted on 30 October 2026:
 it reset `_ext\fahrenheit` to main and rebuilt it, which silently replaced the
@@ -185,3 +186,44 @@ it into the mod folder, adds the mod to the load order before ffxvr, and can
 turn on NTFS compression (about half the size). `-Uninstall` removes it. The
 Fahrenheit file-loader log lists every replaced file at launch, which is the
 check that the files are being served.
+
+## FMV depth (the converter, stage S1; 3 Nov 2026)
+
+`tools\convert-fmv-depth.ps1` makes 8-bit relative depth for every frame of the game's FMVs, for a later
+"relief screen" (FMVs shown with depth in VR). It runs **on your own PC, against your own copy**: each video is
+streamed out of `data\FFX_Data.vbf` (read only, nothing extracted), decoded by ffmpeg, and run through
+Video-Depth-Anything-**Small** (Apache-2.0) on the GPU. Output: one `<name>.fvd` per video (320x180 a frame, 240x180
+for the 4:3 clips; format in `tools/fmvdepth/FORMAT.md`), `manifest.json` and `convert.log` in
+`<game>\fahrenheit\mods\ffxvr\fmvdepth\`. The mod does not read it yet (no runtime code in this round).
+
+**The depth is derived from Square Enix's videos: it is made locally, it stays private, and it is never shipped.**
+The folder holds `PRIVATE-do-not-share.txt`; `package-release.ps1` fails on any `.fvd` or `fmvdepth\` path;
+`install-mod.ps1` never deletes it (not even `-Uninstall -Purge`, which keeps it and says so); `build-mod.ps1` and
+`run-ffx.ps1` leave it alone; `.gitignore` covers `*.fvd` and `fmvdepth` folders; the converter refuses to write inside
+a git checkout or the game's `data\` folder. The converter is not in the player zip yet.
+
+Requirements:
+
+| | |
+| --- | --- |
+| NVIDIA GPU | 8 GB VRAM or more, a current driver (528+ for CUDA 12.4). Designed on an RTX 3080 Ti (12 GB). |
+| Python | 3.10 - 3.13 (`winget install Python.Python.3.12`); the script makes its own venv |
+| ffmpeg + ffprobe | any recent build on PATH (`winget install Gyan.FFmpeg`), or `-Ffmpeg <path>` |
+| Disk | ~1.2-1.5 GB of `.fvd` for the US list (estimate from a proxy; measure on the first run), plus ~3-5 GB for `%LOCALAPPDATA%\ffxvr\fmvdepth-venv` (PyTorch with CUDA) and ~110 MB of weights |
+| Time | estimated 1-2 hours for the US list (61 videos, 86,353 frames, 48 min of video) on a 3080 Ti class GPU; `-InputSize 392` is faster. Not yet measured. |
+
+First run sets up, under `%LOCALAPPDATA%\ffxvr\`: `fmvdepth-venv\` (pinned torch 2.6.0 + torchvision 0.21.0 from the
+PyTorch cu124 index, numpy, OpenCV headless, einops, easydict, tqdm), `fmvdepth-vda\` (the model code at commit
+4f5ae23, from GitHub; its files are checked against their SHA-256) and `fmvdepth-models\` (the Small weights; their
+SHA-256 is recorded on the first download and checked after - not pinned in the script yet). Delete those folders to
+remove them.
+
+    # S0, the quality check: SIN_us and BTS_us, then video | depth previews in fmvdepth\preview\ (private)
+    powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1 -Preview
+    # everything the US game plays (resumes: finished videos are skipped)
+    powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1
+
+Options: `-Only A,B`, `-All` (all 95 files), `-Region us|jp|asia`, `-InputSize 518|392`, `-Force`, `-Frame N` (a PNG
+of one frame with `-Preview`), `-Gray`, `-List`, `-SetupOnly`, `-OutDir`. Out of GPU memory at 518: it says so; run
+again with `-InputSize 392`. Tests (no torch, no GPU, no game data): `python -m unittest discover -s tools/fmvdepth/tests`
+(the end-to-end test needs ffmpeg on PATH).
