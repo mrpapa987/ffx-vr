@@ -66,7 +66,10 @@ $found += @(Get-ChildItem -LiteralPath $game -File -ErrorAction SilentlyContinue
 foreach ($d in (Join-Path $game 'fahrenheit\logs'), (Join-Path $game 'fahrenheit\mods\ffxvr')) {
     if (Test-Path -LiteralPath $d) { $found += @(Get-ChildItem -LiteralPath $d -File -Recurse -ErrorAction SilentlyContinue) }
 }
-$found = @($found | Where-Object { $ext -contains $_.Extension.ToLower() -and $_.LastWriteTime -ge $startTime })
+# Never fmvdepth\ (FMV depth and its previews, made from the game's videos: private; convert.log is not a game log).
+$depthPfx = [IO.Path]::Combine($game, 'fahrenheit', 'mods', 'ffxvr', $FfxvrFmvDepthDir) + [IO.Path]::DirectorySeparatorChar
+$found = @($found | Where-Object { $ext -contains $_.Extension.ToLower() -and $_.LastWriteTime -ge $startTime -and
+                                   -not $_.FullName.StartsWith($depthPfx, [StringComparison]::OrdinalIgnoreCase) })
 
 $gameLen = (Get-Item -LiteralPath $game).FullName.TrimEnd('\').Length     # normalised, like FullName below
 foreach ($f in $found) {

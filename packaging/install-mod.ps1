@@ -3,12 +3,14 @@
 # Copies mod\ffxvr\ from the zip into <game>\fahrenheit\mods\ffxvr\ and adds 'ffxvr' to
 # Fahrenheit's load order. Your settings (ffxvr.ini) and anything else in that folder are kept,
 # so installing a newer zip over an older one is safe. The shipped hand packs (hands\generic-glove\,
-# hands\generic\) are replaced; a hand pack folder of your own under hands\ is never touched.
+# hands\generic\) are replaced; a hand pack folder of your own under hands\ is never touched. Neither is fmvdepth\ (FMV depth
+# made on your PC by convert-fmv-depth.ps1, private): not even -Uninstall -Purge deletes it.
 # It also checks what the mod needs at run time and says what is missing.
 #
 #   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini, logs and your own hand packs are kept, and listed)
 #   -Purge         with -Uninstall: also delete the whole mod folder (settings, logs, captures, your own hand packs, named
-#                  first): nothing is left
+#                  first), except fmvdepth\ (FMV depth made on this PC: hours to remake), which is kept and named; delete
+#                  that folder yourself if you no longer want it
 #   -ResetLogging  set every diagnostic in an existing ffxvr.ini to off (tools\set-logging.ps1 -Profile Release;
 #                  a timestamped .bak is made first). A fresh install needs nothing: its defaults are all off.
 #   -DeleteLogs    delete the mod's own old logs, dumps and captures from the mod folder (ffxvr_*.log,
@@ -72,15 +74,27 @@ function Find-ReparsePoint([string]$Dir) {
     return $null
 }
 
+# FMV depth (tools\paths.ps1 $FfxvrFmvDepthDir): made on this PC from the game's videos, private. Never deleted here.
+$depthDir = Join-Path $dest $FfxvrFmvDepthDir
+function Get-DepthNote {
+    if (-not (Test-Path -LiteralPath $depthDir)) { return $null }
+    $f = @(Get-ChildItem -LiteralPath $depthDir -Recurse -File -Force -ErrorAction SilentlyContinue)
+    return ('{0}\ ({1} files, {2:N1} MB: FMV depth made on this PC; delete that folder yourself if you no longer want it)' -f $FfxvrFmvDepthDir, $f.Count, (($f | Measure-Object Length -Sum).Sum / 1MB))
+}
+function Test-InDepth([string]$Path) { $Path.StartsWith($depthDir + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) }
+
 # ---------------------------------------------------------------- uninstall
 if ($Uninstall) {
     Assert-FfxvrWritable $mods
     if ($Purge -and (Test-Path -LiteralPath $dest)) {
-        $rp = Find-ReparsePoint $dest
-        if ($rp) {
-            Write-Host "  $rp is a junction or link: -Purge does not delete through it. Nothing was changed."
-            Write-Host '  Remove the link yourself, or uninstall without -Purge.'
-            exit 1
+        # fmvdepth\ is kept, so it is not walked (it may well be a junction to another drive)
+        foreach ($c in @(Get-ChildItem -LiteralPath $dest -Force | Where-Object { $_.Name -ne $FfxvrFmvDepthDir })) {
+            $rp = Find-ReparsePoint $c.FullName
+            if ($rp) {
+                Write-Host "  $rp is a junction or link: -Purge does not delete through it. Nothing was changed."
+                Write-Host '  Remove the link yourself, or uninstall without -Purge.'
+                exit 1
+            }
         }
     }
     # The load-order line first: if a delete below fails part-way, Fahrenheit no longer tries to load a half-removed mod.
@@ -93,10 +107,16 @@ if ($Uninstall) {
     if ($Purge) {
         if (Test-Path -LiteralPath $dest) {
             if ($ownPacks.Count -gt 0) { Write-Host ('  -Purge also deletes your own hand packs: ' + (($ownPacks | ForEach-Object { "hands\$($_.Name)" }) -join ', ')) }
-            $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force -ErrorAction SilentlyContinue)
+            $depthNote = Get-DepthNote
+            $all = @(Get-ChildItem -LiteralPath $dest -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { -not (Test-InDepth $_.FullName) })
             try {
-                Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+                if ($depthNote) {
+                    Get-ChildItem -LiteralPath $dest -Force | Where-Object { $_.Name -ne $FfxvrFmvDepthDir } | Remove-Item -Recurse -Force -ErrorAction Stop
+                } else {
+                    Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction Stop
+                }
                 Write-Host ('  deleted {0} ({1} files, {2:N1} MB: the mod, its settings, logs and captures)' -f $dest, $all.Count, (($all | Measure-Object Length -Sum).Sum / 1MB))
+                if ($depthNote) { Write-Host "  kept $depthNote" }
             } catch {
                 Write-Host "  could not delete everything in ${dest}: $($_.Exception.Message)"
                 Write-Host '  Something holds a file (an Explorer window, an antivirus scan?). Close it and run -Uninstall -Purge again.'
@@ -117,14 +137,18 @@ if ($Uninstall) {
         if ($DeleteLogs) { Remove-ModLogs }
     }
     Write-Host ''
-    $left = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue })
-    if ($left.Count -eq 0) {
+    $depthNote = Get-DepthNote
+    $left = @(if (Test-Path -LiteralPath $dest) { Get-ChildItem -LiteralPath $dest -Recurse -File -ErrorAction SilentlyContinue | Where-Object { -not (Test-InDepth $_.FullName) } })
+    if ($left.Count -eq 0 -and -not $depthNote) {
         if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force -Recurse -ErrorAction SilentlyContinue }
         Write-Host 'Done. Nothing of FFX VR is left in the game folder.'
+    } elseif ($left.Count -eq 0) {
+        Write-Host "Done. Left in ${dest}: $depthNote"
     } else {
         Write-Host ('Done. Left in {0} ({1} files, {2:N1} MB): your settings, logs and captures:' -f $dest, $left.Count, (($left | Measure-Object Length -Sum).Sum / 1MB))
         $left | Sort-Object Length -Descending | Select-Object -First 8 | ForEach-Object { Write-Host ('  {0,12:N0} KB  {1}' -f ($_.Length / 1KB), $_.Name) }
         Write-Host '  To remove them too: install-mod.ps1 -Uninstall -Purge'
+        if ($depthNote) { Write-Host "  Also kept: $depthNote" }
     }
     exit 0
 }

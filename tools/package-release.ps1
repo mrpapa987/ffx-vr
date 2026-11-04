@@ -18,6 +18,9 @@
 # Fahrenheit and FFX-60fps are NOT included: they are separate projects with their own licences
 # and releases (see docs\release.md). No settings, logs, captures or .pdb files are included, and
 # nothing is taken from the game folder: everything comes from this repository's build output.
+# Never FMV depth (fmvdepth\, *.fvd) or previews: they are made on a player's PC from the game's videos (a guard below
+# fails the package if any turns up). The FMV depth converter (convert-fmv-depth.ps1, tools\fmvdepth\) is not in the zip
+# yet: it is a developer tool for now (docs\setup.md).
 #
 # <label> is -Version if given, otherwise the csproj <Version> plus the git commit, e.g.
 # 0.1.0-alpha.1-b993ffc ("-dirty" is added when there are uncommitted changes). For the release itself pass
@@ -185,6 +188,11 @@ foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File)) {
     $rel = $f.FullName.Substring($root.Length + 1)
     if ($f.Name -eq 'PRIVATE-do-not-share.txt' -or $f.Name -like '*.private.glb') { Fail "$rel is marked private" }
     if ($f.Extension -eq '.glb' -and -not $f.FullName.StartsWith($handsDst + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { Fail "${rel}: a .glb outside mod\$modId\hands\" }
+    # FMV depth (tools\paths.ps1 $FfxvrFmvDepthDir) is made on a player's PC from the game's videos and must never ship:
+    # no .fvd, no fmvdepth\ folder (the depth or its previews), no video. (The converter, tools\fmvdepth\, is not in the
+    # player zip yet either; when it is, copy its .py files by name and allow exactly those here.)
+    if (@($rel -split '[\\/]') -contains $FfxvrFmvDepthDir) { Fail "${rel}: under a $FfxvrFmvDepthDir\ folder (FMV depth or previews made from the game's videos)" }
+    if (@('.fvd', '.part', '.mp4', '.webm', '.bik', '.npz', '.exr') -contains $f.Extension.ToLowerInvariant()) { Fail "${rel}: FMV depth, a preview or a video does not belong in the zip" }
 }
 
 foreach ($f in 'LICENSE', 'THIRD-PARTY-NOTICES') {

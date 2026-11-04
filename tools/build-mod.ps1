@@ -297,9 +297,16 @@ try {
 Get-ChildItem -LiteralPath $dest -File | ForEach-Object { Log ('  ' + $_.Name + '  (' + $_.Length + ' bytes)') }
 foreach ($pk in $FfxvrHandPacks) { Get-ChildItem -LiteralPath (Join-Path $dest "hands\$pk") -File | ForEach-Object { Log ("  hands\$pk\" + $_.Name + '  (' + $_.Length + ' bytes)') } }
 $shipped = @($FfxvrHandPacks | ForEach-Object { [IO.Path]::Combine($dest, 'hands', $_) + [IO.Path]::DirectorySeparatorChar })
-$kept = @(Get-ChildItem -LiteralPath $dest -Recurse -File | Where-Object { $n = $_.Name; $fn = $_.FullName
-          -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' -and -not ($shipped | Where-Object { $fn.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) })
+# FMV depth (tools\paths.ps1 $FfxvrFmvDepthDir, made on this PC by convert-fmv-depth.ps1): never deleted by the deploy above
+# (its delete is not recursive), reported on its own line.
+$depthPfx = [IO.Path]::Combine($dest, $FfxvrFmvDepthDir) + [IO.Path]::DirectorySeparatorChar
+$all  = @(Get-ChildItem -LiteralPath $dest -Recurse -File)
+$depth = @($all | Where-Object { $_.FullName.StartsWith($depthPfx, [StringComparison]::OrdinalIgnoreCase) })
+$kept = @($all | Where-Object { $n = $_.Name; $fn = $_.FullName
+          -not ($buildOut | Where-Object { $n -like $_ }) -and $n -notlike '*.manifest.json' -and -not ($shipped | Where-Object { $fn.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) -and
+          -not $fn.StartsWith($depthPfx, [StringComparison]::OrdinalIgnoreCase) })
 Log ("[deploy] kept {0} settings/capture/log files ({1:N1} MB)" -f $kept.Count, (($kept | Measure-Object Length -Sum).Sum / 1MB))
+if ($depth.Count -gt 0) { Log ("[deploy] kept {0}\ ({1} files, {2:N1} MB: FMV depth made on this PC)" -f $FfxvrFmvDepthDir, $depth.Count, (($depth | Measure-Object Length -Sum).Sum / 1MB)) }
 
 if (-not (Test-Path -LiteralPath (Join-Path $dest "$modId.manifest.json"))) {
     Log ''
