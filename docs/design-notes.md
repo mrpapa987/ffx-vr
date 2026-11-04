@@ -4462,28 +4462,38 @@ Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratc
   | A message window reached "shown" | byte 0xC5A03C | written only by 0x8B6B70(i): 0 unless window i's u16 +0x2C == 2, then 1 if it was 0; 0x8B5680 turns 1 into 0xFF. Called per window from 0x8AB969 only for windows whose other-table +6 == 1, so it keeps its value when none runs, and **its image value is 0xFF** (.data): it counts only with a window open and shown (below) |
   | Message windows | pointers [0x18676F0 + i*4], i < 8 | the pool initialiser 0x8B86F2 / 0x8B87B9: windows at 0x18663F0 + i*0x130 or 0x1866D70 + i*0x130. 0x8B8560 opens one (+0x00 = 1, +0x2C = 0), 0x8B5810 closes it (+0x2C = 3), 0x8B5850 runs it only while +0x00 == 1 |
   | Choice cursor, row | pointers [0x1868A90 + i*4]; +0x01, +0x02 | the same initialiser: cursors at 0x1867710 + i*0x138 or 0x18680D0 + i*0x138. 0x8B5FB0(i): +0x01 = 1 only when window i's +0x2C == 2 (0x8B6004), draws while +0x01 == 1 with the row `movsx [cursor+2]`; confirmed = 2 (0x8B6483, 0x8B653C); reset to 0 by the text setup 0x8B88A2 |
-  | A skippable movie runs | dword 0x112A008 | 1 at 0x76EB62 / 0x76EBC0 (the skippable starts), 0 at 0x76E968 / 0x76E9D2 / 0x76EA9C / 0x76ECE9; the movie player tests it == 1 at 0x6D948A; the renderer's movie branch 0x668CED. A non-skippable movie leaves it 0 (those are screen frames anyway) |
+  | A skippable movie was started | dword 0x112A008 | 1 at 0x76EB62 / 0x76EBC0 (the skippable starts), 0 at 0x76E968 / 0x76E9D2 / 0x76EA9C / 0x76ECE9. **It lingers** (review B1): the skippable play's own wait (0x76EBE0) never clears it, 0x76ECE9 runs only from the map load 0x88E070 and 0x909A71, and the reti 0x76EB60 sets it without starting a movie; so a scene that plays a skippable FMV and goes on on the same map keeps it 1. A non-skippable movie leaves it 0 |
+  | The movie player is playing | byte [[0xCDED3C] + 0x6D0] | the player object: made at 0x6D717E, 0 at 0x6D738B; +0x6D0 = 1 at 0x6D9159, 0 at 0x6D6A89 / 0x6D7884 / 0x6D9559. Every reader of 0x112A008 pairs it with this byte (0x6D947D, 0x6DA4B3, 0x6DAC06, 0x668CDF) or with 0x76EFC0; none reads the flag alone. **So "a movie" = the flag and this byte** (a null player = none) |
   | Movie id (F8 only) | dword 0xC40E28 | set at 0x76E937 / 0x76EBA4, -1 at 0x76EA1F / 0x76EA92 (the stops); the image's value is -1 |
   | Overdrive minigame up | s16 0x133D734 Tidus, 0x133D6F4 Auron, 0x133D708 Lulu, u8 0x133C93F Wakka | the battle HUD's own test 0x89B38D..0x89B3B2 (any non-zero draws the overdrive bar 0x8A1CE0); handlers 0x892320 (`mov cx,[0x133D734]`, table 0x89255C), 0x890F70, 0x891BE9; Wakka 1 at 0x898DD9, 0 at 0x890F24 / 0x898249 |
   | The shared timer | dword 0x133F77C (0 off, 1 armed, 2 running), f32 0x133F790 seconds left | TOBtlCtrlLimitTimer 0x891AC4 `cmp [0x133F77C],2`; 2 at 0x89AB5E, 1 at 0x89AB25 and the initialisers, 0 at 0x890E75 / 0x897F3F / 0x89B7F8; Tidus's state 4 compares 0 with [0x133F790] at 0x8923AA (time out -> 7) |
   | Tidus's cursor and hit zone | s16 0x133D742; zone s16 0x133D73C .. 0x133D73E | state 4: a press with lo <= cursor <= hi -> 5 (0x8923CD..0x8923EA), outside -> sound 3 and it runs on; the cursor moves by 0x133D744 within [0x133D736, + 0x133D73A] |
-- **The tap gate, stricter and simpler.** Managed (game_gates.cs, hands.cs) sends five new game bits, native
+- **The tap gate, stricter and simpler** (revised after review: gates-review.md B1, SF1, N2, N3-N6). Managed (game_gates.cs, hands.cs) sends five new game bits, native
   (ffxvr_gates.h `tap_game_gate`, pure and unit-tested) maps them to a reason; the older gates are kept and ORed (any
-  shut reason shuts). Order: not readable, battle, sphere grid, save screen, blitzball, riding, **a movie** (0x2000),
+  shut reason shuts). Order: not readable, battle, sphere grid, save screen, blitzball, riding, **a movie** (0x2000: the
+  skippable flag with the movie player playing; the flag alone never shuts),
   **a field menu** (0x80), **a choice box** (0x800: always, whatever "also advance dialogue" says; a press in flight is let
-  go), **no player control** (0x40), a text box (8, or 0x1000 = the byte set and a window open and shown). The one way
-  past "no control" is the dialogue option with a text box waiting by both signals (the Atel bank's bit 8 and the render
-  side's 0x1000) and no choice box: then a tap advances a fully shown line. Choice = a cursor with +0x01 == 1 on a window
+  go), **no player control** (0x40), a text box (8, or 0x1000 = a render-side window open in state 2, the typewriter done,
+  with the byte 0xC5A03C set). "Also advance dialogue" lets a text box, and the no-control reason, pass only when the
+  line is fully shown: bit 8 (the Atel bank has a window) with 0x1000 (a render-side window in state 2), and no choice
+  box, with or without control (SF1: a line still typing shuts, so a Yes/No box still typing cannot take a tap before its
+  cursor appears). The byte adds little to 0x1000: it is overwritten per window and left at 0xFF, so it reduces to "some
+  window is in state 2"; the two are not independent confirmations. Choice = a cursor with +0x01 == 1 on a window
   in state 1 or 2 (closing / confirmed windows do not count, so a stale cursor cannot kill the tap). F8's gate names
   them ("a movie", "a field menu", "a choice box", "no player control"), and so do the `hands: tap gate (game): ...` lines,
   with the render-side windows (`windows open 0x.. shown 0x.., byte 0x..`, the choice slot and row). The gestures readout
   has a "direct gates" line (the player actor, the menu flag, the movie flag and id, the windows, the choice box).
-- **The hands' hide reasons**: + `movie` and `menu` (the game's own flags, bits 0x2000 / 0x80, read with the battle bit on
-  every frame that can draw the hands): the owner's "never in battle, menus or FMVs". Most of those frames were already
-  screen frames (hidden earlier); these catch a 3D frame under a menu or behind a movie. No hide for "no control": the
+- **The hands' hide reasons**: + `menu` (the game's flag, bit 0x80, read with the battle bit on every frame that can draw
+  the hands): the owner's "never in battle, menus or FMVs". The menu flag cannot outlive its menu (review N1: one setter and
+  one clearer in the TkMenu tick, which runs every frame while it is set); the 3D frames it hides are the menu's fades.
+  **No hide for a movie** (review N6), by choice: the frame that *is* the movie is already hidden by the screen / FMV
+  detection (a screen frame, H2_SUSPEND), and a playing movie with no 3D camera has nothing to draw the hands into
+  (H2_NO_TICK / H2_NO_PROJ). What is left are the movie-camera scenes (0x76EFC0: movie ids 0x20, 0x2E, 0x46, 0x48, the camera
+  driven from the movie by 0x76EDC0) that render 3D over a playing movie: those are in-engine scenes to the player, so the
+  hands stay, as in any cutscene. The tap is still shut there (a movie, and no control). No hide for "no control": the
   hands stay in cutscenes and dialogue.
 - **Reads and cost** (cpu-lean's plan kept: nothing on frames that cannot draw the hands). View bits plan (hands drawable,
-  no tap): battle, menu, movie (3 dword reads, was 1). Full plan (first person, tap on): those + the sphere grid, the
+  no tap): battle, menu, movie (3 dword reads, was 1; + the movie player's pointer and byte while the movie flag is set). Full plan (first person, tap on): those + the sphere grid, the
   player, the byte, one 9.7 KB block (VA 0x18663F0..0x1868AB0: both window layouts, both tables, all 8 cursors), the
   bank, the bank's 8 TOMesWinWork windows as one 352-byte read (was 16), the Atel controller (2): 11 calls, was about 21.
   All in FFX.exe's image, so range_readable answers from its region cache.
@@ -4492,16 +4502,18 @@ Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratc
   words, the result bytes, Tidus's zone and cursor), the Wakka byte, and the timer block 0x133F77C.. while a minigame is
   up (or the timer was not off last frame): 2 reads, 3 during a minigame; none outside battle. Output: an `od:` line per
   change of the words or the timer's state with battle_state and the frame (diagnostic profile only; 24 per 5 s, 400 a
-  session, the dropped ones counted in the next line; one line when the battle ends with a minigame state last seen);
+  session, the dropped ones counted in the next line; one line when the battle ends with a minigame state last seen; a failed
+  read in battle logs nothing and keeps the tracker's state, review N3);
   `overdrive minigame: ...` in the `slow:` onset line; an `od` column in the 600-frame dump (`T4/2` = Tidus state 4, timer
   running; `-` none; two bytes in SlowFr's padding). Tidus's states: 1 loading, 2 waiting for the asset, 3 arming the
   timer, 4 the gauge runs, 5 hit, 6 hit / unloading, 7 timed out, 8 timed out / unloading, 9 done, 10 the result to the
-  effect (0x7B0470, then the effect program). `g_od_active` (native) = the game's own "a minigame is up" test, for later
+  effect (0x7B0470, then the effect program). `g_od_active` (native, file-static) = the game's own "a minigame is up" test, for later
   users (a VR minigame panel, the parked Auron sequence idea).
 - **The follow pick, cross-checked** (diagnostic only): in the field in first person, every 10th scan tick, is the
-  picked actor the one at [0x1300788]? A mismatch seen twice in a row is logged (`first person: the follow pick ... is
-  not the game's player actor ...`; one line per 10 s, the same pair again after 2 min, 50 a session); counts in F8. The
+  picked actor the one at [0x1300788]? A mismatch seen twice in a row is logged with a diagnostic key on (review N5;
+  `first person: the follow pick ... is not the game's player actor ...`; one line per 10 s, the same pair again after
+  2 min, 50 a session); counts and the last mismatch in F8 in every profile. The
   pick is unchanged until play shows whether the game's actor is the better rule.
 - **Not seen in play yet**: a Yes/No box with the tap (the gate should read "a choice box"), the field menu flag over a 3D
-  frame, the movie flag, an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
+  frame, the movie flag with the playing byte (F8: "movie skippable 1, playing 0" after a skippable FMV is B1's case), an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
   ("not located") and research exe-battle-ui.md:296 ("message queues") are corrected by the table above.
