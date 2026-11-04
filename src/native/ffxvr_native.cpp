@@ -8280,14 +8280,14 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 // kind, calibration); the 10 s hands: line with diag_verbose only; the frame census gets HANDS lines.
 
 enum H2Why { H2_NONE = 0, H2_OFF, H2_NO_XR, H2_SUSPEND, H2_SCREEN3D, H2_BACKDROP, H2_BT, H2_DREAM, H2_FREEZE, H2_VIEW, H2_BODY,
-             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_N };
+             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_BATTLE, H2_N };
 static const char* const k_h2_why[H2_N] = { "", "off", "xr", "suspend", "screen3d", "backdrop", "bt", "dream", "freeze", "view", "body",
-                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down" };
+                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down", "battle" };
 static const char* const k_h2_why_long[H2_N] = { "", "off", "the headset is off", "a screen frame (FMV, menu, save screen)", "the stereo screen",
     "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "a view the hands are not set to show in",
     "your body is shown (fp_body_mode)", "no camera this frame", "the shader pass is not ready", "no scene projection this frame",
     "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve",
-    "the first scene resolve was not last frame's scene target", "the controllers are put down" };
+    "the first scene resolve was not last frame's scene target", "the controllers are put down", "a battle (hands are hidden in battle)" };
 struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2], put_down[2], mode_drawn[4], mesh_frames; float pv_diff, pv_diff2; bool pv_done; };
 H2Stat g_h2w = {}, g_h2_last = {}, g_h2_tot = {};       // the live 10 s window, the last complete one, this on-session
 bool g_h2_last_valid = false;
@@ -8707,6 +8707,10 @@ static int hands_hide_why() {
     if (g_screen3d_now) return H2_SCREEN3D;
     if (g_backdrop_room) return H2_BACKDROP;
     if (bt_no_split()) return H2_BT;
+    // The owner (3 Nov): hide the hands in every battle ("distracting, and look bad when showing this off"). Battle = Btl.battle_state != 0,
+    // the game-gate bit 1 managed pushes every frame while VR hands are on (ffxvr_hands2_tap_set). A stale gate (no push for 3+
+    // frames: managed not running) is not read as a battle.
+    if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3 && (g_tapcfg.game & 1)) return H2_BATTLE;
     if (g_dream_gate) return H2_DREAM;
     if (g_ovr_freeze) return H2_FREEZE;
     if (!hands_view_ok(g_fp_mode) && !hands_view_ok(0)) return H2_VIEW;   // the exact view (first person may fall back to the seat) is checked at the draw

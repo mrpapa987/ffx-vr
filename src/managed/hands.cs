@@ -257,12 +257,12 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Tap build: the tap's settings and the game gate to native, every frame (native treats a gate older than 3
     /// frames as shut). Bits: 1 battle (Btl.battle_state != 0), 2 the sphere grid (Fahrenheit Globals.SphereGrid.is_open),
     /// 4 Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), 8 a text box is up (a TOMesWinWork window of
-    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed. Reads only while the tap can
-    /// fire (VR hands and the tap on): off costs nothing.</summary>
+    /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed. Reads while VR hands are on (native
+    /// hides the hands in battle from bit 1, and the tap uses the rest): hands off costs nothing.</summary>
     private void hands2_tap_push() {
         if (_fn_hands2_tap_set == null) return;
         bool on = _vr_hands && _vr_hands_tap;
-        int game = on ? hands2_tap_game() : 0;
+        int game = _vr_hands ? hands2_tap_game() : 0;   // read whenever VR hands are on: native also hides the hands in battle (bit 1), tap or not
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
         var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0) | (_vr_hands_tap_point ? 8 : 0) | (_vr_hands_tap_hold_grip ? 16 : 0),
                                sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };
@@ -447,7 +447,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SameLine(); if (ImGui.Checkbox("third person##h2v4", ref tp)) _vr_hands_views = tp ? _vr_hands_views | 4 : _vr_hands_views & ~4;
         ImGui.SameLine(); if (ImGui.Checkbox("the seat view##h2v8", ref seat)) _vr_hands_views = seat ? _vr_hands_views | 8 : _vr_hands_views & ~8;
         ImGui.TextDisabled("In the diorama and the seat view the hands are your own size in the scaled world: life-size to you, giant beside the miniature, and they go behind its walls and ground like a real hand would.");
-        ImGui.TextDisabled("Never on screens, menus, FMVs, battle transitions or under the dream filter. A controller put down for 10 s (nothing touched) hides its hand (with the touch sensors only).");
+        ImGui.TextDisabled("Never in battle, on screens, menus, FMVs, battle transitions or under the dream filter. A controller put down for 10 s (nothing touched) hides its hand (with the touch sensors only).");
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("idle finger curl##h2rc", ref _vr_hands_rest_curl, 0f, 1f, "%.2f"); ImGui.SameLine();
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("size##h2sc", ref _vr_hands_scale, 0.8f, 1.25f, "%.2f x"); ImGui.SameLine();
         if (ImGui.SmallButton("defaults##h2rs")) { _vr_hands_rest_curl = 0.20f; _vr_hands_scale = 1.00f; }

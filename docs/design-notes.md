@@ -3843,3 +3843,18 @@ request, reached only for actors that passed Ch_VisibleTest) now calls `sg_gate`
     0x830240.
   - sg_test.cpp: the stub builder and the budget rule.
   - sg_replay_check.py: each stub's skip path is the original loop end minus the stores, and jumps to the continue point.
+
+## Hands hidden in battle (3 Nov 2026)
+
+The owner: "our VR hands are amazing but I think we need to completely hide them in battle. They are distracting and look
+bad when showing this off." Native `hands_hide_why` now returns `H2_BATTLE` ("battle" in the hands: counters) while the
+game-gate bit 1 (Btl.battle_state != 0) is set; managed now reads the game gate whenever VR hands are on, not only while
+the tap is on (the tap's own gate is unchanged: it still checks its own on/off first). A stale gate (managed not pushing
+for 3+ frames) is not read as a battle. Battle transitions were already hidden (H2_BT). No option for now.
+
+Parked with it (the owner): hands could come back for overdrives (see "Overdrives in VR"), but then they should belong to
+whoever is acting, so **import hand packs for every playable character** (Tidus, Yuna, Auron, Wakka, Lulu, Kimahri, Rikku)
+and tie each pack to its character's chr_id (the battle follow already knows whose turn it is: `cur_chr_id`). The importer
+already handles a full-body T/A-pose OBJ; the per-character packs stay private (made from the player's own models). Needs:
+a pack-per-character mapping in hand.json or the ini, the F8 list per character, and Kimahri's and Lulu's sleeves/claws
+checked by the importer's limits.
