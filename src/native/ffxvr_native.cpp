@@ -13277,13 +13277,17 @@ extern "C" __declspec(dllexport) int ffxvr_sr_status(char* buf, int n) {
 //   window: the game window (sr's rule: the largest visible unowned top-level window of the process), sampled every 30
 //          Presents: foreground, IsIconic, DWM-cloaked, not visible, the client area's centre and four inset points covered
 //          by another top-level window (WindowFromPoint) or off every monitor.
-//   main loop (limiter_probe=1): the frame call is redirected to gt_frame_call (one aligned 8-byte exchange, as sr_patch):
+//   main loop (limiter_probe=1): the frame call is redirected to gt_frame_call (one aligned 8-byte exchange, done by the main
+//          thread itself inside the limiter's Sleep, where it is not at 0x62F350: review SF1):
 //          the interval between frame starts against the limiter's period (the game's divider x FFX-60fps' K), the frame's
 //          run time, frames that started without a Sleep since the last one; FFX.exe's import slot of kernel32!Sleep points
-//          at gt_sleep, which times only the call that returns to 0x62F3C1 (the limiter's) and passes the other seven Sleep
-//          callers of FFX.exe straight through: asked vs took, Sleep(0) counts, oversleep. Never removed (sr's rule: the DLL
-//          stays loaded); limiter_probe=0 later only stops the recording.
-// timer_fix=1: SetProcessInformation(ProcessPowerThrottling, the timer-resolution and execution-speed opt-out added to
+//          at gt_sleep, which times only the call that returns to 0x62F3C1 (the limiter's) and passes the slot's other users
+//          straight through (review N1: 7 more call sites, a jmp thunk at 0x948DDE, and two `mov edi,[slot]` copies at
+//          0xA2790F / 0xA28BAE; a copy taken after the swap is gt_sleep, whose return address never matches): asked vs
+//          took, Sleep(0) counts, oversleep. Never removed (sr's rule: the DLL stays loaded); limiter_probe=0 later only
+//          stops the recording, and the window sampling (review N5).
+// timer_fix=1 (ini, default 0, review N2: FFX-60fps' PERF-001 already does it, and without FFX-60fps it would change the
+// game's pacing): SetProcessInformation(ProcessPowerThrottling, the timer-resolution and execution-speed opt-out added to
 // whatever is set) and timeBeginPeriod(1) for the session, both looked up at run time; logged once with the result.
 namespace gt {
 // FhUtil offsets (FFX.exe is DYNAMIC_BASE; the disassembly's base is 0x400000)
@@ -13310,9 +13314,18 @@ static gt_frame_fn g_gt_frame_orig = nullptr;
 static gt_sleep_fn g_gt_sleep_orig = nullptr;
 static LONGLONG g_gt_prev_start = 0;               // main thread only
 static bool g_gt_slept = false;                    // main thread only: a limiter Sleep since the last frame start
+static LONG g_gt_epoch_seen = 0;                   // main thread only: g_gt_probe_epoch when the frame start was taken
+static volatile LONG g_gt_probe_epoch = 0;         // render thread: +1 each time limiter_probe goes 0 -> 1 (review N4)
+// SF1 (review): the frame call is patched by the main thread itself, inside the limiter's Sleep, where it provably is not
+// at 0x62F350 (same-thread self-modifying code, as sr_patch). The render thread checks the bytes and builds the qword;
+// the first matching gt_sleep exchanges it. States: 0 not asked, 1 pending, 2 patched, 3 VirtualProtect failed, 4 changed.
+static volatile LONG g_gt_frame_state = 0;
+static LONGLONG g_gt_frame_oldq = 0, g_gt_frame_newq = 0;   // written by the render thread before state 1 (a full barrier)
+static DWORD g_gt_frame_err = 0;                   // main thread, before the state's final value
 // render thread
-static bool g_gt_install_tried = false, g_gt_frame_on = false, g_gt_sleep_on = false;
+static bool g_gt_install_tried = false, g_gt_sleep_on = false, g_gt_frame_logged = false;
 static char g_gt_install_why[200] = "";
+static bool g_gt_probe_off_win = false;            // limiter_probe was 0 at some point in this cpu: window (review N4)
 static int g_gt_fix_set = -1;                      // timer_fix as last applied (-1: no setting seen yet)
 static bool g_gt_period = false, g_gt_ptt = false; // our timeBeginPeriod(1) is held; our opt-out went through
 static char g_gt_fix_state[64] = "no setting yet";
@@ -13327,6 +13340,8 @@ static uint32_t g_gt_frame_ctr = 0;
 static int __cdecl gt_frame_call() {
     if (g_gt_probe_on == 0) return g_gt_frame_orig();
     const LONGLONG t0 = cpu_q();
+    const LONG ep = g_gt_probe_epoch;
+    if (ep != g_gt_epoch_seen) { g_gt_epoch_seen = ep; g_gt_prev_start = 0; g_gt_slept = false; }   // re-enabled: no interval across the off time
     const double want = cpu::limiter_period_ms(*reinterpret_cast<volatile int32_t*>(g_gt_base + gt::k_divider),
                                                *reinterpret_cast<volatile double*>(g_gt_base + gt::k_period_k));   // this thread writes them
     const double iv = g_gt_prev_start != 0 ? cpu_ms(t0 - g_gt_prev_start) : -1.0;
@@ -13337,10 +13352,22 @@ static int __cdecl gt_frame_call() {
     AcquireSRWLockExclusive(&g_gt_lock); g_gt_lim.frame_end(run); ReleaseSRWLockExclusive(&g_gt_lock);
     return r;
 }
-/// FFX.exe's kernel32!Sleep (its import slot points here): the limiter's call (returning to 0x62F3C1) is timed, every other
-/// caller goes straight to what the slot held before.
+/// SF1: on the main thread, inside the limiter's Sleep call (gt_sleep): the frame call's qword, once.
+static void gt_frame_patch_here() {
+    if (InterlockedCompareExchange(&g_gt_frame_state, 0, 1) != 1) return;   // 1 -> 0 while we work: nobody else tries
+    const uintptr_t site = g_gt_base + gt::k_frame_site;
+    DWORD prot = 0, tmp = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(site), 8, PAGE_EXECUTE_READWRITE, &prot)) { g_gt_frame_err = GetLastError(); InterlockedExchange(&g_gt_frame_state, 3); return; }
+    const LONGLONG prev = InterlockedCompareExchange64(reinterpret_cast<volatile LONGLONG*>(site), g_gt_frame_newq, g_gt_frame_oldq);   // lock cmpxchg8b
+    VirtualProtect(reinterpret_cast<void*>(site), 8, prot, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 8);
+    InterlockedExchange(&g_gt_frame_state, prev == g_gt_frame_oldq ? 2 : 4);
+}
+/// FFX.exe's kernel32!Sleep (its import slot points here): the limiter's call (returning to 0x62F3C1, main thread) is timed,
+/// and the first one patches the frame call (SF1); every other user of the slot goes straight to what it held before.
 static void WINAPI gt_sleep(DWORD ms) {
     if (reinterpret_cast<uintptr_t>(_ReturnAddress()) != g_gt_sleep_ret || g_gt_probe_on == 0) { g_gt_sleep_orig(ms); return; }
+    if (g_gt_frame_state == 1) gt_frame_patch_here();
     const LONGLONG t0 = cpu_q();
     g_gt_sleep_orig(ms);
     const double took = cpu_ms(cpu_q() - t0);
@@ -13348,43 +13375,13 @@ static void WINAPI gt_sleep(DWORD ms) {
     AcquireSRWLockExclusive(&g_gt_lock); g_gt_lim.sleep(ms, took); ReleaseSRWLockExclusive(&g_gt_lock);
 }
 static bool gt_abs_is(const uint8_t* p, uintptr_t va) { uint32_t v = 0; memcpy(&v, p, 4); return v == static_cast<uint32_t>(va); }
-/// Render thread, once (limiter_probe=1 at the first setting): both redirects, each checked against FFX.exe's bytes first.
+/// Render thread, once (limiter_probe=1 at the first setting): the Sleep slot first (a data write), then the frame call's
+/// bytes are checked and its qword is handed to the main thread (SF1), which patches it in its next limiter Sleep.
 static void gt_install() {
     g_gt_install_tried = true;
     const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_gt_base = b;
     char fw[96] = "", sw[96] = "";
-    // the frame call: lea ecx,[ebp-0x424]; fstp qword [accum]; call 0x62E340; test eax,eax; jne +0x19
-    {
-        const uintptr_t site = b + gt::k_frame_site, fn = b + gt::k_frame_fn;
-        static const uint8_t k_pre[] = { 0x8D, 0x8D, 0xDC, 0xFB, 0xFF, 0xFF, 0xDD, 0x1D };
-        static const uint8_t k_post[] = { 0x85, 0xC0, 0x75, 0x19 };
-        const uint8_t* sp = reinterpret_cast<const uint8_t*>(site);
-        if ((site & 7) != 0 || !range_readable(sp - 12, 21)) snprintf(fw, sizeof(fw), "FFX+0x22F350 not readable");
-        else {
-            int32_t rel = 0; memcpy(&rel, sp + 1, 4);
-            const bool call_ok = sp[0] == 0xE8 && site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) == fn;
-            const bool bytes_ok = memcmp(sp - 12, k_pre, sizeof(k_pre)) == 0 && gt_abs_is(sp - 4, b + gt::k_accum) && memcmp(sp + 5, k_post, sizeof(k_post)) == 0;
-            if (!call_ok || !bytes_ok) snprintf(fw, sizeof(fw), "%s", !call_ok ? "the call at FFX+0x22F350 does not go to FFX+0x22E340 (another mod?)" : "the bytes around FFX+0x22F350 differ (another game version?)");
-            else {
-                LONGLONG oldq = 0; memcpy(&oldq, sp, 8);
-                uint8_t nb[8]; memcpy(nb, sp, 8);
-                const int32_t nrel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&gt_frame_call) - (site + 5));
-                memcpy(nb + 1, &nrel, 4);                          // E8 and the three bytes after the call stay
-                LONGLONG newq = 0; memcpy(&newq, nb, 8);
-                g_gt_frame_orig = reinterpret_cast<gt_frame_fn>(fn);
-                DWORD prot = 0, tmp = 0;
-                if (!VirtualProtect(reinterpret_cast<void*>(site), 8, PAGE_EXECUTE_READWRITE, &prot)) snprintf(fw, sizeof(fw), "VirtualProtect failed (%lu)", GetLastError());
-                else {
-                    const LONGLONG prev = InterlockedCompareExchange64(reinterpret_cast<volatile LONGLONG*>(site), newq, oldq);   // one aligned exchange
-                    VirtualProtect(reinterpret_cast<void*>(site), 8, prot, &tmp);
-                    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 8);
-                    if (prev != oldq) snprintf(fw, sizeof(fw), "the call site changed while patching");
-                    else g_gt_frame_on = true;
-                }
-            }
-        }
-    }
     // Sleep: `call [Sleep slot]` at 0x62F3BB, `cmp dword [ebp-0x440],0x12` after it; the slot is FFX.exe's import of kernel32!Sleep
     {
         const uintptr_t site = b + gt::k_sleep_site, slot = b + gt::k_sleep_iat;
@@ -13413,9 +13410,46 @@ static void gt_install() {
             }
         }
     }
-    snprintf(g_gt_install_why, sizeof(g_gt_install_why), "frame call %s%s%s, Sleep %s%s%s", g_gt_frame_on ? "on" : "off", *fw ? ": " : "", fw, g_gt_sleep_on ? "on" : "off", *sw ? ": " : "", sw);
-    diag("timer: limiter probe (limiter_probe=1): the frame call FFX+0x22F350 %s%s%s; the limiter's Sleep FFX+0x22F3BB through FFX.exe's import of kernel32!Sleep (slot FFX+0x70C100) %s%s%s (FFX.exe's other Sleep callers pass straight through). Never removed; limiter_probe=0 stops the recording",
-         g_gt_frame_on ? "-> ours (frame starts and run time)" : "not hooked", *fw ? ": " : "", fw, g_gt_sleep_on ? "-> ours (asked vs took)" : "not hooked", *sw ? ": " : "", sw);
+    // the frame call: lea ecx,[ebp-0x424]; fstp qword [accum]; call 0x62E340; test eax,eax; jne +0x19 (patched by the main thread)
+    if (!g_gt_sleep_on) snprintf(fw, sizeof(fw), "needs the Sleep hook (the main thread patches it from there)");
+    else {
+        const uintptr_t site = b + gt::k_frame_site, fn = b + gt::k_frame_fn;
+        static const uint8_t k_pre[] = { 0x8D, 0x8D, 0xDC, 0xFB, 0xFF, 0xFF, 0xDD, 0x1D };
+        static const uint8_t k_post[] = { 0x85, 0xC0, 0x75, 0x19 };
+        const uint8_t* sp = reinterpret_cast<const uint8_t*>(site);
+        if ((site & 7) != 0 || !range_readable(sp - 12, 21)) snprintf(fw, sizeof(fw), "FFX+0x22F350 not readable");
+        else {
+            int32_t rel = 0; memcpy(&rel, sp + 1, 4);
+            const bool call_ok = sp[0] == 0xE8 && site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) == fn;
+            const bool bytes_ok = memcmp(sp - 12, k_pre, sizeof(k_pre)) == 0 && gt_abs_is(sp - 4, b + gt::k_accum) && memcmp(sp + 5, k_post, sizeof(k_post)) == 0;
+            if (!call_ok || !bytes_ok) snprintf(fw, sizeof(fw), "%s", !call_ok ? "the call at FFX+0x22F350 does not go to FFX+0x22E340 (another mod?)" : "the bytes around FFX+0x22F350 differ (another game version?)");
+            else {
+                LONGLONG oldq = 0; memcpy(&oldq, sp, 8);
+                uint8_t nb[8]; memcpy(nb, sp, 8);
+                const int32_t nrel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&gt_frame_call) - (site + 5));
+                memcpy(nb + 1, &nrel, 4);                          // E8 and the three bytes after the call stay
+                LONGLONG newq = 0; memcpy(&newq, nb, 8);
+                g_gt_frame_orig = reinterpret_cast<gt_frame_fn>(fn);
+                g_gt_frame_oldq = oldq; g_gt_frame_newq = newq;
+                InterlockedExchange(&g_gt_frame_state, 1);         // a full barrier: the qwords and the target are visible first
+            }
+        }
+    }
+    snprintf(g_gt_install_why, sizeof(g_gt_install_why), "frame call %s%s%s, Sleep %s%s%s", g_gt_frame_state == 1 ? "pending" : "off", *fw ? ": " : "", fw, g_gt_sleep_on ? "on" : "off", *sw ? ": " : "", sw);
+    if (g_gt_frame_state != 1) g_gt_frame_logged = true;   // nothing to report later
+    diag("timer: limiter probe (limiter_probe=1): the limiter's Sleep FFX+0x22F3BB through FFX.exe's import of kernel32!Sleep (slot FFX+0x70C100) %s%s%s (the slot's other users pass straight through: 7 more call sites, a jmp thunk, 2 copies of the pointer); the frame call FFX+0x22F350 %s%s%s. Never removed; limiter_probe=0 stops the recording",
+         g_gt_sleep_on ? "-> ours (asked vs took)" : "not hooked", *sw ? ": " : "", sw,
+         g_gt_frame_state == 1 ? "checked: the main thread patches it inside its next limiter Sleep" : "not hooked", *fw ? ": " : "", fw);
+}
+/// Render thread: the main thread's patch result, logged once.
+static void gt_frame_patch_log() {
+    if (g_gt_frame_logged) return;
+    const LONG st = g_gt_frame_state;
+    if (st < 2) return;
+    g_gt_frame_logged = true;
+    if (st == 2) diag("timer: limiter probe: the frame call FFX+0x22F350 -> ours (patched by the main thread inside the limiter's Sleep; frame starts and run time)");
+    else if (st == 3) diag("timer: limiter probe: the frame call FFX+0x22F350 not hooked: VirtualProtect failed on the main thread (%lu)", g_gt_frame_err);
+    else diag("timer: limiter probe: the frame call FFX+0x22F350 not hooked: the call site changed while patching");
 }
 static void gt_fns() {
     if (g_gt_fns_tried) return;
@@ -13470,12 +13504,14 @@ static void gt_sample_window() {
         if (at == nullptr || GetAncestor(at, GA_ROOT) != h) w.covered++;
     }
 }
-/// Render thread, from cpu_frame_roll (every Present): one sample in 30 (about 4 a second at 120 Hz, 2 at 60).
+/// Render thread, from cpu_frame_roll (every Present): the main thread's patch result; one sample in 30 (about 4 a second
+/// at 120 Hz, 2 at 60). The window is sampled only with limiter_probe=1 (review N5: its off switch).
 static void gt_render_frame() {
+    gt_frame_patch_log();
     if (++g_gt_frame_ctr % 30 != 0) return;
     gt_fns();
     gt_sample_timer();
-    gt_sample_window();
+    if (g_gt_probe_on != 0) gt_sample_window();
 }
 static void gt_timer_fix(bool on) {
     char ptt[200] = "", per[64] = "";
@@ -13490,18 +13526,20 @@ static void gt_timer_fix(bool on) {
                 if (get != nullptr) { have = get(GetCurrentProcess(), gt::k_process_power_throttling, &before, sizeof(before)) != FALSE; if (!have) gerr = GetLastError(); }
                 gt::PtState st = { 1, (have ? before.ControlMask : 0) | gt::k_ptt_exec | gt::k_ptt_timer, (have ? before.StateMask : 0) & ~(gt::k_ptt_exec | gt::k_ptt_timer) };
                 BOOL ok = set(GetCurrentProcess(), gt::k_process_power_throttling, &st, sizeof(st));
-                DWORD serr = ok ? 0 : GetLastError();
-                bool timer_flag = true;
-                if (!ok) {   // a Windows before 11 rejects the timer flag: the execution-speed opt-out alone
-                    st.ControlMask &= ~gt::k_ptt_timer; st.StateMask &= ~gt::k_ptt_timer; timer_flag = false;
+                const DWORD serr = ok ? 0 : GetLastError();
+                DWORD rerr = 0; bool retried = false;
+                if (!ok) {   // an older Windows may refuse the timer flag: the execution-speed opt-out alone
+                    st.ControlMask &= ~gt::k_ptt_timer; st.StateMask &= ~gt::k_ptt_timer; retried = true;
                     ok = set(GetCurrentProcess(), gt::k_process_power_throttling, &st, sizeof(st));
+                    if (!ok) rerr = GetLastError();
                 }
                 g_gt_ptt = ok != FALSE;
-                char bf[64];
+                char bf[64], how[96] = "";
                 if (have) snprintf(bf, sizeof(bf), "control 0x%lX state 0x%lX", before.ControlMask, before.StateMask);
                 else snprintf(bf, sizeof(bf), "not readable (%s %lu)", get ? "error" : "no GetProcessInformation", gerr);
-                snprintf(ptt, sizeof(ptt), "power throttling opt-out %s (control 0x%lX state 0x%lX%s; before: %s)", ok ? "ok" : "failed", st.ControlMask, st.StateMask,
-                         timer_flag ? "" : serr ? ", the timer flag refused: execution speed only" : "", bf);
+                if (retried && ok) snprintf(how, sizeof(how), "; with the timer flag refused (%lu): execution speed only", serr);
+                else if (retried) snprintf(how, sizeof(how), "; error %lu, without the timer flag error %lu", serr, rerr);
+                snprintf(ptt, sizeof(ptt), "power throttling opt-out %s (control 0x%lX state 0x%lX%s; before: %s)", ok ? "ok" : "failed", st.ControlMask, st.StateMask, how, bf);
             }
         }
         if (!g_gt_period) {
@@ -13529,7 +13567,9 @@ static void gt_timer_fix(bool on) {
 }
 /// From ffxvr_cpu_report (render thread, every frame): acts on a change only.
 static void gt_settings(bool timer_fix, bool probe) {
-    InterlockedExchange(&g_gt_probe_on, probe ? 1 : 0);
+    const LONG was = InterlockedExchange(&g_gt_probe_on, probe ? 1 : 0);
+    if (probe && was == 0) InterlockedIncrement(&g_gt_probe_epoch);   // N4: the main thread drops its last frame start
+    if (!probe) g_gt_probe_off_win = true;
     if (probe && !g_gt_install_tried) gt_install();
     const int f = timer_fix ? 1 : 0;
     if (f != g_gt_fix_set) { g_gt_fix_set = f; gt_timer_fix(timer_fix); }
@@ -13544,13 +13584,15 @@ static void gt_line_part(char* out, size_t n) {
     else snprintf(tm, sizeof(tm), "%.3f ms now (%.3f-%.3f over %u samples; finest %.3f, coarsest %.3f)", g_gt_res_cur / 1e4, g_gt_res_lo / 1e4, g_gt_res_hi / 1e4, g_gt_res_n, g_gt_res_fine / 1e4, g_gt_res_coarse / 1e4);
     g_gt_res_n = 0; g_gt_res_lo = g_gt_res_hi = 0;
     char wn[220];
-    if (w.n == 0) snprintf(wn, sizeof(wn), "not sampled yet");
+    if (w.n == 0) snprintf(wn, sizeof(wn), "%s", g_gt_probe_on ? "not sampled yet" : "not sampled (limiter_probe=0)");
     else if (w.nowin == w.n) snprintf(wn, sizeof(wn), "not found (%u samples)", w.n);
     else snprintf(wn, sizeof(wn), "foreground %u/%u, minimized %u, cloaked %u, hidden %u, covered %u of %u points, off-screen %u", w.fg, w.n - w.nowin, w.iconic, w.cloaked, w.hidden, w.covered, w.pts, w.offscreen);
     char ml[480], sl[320];
     if (!g_gt_install_tried) { snprintf(ml, sizeof(ml), "not measured (limiter_probe=0: not installed)"); sl[0] = '\0'; }
     else {
-        if (!g_gt_frame_on) snprintf(ml, sizeof(ml), "not measured (%s)", g_gt_install_why);
+        const LONG fst = g_gt_frame_state;
+        if (fst == 1) snprintf(ml, sizeof(ml), "not measured yet (the frame call is patched in the limiter's next Sleep)");
+        else if (fst != 2) snprintf(ml, sizeof(ml), "not measured (%s)", fst == 3 ? "VirtualProtect failed on the main thread" : fst == 4 ? "the call site changed while patching" : g_gt_install_why);
         else if (L.frames == 0) snprintf(ml, sizeof(ml), "%sno frame interval in the window (gaps over 250 ms %u)", g_gt_probe_on ? "" : "limiter_probe=0, not recording: ", L.gaps);
         else snprintf(ml, sizeof(ml), "%u frames, interval avg %.2f sd %.2f min %.1f max %.1f ms (limiter period %.2f; late by >1 ms %u, >2 ms %u, >1 slot %u; early by >2 ms %u; gaps over 250 ms %u), frame run avg %.2f max %.1f ms, started without a sleep %u",
                       L.frames, L.iv_avg(), L.iv_sd(), L.iv_min, L.iv_max, L.want_avg(), L.late1, L.late2, L.late_slot, L.early2, L.gaps, L.work.avg(), L.work.mx, L.no_sleep);
@@ -13559,7 +13601,9 @@ static void gt_line_part(char* out, size_t n) {
         else snprintf(sl, sizeof(sl), " | limiter Sleep: %u calls (%u of 0 ms), asked avg %.2f max %u ms, took avg %.2f max %.1f ms, over the ask avg %.2f max %.1f ms (by >1 ms %u, >2 ms %u)",
                       L.sleeps, L.sleep0, L.ask_sum / L.sleeps, L.ask_max, L.took_sum / L.sleeps, L.took_max, L.over_avg(), L.over_max, L.over1, L.over2);
     }
-    snprintf(out, n, " | timer %s, timer_fix %s | game window: %s | main loop: %s%s", tm, g_gt_fix_state, wn, ml, sl);
+    const bool part_off = g_gt_probe_off_win && g_gt_probe_on != 0 && g_gt_install_tried;
+    g_gt_probe_off_win = g_gt_probe_on == 0;
+    snprintf(out, n, " | timer %s, timer_fix %s | game window: %s | main loop: %s%s%s", tm, g_gt_fix_state, wn, part_off ? "(limiter_probe was 0 for part of this window) " : "", ml, sl);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
