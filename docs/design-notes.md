@@ -4433,4 +4433,4 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     duplicates PERF-001 when FFX-60fps runs it, and without FFX-60fps it would move the game's limiter from its own 5 ms
     timer to 1 ms, a pacing change; it is there for the A/B with PERF-001=0. 1 -> 0 at run time releases our 1 ms request only; the opt-out
     stays until the game restarts. The game's Sleep itself is not replaced.
-  - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, ABI 38.
+  - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, so the ABI is unchanged (40 with npc-anchor).

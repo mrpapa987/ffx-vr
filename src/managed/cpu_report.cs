@@ -6,7 +6,7 @@ namespace FFXVR;
 // in Stopwatch sections, sent once a frame to native (ffxvr_cpu_report, ABI 38), which prints the window's average and maximum
 // on the cpu: line with every perf: line. Stopwatch.GetTimestamp only (QPC); no allocation, nothing logged here. Always on.
 // The order of the values is native's cpu_line::M_*.
-// grid-timer: two settings ride after the timings (native reads v[M_N], v[M_N + 1]; same export, ABI 38):
+// grid-timer: two settings ride after the timings (native reads v[M_N], v[M_N + 1]; same export, no ABI change):
 //   timer_fix (ini, default 0): the process opts out of Windows' timer-resolution and execution-speed throttling and holds
 //     timeBeginPeriod(1) for the session. Off by default (review N2): FFX-60fps' PERF-001 already asks for the same, and
 //     without FFX-60fps it would move the game's limiter from its own 5 ms timer to 1 ms. For the A/B with PERF-001=0.
