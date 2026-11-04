@@ -36,7 +36,9 @@ gva. A full-text dump (2.8 M lines) with `grep` is faster than any tool for
 - **Fahrenheit stage 0 is a debugger.** Any access violation in the process
   is fatal even inside `__try` (SEH never gets it), and hardware breakpoints /
   single-step exceptions never reach a vectored handler of ours. So: never
-  probe memory by faulting; `VirtualQuery` first (`ffxvr_safe_read`); find
+  probe memory by faulting; `VirtualQuery` first (`ffxvr_safe_read`; or a
+  copy by the kernel, ReadProcessMemory, which fails without a fault: vq-lean's
+  `fast_reads`, design-notes "VirtualQuery cost"); find
   readers/writers by static cross-reference, not by data breakpoints.
 - Managed exceptions escaping a native->managed callback fail fast with exit
   `0xC0000409`; keep `try/catch` at the boundary (`render_imgui`).

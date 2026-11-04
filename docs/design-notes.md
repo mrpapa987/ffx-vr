@@ -4434,6 +4434,49 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     timer to 1 ms, a pacing change; it is there for the A/B with PERF-001=0. 1 -> 0 at run time releases our 1 ms request only; the opt-out
     stays until the game restarts. The game's Sleep itself is not replaced.
   - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, so the ABI is unchanged (40 with npc-anchor).
+- **VirtualQuery cost (vq-lean, 4 Nov 2026).** The owner's 4 Nov session (14:34-14:56) shows the guarded reads, not their
+  number, as the cost: in the 3D field 13 queries a frame took 0.02 ms, but in the two random battles in mi/mihn0800 and on
+  the mihn0300 virtual screen 9-73 queries took 1.4-8.9 ms a frame (100-160 us each), nearly all of push_all's `player`
+  part. VirtualQuery scans the page table from the queried page to the first page with other attributes, so a read into
+  one of the game's large committed blocks (the 128 MB VirtualAlloc reservations on the `va:` lines) pays for the whole rest
+  of the block, every time.
+  - **What we do (`fast_reads`, ini, default 1).** The render thread's `ffxvr_safe_read` keeps every run a query answered
+    readable (any type) until the next Present, at most 50 ms, and drops them all after a failed copy (ffxvr_cpu.h
+    `FastReader`). A miss below a kept run of the same allocation queries once from the allocation's base (VirtualQuery's
+    answer starts at the queried page; reads in random or falling order would otherwise query at each new low address).
+    Bytes only in FFX.exe's image are copied as before (memcpy; the exe is never freed). Anything else is copied by the
+    kernel (ReadProcessMemory on our own process): a page freed, decommitted or made no-access since its query makes the
+    copy fail, without a fault and without an exception in the process, so nothing reaches the stage-0 debugger. Reads up
+    to 256 bytes go through a bounce buffer so a failed one leaves the destination untouched (some managed callers ignore
+    the result); the larger ones all check it. `range_readable` (whose callers read with plain loads) and the other
+    threads' reads are unchanged, and `fast_reads=0` is the old path exactly. The setting rides on ffxvr_cpu_report as a
+    third value after timer_fix and limiter_probe (same export, ABI 40).
+  - **Why not SEH.** Under alpha12's stage 0 an access violation is fatal even inside `__try` (section 2 of
+    exe-analysis.md); upstream's #388 passes first-chance exceptions on but writes a minidump and two stack walks for each
+    one above 0xC0000000 first. A vectored handler comes after the debugger too. Faulting on purpose stays out.
+  - **Why the cache alone was not enough.** The main and loader threads run while our hook does (load lock, `va:` lines at
+    zone changes and battle starts and ends), so a block can be freed in the middle of our frame; a kept run copied with
+    memcpy would then fault. The kernel's copy is what makes a stale entry harmless. It is also stronger than the old path
+    on a miss: VirtualQuery then memcpy had a (microsecond) window of its own, which the kernel copy closes.
+  - **The one residual.** The kernel's copy consumes a guard page as a user-mode read would (the guard bit is cleared; the
+    copy fails, no exception). A kept run was not a guard page when queried; it can become one within the frame only by
+    VirtualProtect(PAGE_GUARD) on committed memory (a debugger's memory breakpoint) or by a free and a new thread stack
+    reserved at the same address in the same frame. FFX.exe imports no VirtualProtect, and its seven VirtualAlloc calls ask
+    for PAGE_READWRITE (PAGE_NOACCESS for one reserve), never PAGE_GUARD; Fahrenheit's sources set no PAGE_GUARD (its
+    VirtualProtect scope is for code patches); the CLR uses guard pages for thread stacks only. Drivers were not checked. A stack's own growth never turns committed pages into guard pages. This build cannot notice new threads
+    (DllMain disables thread notifications), hence the 50 ms bound as well as the Present.
+  - **The cpu: line.** `VirtualQuery` and `cache hits` keep their meaning (all queries, base probes included; reads with no
+    query); `range_readable` is the walk's time without the copies; new: `fast_reads on: kernel copies N/M a frame x/y ms,
+    F failed, base probes N/M` (or `fast_reads off`). Failed copies above zero outside loads would be worth a look.
+  - **Expected.** A scratch model of the battle shape (three 112 MB blocks, 70 heap and 25 exe reads a frame in random
+    order): 73.6 -> 9.5 queries a frame and 87% fewer pages scanned. The kernel copy costs a system call (a few us under
+    WoW64) for each heap read, about 0.1-0.3 ms a frame at 70 reads: measured on the line. Option (c), fewer reads (bulk
+    copies of the structures push_player reads field by field), is managed work for later.
+  - **Tests (container):** vq_chk/tests/fastread_test.cpp, a page-level address space whose VirtualQuery scans like the
+    real one: readability identical to range_check over 600k reads; 720k reads under churn on another "thread" (decommit,
+    release, no-access, commit) with no plain copy meeting an unreadable page and no read returning bytes from one; guard
+    pages met only when PAGE_GUARD was set mid-frame; the probe, the age bound and the clear after a failed copy; nine
+    mutations of ffxvr_cpu.h caught.
 
 ## Direct game-state gates and overdrive minigame state (4 Nov 2026)
 
