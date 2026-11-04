@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 36;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 37;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -421,6 +421,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_player_head_set = (delegate* unmanaged[Cdecl]<float, float, float, int, void>)req("ffxvr_player_head_set");
             _fn_ride_set     = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float, float, uint>)req("ffxvr_ride_set");   // ABI 32: riding (ride.cs)
             _fn_ride_stats   = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ride_stats");   // ABI 33
+            _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, void>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs)
+            _fn_fp_others_set = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_fp_others_set");
             _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
             _fn_sg_budget    = (delegate* unmanaged[Cdecl]<float, int, void>)req("ffxvr_shadow_budget_set");
             _fn_sg_status    = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_pool_status");
@@ -561,7 +563,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
-        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
+        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
         _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null; _fn_log_config = null; _fn_build_info = null;
@@ -1918,6 +1920,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             ImGui.SetNextItemWidth(200); ImGui.SliderInt("show only part # (-1 = off; use in third person to find the head)", ref _fp_solo, -1, 31);
             if (_fn_fp_hidden != null) ImGui.Text($"draws hidden: {_fn_fp_hidden()}");
+            body_hide_ui();   // the on-foot ownership: radius, NPC parts kept visible (body_hide.cs)
             ImGui.InputText("player model names (comma list, best first)", ref _fp_actor, 64); ImGui.SameLine();
             ImGui.TextDisabled((_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? esc(_fp_how) : $"actor {_fp_actor_idx}") + (_ride_att ? " | " + esc(_ride_status) : ""));
             ImGui.TreePop();
@@ -2369,7 +2372,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
         _ride_att = false; _ride_mount_ok = false;   // ride_probe sets them again for an attached followed actor
-        if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
+        if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); body_hide_push(null, -1, false, default, false, default); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
@@ -2539,8 +2542,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (att) ride_eye(ref pos3, ref head3);   // the body-hide centre stays the rider's root; the eye base gets the bob filtered
             _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
             if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, have ? 1 : 0);
+            // the body hide's ownership (body_hide.cs): after player_set, so a re-pick resets the step margin it just widened
+            bool root_ok = body_hide_root(actors, pick, att, out Vector3 root3);
+            body_hide_push(actors, pick, !in_battle, root3, root_ok, att ? _ride_rider : pos3);
         }
-        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
+        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, false, default, false, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }
     /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,

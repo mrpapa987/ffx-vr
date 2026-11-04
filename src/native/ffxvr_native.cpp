@@ -758,6 +758,16 @@ uint32_t g_ride_rider_n = 0, g_ride_mount_n = 0, g_ride_report = 0;   // first-p
 // (nearer it than the bird's) and the nearest such draw. Read (and reset) by managed every 10 s.
 bool     g_ride_fp_frame = false; float g_ride_match_max = 0.f, g_ride_near_min2 = 1e30f;
 double   g_ride_st[6] = {};   // frames, matched, missed, near-miss frames, near-miss max distance, matched max distance
+// On-foot ownership (ffxvr_fp_self_set / ffxvr_fp_others_set, ABI 37; ffxvr_fpown.h): NPCs vanished in first-person cutscenes
+// (Auron on lc/lchb0500, Yuna on lu/luca0600) because any skinned draw inside the step margin was taken for the player's. Managed
+// sends, every field frame after ffxvr_player_set, the followed actor's drawn root and table index, and the drawn roots (+0x200)
+// of the other live actors within 30 units (not the mount). A draw nearer another root than the player's (by 0.5) is not his.
+// Used only when sent this frame or the one before; otherwise the old radius test. Render space.
+float    g_fp_others[fpown::k_others_max][3] = {}; int g_fp_others_n = 0; uint32_t g_fp_others_frame = 0;
+float    g_fp_self_root[3] = {}; bool g_fp_self_ok = false; uint32_t g_fp_self_frame = 0; int g_fp_pick = -2;
+float    g_fp_d_call[2] = {};   // step_hide's two distances: this ffxvr_player_set call's, the one before (the body hide: line)
+uint32_t g_fph_refused = 0, g_fph_refused_last = 0;   // draws inside the radius refused as another actor's (NPC parts kept visible): this frame / last frame
+static inline bool fp_others_live() { return g_fp_others_n > 0 && g_frames - g_fp_others_frame <= 1u; }
 static void ride_d2(const float* w, float* dr, float* dm) {
     const float ax = w[0] - g_ride_rider[0], ay = w[1] - g_ride_rider[1], az = w[2] - g_ride_rider[2];
     *dr = ax*ax + ay*ay + az*az; *dm = 1e30f;
@@ -776,6 +786,10 @@ static void ride_d2(const float* w, float* dr, float* dm) {
 static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
     if ((g_ride_flags & 1) == 0) {
         fpown::Foot f; f.centre = g_fp_pos; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        if (fp_others_live()) {   // nearest-root ownership; none sent this frame = the radius test alone, as before
+            f.others = g_fp_others; f.n = g_fp_others_n;
+            if (g_fp_self_ok && g_frames - g_fp_self_frame <= 1u) f.self = g_fp_self_root;
+        }
         return fpown::on_foot(w, f, why);
     }
     return fpown::riding(w, g_ride_flags, g_ride_rider, g_ride_mount, g_fp_hide_radius, g_ride_radius);
@@ -4542,7 +4556,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 36;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard)
+constexpr int FFXVR_ABI = 37;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5741,6 +5755,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     lightcam_frame_end();           // shadow camera: the frame's light-camera count, the per-map line, shadow_cam applied for the next frame
     haze_tick();                    // heat haze: heat_haze applied for the next frame, the frame's counts, the 10 s haze: line
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
+    g_fph_refused_last = g_fph_refused; g_fph_refused = 0;
     g_ride_report = ((g_ride_mount_n > 0xFFFFu ? 0xFFFFu : g_ride_mount_n) << 16) | (g_ride_rider_n > 0xFFFFu ? 0xFFFFu : g_ride_rider_n);
     if (g_ride_fp_frame) {
         g_ride_st[0] += 1.0; if (g_ride_rider_n > 0) g_ride_st[1] += 1.0; else g_ride_st[2] += 1.0;
@@ -6432,7 +6447,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         if (whole && (who == 1 || (who == 2 && (g_ride_flags & 4)))) { g_lc_self_hidden++; return -1; }
     }
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
-        const int who = fp_part_of(g_eye2_cur->world_pos);
+        fpown::Why why; const int who = fp_part_of(g_eye2_cur->world_pos, &why);
+        if (why.refused && fp_hiding) g_fph_refused++;   // on foot: inside the radius, nearer another actor's root (kept visible)
         if ((g_ride_flags & 1) && fp_hiding) {   // riding statistics (ffxvr_ride_stats)
             g_ride_fp_frame = true; float dr, dm; ride_d2(g_eye2_cur->world_pos, &dr, &dm);
             if (who == 1) { const float d = sqrtf(dr); if (d > g_ride_match_max) g_ride_match_max = d; }
@@ -10453,7 +10469,7 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
         }
         else if (++g_fp_still_frames > 6) g_fp_step = 0.f;                          // stood still for a few frames
     }
-    g_fp_step_hide = d_hide + g_fp_d_prev; g_fp_d_prev = d_hide;
+    g_fp_step_hide = d_hide + g_fp_d_prev; g_fp_d_call[1] = g_fp_d_prev; g_fp_d_call[0] = d_hide; g_fp_d_prev = d_hide;
     g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0;
 }
 extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {
@@ -10478,7 +10494,7 @@ extern "C" __declspec(dllexport) uint32_t ffxvr_ride_set(int flags, float rx, fl
     // N4: mounting and dismounting re-pick the followed actor (bird -> rider, rider -> Tidus on foot), a jump under the 50-unit warp
     // rule that ffxvr_player_set (called just before) counted as a step: it would widen the hide radius for two frames and flash-hide
     // the bird or an NPC beside Tidus. Not a step: the margin starts again from 0.
-    if ((nf & 1) != (g_ride_flags & 1)) { g_fp_step_hide = 0.f; g_fp_d_prev = 0.f; }
+    if ((nf & 1) != (g_ride_flags & 1)) { g_fp_step_hide = 0.f; g_fp_d_prev = 0.f; g_fp_d_call[0] = g_fp_d_call[1] = 0.f; }
     g_ride_flags = nf;
     g_ride_rider[0] = rx; g_ride_rider[1] = ry; g_ride_rider[2] = rz; g_ride_mount[0] = mx; g_ride_mount[1] = my; g_ride_mount[2] = mz;
     g_ride_radius = std::isfinite(cap) ? (cap < 0.5f ? 0.5f : cap > 12.f ? 12.f : cap) : 6.f;
@@ -10492,6 +10508,31 @@ extern "C" __declspec(dllexport) int ffxvr_ride_stats(float* out, int n) {
     for (; out != nullptr && k < n && k < 6; ++k) out[k] = static_cast<float>(g_ride_st[k]);
     for (double& v : g_ride_st) v = 0.0;
     return k;
+}
+/// On-foot ownership (ABI 37), every frame right after ffxvr_player_set: the followed actor's drawn root (+0x200, render space;
+/// root_ok 0 = not known: the player's side of the test is the hide centre g_fp_pos alone) and its table index (-1 none). A new
+/// index is a re-pick (a cutscene double: actor 0 hidden -> the event Tidus, a party swap), not a step: the jump ffxvr_player_set
+/// just counted (under its 50-unit warp rule) would widen the margin for two calls, so it starts again from 0, as ffxvr_ride_set's
+/// N4 does for a mount. radius (if not null) gets the on-foot hide radius now in effect (hide_radius + the capped margin).
+extern "C" __declspec(dllexport) void ffxvr_fp_self_set(float x, float y, float z, int root_ok, int pick, float* radius) {
+    if (pick != g_fp_pick) { g_fp_pick = pick; g_fp_step_hide = 0.f; g_fp_d_prev = 0.f; g_fp_d_call[0] = g_fp_d_call[1] = 0.f; }
+    g_fp_self_ok = root_ok != 0 && std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+    if (g_fp_self_ok) { g_fp_self_root[0] = x; g_fp_self_root[1] = y; g_fp_self_root[2] = z; }
+    g_fp_self_frame = g_frames;
+    if (radius != nullptr) *radius = g_fp_hide_radius + fpown::margin(g_fp_step_hide);
+}
+/// On-foot ownership (ABI 37), every field frame: the drawn roots (+0x200, render space, x y z each) of the other live actors near
+/// the followed one, nearest first; at most 32 are kept, non-finite entries are dropped. n <= 0 (or no buffer) = none: the old
+/// radius test. Returns last frame's count of draws inside the radius refused as another actor's (NPC parts kept visible).
+extern "C" __declspec(dllexport) int ffxvr_fp_others_set(const float* xyz, int n) {
+    int k = 0;
+    for (int i = 0; xyz != nullptr && i < n && k < fpown::k_others_max; ++i) {
+        const float* p = xyz + 3 * i;
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+        g_fp_others[k][0] = p[0]; g_fp_others[k][1] = p[1]; g_fp_others[k][2] = p[2]; ++k;
+    }
+    g_fp_others_n = k; g_fp_others_frame = g_frames;
+    return static_cast<int>(g_fph_refused_last);
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_head_set(int anchor, float up, float smooth, float fwd) { g_fp_head_anchor = anchor; g_fp_head_up = up; g_fp_head_smooth = smooth; g_fp_head_fwd = fwd; }
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
