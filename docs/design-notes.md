@@ -4219,6 +4219,42 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   previous draw's buffer and its owner). One shared-anchor census answers all three: "count differs" 0, and every kept draw's
   ib/offset in the build line.
 
+### Round 3: the eye on a body drawn away from its root (4 Nov 2026)
+
+- **The owner's run (grid-timer d2c20d1 = npc-anchor 7cf1e3e + grid timing).** Yuna visible, Tidus hidden, but the eye
+  floated above Yuna. The census (14:00:27 and :31) confirms the IB table: Tidus's 13 draws per pass "HIDDEN ... IB table the
+  player's" (textures 405420E4 and 40535B64: c101 uses two, review SF3 was right), Yuna's 25 "kept visible: another actor's
+  segment" (one texture, 406F4CA4); every segment its own index buffer at offset 0; "count differs 0", "not in it 0". The
+  body hide line: 38 tied draws a frame, all decided by the table; the head rule agreed (Tidus's textures dp 0.1, Yuna's dq 0.4).
+  The module log: c101 and c102 not attached, no override matrix, chr_offset 0, both +0x0C on the anchor.
+- **Why the eye was wrong.** The head sub-position was right: "the player's head sub-position 67.49 from the centre", and his
+  palette's head points within 0.1 of it. But fp_head_anchor 1 (the owner's setting, and 0) takes only the head's HEIGHT and the
+  horizontal position from the actor's root (g_fp_pos), by design (no lean when swimming or crouching). The root is the anchor,
+  where Yuna sits. (My round-1 note that "the eye sits in Tidus's head" held for fp_head_anchor 2 only.)
+- **The fix.** Managed (EyeLogic, body_hide.cs) measures the horizontal distance from the drawn root (+0x200) to the NEAREST of
+  the followed actor's 26 sub-positions: in normal play one of them (feet, hips) is always near the root, also prone or
+  crouching; on a displaced body all are far. Over 6 units for 10 frames in a row: on; under 3 for 10 frames: off; an unknown
+  or implausible value (none set, over 400) breaks a run. On foot in the field only (riding and battle unchanged), reset on a
+  re-pick. It sets bit 1 of ffxvr_player_head_set's `valid` (the signature unchanged; old managed sends 0 / 1). Native then
+  takes the eye's horizontal position from the head sub-position in fp_head_anchor 0 and 1 too (fp_eye_base; mode 2 always
+  did), and while it does, a head that jumps more than 8 units from the smoothed one is held for up to 3 frames (a one-frame
+  bad value never moves the view; a real move is taken on the 4th). The switch itself is a cut, not a glide.
+- **Unchanged.** The body hide (its centre is still the root: the draws' world translation is the root), the shadow (drawn by
+  the game at the body), the hands (relative to the eye). Without the bit every mode's eye base is bit-identical to before
+  (test). The head sub-position steps at 30 Hz (not interpolated), as in mode 2: while the displaced body walks, the eye may
+  step with it.
+- **Diagnostics.** ffxvr_diag.log: "eye: from the drawn head: the followed actor's body is drawn away from its root (head
+  sub-position N units from the root horizontally; the palette's head points X units from it) ..." and "eye: back to the
+  root's horizontal position ..." (60 a session). Module log: "eye: from the drawn head / back to the root: the nearest of
+  'c101''s sub-positions is N units from its root horizontally ..." (40 a session).
+- **Tests.** eye_test (fp_eye_base and ffxvr_player_head_set extracted): without the bit, 200,000 random heads in all three
+  modes equal the old formula; with it, modes 0 / 1 at the head, mode 2 unchanged; a 30-unit one-frame spike held; a real
+  15-unit move taken on the 4th frame; the switch back; no head. CpuTests: EyeLogic never switches over 240,000 frames of
+  normal play (standing, running a tick off, prone); a body 67 units away switches after 10 frames; one frame on the root or an
+  isolated spike does not switch; an unknown distance breaks a run.
+- **Not verified.** Whether some normal-play pose (swimming) leaves every sub-position 6+ units from the root (then the eye
+  would follow the head there too); the headset.
+
 ## Battle-start banners in double (4 Nov 2026)
 
 - **What the owner saw.** In battles that start with a message ("Preemptive Strike!", "Ambushed!") the 2D UI is not on the
