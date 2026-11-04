@@ -31,6 +31,10 @@ public sealed unsafe partial class FFXVRModule {
         // frame goes to the virtual screen, as the menus and the sphere grid do: the override is suspended there, and every
         // user of the roots needs it; fixed until the next Present). Then nothing is walked: n = 0, which those draws ignore.
         bool used = false;
+        // review SF2: the re-pick key also carries a scene generation (the map name, the event id and the followed actor's model
+        // instance +0x830, which a load re-creates): a map change or a load in the same slot and model is a new key, so native
+        // starts a new texture table and a recycled texture address cannot inherit the last scene's verdict.
+        if (key >= 0) key = (key & 0x3FFFFF) | (int)((body_hide_scene_gen(actors, pick) & 0x1FF) << 22);
         if (_fn_fp_self_set != null) { float r = 0f; used = _fn_fp_self_set(-root.X, -root.Y, root.Z, root_kind, key, &r) != 0; _fph_radius = r; }
         if (_fn_fp_others_set == null) return;
         float* buf = stackalloc float[48 * 3]; float* dist = stackalloc float[48]; float* heads = stackalloc float[48 * 3];
@@ -47,6 +51,17 @@ public sealed unsafe partial class FFXVRModule {
         }
         _fph_others_n = n;
         _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n > 0 ? heads : null, n);
+    }
+
+    // -- review SF2: the scene generation ---------------------------------------------------------------------------------
+    private ulong _fph_scene_sig; private uint _fph_scene_gen;
+    private uint body_hide_scene_gen(Actor* actors, int pick) {
+        ulong sig = 1469598103934665603UL;
+        try { sig = (sig ^ FhUtil.get_at<ulong>(0x1FCBC60)) * 1099511628211UL; sig = (sig ^ FhUtil.get_at<ulong>(0x1FCBC68)) * 1099511628211UL; } catch { }
+        sig = (sig ^ (ulong)(Globals.event_id != null ? *Globals.event_id : -1)) * 1099511628211UL;
+        if (actors != null && (uint)pick < 48 && read((byte*)(actors + pick) + 0x830, out nint mh)) sig = (sig ^ (ulong)mh) * 1099511628211UL;
+        if (sig != _fph_scene_sig) { _fph_scene_sig = sig; _fph_scene_gen++; }
+        return _fph_scene_gen;
     }
 
     // -- npc-anchor: who shares the followed actor's root ---------------------------------------------------------------
@@ -118,9 +133,9 @@ public sealed unsafe partial class FFXVRModule {
         public bool Hidden(int i) { byte h = 0; return _rd((byte*)(_t + i) + 0x180, &h, 1) != 0 && (h & 0x13) != 0; }
         public bool Root(int i, out Vector3 v) { Vector3 r = default; bool ok = _rd((byte*)(_t + i) + 0x200, &r, (uint)sizeof(Vector3)) != 0; v = r; return ok; }
         public bool Head(int i, out Vector3 v) {
-            Vector4* op = stackalloc Vector4[26]; Vector3 pos = default; v = default;
-            if (_rd((byte*)(_t + i) + 0x524, op, 26 * 16) == 0 || _rd((byte*)(_t + i) + 0x0C, &pos, (uint)sizeof(Vector3)) == 0) return false;
-            return FphWalk.HeadOf(new ReadOnlySpan<Vector4>(op, 26), pos, out v);
+            Vector4* op = stackalloc Vector4[26]; Vector3 pos = default; nint par = 0; v = default;
+            if (_rd((byte*)(_t + i) + 0x524, op, 26 * 16) == 0 || _rd((byte*)(_t + i) + 0x0C, &pos, (uint)sizeof(Vector3)) == 0 || _rd((byte*)(_t + i) + 0x19C, &par, (uint)sizeof(nint)) == 0) return false;
+            return FphWalk.HeadOf(new ReadOnlySpan<Vector4>(op, 26), pos, par != 0, out v);
         }
     }
     /// <summary>... and from this frame's snapshot of the table (plain memory).</summary>
@@ -131,7 +146,7 @@ public sealed unsafe partial class FFXVRModule {
         public bool NamePtr(int i, out nint v) { v = (nint)_t[i].chr_name; return true; }
         public bool Hidden(int i) => (((byte*)(_t + i))[0x180] & 0x13) != 0;
         public bool Root(int i, out Vector3 v) { v = *(Vector3*)((byte*)(_t + i) + 0x200); return true; }
-        public bool Head(int i, out Vector3 v) => FphWalk.HeadOf(new ReadOnlySpan<Vector4>((byte*)(_t + i) + 0x524, 26), *(Vector3*)((byte*)(_t + i) + 0x0C), out v);
+        public bool Head(int i, out Vector3 v) => FphWalk.HeadOf(new ReadOnlySpan<Vector4>((byte*)(_t + i) + 0x524, 26), *(Vector3*)((byte*)(_t + i) + 0x0C), *(nint*)((byte*)(_t + i) + 0x19C) != 0, out v);
     }
 
     /// <summary>The followed actor's drawn root for the ownership test (game space): 2 = on foot, the smooth anchor's post-join
@@ -207,11 +222,12 @@ internal static class FphWalk {
     }
     /// <summary>npc-anchor: an actor's head as push_player picks the followed actor's (the eye): the highest sub-position (the
     /// lowest game-space Y) not on the vertical axis through the origin, folded onto the actor's position when it looks relative
-    /// (more than 100 units off it). False when none is set. Game space.</summary>
-    public static bool HeadOf(ReadOnlySpan<Vector4> optpos, Vector3 pos, out Vector3 head) {
+    /// (more than 100 units off it), but never for an attached actor (review N3, push_player's rule: its +0x0C is not where it is;
+    /// its sub-positions are built from the parent's bone and are world positions). False when none is set. Game space.</summary>
+    public static bool HeadOf(ReadOnlySpan<Vector4> optpos, Vector3 pos, bool attached, out Vector3 head) {
         float hy = float.MaxValue; head = default; bool have = false;
         for (int k = 0; k < optpos.Length && k < 26; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = new Vector3(sp.X, sp.Y, sp.Z); have = true; } }
-        if (have && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
+        if (have && !attached && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
         return have;
     }
 }
