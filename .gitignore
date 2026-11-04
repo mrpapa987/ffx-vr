@@ -70,3 +70,13 @@ __pycache__/
 # Importer previews (pictures of a user's model): never committed, wherever they land
 preview*.png
 debug-preview.png
+
+# FMV depth (tools/fmvdepth/convert.py) and its previews: derived from the game's videos. Never committed, wherever they
+# land. Anchored / specific patterns only: tools/fmvdepth/ (the converter's source) is not matched.
+/fmvdepth/
+**/ffxvr/fmvdepth/
+*.fvd
+*.fvd.part
+*_preview.mp4
+*_preview.mp4.part.mp4
+*_frame[0-9]*.png
