@@ -5480,7 +5480,7 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
         r.mode = mode; r.bst = (int16_t)bst; r.flags = (uint8_t)((g_gpu_last_ok ? 1 : 0) | (g_can_last_ok ? 2 : 0) | (excluded ? 4 : 0));
     }
     if (g_dll_w != g_dll_r || g_dll_dropped) dll_drain();
-    if (!g_slow_bcensus_done && (bst == 1 || bst == 2) && mode != 0 && g_bt_phase == BT_IDLE && xr_running()) {   // (d) a baseline for a slow census
+    if (g_slow_on && !g_slow_bcensus_done && (bst == 1 || bst == 2) && mode != 0 && g_bt_phase == BT_IDLE && xr_running()) {   // (d) a baseline for a slow census (slow_guard=1 only)
         g_slow_bcensus_done = true;
         if (frame_arm_auto("the session's first live battle frame in the headset (a baseline for the slow guard's census)"))
             diag("census: frame %u: the session's first live battle frame in the headset: the next frame goes to ffxvr_frame_auto.log (once a session; a baseline for a slow-state census)", g_frames);
