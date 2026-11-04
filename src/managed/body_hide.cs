@@ -81,7 +81,7 @@ public sealed unsafe partial class FFXVRModule {
     // creation): that actor adds nothing until it is set. Two actors of one model share the mesh: their keys have both owners
     // and decide nothing. Each build is dumped to the module log (30 a session).
     private const int k_ib_max = 192, k_ib_segs = 96; private const float k_ib_range = 6f;
-    private uint* _ib_q; byte* _ib_seg; private int _ib_n, _ib_dumps, _fph_ib_dec; private uint _ib_gen; private ulong _ib_sig, _ib_built; private bool _ib_incomplete;
+    private uint* _ib_q; byte* _ib_seg; private int _ib_n, _ib_dumps, _fph_ib_dec; private uint _ib_gen; private ulong _ib_sig, _ib_built, _ib_last_call = ulong.MaxValue - 1, _ib_logged; private bool _ib_incomplete;
     private void body_hide_ib(Actor* actors, Actor* snap, int pick, Vector3 c) {
         if (_fn_fp_ib_set == null) return;
         if (snap == null || (uint)pick >= 48) { _fph_ib_dec = _fn_fp_ib_set(null, 0, _ib_gen); return; }
@@ -96,26 +96,46 @@ public sealed unsafe partial class FFXVRModule {
             byte* a = (byte*)(snap + idx[k]);
             sig = (sig ^ (ulong)idx[k]) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x830)) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x1C4)) * 1099511628211UL;
         }
-        if (sig != _ib_sig || (_ib_incomplete && _frames - _ib_built >= 30)) ib_build(actors, snap, idx, m, sig);
+        // review 2 SF1: also after any gap in the pushes (a load, a menu, no followed actor: the buffers may have been freed and
+        // reused at the same addresses behind an unchanged signature) and every 60 frames regardless; while a chain did not read
+        // whole, every 30
+        bool gap = _frames - _ib_last_call != 1;
+        _ib_last_call = _frames;
+        if (sig != _ib_sig || gap || _frames - _ib_built >= 60 || (_ib_incomplete && _frames - _ib_built >= 30)) ib_build(actors, snap, idx, m, sig, sig == _ib_sig && !gap);
         _fph_ib_dec = _fn_fp_ib_set(_ib_n > 0 ? _ib_q : null, _ib_n, _ib_gen);
     }
-    private void ib_build(Actor* actors, Actor* snap, int* idx, int m, ulong sig) {
+    private void ib_build(Actor* actors, Actor* snap, int* idx, int m, ulong sig, bool periodic) {
         if (_ib_q == null) { _ib_q = (uint*)Marshal.AllocHGlobal(k_ib_max * 16); _ib_seg = (byte*)Marshal.AllocHGlobal(k_ib_segs * 0x6C); }   // kept for the session
         _ib_sig = sig; _ib_built = _frames; _ib_gen++; _ib_n = 0; _ib_incomplete = false;
-        var sb = _ib_dumps < 30 ? new System.Text.StringBuilder() : null;
+        var sb = _ib_dumps < 30 ? new System.Text.StringBuilder() : null;   // (no strings once the budget is spent)
         uint res0 = *(uint*)((byte*)(snap + idx[0]) + 0x1C4);
+        string[] names = fp_names();
         for (int k = 0; k < m; k++) {
             byte* a = (byte*)(snap + idx[k]);
-            int n0 = _ib_n; int segs = IbChain.Walk(*(nint*)(a + 0x830), k == 0 ? 0u : 1u, _ib_q, ref _ib_n, k_ib_max, _ib_seg, k_ib_segs, _fn_safe_read, out bool fail);
+            // review 2 B1: a slot whose model is in the fp_actor list (c001, c101: a Tidus double, the field model coming back before
+            // the event model leaves) is the player's, never "another actor's"
+            int rank = k == 0 ? 0 : fp_name_rank(idx[k], snap[idx[k]].chr_name, snap[idx[k]].chr_id, names);
+            uint owner = IbChain.Owner(k == 0, rank);
+            int n0 = _ib_n; int segs = IbChain.Walk(*(nint*)(a + 0x830), owner, _ib_q, ref _ib_n, k_ib_max, _ib_seg, k_ib_segs, _fn_safe_read, out bool fail);
             if (fail) _ib_incomplete = true;
+            uint res = *(uint*)(a + 0x1C4);
             if (sb != null) {
-                uint res = *(uint*)(a + 0x1C4);
-                sb.Append(I($" | actor {idx[k]} '{actor_name(snap[idx[k]].chr_name)}' {(k == 0 ? "the player's" : res == res0 ? "another actor's, SAME MODEL as the player's (its keys decide nothing)" : "another actor's")}: +0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{res:X}, {segs} segments, {_ib_n - n0} keys{(fail ? " (a read failed: retried)" : "")}"));
-                for (int e = n0; e < _ib_n && e < n0 + 4; e++) sb.Append(I($" {_ib_q[e * 4]:X8}+{_ib_q[e * 4 + 1]}/{_ib_q[e * 4 + 2]}"));
-                if (_ib_n - n0 > 4) sb.Append(" ...");
+            sb.Append(I($" | actor {idx[k]} '{actor_name(snap[idx[k]].chr_name)}' {(k == 0 ? "the player's" : owner == 0 ? "the player's (a listed model: fp_actor)" : res == res0 ? "another actor's, SAME MODEL as the player's (its keys decide nothing)" : "another actor's")}: +0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{res:X}, {segs} segments, {_ib_n - n0} keys{(fail ? " (a read failed: retried)" : "")}"));
+            for (int e = n0; e < _ib_n && e < n0 + 4; e++) sb.Append(I($" {_ib_q[e * 4]:X8}+{_ib_q[e * 4 + 1]}/{_ib_q[e * 4 + 2]}"));
+            if (_ib_n - n0 > 4) sb.Append(" ...");
             }
+            // review 2 N1: without the followed actor's own keys the table could hold a same-model actor's keys as "another
+            // actor's" alone: no table then (n = 0: the texture and position rules), and no reads for the others
+            if (k == 0 && (fail || _ib_n == 0)) { _ib_n = 0; sb?.Append(" | the player's chain gave no keys: no table sent"); break; }
         }
-        if (sb != null) { _ib_dumps++; _logger.Info(I($"body hide: IB table build {_ib_gen} on map {map_name()}: {_ib_n} entries (buffer+offset/count){sb}") + (_ib_dumps == 30 ? " (no more of these lines this session)" : "")); }
+        // review 2 N3: a build is logged only when its key set differs from the last one logged (30 a session)
+        ulong ks = 1469598103934665603UL;
+        for (int e = 0; e < _ib_n * 4; e++) ks = (ks ^ _ib_q[e]) * 1099511628211UL;
+        if (sb != null && ks != _ib_logged) {
+            bool changed_periodic = periodic && _ib_logged != 0;
+            _ib_logged = ks; _ib_dumps++;
+            _logger.Info(I($"body hide: IB table build {_ib_gen} on map {map_name()}: {_ib_n} entries (buffer+offset/count){(changed_periodic ? " (a periodic rebuild: the keys had changed under an unchanged signature)" : "")}{sb}") + (_ib_dumps == 30 ? " (no more of these lines this session)" : ""));
+        }
     }
 
     // -- npc-anchor: who shares the followed actor's root ---------------------------------------------------------------
@@ -292,6 +312,9 @@ internal static class FphWalk {
 /// owner) quadruples to q from n (up to max); seg is scratch for up to max_segs segment records. Returns the segments read;
 /// fail = a read inside a set chain failed (the caller retries later).</summary>
 internal static unsafe class IbChain {
+    /// <summary>review 2 B1: the followed actor and any slot whose model is in the fp_actor list (name rank >= 0) are the player's (0),
+    /// every other actor another actor's (1).</summary>
+    public static uint Owner(bool followed, int name_rank) => followed || name_rank >= 0 ? 0u : 1u;
     public static int Walk(nint h, uint owner, uint* q, ref int n, int max, byte* seg, int max_segs, delegate* unmanaged[Cdecl]<void*, void*, uint, int> rd, out bool fail) {
         fail = false; int segs = 0;
         if (h == 0 || rd == null) return 0;
