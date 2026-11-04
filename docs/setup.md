@@ -199,8 +199,9 @@ for the 4:3 clips; format in `tools/fmvdepth/FORMAT.md`), `manifest.json` and `c
 **The depth is derived from Square Enix's videos: it is made locally, it stays private, and it is never shipped.**
 The folder holds `PRIVATE-do-not-share.txt`; `package-release.ps1` fails on any `.fvd` or `fmvdepth\` path;
 `install-mod.ps1` never deletes it (not even `-Uninstall -Purge`, which keeps it and says so); `build-mod.ps1` and
-`run-ffx.ps1` leave it alone; `.gitignore` covers `*.fvd` and `fmvdepth` folders; the converter refuses to write inside
-a git checkout or the game's `data\` folder. The converter is not in the player zip yet.
+`run-ffx.ps1` leave it alone; `.gitignore` covers `*.fvd`, the previews and every folder named `fmvdepth` (except
+`tools/fmvdepth/`, the converter's source); the converter refuses to write inside a git checkout or the game's `data\`
+folder (junctions resolved). The converter is not in the player zip yet.
 
 Requirements:
 
@@ -215,7 +216,8 @@ Requirements:
 First run sets up, under `%LOCALAPPDATA%\ffxvr\`: `fmvdepth-venv\` (pinned torch 2.6.0 + torchvision 0.21.0 from the
 PyTorch cu124 index, numpy, OpenCV headless, einops, easydict, tqdm), `fmvdepth-vda\` (the model code at commit
 4f5ae23, from GitHub; its files are checked against their SHA-256) and `fmvdepth-models\` (the Small weights; their
-SHA-256 is recorded on the first download and checked after - not pinned in the script yet). Delete those folders to
+SHA-256 is recorded on the first download and checked after - not pinned in the script yet: until it is, every run
+prints a block with the hash and what Hugging Face said about the file; please send it to the developers). Delete those folders to
 remove them.
 
     # S0, the quality check: SIN_us and BTS_us, then video | depth previews in fmvdepth\preview\ (private)

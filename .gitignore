@@ -72,9 +72,9 @@ preview*.png
 debug-preview.png
 
 # FMV depth (tools/fmvdepth/convert.py) and its previews: derived from the game's videos. Never committed, wherever they
-# land. Anchored / specific patterns only: tools/fmvdepth/ (the converter's source) is not matched.
-/fmvdepth/
-**/ffxvr/fmvdepth/
+# land: any folder named fmvdepth, except tools/fmvdepth/ (the converter's source), re-included below.
+**/fmvdepth/
+!/tools/fmvdepth/
 *.fvd
 *.fvd.part
 *_preview.mp4

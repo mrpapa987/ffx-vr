@@ -3876,7 +3876,10 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
   fp16 autocast, DINOv2 attention swapped for `scaled_dot_product_attention` (same maths; the plain version builds
   ~2.4k x 2.4k score matrices per head and frame at 518x924) -> area-downscale to 320x180 on the GPU -> optional edge
   filter -> per-shot normalisation -> left predictor -> XPRESS_HUFF -> `<name>.fvd.part`, renamed when complete.
-  Model input as VDA's own Resize: 924x518 (16:9) / 686x518 (4:3) at 518, 700x392 / 518x392 at 392.
+  Model input as VDA's own Resize: 924x518 (16:9) / 686x518 (4:3) at 518, 700x392 / 518x392 at 392. Same size, but
+  not the same resampler: upstream resizes float frames with cv2 INTER_CUBIC (no antialias); here ffmpeg's bicubic
+  scaler (which widens its filter when shrinking) makes uint8 rgb24 directly from the YUV planes, so the model sees a
+  slightly softer, requantised image. Expected to matter little; S0 is where that shows.
 - **Windowing** (window.py): upstream `infer_video_depth` keeps all frames and full-size float depth in RAM (END_us:
   ~160 GB), so it is re-implemented as a generator with the same maths: windows of 32 (frames 0..31, then the previous
   window's KEYFRAMES [0,12,24..31] + 22 new frames, padding with the last frame, ceil(n/22) windows), a least-squares
@@ -3884,33 +3887,45 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
   cross-faded 0..1, clamps at 0. Slot 0 is video frame 0 for the whole video, as upstream. Frames leave 8 frames late;
   at most two windows of input frames are alive. One deliberate difference: the fit and cross-fade run on the 320x180
   maps (linear per pixel; only the fit's sample set changes). A test checks the generator against a batch
-  re-statement of upstream on 19 lengths (0-333 frames) to 2e-5.
+  re-statement of upstream (with copies of upstream's own fit and interpolation helpers) on 19 lengths (1-333 frames) to
+  2e-5; another test checks that .fvd frame i comes from video frame i.
 - **Normalisation**: `q = 255 * clamp((d - lo) / (hi - lo))`, 0 far ... 255 near (relative disparity), lo/hi = p2/p98
   EMA-smoothed (alpha 0.9 on the past) within a shot and reset at a cut. Cut = mean absolute luma change of 64x36
   thumbnails >= 28 levels and >= 3x the recent average (+1), so fades and pans do not flag every frame. Raw p2/p98
   and the lo/hi used go into the index; the runtime picks strength and pivot itself.
 - **.fvd v1**: 128-byte header (magic `FVD1`, version, size, frame count, fps, codec, predictor, model, flags, input
-  size, settings hash, index/thumbnail offsets, source size + VBF offset + name), payloads, then the index (32 B a frame:
+  size, settings hash, index/thumbnail offsets, source size + VBF offset + name, the name lower-case as the VBF stores
+  it), payloads, then the index (32 B a frame:
   u64 offset, u32 size, u16 flags cut/stored, f32 p2, p98, lo, hi) and a 16x9 (12x9) luma thumbnail per frame at the end,
   so the writer can stream; the header is rewritten with HF_COMPLETE last. XPRESS_HUFF in buffer mode (not
   COMPRESS_RAW), via ctypes to cabinet.dll; zlib (codec 1) for tests and non-Windows; a frame that does not shrink is
   stored (FF_STORED). The writer decodes every payload again and compares, so a codec fault on the owner's PC cannot
   produce a bad file silently. Reading needs one ReadFile + one Decompress per frame; END_us's index is 0.79 MB.
+  FORMAT.md lists the checks a reader makes before using any offset or size (payload <= w*h, == w*h when stored) and
+  the version rule (major version; compatible additions only in ignored flag bits, reserved fields or header bytes past
+  128). Readers open with FILE_SHARE_DELETE so the converter's final rename works while the game runs.
 - **Resume / manifest**: `manifest.json` per video (status, source size, VBF offset, model, weights SHA-256, settings and
   their hash, converter version, frames, seconds, bytes, cuts, peak VRAM). A video is skipped when the manifest says done
   with the same source and settings hash and the .fvd header agrees; `--force` redoes it. A crash leaves only a .part,
   deleted on the next attempt. Out of VRAM: a plain message suggesting `-InputSize 392`, exit 3.
-- **Pins**: VDA code at 4f5ae23 (GitHub zip; the 18 imported files + LICENSE checked by SHA-256), Small weights only
+- **Pins**: VDA code at 4f5ae23 (GitHub zip; the 17 imported files + LICENSE checked by SHA-256, and no unexpected
+  .py file allowed in the imported packages), Small weights only
   (Base and Large are CC-BY-NC-4.0 and are not offered), torch 2.6.0 / torchvision 0.21.0 (cu124 index), numpy 2.1.3,
   opencv-python-headless 4.10.0.84, einops 0.8.0, easydict 1.13, tqdm 4.67.1; no xformers. The weights' SHA-256 is not
-  known yet (Hugging Face was unreachable while writing): recorded on the first download, printed, checked on later
-  runs; `$WeightsSha256` in the script is the TODO to pin it.
+  known yet (Hugging Face was unreachable while writing): recorded on the first download and checked on later runs.
+  The launcher also records what Hugging Face says about the file (a HEAD request without redirect: X-Repo-Commit,
+  X-Linked-Etag = its SHA-256, X-Linked-Size, ETag, Location) and refuses a download that disagrees with them; while
+  unpinned it prints a block on every run asking the owner to send those lines. `$WeightsSha256` (and a `resolve/<commit>`
+  URL) is the TODO to pin.
 - **Protection** (like the private hand packs): PRIVATE-do-not-share.txt in `fmvdepth\` and `fmvdepth\preview\`;
   package-release fails on any fmvdepth path, .fvd, .part, video or preview; install-mod never deletes it (-Purge keeps
-  it and names it); build-mod reports it separately; run-ffx does not collect it; .gitignore; the converter refuses a
-  git checkout and the game's data folder as output. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
+  it and names it, and still refuses when the mod folder itself is a junction); build-mod reports it separately; run-ffx
+  does not collect it (prefix from the normalised game path, plus a path-component test); .gitignore (`**/fmvdepth/`
+  except `tools/fmvdepth/`, `*.fvd`, previews); the converter refuses a git checkout and the game's data folder as
+  output, junctions and symlinks resolved, and the launcher asks it (`--check-out`) before its write test. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
 - **For the runtime later** (static analysis of FFX.exe, not yet confirmed in game): manager `*(void**)0xCDED3C`
-  (FhUtil 0x8DED3C); playing = byte mgr+0x6D2; file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, "" when idle); id =
+  (FhUtil 0x8DED3C); playing = byte mgr+0x6D2; file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, mixed case as in
+  FFX_VideoList.txt, "" when idle; the .fvd's src_name is lower-case: compare case-insensitively); id =
   int mgr+0x6DC; the player object is embedded at mgr+0x38 and its u32 +0x100 counts uploaded frames, so the frame on
   screen is that count - 1 = the .fvd frame index (clamp to the frame count). Depth file: `fmvdepth\<name lower-cased
   without .webm>.fvd`. If the decoder drops frames that count under-counts: the per-frame thumbnails allow a content
