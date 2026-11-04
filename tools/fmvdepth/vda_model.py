@@ -60,6 +60,21 @@ def sha256_file(path, bufsize=1 << 20):
 # Python files at VDA_COMMIT that we do not import (so not hashed) but that may be there. Any other .py file in the two
 # imported package folders (an added __init__.py above all: it would run on import) fails the check.
 VDA_OTHER_PY = {'utils/dc_utils.py', 'video_depth_anything/video_depth_stream.py'}
+# Every file in those two folders at VDA_COMMIT: `git ls-tree -r --name-only 4f5ae23 -- video_depth_anything utils`
+# on a clone of the official repository (3 Nov 2026). All are .py. VDA_FILES (minus LICENSE) + VDA_OTHER_PY must be
+# exactly this list (tests/test_vda_files.py), and `python vda_model.py verify <that clone>` passes.
+VDA_TREE_AT_COMMIT = (
+    'utils/dc_utils.py', 'utils/util.py',
+    'video_depth_anything/dinov2.py',
+    'video_depth_anything/dinov2_layers/__init__.py', 'video_depth_anything/dinov2_layers/attention.py',
+    'video_depth_anything/dinov2_layers/block.py', 'video_depth_anything/dinov2_layers/drop_path.py',
+    'video_depth_anything/dinov2_layers/layer_scale.py', 'video_depth_anything/dinov2_layers/mlp.py',
+    'video_depth_anything/dinov2_layers/patch_embed.py', 'video_depth_anything/dinov2_layers/swiglu_ffn.py',
+    'video_depth_anything/dpt.py', 'video_depth_anything/dpt_temporal.py',
+    'video_depth_anything/motion_module/attention.py', 'video_depth_anything/motion_module/motion_module.py',
+    'video_depth_anything/util/blocks.py', 'video_depth_anything/util/transform.py',
+    'video_depth_anything/video_depth.py', 'video_depth_anything/video_depth_stream.py',
+)
 VDA_PACKAGES = ('video_depth_anything', 'utils')
 
 
@@ -115,10 +130,16 @@ class VdaSmall:
             m = types.ModuleType('utils')
             m.__path__ = [os.path.join(vda_dir, 'utils')]
             sys.modules['utils'] = m
+        # The verified checkout first on sys.path while its package is imported (nothing else named
+        # video_depth_anything can win), then off it again (its top-level files cannot shadow our own modules later).
         if vda_dir in sys.path:
             sys.path.remove(vda_dir)
-        sys.path.insert(0, vda_dir)          # the verified checkout wins over anything else named video_depth_anything
-        from video_depth_anything.video_depth import VideoDepthAnything
+        sys.path.insert(0, vda_dir)
+        try:
+            from video_depth_anything.video_depth import VideoDepthAnything
+        finally:
+            if vda_dir in sys.path:
+                sys.path.remove(vda_dir)
         if attention == 'sdpa':
             self._patch_attention()
         net = VideoDepthAnything(**VITS_CONFIG)
