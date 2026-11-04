@@ -4047,32 +4047,47 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   50-unit warp rule, a re-pick of the followed actor (a jump counted as a step) and 30 fps logic (a full step on every call,
   so step_hide = two steps) all widened it to several units, and an NPC whose root was inside went whole. Riding already used
   a better rule (a draw nearer the mount's root than the rider's is the mount's).
-- **The fix: nearest-root ownership on foot.** Every frame push_player sends native the followed actor's drawn root and table
-  index (ffxvr_fp_self_set) and, in the field, the drawn roots (+0x200, render space) of the other live actors within 30 units,
-  at most 32, nearest first (ffxvr_fp_others_set). Left out: the followed actor, the mount while riding (its own rule), actors
-  the game script-hides (+0x180 & 0x13: not drawn) and unbuilt roots (about 0). A draw is the player's only if it is inside the
-  radius AND no other root is nearer it than the player's by more than 0.5 units (`ffxvr_fpown.h`; ties and the tolerance go
-  to the player, so his own parts within 0.5 of his root are never refused, whatever stands next to him).
-- **The player's side.** The hide centre g_fp_pos is the smooth anchor's position: the drawn root minus chr_offset (+0x6C) when
-  the post-join snapshot is used, else the 30 Hz +0x0C, up to a step from where the body is drawn. So the player's distance is
-  the smaller of the distances to the hide centre and to his drawn root (the snapshot's +0x200 when used, else +0x200 read at
-  Present): his parts sit on one of the two.
+- **The fix: nearest-root ownership on foot.** Every frame push_player sends native the followed actor's drawn root and a
+  re-pick key (ffxvr_fp_self_set) and, in the field in first person on foot, the drawn roots (+0x200, render space) of the
+  other live actors within 30 units, at most 32, nearest first (ffxvr_fp_others_set). Left out: the followed actor, actors
+  the game script-hides (+0x180 & 0x13: not drawn) and unbuilt roots (about 0); nothing is sent while riding (the mount has
+  its own rule). A draw is the player's only if it is inside the radius AND not both more than 0.75 from the player and
+  nearer another root than his by more than 0.5 units (`ffxvr_fpown.h`; ties and the tolerance go to the player, so his own
+  parts within 0.75 of his root are never refused, whatever stands next to him).
+- **The player's side.** His parts sit on his drawn root, +0x200 = +0x0C + chr_offset (+0x6C). The hide centre g_fp_pos is
+  that root minus chr_offset when the smooth anchor's post-join snapshot is used, else the 30 Hz +0x0C: chr_offset moves the
+  centre off his parts, never the root (review N5). So with the snapshot (root_ok 2, what this frame draws) the player's
+  distance is to his drawn root alone (review N2: a large chr_offset would otherwise make a "phantom" centre that hides an NPC
+  standing by it). Without it (root_ok 1: +0x200 read at Present, the lerp the last frame drew or the canonical tick) it is the
+  smaller of the distances to that root and to the centre, whichever is nearer what is drawn.
+- **Never refused near him (review N3).** A draw within 0.75 of the player (his distance, above) is his, whatever stands next
+  to it, so his body does not flash on while his root is known to within 0.75. With both his roots a tick off what is drawn
+  (no snapshot: smooth_anchor 0, no join hook, a script matrix +0x10C, the re-pick frame, a stale snapshot) and running, a root
+  under 0.5 + that tick from his parts still refuses them; all his parts share one translation, so his whole body (in body mode
+  1 / the VR hands also the head) shows for that frame. The safer failure: in the headset a one-frame body flash means this.
 - **The margin.** min(1.5 x step_hide, 4) on top of hide_radius (4 covers a 2.7-unit step; the smooth anchor needs about 0).
-  A new followed index zeroes it, as ffxvr_ride_set's N4 does for a mount. No roots sent this frame or the one before = the
-  radius test alone, as before. Riding is unchanged.
+  A new re-pick key zeroes it, as ffxvr_ride_set's N4 does for a mount: the key is the table index << 16 | chr_id, so a model
+  swap in the same slot (lc/lchb0500: actor 3 c001 -> c101) counts too (review N1). No roots sent this frame or the one before
+  = the radius test alone, as before. Riding is unchanged.
 - **Limits.** Other actors' roots are read at Present: the lerp the last frame drew or the canonical tick, up to a step off
   (about 0.5 units at a walk; inside the tolerance). An NPC whose root is read more than 0.5 units nearer the player's part
-  than its own parts, or one standing within 0.5 units of the player's root, can still be taken for his. The other way round
-  (another root nearer one of his parts by over 0.5) shows a part of Tidus for that frame: the safer failure. An object
-  attached to the player as an actor of its own is no longer hidden with him (none known on foot).
+  than its own parts, or one whose parts are within 0.75 of the player, can still be taken for his (the base's radius always
+  took those). An object attached to the player as an actor of its own is no longer hidden with him (none known on foot).
+- **Cost (review N4).** Managed walks the table only in first person on foot with the body hide on (native ignores the roots
+  elsewhere), reading chr_enabled and chr_name (live()'s rule), then +0x180 and +0x200 of the live ones: about 48 x 8 bytes
+  plus a few hundred, not 48 whole actors.
 - **Diagnostics.** `body hide:` (ffxvr_diag.log), first person on foot, at most once a second and 200 a session, only on
-  frames whose radius is over 1.5 or with a match beyond 0.75 units: the matched draws grouped by place (count at distance from
-  the centre), the radius with its margin and the two per-call distances, the other roots sent and the nearest, the player's
-  drawn root's distance from the centre, and the draws refused as another actor's. Every 10 s, when anything was refused or
-  the radius went over 1.5: `body hide (10 s, first person on foot):` (100 a session). F8 > Debug > First person / follow:
-  `body hide: radius N, NPC parts kept visible last frame M`.
+  frames with a draw refused as another actor's or a match more than 0.75 from the player (review SF1: not on the radius, which
+  running alone takes over 1.5 on every frame and which spent both budgets before a cutscene): the matched draws grouped by place
+  (count at distance from the centre), the radius with its margin and the two per-call distances, the other roots sent and the
+  nearest, the player's drawn root's distance from the centre (snapshot or read at Present), and the draws refused. Every 10 s,
+  when anything was refused: `body hide (10 s, first person on foot):` with the frames and draws kept visible and the frames
+  with a radius over 1.5 (100 a session). F8 > Debug > First person / follow: `body hide: radius N, NPC parts kept visible
+  last frame M`.
 - **ABI 37:** + ffxvr_fp_self_set, ffxvr_fp_others_set.
 - **Tests (container):** fpown_test (the header and the native glue extracted verbatim, against the base's fp_part_of): an NPC at
-  1 unit with a big margin stays visible; the player's parts 0-0.5 from his root stay hidden (200,000 random cases); riding
-  identical to the base (200,000); no others or stale ones = the base; an NPC exactly between; stale roots off by a step; the
-  30 fps margin, its cap and the re-pick reset. Not verified: MSVC build, the headset.
+  1 unit with a big margin stays visible; the player's parts 0-0.5 from his root stay hidden (200,000 random cases), 0-0.75 from
+  the snapshot root (200,000); riding identical to the base (200,000); no others or stale ones = the base; an NPC exactly
+  between; stale roots off by a step; the 30 fps margin, its cap and the re-pick reset; N1 (a model swap in the same slot), N2
+  (the phantom centre), N3 (and its documented limit). sf1_test drives the extracted diagnostics: ten minutes of running write
+  no line; refusals write about one a second and the 10 s lines. Not verified: MSVC build, the headset.
