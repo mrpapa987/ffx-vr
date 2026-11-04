@@ -80,8 +80,7 @@ def real(path):
     return os.path.realpath(os.path.abspath(path))
 
 
-def in_git_checkout(path):
-    p = real(path)
+def _git_above(p):
     while True:
         if os.path.exists(os.path.join(p, '.git')):
             return p
@@ -91,9 +90,23 @@ def in_git_checkout(path):
         p = up
 
 
-def is_inside(child, parent):
-    c, p = os.path.normcase(real(child)), os.path.normcase(real(parent))
+def in_git_checkout(path):
+    """The checkout `path` is in, by its literal (absolute) spelling or with links resolved, or None. Both: a junction
+    inside a checkout pointing elsewhere still writes into the working tree; one elsewhere pointing into a checkout
+    still writes into the repository."""
+    return _git_above(os.path.abspath(path)) or _git_above(real(path))
+
+
+def _inside(c, p):
+    c, p = os.path.normcase(c), os.path.normcase(p)
     return c == p or c.startswith(p.rstrip('\\/') + os.sep)
+
+
+def is_inside(child, parent):
+    """child is parent or below it, comparing the literal and the resolved spellings of both."""
+    cs = {os.path.abspath(child), real(child)}
+    ps = {os.path.abspath(parent), real(parent)}
+    return any(_inside(c, p) for c in cs for p in ps)
 
 
 def check_out_dir(out, vbf_path):
@@ -101,7 +114,7 @@ def check_out_dir(out, vbf_path):
     if g:
         raise ConvertError(f'--out {out} is inside a git checkout ({g}): depth made from the game\'s videos must never '
                            'go near a repository. Use the mod folder (<game>/fahrenheit/mods/ffxvr/fmvdepth).')
-    data_dir = os.path.dirname(real(vbf_path))
+    data_dir = os.path.dirname(os.path.abspath(vbf_path))
     if is_inside(out, data_dir):
         raise ConvertError(f'--out {out} is inside the game\'s data folder: never write there.')
 
@@ -115,12 +128,12 @@ def write_private_note(folder):
 
 
 RESERVED = {'con', 'prn', 'aux', 'nul'} | {f'com{i}' for i in range(10)} | {f'lpt{i}' for i in range(10)}
-NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,40}\.webm$')
+NAME_RE = re.compile(r'[A-Za-z0-9_]{1,40}\.webm')         # used with fullmatch (a trailing newline does not pass)
 
 
 def check_name(file_name):
     """A video name we are willing to turn into a file name: letters, digits, '_' + '.webm', not a Windows device name."""
-    if not NAME_RE.match(file_name) or file_name[:-5].lower() in RESERVED:
+    if not NAME_RE.fullmatch(file_name) or file_name[:-5].lower() in RESERVED:
         raise ConvertError(f'{file_name!r}: not a name the converter writes a file for')
 
 
@@ -332,16 +345,22 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
 
 # ==================================================================== selection
 def select_videos(arc, a):
-    """[(file name, entry)] in conversion order. Names are checked (check_name); two videos that would write the same
-    .fvd are refused."""
-    out = _select(arc, a)
-    seen = {}
-    for n, _e in out:
-        check_name(n)
+    """[(file name, entry)] in conversion order. A name that fails check_name, or a second video that would write the
+    same .fvd, is skipped with a warning (the rest of the run goes on)."""
+    out, seen = [], {}
+    for n, e in _select(arc, a):
+        try:
+            check_name(n)
+        except ConvertError as ex:
+            print(f'  WARNING: skipped {ex}')
+            continue
         k = out_name(n)
-        if k in seen and seen[k] != n:
-            raise ConvertError(f'{seen[k]} and {n} would both write {k}.fvd')
+        if k in seen:
+            if seen[k] != n:
+                print(f'  WARNING: skipped {n}: {seen[k]} already writes {k}.fvd')
+            continue
         seen[k] = n
+        out.append((n, e))
     return out
 
 

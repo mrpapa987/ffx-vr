@@ -67,7 +67,7 @@ class PipelineTest(unittest.TestCase):
         cls.vbf = os.path.join(t, 'data', 'FFX_Data.vbf')
         os.makedirs(os.path.dirname(cls.vbf))
         helpers.write_vbf(cls.vbf, {vd + 'tst_us.webm': a, vd + 'four_480.webm': b, vd + 'us/ffx_videolist.txt': lst,
-                                    vd + 'extra_jp.webm': b})
+                                    vd + 'extra_jp.webm': b, vd + 'bad-name.webm': b})
         cls.out = os.path.join(t, 'mods', 'ffxvr', 'fmvdepth')
 
     @classmethod
@@ -163,6 +163,8 @@ class PipelineTest(unittest.TestCase):
         expect = [norm(d, flags[i])[0] for i, d in windowed_depth(frames, m)]
         with fvd.FvdReader(os.path.join(self.out, 'tst_us.fvd')) as r:
             got = [r.frame(i).astype(int) for i in range(len(r))]
+        self.assertEqual(len(got), len(expect))
+        self.assertEqual(len(got), n)
         same = [int(np.abs(g - e).max()) for g, e in zip(got, expect)]
         self.assertLessEqual(max(same), 1, same)                      # frame i == video frame i (rounding at most)
         moving = range(1, 40)                                          # the first scene moves; the colour bars do not
@@ -186,13 +188,30 @@ class PipelineTest(unittest.TestCase):
                                           + extra), 0)
             self.assertFalse(os.path.exists(fresh), extra)
         self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(repo, 'y'), '--check-out']), 1)
-        # a symbolic link into the repository is refused too
+        # a symbolic link into the repository is refused too, and so is a link inside it that points outside
         link = os.path.join(self.tmp.name, 'link-to-repo')
         os.symlink(repo, link)
         self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(link, 'z'), '--check-out']), 1)
+        outside = os.path.join(self.tmp.name, 'outside')
+        os.makedirs(outside)
+        os.symlink(outside, os.path.join(repo, 'depth-link'))
+        self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(repo, 'depth-link', 'x'),
+                                       '--check-out']), 1)
+        self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(outside, 'x'), '--check-out']), 0)
+        # the same both ways for the game's data folder
+        data_link = os.path.join(self.tmp.name, 'data-link')
+        os.symlink(os.path.dirname(self.vbf), data_link)
+        self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(data_link, 'x'), '--check-out']), 1)
+        # a name the converter will not write a file for is skipped with a warning; the rest of the run goes on
+        self.assertEqual(self.run_convert('--all', '--list'), 0)
+        arc = vbf.VbfArchive(self.vbf)
+        names = [n for n, _e in convert.select_videos(arc, convert.parse_args(
+            ['--vbf', self.vbf, '--out', self.out, '--all']))]
+        self.assertNotIn('bad-name.webm', names)
+        self.assertIn('tst_us.webm', names)
 
     def test_names(self):
-        for bad in ('con.webm', 'NUL.webm', 'com1.webm', 'a/b.webm', '..\\x.webm', 'x y.webm', 'x.mp4', '.webm'):
+        for bad in ('con.webm', 'NUL.webm', 'com1.webm', 'a/b.webm', 'opn_us.webm\n', 'x' * 41 + '.webm', '..\\x.webm', 'x y.webm', 'x.mp4', '.webm'):
             with self.assertRaises(convert.ConvertError, msg=bad):
                 convert.check_name(bad)
         for good in ('OPN_us.webm', 'WithoutEvent_480.webm', '1_480_new.webm', 'console.webm'):
