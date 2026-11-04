@@ -4,6 +4,7 @@
 // memory map. The page rule here is range_readable's, unchanged; ffxvr_native.cpp static_asserts the constants against
 // <windows.h>.
 #pragma once
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -79,5 +80,74 @@ bool range_check(uintptr_t a, size_t len, Query&& query, RegionCache<N>* cache, 
     }
     return true;
 }
+
+// -- grid-timer: the game's main loop (SKS_WinMainLoop 0x62EE50) over one cpu: line window --------------------------------
+/// The limiter's period for one frame in ms: the game's divider ([0xC30E88], 1 or 2) x K ([0xB412D8], 1 / 59.94 s; FFX-60fps
+/// writes it for its rate). 0 = not a frame period (the expected interval is then unknown and nothing counts as late).
+inline double limiter_period_ms(int32_t divider, double k_s) {
+    if (divider < 1 || divider > 8 || !(k_s > 1.0 / 400.0) || !(k_s < 1.0 / 20.0)) return 0.0;
+    return static_cast<double>(divider) * k_s * 1000.0;
+}
+
+/// The main thread's frames and the limiter's Sleep calls between them, summed over one window. Filled on the game's main
+/// thread (under the native side's lock), swapped out by the render thread with the cpu: line. Pure arithmetic.
+struct Limiter {
+    static constexpr double k_gap_ms = 250.0;   // a longer interval is a load or a stall, not pacing: counted, kept out of the stats
+    static constexpr double k_slot_ms = 8.333;  // one 120 Hz headset slot
+    uint32_t frames = 0;                        // frame starts with an interval (the first after a gap or the probe's start has none)
+    uint32_t gaps = 0;                          // intervals over k_gap_ms
+    uint32_t known = 0, late1 = 0, late2 = 0, late_slot = 0, early2 = 0;   // intervals with a known period; late by > 1, > 2 ms, > a slot; early by > 2 ms
+    uint32_t no_sleep = 0;                      // frames that started without a Sleep since the previous frame's end (already due)
+    double iv_sum = 0.0, iv_sq = 0.0, want_sum = 0.0; float iv_max = 0.f, iv_min = 0.f;
+    Acc work;                                   // 0x62E340's run time (the frame on the main thread, its waits included)
+    uint32_t sleeps = 0, sleep0 = 0, over1 = 0, over2 = 0;   // Sleep calls, of them Sleep(0); took more than asked + 1 / + 2 ms (asked > 0)
+    double ask_sum = 0.0, took_sum = 0.0, over_sum = 0.0; float took_max = 0.f, over_max = 0.f; uint32_t ask_max = 0;
+
+    /// A frame starts: iv_ms since the previous start (< 0: none), want_ms the period the limiter waited for (0: unknown),
+    /// slept: a Sleep ran since the previous frame ended.
+    void frame_start(double iv_ms, double want_ms, bool slept) {
+        if (!slept) no_sleep++;
+        if (!(iv_ms >= 0.0)) return;
+        if (iv_ms > k_gap_ms) { gaps++; return; }
+        const float f = static_cast<float>(iv_ms);
+        if (frames == 0 || f < iv_min) iv_min = f;
+        if (f > iv_max) iv_max = f;
+        frames++; iv_sum += iv_ms; iv_sq += iv_ms * iv_ms;
+        if (want_ms > 0.0) {
+            known++; want_sum += want_ms;
+            const double d = iv_ms - want_ms;
+            if (d > 1.0) late1++;
+            if (d > 2.0) late2++;
+            if (d > k_slot_ms) late_slot++;
+            if (d < -2.0) early2++;
+        }
+    }
+    void frame_end(double work_ms) { work.add(work_ms); }
+    /// One of the limiter's Sleep calls: asked (the game's argument), took (measured around the call).
+    void sleep(uint32_t ask_ms, double took_ms) {
+        if (!(took_ms >= 0.0)) took_ms = 0.0;
+        sleeps++;
+        if (ask_ms == 0) sleep0++;
+        if (ask_ms > ask_max) ask_max = ask_ms;
+        ask_sum += ask_ms; took_sum += took_ms;
+        if (took_ms > took_max) took_max = static_cast<float>(took_ms);
+        if (ask_ms > 0) {
+            const double o = took_ms - static_cast<double>(ask_ms);
+            over_sum += o > 0.0 ? o : 0.0;
+            if (o > over_max) over_max = static_cast<float>(o);
+            if (o > 1.0) over1++;
+            if (o > 2.0) over2++;
+        }
+    }
+    double iv_avg() const { return frames ? iv_sum / frames : 0.0; }
+    double iv_sd() const {
+        if (frames < 2) return 0.0;
+        const double m = iv_sum / frames, v = iv_sq / frames - m * m;
+        return v > 0.0 ? std::sqrt(v) : 0.0;
+    }
+    double want_avg() const { return known ? want_sum / known : 0.0; }
+    /// Average oversleep over the calls that asked for at least 1 ms.
+    double over_avg() const { const uint32_t n = sleeps - sleep0; return n ? over_sum / n : 0.0; }
+};
 
 }  // namespace cpu
