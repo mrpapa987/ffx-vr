@@ -62,18 +62,33 @@ public sealed unsafe partial class FFXVRModule {
     // from it. Every sub-position (built by the game from his skeleton) is then far from the root, while in normal play one of them
     // (the hips, the feet) is always near it, also swimming (prone) or crouching. EyeLogic decides from the nearest sub-position's
     // horizontal distance, with hysteresis over frames; the module log gets each change (40 a session).
+    // eye review SF2: the flag can turn on only while another live, drawn actor's root is on the followed actor's (within
+    // fpown::k_tol, 0.5): the shared-anchor signature that caused the bug, so normal play cannot turn it on whatever joints the
+    // 26 sub-positions are. N3: the state's key carries the scene generation (a map change or load starts it again).
     private EyeDisp _eye_disp; private int _eye_key = -1, _eye_lines;
-    private bool eye_disp_step(ref Actor p, int key, bool allowed) {
+    private bool eye_disp_step(Actor* actors, ref Actor p, int pick, bool allowed) {
+        int key = (int)(((uint)pick << 16 | (uint)(p.chr_id & 0xFFFF)) & 0x3FFFFF | (body_hide_scene_gen(actors, pick) & 0x1FF) << 22);
         if (!allowed || key != _eye_key) { _eye_disp = default; _eye_key = key; if (!allowed) return false; }
         fixed (Actor* pp = &p) {
             Vector3 root = *(Vector3*)((byte*)pp + 0x200);
             float d = EyeLogic.BodyOffset(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root);
-            if (EyeLogic.Step(ref _eye_disp, d) && _eye_lines < 40) {
+            bool shared = !_eye_disp.on && d > EyeLogic.k_enter && eye_root_shared(actors, pick, root);   // read only while it could turn on
+            if (EyeLogic.Step(ref _eye_disp, d, shared) && _eye_lines < 40) {
                 _eye_lines++;
                 _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head" : "back to the root")}: the nearest of '{actor_name(p.chr_name)}''s sub-positions is {d:F1} units from its root horizontally (over {EyeLogic.k_frames} frames; on above {EyeLogic.k_enter:F0}, off below {EyeLogic.k_exit:F0}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
             }
         }
         return _eye_disp.on;
+    }
+    /// <summary>Another live actor the game draws (not script-hidden) with its drawn root within 0.5 of `root` (game space).</summary>
+    private bool eye_root_shared(Actor* actors, int pick, Vector3 root) {
+        Actor* snap = tbl_snap(actors); if (snap == null) return false;
+        for (int i = 0; i < 48; i++) {
+            if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name) || slot_hidden(actors, snap, i)) continue;
+            Vector3 r = *(Vector3*)((byte*)(snap + i) + 0x200);
+            if (finite(r) && Vector3.DistanceSquared(r, root) < 0.5f * 0.5f) return true;
+        }
+        return false;
     }
 
     // -- review SF2: the scene generation ---------------------------------------------------------------------------------
@@ -344,11 +359,12 @@ internal static class EyeLogic {
         }
         return best == float.MaxValue ? -1f : best;
     }
-    /// <summary>One frame: on after k_frames frames with the nearest sub-position over k_enter, off after k_frames under k_exit.
-    /// An unknown or implausible distance (none, over k_max) breaks a run in progress and changes nothing. True when it switched.</summary>
-    public static bool Step(ref EyeDisp s, float d) {
+    /// <summary>One frame: on after k_frames frames with the nearest sub-position over k_enter AND another actor's root on the
+    /// followed one's (shared; eye review SF2), off after k_frames under k_exit. An unknown or implausible distance (none, over
+    /// k_max) breaks a run in progress and changes nothing. True when it switched.</summary>
+    public static bool Step(ref EyeDisp s, float d, bool shared) {
         if (!(d >= 0f) || d > k_max) { s.n_in = 0; s.n_out = 0; return false; }
-        if (!s.on) { s.n_in = d > k_enter ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
+        if (!s.on) { s.n_in = d > k_enter && shared ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
         else { s.n_out = d < k_exit ? s.n_out + 1 : 0; if (s.n_out >= k_frames) { s.on = false; s.n_in = 0; s.n_out = 0; return true; } }
         return false;
     }

@@ -2575,18 +2575,23 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             bool att = !in_battle && ride_probe(actors, pick);
             _cpu_ride += cpu_now() - t_ride;
             if (att && !_ride_built) have = false;   // CR-1: the rider's root is not built yet, nor his sub-positions: the eye is the stand-in root + eye height
+            // npc-anchor round 3: is the body drawn away from its root (a shared scene anchor)? Then the eye's horizontal position
+            // comes from the head (bit 1 below). First person, field, on foot, not blitzball; gated on another actor on his root
+            // (eye review SF2). Decided before the fold below: a displaced head is absolute however far it is (eye review SF1).
+            bool eye_on = have && eye_disp_step(actors, ref p, pick, _fp_mode == 1 && !att && !in_battle && !_in_blitz);
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
-            // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low).
-            if (have && !att && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
+            // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low); nor for a body
+            // drawn away from its root (eye review SF1: the fold moved that eye ~257 units off once the body was 100+ units out).
+            if (have && !att && !eye_on && MathF.Abs(head.X - p.chr_pos_vec.X) + MathF.Abs(head.Z - p.chr_pos_vec.Z) > 100f) head += p.chr_pos_vec;
             // Smooth follow anchor: the post-join snapshot's drawn (interpolated) root when fresh, else +0x0C as before (riding: +0x200 now)
             Vector3 pos3 = att ? _ride_rider : new Vector3(p.chr_pos_vec.X, p.chr_pos_vec.Y, p.chr_pos_vec.Z), head3 = new Vector3(head.X, head.Y, head.Z);
             sa_apply((nint)(actors + pick), ref pos3, ref head3, ref have, att);
             if (att) ride_eye(ref pos3, ref head3);   // the body-hide centre stays the rider's root; the eye base gets the bob filtered
             _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
-            // npc-anchor round 3: bit 1 = the body is drawn away from its root (a shared scene anchor): the eye's horizontal position
-            // from the head (fp_head_anchor 0 / 1 used the root's). Field, on foot only; riding and battle are unchanged.
+            // npc-anchor round 3: bit 1 = the body is drawn away from its root (eye_on above): the eye's horizontal position from the
+            // head (fp_head_anchor 0 / 1 used the root's). Riding, battle and blitzball are unchanged.
             int hv = have ? 1 : 0;
-            if (have && eye_disp_step(ref p, (pick << 16) | ((int)p.chr_id & 0xFFFF), !att && !in_battle)) hv |= 2;
+            if (have && eye_on) hv |= 2;
             if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, hv);
             // the body hide's ownership (body_hide.cs): after player_set, so a re-pick resets the step margin it just widened
             // the re-pick key: the index and the model (N1: lc/lchb0500 swaps c001 -> c101 in the same slot)

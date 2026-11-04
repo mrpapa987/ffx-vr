@@ -65,7 +65,7 @@ public sealed unsafe partial class FFXVRModule {
             if (d.LengthSquared() > k_sa_max_d * k_sa_max_d) { _sa_rejects++; why = "drawn root far from the logic position (not built yet?): the 30 Hz logic position"; }   // SM-1
             else {
                 pos = _r7j.pos + d;
-                if (_r7j.head_ok != 0) head = _r7j.head + d; else have_head = false;   // SM-4: never a Present-time head with the snapshot's position
+                if (_r7j.head_ok != 0) head = ((_r7j.flags & 4) != 0 && _eye_disp.on ? _r7j.head - _r7j.pos : _r7j.head) + d; else have_head = false;   // SM-4: never a Present-time head with the snapshot's position; eye review SF1: no fold for a displaced body
                 _sa_used = true; why = "on: the drawn (interpolated) root";
                 float step_logic = _sa_have_prev ? Vector3.Distance(logic, _sa_prev_logic) : 0f;
                 if (d.LengthSquared() < 1e-8f) { if (step_logic > 0.1f) _sa_flat++; } else _sa_flat = 0;   // SM-7: with FFX-60fps smoothing on, d is non-zero on every logic invocation
