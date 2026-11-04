@@ -4194,7 +4194,9 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     Assumption: the name under an unchanged pointer and chr_id does not change (the name is the model's).
   - Untouched: "keep characters drawn", the distance culls and every cull patch, the pacing (stickrep, lock release).
 - **ABI 38:** + ffxvr_cpu_report; ffxvr_hands2_set and ffxvr_fp_self_set return int; tap game bits 0x200 / 0x400.
-- **Reading the A/B.** If the grid's `cpu:` line shows `push_all` or `range_readable` in milliseconds before this build's
-  savings take effect, H1/H2 of the research hold; if begin_frame and managed are small while `after our hook to the ring wait`
-  is large, the time is outside our hook (Fahrenheit's ImGui, the real Present, the game's list) and the savings will not
-  move the grid.
+- **Reading the A/B.** The savings have no switch: the A/B is this build against bt-banner (521d237) at the same save,
+  each in the grid for a minute (fps60.log PERF-002, the `sr:` line's fresh and skipped-by-us counts). On this build the
+  grid's `cpu:` line says where the render thread's time goes: our own work is `begin_frame` minus `xr wait`, plus `managed
+  total` minus `begin_frame call`; `after our hook to the ring wait` is everything after it. If the grid still misses slots
+  while our own work is well under a millisecond and the ring wait is entered late, the time is outside our hook
+  (Fahrenheit's ImGui, the real Present, the game's list, or the slot clock itself), and the next step is there.
