@@ -441,8 +441,11 @@ def main(argv=None):
         ver, passthrough = media.check_ffmpeg(a.ffmpeg)
         log(f'  {ver}')
         model, wsha = make_model(a, log)
-    except (media.MediaError, ConvertError, RuntimeError, OSError, ImportError) as e:
+    except (media.MediaError, ConvertError) as e:
         print(f'ERROR: {e}')
+        return 1
+    except Exception as e:  # noqa: BLE001 - torch / the weights: a DLL that does not load, a bad download, no GPU
+        print(f'ERROR: could not load the model: {type(e).__name__}: {e}')
         return 1
     ff = {'ffmpeg': a.ffmpeg, 'ffprobe': a.ffprobe, 'passthrough': passthrough}
     settings, shash = settings_of(a, model, wsha)
