@@ -7,17 +7,19 @@ namespace FFXVR;
 // on the cpu: line with every perf: line. Stopwatch.GetTimestamp only (QPC); no allocation, nothing logged here. Always on.
 // The order of the values is native's cpu_line::M_*.
 // grid-timer: two settings ride after the timings (native reads v[M_N], v[M_N + 1]; same export, ABI 38):
-//   timer_fix (ini, default 1): the process opts out of Windows' timer-resolution and execution-speed throttling and holds
-//     timeBeginPeriod(1) for the session (FFX-60fps' PERF-001 asks for the same; this keeps it with PERF-001 off or absent).
+//   timer_fix (ini, default 0): the process opts out of Windows' timer-resolution and execution-speed throttling and holds
+//     timeBeginPeriod(1) for the session. Off by default (review N2): FFX-60fps' PERF-001 already asks for the same, and
+//     without FFX-60fps it would move the game's limiter from its own 5 ms timer to 1 ms. For the A/B with PERF-001=0.
 //     1 -> 0 at run time releases our 1 ms request only; the opt-out stays until the game restarts.
 //   limiter_probe (ini, default 1): the main loop's frame call and the limiter's Sleep are timed for the cpu: line (two
-//     redirects in FFX.exe, checked against its bytes; installed once, never removed; 0 later stops the recording).
+//     redirects in FFX.exe, checked against its bytes; installed once, never removed; 0 later stops the recording and the
+//     game-window sampling).
 public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float*, int, void> _fn_cpu_report;   // ABI 38
 
     private const int k_cpu_n = 15, k_cpu_settings = 2;   // the timings, then timer_fix and limiter_probe
-    private bool _timer_fix = true, _limiter_probe = true;   // ini timer_fix, limiter_probe (grid-timer)
+    private bool _timer_fix = false, _limiter_probe = true;   // ini timer_fix (default 0), limiter_probe (default 1) (grid-timer)
     // the frame's stamps (render thread)
     private long _cpu_t_top, _cpu_t_bf0, _cpu_t_bf1, _cpu_t_win0, _cpu_t_win1, _cpu_t_push0, _cpu_t_push1, _cpu_t_end;
     // accumulated inside push_all (a section can run more than once a frame: body_hide_push has three call sites)

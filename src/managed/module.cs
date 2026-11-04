@@ -985,7 +985,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
                 case "slow_guard":        pb(k, v, ref _slow_guard); break;               // the slow-GPU guard (default 1; slow_guard.cs)
                 case "slow_guard_restart": pb(k, v, ref _slow_guard_restart); break;      // ... its last step, the VR session restart (default 1)
-                case "timer_fix":         pb(k, v, ref _timer_fix); break;                // grid-timer: 1 ms timer + no timer throttling (default 1; cpu_report.cs)
+                case "timer_fix":         pb(k, v, ref _timer_fix); break;                // grid-timer: 1 ms timer + no timer throttling (default 0; cpu_report.cs)
                 case "limiter_probe":     pb(k, v, ref _limiter_probe); break;            // grid-timer: time the game's frame limiter for the cpu: line (default 1)
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
                 case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
