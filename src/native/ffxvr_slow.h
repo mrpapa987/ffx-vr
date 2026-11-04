@@ -75,7 +75,7 @@ enum Fix { FIX_NONE = -1, FIX_RESTART = 100, FIX_PASSED = 101, FIX_NOTHING = 102
 // FIX_UNVERIFIED (review 2 N1): last_fix_item helped, but its re-check could not be measured twice (it is back on)
 enum Why { WHY_NONE = 0, WHY_HEADSET_OFF, WHY_DISABLED, WHY_NO_RESTART, WHY_RESTARTS_MAX, WHY_RESTART_GAP, WHY_NOT_BACK, WHY_STILL_SLOW,
            WHY_FEW_STEPS, WHY_PRE_UNMEASURED, WHY_NOT_SLOW_NOW, WHY_NO_FOCUS, WHY_VERIFY_UNMEASURED, WHY_AFTER_UNMEASURED,
-           WHY_REPEAT, WHY_SKIPPED, WHY_UNLEARNT };
+           WHY_REPEAT, WHY_SKIPPED, WHY_UNLEARNT, WHY_RESTART_SPENT };
 inline const char* why_text(int w) {
     switch (w) {
         case WHY_HEADSET_OFF:       return "the headset is off";
@@ -91,6 +91,7 @@ inline const char* why_text(int w) {
         case WHY_NO_FOCUS:          return "no FOCUSED frame outside a transition window or load phase within 5 s: no restart";
         case WHY_VERIFY_UNMEASURED: return "the re-check with the item back on could not be measured twice: it stays on";
         case WHY_AFTER_UNMEASURED:  return "the frames after the restart could not be measured";
+        case WHY_RESTART_SPENT:     return "nothing helped, and restarts are off for this session (a restart did not help)";
         default:                    return "";
     }
 }
@@ -111,6 +112,7 @@ public:
     double base[2] = { 0, 0 }; bool learnt[2] = { false, false };
     int    run = 0, miss = 0; double run_span = 0, run_end = 0, run_frame = 0, run_t0 = 0, quiet_until = -1e300;
     int    episodes = 0, restarts = 0; double last_restart = -1e300, spent_at = -1e300, unlearnt_at = -1e300;
+    bool   restart_failed = false;   // (review 2 Q3) a restart did not help: no more restarts this session (steps and lines go on)
     int    item = -1; Window w; double t_state = 0, t_onset = 0, cool_until = 0; bool repeated = false; int measured_steps = 0;
     // the last episode, for the overlay and the log: its trigger and how it ended
     double last_span = 0, last_end = 0, last_frame = 0, last_base = 0, last_dur = 0; bool last_screen = false; int last_frames = 0;
@@ -211,7 +213,7 @@ public:
                 Out r; fill(r, -1);
                 if (w.n < c.min_samples) { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_AFTER_UNMEASURED; end_episode(in.now, c.cool_fail, FIX_NOTHING); }
                 else if (r.helped) { Out& e = emit(EV_RECOVERED); e = r; e.ev = EV_RECOVERED; end_episode(in.now, c.cool_ok, FIX_RESTART); }
-                else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_STILL_SLOW; end_episode(in.now, c.cool_fail, FIX_NOTHING); learn_all = true; }
+                else { Out& e = emit(EV_GAVE_UP); e = r; e.ev = EV_GAVE_UP; e.why = WHY_STILL_SLOW; end_episode(in.now, c.cool_fail, FIX_NOTHING); learn_all = true; restart_failed = true; }
             } break;
             default: break;
         }
@@ -302,6 +304,7 @@ private:
         item = IT_N;
         int why = WHY_NONE;
         if (!in.restart_ok) why = WHY_NO_RESTART;
+        else if (restart_failed) why = WHY_RESTART_SPENT;
         else if (measured_steps < c.restart_min_steps) why = WHY_FEW_STEPS;
         else if (restarts >= c.restarts_max) why = WHY_RESTARTS_MAX;
         else if (in.now - last_restart < c.restart_gap) why = WHY_RESTART_GAP;

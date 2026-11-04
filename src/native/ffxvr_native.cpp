@@ -5585,6 +5585,7 @@ static const char* slow_status_text() {
     if (g.learnt[1]) snprintf(bs, sizeof(bs), "%.1f ms", g.base[1]); else snprintf(bs, sizeof(bs), "learning");
     slow_text_add(len, " | baseline 3D %s, screen %s", b3, bs);
     for (int i = 0; i < IT_N; ++i) if ((g.latched >> i) & 1u) slow_text_add(len, " | %s kept off", item_name(i));
+    if (g.restart_failed) slow_text_add(len, " | restarts off for this session (a restart did not help)");
     if (g.episodes == 0) { slow_text_add(len, " | never triggered"); return g_slow_text; }
     char fix[64];
     if (!g.last_ended) snprintf(fix, sizeof(fix), "under way");

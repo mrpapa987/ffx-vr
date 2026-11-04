@@ -4029,9 +4029,10 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   (another process taking the GPU = H1). An item fixed it (slow again with it back on) = our work (H2, that item). Fast
   after a restart suggests the runtime's state, but the cause may have ended by itself at the same time (the restart
   comes 60 s or more after the onset). A canary over 2 ms in many frames suggests H1; a low one is no evidence.
-- **Known limit** (review 2 Q3): a map that is legitimately 3x heavier than the previous minute and over 33 ms for
-  minutes still gets a restart 60 s in (at most 3 a session, one per 5 min); the restart that did not help then lets the
-  guard learn that map, and the light map after it is learnt back. The
+- **A restart that did not help** (review 2 Q3): no more restarts for the rest of the session; the steps and the lines go
+  on, later episodes end "restarts are off for this session (a restart did not help)", and F8 says so. A map that is
+  legitimately 3x heavier than the previous minute and over 33 ms for minutes therefore costs one restart a session at
+  most (60 s in). A restart that did help keeps the usual limits (one per 5 min, 3 a session). The
   `dll:` and `rt:` lines around the onset show what the game loaded and created.
 - **Not verified here** (container only): MSVC build, the PDH counter names on the owner's driver, the restart under
   VDXR mid-battle, whether the census frame's hitch is noticeable.
