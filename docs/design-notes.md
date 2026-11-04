@@ -3950,7 +3950,8 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
 
 ## Slow-GPU guard and overdrive freeze diagnostics (3 Nov 2026)
 
-Branch `od-guard` (ABI 36). Research: overdrive-freeze.md (scratchpad).
+Branch `od-guard` (ABI 36). Research: overdrive-freeze.md (scratchpad). Revised after review (od-guard-review.md: B1-B3,
+SF1-SF3, N1-N4, N6-N8).
 
 - **What happened.** At Tidus's Slice & Dice (the timing gauge) the headset view fell to about 15 fps and never came
   back until the game was quit: the GPU span (the game's first clear to our Present hook, GPU timestamps) went from ~12
@@ -3963,44 +3964,62 @@ Branch `od-guard` (ABI 36). Research: overdrive-freeze.md (scratchpad).
   driver), so our span and VDXR's xrEndFrame both stretch. Not excluded: a per-frame cost the overdrive latched inside
   our span that our counters do not see. The cause is undetermined; this round adds a guard and the data to tell.
 - **The guard** (ffxvr_slow.h, the decisions, pure and unit-tested; ffxvr_native.cpp "slow-GPU guard", at every Present
-  on the render thread). Slow = span > max(3 x the mode's baseline, 33 ms) and xrEndFrame > 20 ms. Baselines: 3D (and the
-  stereo screen) and the mono screen, learnt from normal frames only (spans up to 25 ms). Trigger: 120 slow frames (about
-  8 s at 15 fps), 6 normal frames tolerated inside the run. Not counted (the run restarts): a battle transition window, a
-  load phase, the pick tool's slow motion, a session that is not FOCUSED (the Quest / VD menu throttles by design), and a
-  Present gap over 250 ms (a stall, a load hitch: 2 s of quiet after it). Then:
+  on the render thread). Slow = span > max(3 x the view's baseline, 33 ms) and xrEndFrame > 20 ms. Baselines, one for 3D
+  (and the stereo screen) and one for the mono screen: the median of the measured spans outside episodes, from a
+  0.5 ms-bin histogram that halves at 8192 frames (the last 1-2 min at 120 Hz); learnt after 600 frames; no 25 ms cap
+  (review B2), so a setup that always runs at 36 ms learns 36 and is never "slow" against itself. Each span is judged
+  against the view of the frame it timed (5 frames earlier). Trigger: 120 slow frames (about 8 s at 15 fps), 6 normal
+  frames tolerated inside the run. Without a learnt baseline for that view the run is only logged (one line, 10 min
+  apart) and nothing is switched off. Not counted (the run restarts): a battle transition window, a load phase, the pick
+  tool's slow motion, a session that is not FOCUSED (the Quest / VD menu throttles by design), and a Present gap over
+  250 ms (a stall, a load hitch: 2 s of quiet after it). Then:
   1. a `slow:` line (span, its baseline and threshold, xrEndFrame, frame time, the canary, draws, battle_state, map), a
-     frame census (ffxvr_frame_auto.log; 2 a session), the last 600 frames (3 a session), the PDH snapshot;
-  2. after 1 s, each optional item that is on goes off for about 2 s (0.5 s settle + 2 s measured): `ui_capture` (the UI
-     pass split), `ui_depth` (the adaptive distance and the plate), `vr_hands`, `imgui_layer` (not while Fahrenheit's save
-     screen is on the screen), `screen_mono` (the mono virtual screen, eye 2 not re-issued; the skip stops one Present
-     before the forcing, so the first 3D frame after it has an eye 2). An item helped when 75 % of the measured frames are
-     fast (span <= max(2 x baseline, 25 ms) and xrEndFrame <= 10 ms); one that did not is back on at once. One that
-     helped stays off 10 s, comes back on and the frames are checked 2.5 s: still fast = the cause had passed ("recovered
-     ... (by X off; it is back on and the frames stay fast ...)"); slow again = X stays off for 5 min (F8 shows it);
-  3. nothing helped: everything is back on and the VR session restarts as the stuck-swapchain recovery does (xr_stop,
-     the flat state; managed's ffxvr_xr_set starts it again after 1 s, not counted as a failed start). At most one per
-     5 min and 3 a session (slow_guard_restart=0: never). Fast 1.5 s after the session is back = "recovered ... (by the
-     session restart)"; else it gives up.
+     frame census (ffxvr_frame_auto.log; 2 a session), the last 600 frames (1 a session, 3 with a diagnostic on), the PDH
+     snapshot;
+  2. after 1 s, each optional item that is on goes off for about 2.5 s (0.5 s settle + 2 s measured): `ui_capture` (the UI
+     pass split), `ui_depth` (the adaptive distance and the plate), `vr_hands`, `screen_mono` (the mono virtual screen,
+     eye 2 not re-issued; the skip stops one Present before the forcing, so the first 3D frame after it has an eye 2). The
+     ImGui layer is never an item (review SF1): F8 and Fahrenheit's save screen are on it. Only measured frames count
+     (a span read, not excluded); a window needs 8 of them. One with fewer (all excluded: a menu, a load, a transition
+     window) is repeated once and then skipped; it never counts as "no change" (review B1). An item helped when 75 % of
+     the measured frames are fast (span <= max(2 x baseline, 25 ms) and xrEndFrame <= 10 ms); one that did not is back on
+     at once. One that helped stays off 10 s, comes back on and the frames are checked 2.5 s: still fast = the cause had
+     passed; slow again = it stays off for 5 min (F8 shows it). A re-check without 8 measured frames is repeated once and
+     then ends the episode with the item on: latching needs a measured result (review B3);
+  3. nothing helped: everything is back on and the slow state is measured once more (1.5 s). The session restarts only
+     if at least 2 steps were measured, that check is 75 % slow (fast instead = "recovered ... by itself"), and from a
+     FOCUSED frame outside a transition window or load phase (waited for up to 5 s). The restart is the stuck-swapchain
+     recovery's (xr_stop under InEye2, the flat state; managed's ffxvr_xr_set starts it again after 1 s, not counted as a
+     failed start). At most one per 5 min and 3 a session (slow_guard_restart=0: never). Fast 1.5 s after the session is
+     back = "recovered ... (by the session restart)"; else it gives up. Every refusal is one `slow: gave up ...` line.
   Every episode ends in a cool-down (30 s; 5 min after giving up); 6 episodes a session, then it only logs (one line a
-  minute). The headset going off or slow_guard=0 ends an episode with everything back on. The effective settings are the
-  user's values with the guard's items off (the setters and slow_apply), so managed's every-frame push cannot undo a step.
-- **Diagnostics.** (a) every ffxvr_diag.log line starts with the local time `hh:mm:ss.mmm` (core.log and the module log
-  are UTC: compare minutes and seconds). (b) `dll:` lines for every DLL load / unload after init (LdrRegisterDllNotification:
-  the callback copies into a fixed 64-slot ring under the loader lock; the render thread logs; magic_*.dll up to 300 a
-  session, others 150). (c) a 600-frame ring (frame, QPC, frame ms, span, canary, xr wait / end, draws, eye-2 draws, view,
-  battle_state, excluded), dumped at the trigger. (d) the census at the trigger, and a baseline census at the session's
-  first live battle frame in the headset (battle_state 1 or 2; slow_guard=1); the first automatic census of a session
-  starts ffxvr_frame_auto.log fresh (the previous one is ffxvr_frame_auto.prev.log) and only one automatic census can wait.
-  (e) the GPU canary: two timestamps back to back at the Present hook's start, read with the span; over 2 ms means the
-  GPU was busy elsewhere (perf: `canary avg max, over 2 ms N`; the slow: line has it over the run). (f) `rt:` lines for
-  render-target / depth textures (any sample count) the game creates in a battle or an episode: the first 40 a session,
-  then new size / format / samples / bind kinds (64); ours are left out by the caller's return address. (g) during an
-  episode only, at its start and every 5 s, a PDH line with the top 5 processes by 3D and by VideoEncode engine use
-  (`\GPU Engine(*)\Utilization Percentage`, summed per process; a thread of its own, pdh.dll loaded there).
-- **F8** (Debug): the two settings and one line: the state, the baselines, any item kept off, and the last trigger
-  (time, view, span and baseline, xrEndFrame) with what fixed it.
-- **Reading the next log.** Canary high with the span = another process (H1; the PDH line names it). Canary low, span
-  high, an item fixed it = our work (H2, that item). A restart fixed it = the runtime's state. The `dll:` and `rt:` lines
-  around the onset show what the game loaded and created.
+  minute). The headset going off (or unticked while a restart is pending) or slow_guard=0 ends an episode with everything
+  back on, latched items included. The effective settings are the user's values with the guard's items off (the setters
+  and slow_apply), so managed's every-frame push cannot undo a step.
+- **Diagnostics.** (a) every ffxvr_diag.log line starts with the local time `hh:mm:ss.mmm`, every line of a multi-line
+  text too (core.log and the module log are UTC: compare minutes and seconds). (b) `dll:` lines for DLL loads / unloads
+  after init (LdrRegisterDllNotification: the callback copies into a fixed 64-slot ring under the loader lock; the render
+  thread logs): magic_*.dll up to 300 a session, others 20 (150 with a diagnostic key on). (c) a 600-frame ring (frame,
+  QPC, frame ms, span with its frame's view, canary, xr wait / end, draws, eye-2 draws, view, battle_state, excluded),
+  dumped at the trigger. (d) the census at the trigger; with a diagnostic key on, also a baseline census at the session's
+  first live battle frame in the headset (battle_state 1 or 2). The first automatic census of a session starts
+  ffxvr_frame_auto.log fresh (the previous one is ffxvr_frame_auto.prev.log); one automatic census can wait, and the
+  baseline gives its place to the first shatter or a slow onset. (e) the GPU canary: two timestamps back to back at the
+  Present hook's start, read with the span (perf: `canary avg max, over 2 ms N`; the slow: line has it over the run).
+  Weak evidence (review SF3): with no flush between them another process shows up only if the scheduler switches exactly
+  there. Over 2 ms means the GPU was shared at that moment; a low canary proves nothing. (f) with a diagnostic key on,
+  `rt:` lines for render-target / depth textures (any sample count) the game creates in a battle or an episode: the first
+  40 a session, then new size / format / samples / bind kinds (64); ours are left out by the caller's return address.
+  (g) during an episode only, at its start and every 5 s, a PDH line with the top 5 processes by 3D and by VideoEncode
+  engine use (`\GPU Engine(*)\Utilization Percentage`, summed per process; a thread of its own, pdh.dll loaded there).
+- **Logging profiles.** tools\set-logging.ps1 -Profile Release turns every diagnostic key off and leaves slow_guard (not a
+  diagnostic, default 1): release users get the guard with a quiet log (no baseline census, no rt: lines, 20 dll: lines
+  besides magic_*.dll, one 600-frame dump; slow: lines only when it is slow).
+- **F8** (Debug): the two settings and one line: the state, the baselines ("learning" until learnt), any item kept off,
+  and the last trigger (time, view, span and baseline, xrEndFrame) with what fixed it.
+- **Reading the next log.** The PDH line names the processes using the 3D and VideoEncode engines during the episode
+  (another process taking the GPU = H1). An item fixed it (slow again with it back on) = our work (H2, that item). A
+  restart fixed it = the runtime's state. A canary over 2 ms in many frames supports H1; a low one is no evidence. The
+  `dll:` and `rt:` lines around the onset show what the game loaded and created.
 - **Not verified here** (container only): MSVC build, the PDH counter names on the owner's driver, the restart under
   VDXR mid-battle, whether the census frame's hitch is noticeable.
