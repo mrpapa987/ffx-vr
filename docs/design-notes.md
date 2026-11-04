@@ -4196,6 +4196,29 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   scenes latched), SF2 (a new scene generation clears the table). CpuTests: IbChain.Walk on a fake chain (inline and array
   entries, no-GPU segments, the cap, a failed read, no model yet) and HeadOf for attached actors.
 
+### Round 2 review fixes (4 Nov 2026)
+
+- **B1: a listed model is the player's.** A slot whose model is in the fp_actor list (c001, c101, ...) goes into the IB table
+  as the player's, never "another actor's" (IbChain.Owner): a Tidus double near him (the c001 -> c101 handover before the
+  script hides c001, the field model back before the event model leaves) stays hidden, also when it is drawn on his root with
+  its own root reported elsewhere.
+- **SF1: no stale table.** Managed rebuilds after any gap in its calls (a load, a menu, no followed actor: buffers can be freed
+  and reused at the same addresses behind an unchanged signature) and every 60 frames regardless; native never re-arms a
+  table after a gap with the same build number (only a new build fills it). A periodic rebuild whose keys changed says so in
+  its log line.
+- **N1:** when the followed actor's own walk gives no keys (or a read fails), no table is sent (n = 0): a same-model actor's
+  keys can never stand alone as "another actor's".
+- **N2:** a tied draw still feeds the texture rule when the table decides it, so the fallback is warm if the table drops out.
+- **N3:** a build is logged only when its key set differs from the last one logged (30 a session).
+- **Left as they are (review 2 N4, N5).** N4: the light-camera path shares the scene's IB counters (F8's "decided by it"
+  includes shadow casters); a frame that is "wide" while the 200-line budget is spent writes no line even with tie budget
+  left; an NPC part kept visible by the table near the player in normal play spends the shared 200 at 1/s; light-camera hides
+  have no census line. N5, for the census to confirm: that the draw packet's index block (+0x34) is the PMesh segment's;
+  that the buffer index k is 0..3 (a 5th buffer falls back); that no character draw reaches DrawIndexed without its own
+  IASetIndexBuffer (the vtbl +0x0C branch at 0x614575, packet +0x04 != 0, is not 0x592C60: such a draw would inherit the
+  previous draw's buffer and its owner). One shared-anchor census answers all three: "count differs" 0, and every kept draw's
+  ib/offset in the build line.
+
 ## Battle-start banners in double (4 Nov 2026)
 
 - **What the owner saw.** In battles that start with a message ("Preemptive Strike!", "Ambushed!") the 2D UI is not on the
