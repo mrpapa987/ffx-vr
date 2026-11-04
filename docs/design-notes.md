@@ -4270,6 +4270,12 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
 - **SF3:** the spike hold compares with the last accepted raw head, not the smoothed one (heavy smoothing no longer runs away).
 - **N1:** one or two frames without a head while displaced keep the last eye. **N2:** the switch in and out blinks (4 frames,
   the camera-cut blink). **N3:** the flag's state key carries the scene generation.
+- **Round 3b (the owner's retest, 14:28).** The eye switched on (body 66.9 units out) and then back 11 s later: Tidus's feet
+  walked back to 1.4 units from the anchor while his head was still 8.4 units out, and the distance off-switch put the eye on
+  the anchor (above Yuna) again. The rule is now the shared root itself: while another live, drawn actor's root is within 0.5
+  of the followed one's for 10 frames, the eye follows the drawn head whatever the distance; it goes back after 10 frames
+  without the shared root (or on the exclusions). The body's distance only guards plausibility (none set, over 400, breaks a
+  run). The fold skip, the spike hold, the missing-head frames and the blink are unchanged.
 - **Left (eye review N4-N8).** N4: a root jump while displaced moves the eye with the root for up to 3 frames, then it glides
   back (offsets are relative to the root); real 8-50 unit moves glide over ~10 frames at the default smoothing. N5: during a
   hold the raw head is stale for the tie rule and the census (harmless: a stale dp gives no "other" evidence). N6: without the

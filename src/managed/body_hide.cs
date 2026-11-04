@@ -59,9 +59,9 @@ public sealed unsafe partial class FFXVRModule {
 
     // -- npc-anchor round 3: the eye on a body drawn away from its root --------------------------------------------------
     // On mi/mihn0100 the event Tidus's root is the scene anchor (shared with Yuna) and the animation places his body up to ~70 units
-    // from it. Every sub-position (built by the game from his skeleton) is then far from the root, while in normal play one of them
-    // (the hips, the feet) is always near it, also swimming (prone) or crouching. EyeLogic decides from the nearest sub-position's
-    // horizontal distance, with hysteresis over frames; the module log gets each change (40 a session).
+    // from it, and back near it (the owner's retest: feet 1.4 units from it, head 8.4). While another actor's root is on his,
+    // the eye follows the drawn head whatever the distance (EyeLogic); normal play has no shared root. The module log gets each
+    // change (40 a session).
     // eye review SF2: the flag can turn on only while another live, drawn actor's root is on the followed actor's (within
     // fpown::k_tol, 0.5): the shared-anchor signature that caused the bug, so normal play cannot turn it on whatever joints the
     // 26 sub-positions are. N3: the state's key carries the scene generation (a map change or load starts it again).
@@ -72,10 +72,10 @@ public sealed unsafe partial class FFXVRModule {
         fixed (Actor* pp = &p) {
             Vector3 root = *(Vector3*)((byte*)pp + 0x200);
             float d = EyeLogic.BodyOffset(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root);
-            bool shared = !_eye_disp.on && d > EyeLogic.k_enter && eye_root_shared(actors, pick, root);   // read only while it could turn on
+            bool shared = eye_root_shared(actors, pick, root);   // every frame: the rule is the shared root itself
             if (EyeLogic.Step(ref _eye_disp, d, shared) && _eye_lines < 40) {
                 _eye_lines++;
-                _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head" : "back to the root")}: the nearest of '{actor_name(p.chr_name)}''s sub-positions is {d:F1} units from its root horizontally (over {EyeLogic.k_frames} frames; on above {EyeLogic.k_enter:F0}, off below {EyeLogic.k_exit:F0}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
+                _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head: another actor's root is on" : "back to the root: no other actor's root on")} '{actor_name(p.chr_name)}''s root for {EyeLogic.k_frames} frames (the nearest of his sub-positions {d:F1} units from it horizontally) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
             }
         }
         return _eye_disp.on;
@@ -343,10 +343,14 @@ internal static class FphWalk {
 
 /// <summary>npc-anchor round 3: the eye's displaced-body state (EyeLogic.Step).</summary>
 internal struct EyeDisp { public bool on; public int n_in, n_out; }
-/// <summary>npc-anchor round 3: is the followed actor's body drawn away from its root? Pure (the scratch test drives it).</summary>
+/// <summary>npc-anchor round 3: does the eye follow the drawn head (the body may be drawn anywhere around a shared root)? Pure
+/// (the scratch test drives it). Round 3b (the owner's retest, 14:28): the distance off-switch put the eye back on the anchor
+/// when Tidus's feet walked back near it (1.4 units) with his head still 8.4 units away. The rule is now the shared root itself:
+/// on after k_frames frames with another live, drawn actor's root on the followed one's, off after k_frames without; the body's
+/// distance only guards plausibility (none set, or over k_max, breaks a run).</summary>
 internal static class EyeLogic {
-    public const float k_enter = 6f, k_exit = 3f, k_max = 400f;   // units (horizontal); a prone Tidus has sub-positions on his root
-    public const int k_frames = 10;                                // consecutive frames to switch either way
+    public const float k_max = 400f;   // units (horizontal): a nearest sub-position farther than this is not believed
+    public const int k_frames = 10;    // consecutive frames to switch either way
     /// <summary>The horizontal distance from the root to the nearest sub-position (those off the origin's axis, push_player's
     /// rule), game space; -1 when none is set.</summary>
     public static float BodyOffset(ReadOnlySpan<Vector4> optpos, Vector3 root) {
@@ -359,13 +363,13 @@ internal static class EyeLogic {
         }
         return best == float.MaxValue ? -1f : best;
     }
-    /// <summary>One frame: on after k_frames frames with the nearest sub-position over k_enter AND another actor's root on the
-    /// followed one's (shared; eye review SF2), off after k_frames under k_exit. An unknown or implausible distance (none, over
-    /// k_max) breaks a run in progress and changes nothing. True when it switched.</summary>
+    /// <summary>One frame: on after k_frames frames with another actor's root on the followed one's (shared; eye review SF2),
+    /// off after k_frames without, whatever the body's distance d (round 3b). An unknown or implausible d (none, over k_max)
+    /// breaks a run in progress and changes nothing. True when it switched.</summary>
     public static bool Step(ref EyeDisp s, float d, bool shared) {
         if (!(d >= 0f) || d > k_max) { s.n_in = 0; s.n_out = 0; return false; }
-        if (!s.on) { s.n_in = d > k_enter && shared ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
-        else { s.n_out = d < k_exit ? s.n_out + 1 : 0; if (s.n_out >= k_frames) { s.on = false; s.n_in = 0; s.n_out = 0; return true; } }
+        if (!s.on) { s.n_in = shared ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
+        else { s.n_out = !shared ? s.n_out + 1 : 0; if (s.n_out >= k_frames) { s.on = false; s.n_in = 0; s.n_out = 0; return true; } }
         return false;
     }
 }
