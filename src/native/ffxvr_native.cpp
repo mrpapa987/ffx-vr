@@ -6797,12 +6797,28 @@ static void diag_stamp(FILE* f) {
     SYSTEMTIME t; GetLocalTime(&t);
     fprintf(f, "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 }
+/// The text's lines, each after `stamp`, then a newline (a text ending in one gets no empty stamped line after it).
+static void diag_put_lines(FILE* f, const char* text, const char* stamp) {
+    for (const char* p = text; ; ) {
+        const char* nl = strchr(p, '\n');
+        fputs(stamp, f);
+        if (nl == nullptr) { fputs(p, f); fputc('\n', f); return; }
+        fwrite(p, 1, static_cast<size_t>(nl - p) + 1, f);
+        p = nl + 1;
+        if (*p == 0) return;
+    }
+}
 static void diag_va(const char* fmt, va_list ap) {
     FILE* f = diag_open();
     if (f == nullptr) return;
-    diag_stamp(f);
-    vfprintf(f, fmt, ap);
-    fputc('\n', f);
+    // (review N7) formatted first, so a line with embedded newlines (a managed exception text) is stamped on every line
+    char buf[2048]; va_list ap2; va_copy(ap2, ap);
+    const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    SYSTEMTIME t; GetLocalTime(&t);
+    char stamp[16]; snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    if (n >= 0 && static_cast<size_t>(n) < sizeof(buf)) diag_put_lines(f, buf, stamp);
+    else if (n > 0) { std::vector<char> big(static_cast<size_t>(n) + 1); vsnprintf(big.data(), big.size(), fmt, ap2); diag_put_lines(f, big.data(), stamp); }
+    va_end(ap2);
     diag_close(f);
 }
 /// Appends a line to ffxvr_diag.log (the heartbeat rewrites ffxvr_native.log
@@ -6824,15 +6840,7 @@ static bool diag_try(const char* text) {
     if (f == nullptr) return drop;
     SYSTEMTIME t; GetLocalTime(&t);   // od-guard (a): one time for the batch, at the start of each of its lines
     char stamp[16]; snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-    for (const char* p = text; ; ) {
-        const char* nl = strchr(p, '\n');
-        fputs(stamp, f);
-        if (nl == nullptr) { fputs(p, f); break; }
-        fwrite(p, 1, static_cast<size_t>(nl - p) + 1, f);
-        p = nl + 1;
-        if (*p == 0) { diag_close(f); return true; }   // a batch that ends in a newline: no empty stamped line after it
-    }
-    fputc('\n', f);
+    diag_put_lines(f, text, stamp);
     diag_close(f);
     return true;
 }
