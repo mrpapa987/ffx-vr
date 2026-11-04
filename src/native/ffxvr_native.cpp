@@ -10957,6 +10957,10 @@ static void bt_begin(bool encounter, bool trig, const char* why) {
 static void bt_end(const char* why) {
     const ULONGLONG now = GetTickCount64();
     if (g_bt_phase >= 0 && g_bt_phase < 4) g_bt_t_ph[g_bt_phase] += now - g_bt_phase_t;
+    if (g_bt_phase == BT_SHATTER) g_bt_bst_shatter_end = g_bt_r.bst;   // BT-B-1 review N1: a window that ends inside the shatter (the battle intro) has its end state too
+    char aft[64];   // N1: "none" rather than "0 ms" when the window never reached the after phase
+    if (g_bt_phase == BT_SHATTER) snprintf(aft, sizeof(aft), "no after phase (ended in the shatter phase)");
+    else snprintf(aft, sizeof(aft), "after %llu ms", g_bt_t_ph[BT_AFTER]);
     unsigned held = 0, wt = 0; xr_counters(&held, &wt);
     char fr[64] = "not seen";
     if (g_bt_t_free) snprintf(fr, sizeof(fr), "at +%llu ms", g_bt_t_free - g_bt_t0);
@@ -10965,9 +10969,9 @@ static void bt_end(const char* why) {
     else if (g_bt_capf) snprintf(cap, sizeof(cap), "no capture adopted (%u candidate frames)", g_bt_capf);
     char stb[16];
     const char* amb = g_bt_amb == 1 ? "1 (preemptive)" : g_bt_amb == 2 ? "2 (ambushed)" : g_bt_amb == -99 ? "not read" : g_bt_amb == 0 ? "0" : "other";   // BT-B-1
-    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s, screen_transition %s at the open, ambush_state %s at the end): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
+    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s, screen_transition %s at the open, ambush_state %s at the end): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), %s; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
              why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : g_bt_freeze_wait ? ", no freeze: no BrokenScreen signal" : "", bt_st_str(g_bt_st_open, stb, sizeof(stb)), amb, g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
-             g_bt_bst_first_shard, g_bt_bst_last_shard, g_bt_bst_shatter_end, g_bt_t_ph[BT_AFTER], fr, g_frames - g_bt_win_frame, held - g_bt_held0, g_bt_gap_max, cap,
+             g_bt_bst_first_shard, g_bt_bst_last_shard, g_bt_bst_shatter_end, aft, fr, g_frames - g_bt_win_frame, held - g_bt_held0, g_bt_gap_max, cap,
              g_bt_m_rule, g_bt_m_slot, g_bt_m_cam, g_bt_m_nodsv, g_bt_dropped ? " (some bt: lines were dropped: the log stayed busy)" : "");
     bt_add("bt: frame %u: %s -> idle: %s", g_frames, k_bt_names[g_bt_phase & 3], why);
     bt_add("bt: %s; Present gaps over 50 ms add up to %.0f ms", g_bt_summary, g_bt_gap_sum);
@@ -11097,8 +11101,11 @@ static void bt_tick() {
     if (g_bt_live_n >= 2) {   // BT-S-3: in every phase (armed included): a frozen pose never reaches a live battle
         char hs[112] = "";
         if (intro) {   // BT-B-1 (state 0x16: never a running state)
-            snprintf(g_bt_why, sizeof(g_bt_why), "the battle intro in the %s phase (battle_state 22 with a 3D camera, 2 frames; no BrokenScreen drawing for %u Presents, handle %08X; ambush_state %d, message cue %s)",
-                     k_bt_names[g_bt_phase & 3], g_bt_still_n, r.h, g_bt_amb, g_bt_cue == -99 ? "not read" : g_bt_cue != 0 ? "up" : "none");
+            char sb[64];   // review N2: which bt_intro_live branch fired
+            if (g_bt_phase == BT_AFTER && r.h == 0) snprintf(sb, sizeof(sb), "the effect completed (handle 0)");
+            else snprintf(sb, sizeof(sb), "no BrokenScreen drawing for %u Presents, handle %08X", g_bt_still_n, r.h);
+            snprintf(g_bt_why, sizeof(g_bt_why), "the battle intro in the %s phase (battle_state 22 with a 3D camera, 2 frames; %s; ambush_state %d, message cue %s)",
+                     k_bt_names[g_bt_phase & 3], sb, g_bt_amb, g_bt_cue == -99 ? "not read" : g_bt_cue != 0 ? "up" : "none");
             bt_end(g_bt_why); return;
         }
         if (r.h != 0) snprintf(hs, sizeof(hs), "; the transition handle %08X still set, no BrokenScreen signal: a transition without a glass break", r.h);

@@ -4103,16 +4103,18 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   processes the cue in the same tick for any non-zero state (0x790D83 -> 0x79CDF0 -> TOBtlDrawFirstStrike*MessageWindow
   0x8934F0 / 0x8934D0), and the battle UI draw puts the message window in the UI pass. BT-3 counted 0x16 as the load chain,
   so the transition window stayed open through it, with no UI split (bt_no_split): the UI pass went into both eye images.
-  The doubling was there in every battle (4 Nov log: 60-231 frames per battle at state 22 with `cam3d=329 dclr=1
-  uiframe=0`), but only the banner is visible there: the command, CTB and party windows come at state 1.
+  The doubling was there in every random battle (4 Nov log: 60-231 frames per battle at state 22 with `cam3d=329 dclr=1
+  uiframe=0`; the one script glass break, window 1, had `dclr=0` there: no UI pass), but only the banner is visible
+  there: the command, CTB and party windows come at state 1.
 - **The glass break overlaps it.** State 22 starts while the shatter's last pieces still fly (23-45 frames with shard draws
   in 11 of 13 random windows), and the handle stays set ~50 frames after the last shard. So "AFTER at 0x16" alone would fix
   little: in most battles the banner is up in the shatter phase.
 - **BT-B-1, the fix (native, bt_tick).** `bt_intro_live`: an encounter window in SHATTER or AFTER counts state 0x16 with a
   3D camera (BT-3's 2 frames) as live when the glass break has stopped drawing: AFTER with handle 0 (the effect completed),
   or real shards seen this window (`g_bt_real_seen`) and 6 still Presents in a row (`g_bt_still_n`: no shard draw, no
-  capture of capturedFrame's size, +5 clear), the handle's tail set or not. Real shards are required for the second case so
-  a window whose shard detection failed keeps the old behaviour. ARMED (a haze, BT-H-1) and every other state are unchanged.
+  capture of capturedFrame's size, +5 clear), the handle's tail set or not. Real shards are required for the second case,
+  so a window whose shard detection failed does not end while the handle is set; it ends at the intro once it is in AFTER
+  with handle 0 (the effect completed), not at state 1 as before. ARMED (a haze, BT-H-1) and every other state are unchanged.
   After such an end the re-arm block (`every signal clear`) waits for the handle's tail, as after BT-H-1. In mode 2 the freeze
   and the AFTER hold (the pinned frame over the load black) also end at the intro instead of at state 1. No ABI change.
 - **Effect (replayed on the 4 Nov log).** Doubled frames at state 22 go from 60-231 per battle to 2-52; e.g. window 5 ends at
@@ -4121,11 +4123,19 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   pass's signature (battle-transition.md 2.2), so the split stays off. A follow-up could open the UI pass at a depth clear
   that comes after this frame's shard draws (the second clear: `dclr=2` on those frames). That changes the UI detector
   inside the glass break, so it is not part of this fix.
+- **Known limits (review N4).** MsMessageCueRegist only queues the cue; the slot [0x112C910] is written by the process call
+  later in the tick. 0x14 -> 0x15 -> 0x16 -> its test run in one call of 0x783020, so if 0x7A04C0, 0x784220 and [0x112CA64]
+  are all clear in that tick, the game goes to state 1 with the banner still queued, and the banner shows at state 1. If the
+  handle's tail is still set then, the window stays open (BT-3 needs handle 0) and the banner is doubled as before. Never
+  seen: state 22 lasted 39+ frames in every logged window. Haze windows (ARMED) at state 22 keep the split off until state 1
+  as before; whether a scripted battle ever carries ambush_state 1 or 2 is unknown.
 - **Diagnostics.** `bt: f=` lines end with `amb=N cue=M` (ambush_state; the cue slot, non-zero while a battle message is up;
   -99 = not read; the AFTER-phase thinning never hides a cue change). The new release: `bt: frame N: shatter -> idle: the
   battle intro in the shatter phase (battle_state 22 with a 3D camera, 2 frames; no BrokenScreen drawing for K Presents,
-  handle H; ambush_state A, message cue up|none)`. The summary's window part gets `ambush_state N at the end` (`1
-  (preemptive)`, `2 (ambushed)`).
+  handle H; ambush_state A, message cue up|none)`, or `...; the effect completed (handle 0); ...` on the AFTER path. The
+  summary's window part gets `ambush_state N at the end` (`1 (preemptive)`, `2 (ambushed)`); a window that ends in the
+  shatter phase records its end state (`battle_state a..b, c at its end`) and says `no after phase (ended in the shatter
+  phase)` instead of `after 0 ms` (review N1).
 - **Tests (container):** bt_intro_test (bt_intro_live and bt_running_state extracted verbatim): every state and phase, the
   handle's tail, a replay of window 5 (release at 26520), no shards detected (26570, AFTER with handle 0), a stray
   capture-sampling draw, a capture candidate every frame, no camera, a non-encounter window. Not verified: MSVC build, the
