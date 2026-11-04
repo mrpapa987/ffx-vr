@@ -249,12 +249,14 @@ public sealed unsafe partial class FFXVRModule {
 
     private void d7_join_record() {
         _d7_join_calls_total++;
-        if (!_sg_tried && _native_ready && _fn_sg_install != null) { _sg_tried = true; _sg_state = _fn_sg_install(); _sg_on_main = true; }   // the pool guard: written on the main thread, between frames (shadow_cam.cs)
         if (_fn_main_note == null || _fn_main_note() == 0) return;   // the main thread's joins only (the first caller names it, for the watchdog)
         if (_d7_join_mtid == 0) _d7_join_mtid = Environment.CurrentManagedThreadId;
         uint stamp = FhUtil.get_at<uint>(0x1FCBBF0);
         if (stamp == _d7_join_last_stamp) return;   // the first join after the counter moved (0x821617) is Sg_MainLoop's post-join call (0x821656)
         _d7_join_last_stamp = stamp; _d7_join_post_total++;
+        // The shadow pool guard (shadow_cam.cs): written here only, on the main thread (past the filter above) at Sg_MainLoop's
+        // post-join, between frames, so the main thread is never running the code being rewritten (review 2, S1 / S2).
+        if (!_sg_done && _native_ready && _fn_sg_install != null) { _sg_state = _fn_sg_install(); System.Threading.Volatile.Write(ref _sg_done, true); }
         int s = (_d7j_seq + 1) & 1;
         ref D7Join j = ref _d7j[s];
         j.stamp = stamp; j.exec = FhUtil.get_at<byte>(0x8496D4); j.valid = 0; j.head_ok = 0; j.flags = 0;   // exec byte: VA 0xC496D4 (FFX-60fps sigs.cpp; read at 0x82D7F4)

@@ -3699,8 +3699,10 @@ visible in the log: no `riding: off`, no text box, no map or event change.
   current buffer half (manager+0xDC4 + half x 16, the half at gva 0xCDEC24 flipping per frame) and, when all are set,
   printf's "GetASpareGradMeshInstance() , Shouldn't get here, contact cg please" and returns null. The caller writes through
   the null.
-- **The flags are never cleared.** No code in .text clears a flag: the only accesses at +0xDC4 are the scan and the set. So
-  the pool is handed out and kept. A null on the first entry means it was already exhausted before this frame.
+- **(Corrected by review 2, below.)** The first reading here, that nothing ever frees the pool, was wrong: ShadowManager::Render
+  frees all 32 flags at the end of every render (0x6CADD0, addressed as `[esi-0x10]` / `[esi]` off +0xDD4, which a grep for
+  `+0xdc4` cannot find). A null on the first entry means this render's earlier walks (list 0, then list 1 of 0x6D12F0) had
+  already taken the 16 instances.
 - **The stall line is not a hang.** `stall #3` (4125 ms, main thread in coreclr) is the crash in progress: the exception
   being dispatched and the core dumped. The 2D1733 / 2D1736 values on its stack are copies of the faulting site.
 - **Our likely part (medium confidence).** In Ch_DrawMain the shadow-tile request (0x830240 -> 0x82E3E0 -> 0x644A00 ->
@@ -3711,16 +3713,77 @@ visible in the log: no `riding: off`, no text box, no map or event change.
 - **Not ours.** The A presses (no input in this path), the ride hide (render-thread draw skipping only), the smooth anchor
   and the ride probe (reads only), and the grip strip (input only). FFX-60fps doubles the render invocations; whether that
   speeds the pool up is unknown.
-- **What settles it.**
-  1. The read-only pool watch added in this build. Every 60 frames it reads the 32 flags and the two list counts and logs a
-     `shadow pool:` line when they change, plus a warning at 14/16. It is also in F8 > Debug > Character shadows. If the
-     counts climb during the ride, this is the cause.
-  2. An A/B: the same ride with "keep characters drawn" unticked.
-  3. Optionally a full-memory dump.
-- **A fix, if confirmed:** keep the character cull off only within a radius of the player (or of the headset's view), or
-  release / cap shadow tiles for far actors. Not done yet: the counts first.
+- **What settled it:** review 2 (chocobo-review2.md) traced the per-render allocator. See "The shadow pool, corrected".
 
-### The shadow pool: prevention (ABI 34, branch `chocobo`)
+### The shadow pool, corrected (review 2; ABI 35, branch `chocobo`)
+
+The prevention in f654547 (ABI 34) rested on a wrong reading, and review 2 found two blockers in it. This section replaces
+that section, which is kept below for the record, struck by this one.
+
+**How the pool really works: a per-render scratch allocator.** ShadowManager::Render (0x6C9E50, main thread; once a frame
+from the scene render), on its normal path:
+- flips the buffer half (0x6CA1A4);
+- zeroes the first 16 tile slots of both lists (0x6CA1B0);
+- hands one of the half's 16 instances to every in-range tile entry (lists 0 and 1, so at most 2 per shadowed character):
+  0x6D12F0(0), 0x6D12F0(1), 0x6D1530(1), each through GetASpare 0x6CC980;
+- draws each entry from its slot (0x6CAB60..0x6CAD4E);
+- frees all 32 flags (0x6CADD0).
+
+The halves are for GPU double-buffering, not a session budget. The tile entries come from this pass's shadow requests.
+Ch_DrawMain clears the 64 caster marks (+0xFE8) before loop 3 (0x82F1FF -> 0x6D1780), and each request
+(0x830240 -> ... -> 0x6D3000) sets one (0x6D30F0). So **a render crashes when more than about 8 shadowed characters are in
+the tiles at once**. It has nothing to do with session length: the 1.5 vs 3.7 minutes says where the owner rode, not how
+long. Vanilla requests shadows only for visible characters, a handful. "Keep characters drawn" makes all ~25 Calm Lands
+actors request one.
+
+**B1, the f654547 guard, still crashed.** Its skip left the slot null, and the draw loop in the same render reads it
+(0x6CACCE, then `push [eax+0x10]` at 0x6CAD03). **Fix:** on a null the stub now does what the loops' own "nothing to do" paths
+do. It stores the default instance, manager+0x8B8, into the slot (`mov eax,[edx/ebx+0x8B8]; mov [edi],eax`, as at 0x6D15A9
+and 0x6D1355), so the draw loop takes its default branch, as for an empty tile. Then it replays the loop end and continues.
+- Those bytes are now in the verified set.
+- The stub stride is 128 bytes.
+- The cave is made execute-read after building.
+- What the player sees: that shadow is missing for that one render. The next render starts with a free pool.
+
+**B2, the f654547 budget, never fired.** It read the pool flags on the main thread, after the render had freed them, so
+the count was always 0. **Fix: a caster budget from the marks**, counted in the same Ch_DrawMain pass.
+- `sg_gate` (still replacing the call at 0x82F4BE) reads the marks before and after each request (+0xFE8, 64 dwords). A
+  drop in the count means a new pass.
+- Characters within `shadow_near` (300 units, about 26 m) always ask for a shadow.
+- A farther one is skipped once this pass's far casters reach `shadow_budget` minus the near casters. The near count is the
+  larger of this pass's and the last pass's, because the actor walk is in table order: far birds come first and Tidus on the
+  bird is slot 28.
+- `shadow_budget` counts characters, not instances: default 8 (at most 16 instances), range 2-8, shown in F8 as "characters
+  with a shadow".
+- If more than 8 near characters ask, the guard catches the rest.
+
+**Install (S1, S2, S3).** Only on the main thread: in the job-join hook, past its main-thread filter, at Sg_MainLoop's
+post-join, so never while the main thread runs these sites. The render-thread fallback is gone: the gate's rel32 at
+0x82F4BF straddles a cache line, so writing it from another thread could be fetched torn. Without the hook, one warning
+says it is not installed. The managed side logs from a flag written after the install result.
+
+**Readouts (S4).** The F8 line and the `shadow pool:` log lines report:
+- shadowed characters in the last pass (and how many were near);
+- the peak in a pass;
+- the far characters left without a shadow;
+- the renders where the guard saved a shadow from crashing (it should stay 0 with the budget).
+
+Gone: the instance counts per half, and the "missing until restart" warning.
+
+**Tests that would have caught B1 / B2** (choco_chk/tests/sg_test.cpp). A model of Ch_DrawMain's marks and of the render
+(the flip, the slot clear, GetASpare, the draw loop's slot read, the free) over the 22:20:16 Calm Lands positions. It
+reproduces:
+- the original crash (0x6D1736);
+- B1 (the old stub: a null read at 0x6CAD03);
+- B2 (the flag budget never skips).
+
+It then shows the new stub and budget: no crash in 10 passes, no overflow after the first pass, Tidus shadowed every pass.
+`sg_replay_check.py` checks that each stub's null path is the exe's own default store plus the loop end. `sg_check.py`
+checks every verified byte array against the exe.
+
+### (Superseded) The shadow pool: prevention (ABI 34, f654547)
+
+Kept for the record. Its "never frees" premise and its budget are wrong: see the section above.
 
 The owner: "Can we exclude shadows when we get too many away from the character's immediate area?" There are two parts, and
 both are installed once, each only over the bytes it expects.

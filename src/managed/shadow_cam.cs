@@ -30,45 +30,50 @@ public sealed unsafe partial class FFXVRModule {
         shadow_pool_watch();
     }
 
-    // The ShadowManager's grad-mesh pool (design-notes "Headset round 1 of chocobo": the Calm Lands crash). Native
-    // (ffxvr_shadow_guard_install, ABI 34) installs two things once, each only over the bytes it expects:
-    // - the guard: GetASpareGradMeshInstance (0x6CC980) returning null (all 16 instances of a buffer half in use; the game then
-    //   wrote through the null at 0x6D1736) now skips that shadow for the frame instead of crashing;
-    // - the distance budget: Ch_DrawMain's per-actor shadow request (0x830240) is skipped for characters farther than
-    //   shadow_near from the player once the pool holds shadow_budget instances (they stay drawn, without a shadow).
-    // The pool is never released while the game runs (the flags are cleared only by the pool's setup, 0x6D1B40, from the
-    // renderer's resource build), so the budget is what keeps the near characters' shadows for the session.
-    // Install: from the job-join hook on the main thread (between frames) when it runs, else from here after 600 frames.
+    // The ShadowManager's grad-mesh pool (design-notes "Headset round 1 of chocobo" and "The shadow pool, corrected";
+    // chocobo-review2.md). ShadowManager::Render hands out at most 16 instances a render (up to 2 per shadowed character)
+    // and frees them all at the end of the render (0x6CADD0). The Calm Lands crash: more shadowed characters at once than
+    // that, because "keep characters drawn" makes every actor ask for a shadow. Native (ffxvr_shadow_guard_install, ABI 35):
+    // - the budget: Ch_DrawMain's per-actor shadow request (0x830240) is skipped for characters farther than shadow_near
+    //   from the player once this pass's far casters fill shadow_budget minus the near ones (they stay drawn, shadowless);
+    // - the guard: a null from GetASpareGradMeshInstance puts the default instance in the slot, as the game's own path for
+    //   an empty tile does: that shadow is missing for one render instead of a crash.
+    // Install: only from the job-join hook on the main thread (diag7.cs), between frames; never from the render thread (the
+    // gate's rel32 straddles a cache line). Without that hook (smooth_anchor=0 and diag_build7=0) it is not installed.
     // Watch: every 60 frames the native status; a "shadow pool:" line when the counts change (one every 2 s, 200 a session).
     private float _shadow_near = 300f;          // ini shadow_near: game units (11.4 a metre: 300 is about 26 m); 0 = no budget
-    private int   _shadow_budget = 12;          // ini shadow_budget: of the 16 instances per half; far characters get none past it
+    private int   _shadow_budget = 8;           // ini shadow_budget: shadowed characters a pass (2..8; each takes up to 2 of the 16 instances)
     private delegate* unmanaged[Cdecl]<int> _fn_sg_install;                     // ABI 34
     private delegate* unmanaged[Cdecl]<float, int, void> _fn_sg_budget;        // ABI 34
-    private delegate* unmanaged[Cdecl]<int*, int, int> _fn_sg_status;          // ABI 34
-    private volatile bool _sg_tried; private volatile int _sg_state; private volatile bool _sg_on_main;
-    private int  _sp_frame, _sp_used0 = -1, _sp_used1 = -1, _sp_hits = -1, _sp_skips = -1, _sp_lines, _sp_frames_up; private long _sp_log_t; private bool _sp_warned, _sp_inst_logged;
+    private delegate* unmanaged[Cdecl]<int*, int, int> _fn_sg_status;          // ABI 35: 7 values
+    private bool _sg_done; private int _sg_state;   // written by the main thread (the install), read here after _sg_done
+    private int  _sp_frame, _sp_hits = -1, _sp_skips = -1, _sp_last = -1, _sp_peak = -1, _sp_lines, _sp_frames_up; private long _sp_log_t; private bool _sp_warned, _sp_inst_logged;
     private string _sp_status = "";
     private void shadow_pool_watch() {
         if (_fn_sg_budget != null) _fn_sg_budget(_shadow_near, _shadow_budget);
-        if (!_sg_tried && _native_ready && _fn_sg_install != null && ++_sp_frames_up > 600) { _sg_tried = true; _sg_state = _fn_sg_install(); }   // no job-join hook: from the render thread
-        if (_sg_tried && !_sp_inst_logged) {
+        if (!_sp_inst_logged && System.Threading.Volatile.Read(ref _sg_done)) {
             _sp_inst_logged = true; int st = _sg_state;
-            _logger.Info($"shadow pool: guard {((st & 3) == 3 ? "on (both tile lists)" : (st & 3) != 0 ? "on for one tile list only" : "NOT installed (the bytes were not as expected)")}, distance budget {((st & 4) != 0 ? "on" : "NOT installed")} ({(_sg_on_main ? "the main thread" : "the render thread")}) | shadow_near {_shadow_near:F0} units, budget {_shadow_budget} of 16");
+            _logger.Info($"shadow pool: guard {((st & 3) == 3 ? "on (both tile lists)" : (st & 3) != 0 ? "on for one tile list only" : (st & 0x200) != 0 ? "NOT installed (no executable page)" : "NOT installed (the bytes were not as expected)")}, distance budget {((st & 4) != 0 ? "on" : "NOT installed")} (the main thread) | shadow_near {_shadow_near:F0} units, budget {_shadow_budget} characters a pass");
+        }
+        if (!_sp_inst_logged && _native_ready && ++_sp_frames_up == 1200) {   // no main-thread hook ran: say so once (never install from here)
+            _sp_inst_logged = true;
+            _logger.Warning("shadow pool: guard and distance budget NOT installed: no main-thread hook (smooth_anchor=0 and diag_build7=0, or the job-join hook failed). Busy maps with 'keep characters drawn' can crash the game's shadow pass.");
         }
         if (_fn_sg_status == null || ++_sp_frame % 60 != 0) return;
-        int* v = stackalloc int[6]; for (int i = 0; i < 6; i++) v[i] = 0;
-        if (_fn_sg_status(v, 6) < 6) return;
-        int u0 = v[4], u1 = v[5], hits = v[1], skips = v[2];
-        bool changed = u0 != _sp_used0 || u1 != _sp_used1 || hits != _sp_hits || (skips > 0) != (_sp_skips > 0);
-        _sp_used0 = u0; _sp_used1 = u1; _sp_hits = hits; _sp_skips = skips;
-        if (changed || _sp_status.Length == 0)
-            _sp_status = $"grad-mesh instances in use: half 0 {u0}/16, half 1 {u1}/16 | far characters left without a shadow {skips} times (budget {_shadow_budget} past {_shadow_near:F0} units) | the guard skipped {hits} (would have crashed)";
+        int* v = stackalloc int[7]; for (int i = 0; i < 7; i++) v[i] = 0;
+        if (_fn_sg_status(v, 7) < 7) return;
+        int hits = v[1], skips = v[2], last = v[4], near = v[5], peak = v[6];
+        bool changed = hits != _sp_hits || (skips > 0) != (_sp_skips > 0) || peak != _sp_peak || (last > _shadow_budget) != (_sp_last > _shadow_budget);
+        bool text = changed || last != _sp_last || _sp_status.Length == 0;
+        _sp_hits = hits; _sp_skips = skips; _sp_last = last; _sp_peak = peak;
+        if (text)
+            _sp_status = $"shadowed characters last pass {last} (near {near}), peak {peak}, budget {_shadow_budget} within {_shadow_near:F0} units | far characters left without a shadow {skips} times | renders where the guard saved a shadow from crashing {hits}";
         long now = System.Diagnostics.Stopwatch.GetTimestamp();
         if (changed && _sp_lines < 200 && now - _sp_log_t >= 2 * System.Diagnostics.Stopwatch.Frequency) {
             _sp_log_t = now; _sp_lines++;
             _logger.Info($"shadow pool: {_sp_status} | map {map_name()}{(_ride_att ? " | riding" : "")}{(_sp_lines == 200 ? " (no more of these lines this session)" : "")}");
         }
-        if (!_sp_warned && hits > 0) { _sp_warned = true; _logger.Warning($"shadow pool: full: the guard skipped a shadow that would have crashed the game (the Calm Lands crash of 3 Nov). Nothing to do; shadows may be missing until the game is restarted."); }
+        if (!_sp_warned && hits > 0) { _sp_warned = true; _logger.Warning("shadow pool: a render ran out of shadow instances; the guard dropped that shadow for that render (it would have crashed the game, the Calm Lands crash of 3 Nov). More than 8 shadowed characters near you at once?"); }
     }
 
     /// <summary>"light cameras last frame N | this session M ..." (the native status; render thread).</summary>
@@ -105,8 +110,8 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("hide it with the body (whole-body mode only)##selfshadow", ref _fp_self_shadow, 0);
         if (_fn_shadow_status != null) ImGui.TextDisabled(esc(shadow_status_text()));
         ImGui.TextDisabled("ShadowManager pool: " + esc(_sp_status));
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("shadows only within this distance once the pool fills (units, 0 = off)##sgnear", ref _shadow_near, 0f, 1000f, "%.0f"); ImGui.SameLine();
-        ImGui.SetNextItemWidth(120); ImGui.SliderInt("of 16 instances##sgbudget", ref _shadow_budget, 4, 16); ImGui.SameLine();
-        ImGui.TextDisabled("11.4 units a metre; far characters stay drawn, without a shadow");
+        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("near: always a shadow within (units, 0 = no budget)##sgnear", ref _shadow_near, 0f, 2000f, "%.0f"); ImGui.SameLine();
+        ImGui.SetNextItemWidth(120); ImGui.SliderInt("characters with a shadow##sgbudget", ref _shadow_budget, 2, 8); ImGui.SameLine();
+        ImGui.TextDisabled("11.4 units a metre; farther characters get a shadow only while the budget allows, and stay drawn without one");
     }
 }

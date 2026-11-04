@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 34;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 35;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -1042,8 +1042,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     else _fp_actor = fa;
                 } break;
                 case "noimg_mode":        pi(k, v, ref _noimg_mode, 0, 2); break;
-                case "shadow_near":       pf(k, v, ref _shadow_near, 0f, 2000f); break;   // the pool budget (shadow_cam.cs): 0 = off
-                case "shadow_budget":     pi(k, v, ref _shadow_budget, 4, 16); break;
+                case "shadow_near":       pf(k, v, ref _shadow_near, 0f, 2000f); break;   // the shadow budget (shadow_cam.cs): 0 = off
+                case "shadow_budget":     pi(k, v, ref _shadow_budget, 2, 8); break;      // shadowed characters a pass (f654547's 4..16 instances clamp into range)
                 case "shadow_cam":        pi(k, v, ref _shadow_cam, 0, 1); break;       // character shadows: 1 the game's light camera left alone (default), 0 overridden (old, A/B)
                 case "fp_self_shadow":    pi(k, v, ref _fp_self_shadow, 0, 1); break;   // 1 own shadow always drawn (default), 0 hidden in first person's whole-body mode
                 case "heat_haze":         pi(k, v, ref _heat_haze, 0, 2); break;        // fire shimmer: 0 off in the headset's 3D view (default), 1 fixed per eye (experimental), 2 as before (A/B)

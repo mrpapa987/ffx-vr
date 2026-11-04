@@ -4516,7 +4516,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 34;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget)
+constexpr int FFXVR_ABI = 35;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -9486,50 +9486,62 @@ extern "C" __declspec(dllexport) int ffxvr_cull_dist_get() { return (g_patches[k
 static const int k_set_scene[] = { k_patch_scene_frustum, k_patch_bounds };
 extern "C" __declspec(dllexport) int ffxvr_cull_scene_set(int keep_all) { return patch_set_apply(k_set_scene, 2, keep_all != 0); }
 extern "C" __declspec(dllexport) int ffxvr_cull_scene_get() { return (g_patches[k_patch_scene_frustum].on && g_patches[k_patch_bounds].on) ? 1 : 0; }
-// ---------------------------------------------------------------- the ShadowManager's grad-mesh pool (branch chocobo, ABI 34)
-// The Calm Lands crash of 3 Nov 2026 (design-notes "Headset round 1 of chocobo"): GetASpareGradMeshInstance (0x6CC980,
-// thiscall on the ShadowManager, gva 0xCDEC28) hands out one of 16 instances per buffer half (in-use flags at +0xDC4 +
-// half x 16); when all are set it returns 0, and both callers write through it (0x6D1736 in the tile list 1 walk 0x6D1530,
-// 0x6D14F3 in the list 0 walk 0x6D12F0). The flags are cleared only by the pool setup 0x6D1B40 (from the renderer's
-// resource build, 0x6364D4 -> 0x6CE100), never per frame or per map. Two parts:
-// - the guard (always on): both `call 0x6CC980` sites go through a small stub; a null skips that tile entry the way the
-//   loop's own "nothing to do" path does (the loop end's x87 pushes and registers replayed from the bytes verified below),
-//   so that shadow is not drawn this frame instead of the game crashing;
-// - the budget (shadow_near / shadow_budget): Ch_DrawMain's per-actor shadow request (0x830240, reached only for actors
-//   that passed Ch_VisibleTest, which "keep characters drawn" makes every actor do) is skipped for actors farther than
-//   shadow_near from the player once the pool holds shadow_budget instances: they stay drawn, without a shadow.
-// Every site is verified against the expected bytes (call and surrounding code) before anything is written.
+// ---------------------------------------------------------------- the ShadowManager's grad-mesh pool (branch chocobo, ABI 35)
+// The Calm Lands crash of 3 Nov 2026 (design-notes "Headset round 1 of chocobo", corrected by chocobo-review2.md):
+// ShadowManager::Render (0x6C9E50, main thread) is a per-render scratch allocator. Each render it flips the buffer half
+// (0x6CA1A4), zeroes the first 16 tile slots of both lists (0x6CA1B0), hands one of 16 instances (in-use flags +0xDC4 +
+// half x 16) to every in-range tile entry of list 0 and list 1 through GetASpareGradMeshInstance (0x6CC980, thiscall),
+// draws, and frees all 32 flags again at 0x6CADD0. The tile entries come from this pass's shadow requests (Ch_DrawMain's
+// call 0x830240(actor), which marks a cell of the 8x8 caster table, +0xFE8 + cell x 4 = 1 at 0x6D30F0; the marks are
+// cleared before loop 3 at 0x82F1FF). So a render runs out when more than about 8 shadowed characters (up to 2 entries each)
+// are in the tiles at once; vanilla requests shadows only for visible characters, a handful, but "keep characters drawn"
+// makes all of the Calm Lands' ~25 actors request one. On a null both callers write through it (0x6D1736, 0x6D14F3).
+// - the budget (shadow_near / shadow_budget): sg_gate replaces Ch_DrawMain's call 0x830240 (0x82F4BE). It counts this pass's
+//   casters from the marks; characters within shadow_near of the player always ask; a farther one is skipped once the far
+//   casters of this pass reach shadow_budget minus the near casters (the larger of this pass's and the last pass's, as the
+//   actor walk is in table order and Tidus on the bird is slot 28). Skipped characters stay drawn, without a shadow.
+// - the guard (the safety net): both `call 0x6CC980` sites go through a stub; on a null it does what the loop's own
+//   "nothing to do" path does (the default instance, manager+0x8B8, into the slot, as at 0x6D1355 / 0x6D15A9, so the draw
+//   loop's read at 0x6CAD03 takes its default branch), replays the loop end and continues: that shadow is missing for one
+//   render instead of a crash.
+// Installed once, from the game's main thread only (the job-join hook, between frames), and each site only over the bytes
+// it expects: the call, the loop end it replays, its default path, its continue point, the pool scan's prologue, the gate.
 namespace sg {
 constexpr uintptr_t k_mgr = 0xCDEC28, k_get = 0x6CC980, k_req = 0x830240;
 constexpr uintptr_t k_site_a = 0x6D16F5, k_cont_a = 0x6D174F, k_site_b = 0x6D14AA, k_cont_b = 0x6D14FA, k_site_gate = 0x82F4BE;
+constexpr uintptr_t k_tail_a_va = 0x6D1721, k_tail_b_va = 0x6D14E5, k_def_a_va = 0x6D15A9, k_def_b_va = 0x6D1355, k_def_b2_va = 0x6D135D;
 // list 1 (0x6D1530): the call, then the loop end it replays (0x6D1721..0x6D174E) and the first bytes of its continue point
 const uint8_t k_call_a[5] = { 0xE8, 0x86, 0xB2, 0xFF, 0xFF };
 const uint8_t k_tail_a[] = { 0x8B, 0x55, 0xFC, 0x8B, 0x82, 0xE4, 0x0D, 0x00, 0x00, 0x85, 0xC0, 0x75, 0x05, 0x8B, 0x06, 0x83, 0xC0, 0x30, 0xD9, 0x45, 0x1C,
                              0x89, 0x46, 0x10, 0xD9, 0xE8, 0x89, 0x37, 0xDD, 0x45, 0xE4, 0x8B, 0x75, 0xF0, 0xD9, 0xEE, 0xD9, 0xEE, 0xD9, 0xCA, 0xD9, 0xCB,
                              0xD9, 0xCA, 0xD9, 0xC9, /* 0x6D174F */ 0x8B, 0x45, 0xEC, 0x46 };
+const uint8_t k_def_a[8] = { 0x8B, 0x82, 0xB8, 0x08, 0x00, 0x00, 0x89, 0x07 };   // 0x6D15A9: mov eax,[edx+0x8B8]; mov [edi],eax (the loop's own default path)
 // list 0 (0x6D12F0): the call, the loop end (0x6D14E5..0x6D14F9) and its continue point
 const uint8_t k_call_b[5] = { 0xE8, 0xD1, 0xB4, 0xFF, 0xFF };
 const uint8_t k_tail_b[] = { 0xD9, 0x45, 0x1C, 0x8B, 0x4D, 0xF4, 0xDD, 0x45, 0xE4, 0x8B, 0x55, 0xF8, 0xD9, 0xE8, 0x89, 0x46, 0x10, 0xD9, 0xEE, 0x89, 0x37,
                              /* 0x6D14FA */ 0x8B, 0x45, 0xEC, 0x42 };
+const uint8_t k_def_b[6] = { 0x8B, 0x83, 0xB8, 0x08, 0x00, 0x00 };               // 0x6D1355: mov eax,[ebx+0x8B8] ...
+const uint8_t k_def_b2[2] = { 0x89, 0x07 };                                      // 0x6D135D: ... mov [edi],eax
 const uint8_t k_get_entry[10] = { 0x55, 0x8B, 0xEC, 0x56, 0x8B, 0x35, 0x24, 0xEC, 0xCD, 0x00 };   // 0x6CC980: the pool scan's prologue
 const uint8_t k_gate_ctx[12] = { 0x56, 0xE8, 0x7D, 0x0D, 0x00, 0x00, 0xD9, 0x86, 0x54, 0x03, 0x00, 0x00 };   // 0x82F4BD: push esi; call 0x830240; fld [esi+0x354]
+constexpr int k_stride = 128;
 }
-volatile LONG g_sg_hits = 0, g_sg_skips = 0, g_sg_reqs = 0;   // guard: nulls skipped; budget: shadow requests skipped / made
-int   g_sg_state = 0;                                         // 1 guard list 1, 2 guard list 0, 4 the budget gate; 0x100 install tried
-float g_sg_near = 300.f; int g_sg_budget = 12;                 // shadow_near (game units; 0 = no budget), shadow_budget (of 16)
+volatile LONG g_sg_hits = 0, g_sg_skips = 0, g_sg_reqs = 0;   // guard: nulls turned into the default this session; budget: requests skipped / made
+int   g_sg_state = 0;                                         // 1 guard list 1, 2 guard list 0, 4 the budget gate; 0x100 install tried, 0x200 no cave
+float g_sg_near = 300.f; int g_sg_budget = 8;                  // shadow_near (game units; 0 = no budget), shadow_budget (casters per pass, 2..8)
 using SgReqFn = void(__cdecl*)(void*);
 SgReqFn g_sg_req = nullptr;
-/// Writes the two guard stubs (cave+0 for list 1, cave+64 for list 0). Pure: the addresses are parameters (unit-tested on
-/// the host, and the bytes disassembled there). Each stub: push the caller's argument again and call the pool scan; a
-/// non-null result returns as the call did (ret 4); a null drops the return address and the argument, counts the hit,
-/// replays the loop end's register reloads and x87 pushes (the caller's x87 stack is empty at the call, as MSVC code
-/// keeps it across calls) and jumps to the loop's continue point. Returns the bytes used (128).
+/// Writes the two guard stubs (cave+0 for list 1, cave+k_stride for list 0). Pure: the addresses are parameters (host-tested
+/// and disassembled). Each stub: push the caller's argument again and call the pool scan; a non-null result returns as the
+/// call did (ret 4); a null drops the return address and the argument, counts the hit, puts the default instance in the
+/// slot as the loop's own default path does, replays the loop end's register reloads and x87 pushes (the caller's x87 stack
+/// is empty at the call, as MSVC code keeps it across calls) and jumps to the loop's continue point. Returns 2 x k_stride.
 static int sg_build(uint8_t* c, uint32_t cave_va, uint32_t get_va, uint32_t cont_a, uint32_t cont_b, uint32_t hits_va) {
     auto rel = [](uint32_t from_next, uint32_t to) { return static_cast<uint32_t>(to - from_next); };
     auto put32 = [](uint8_t* p, uint32_t v) { memcpy(p, &v, 4); };
-    memset(c, 0xCC, 128);
+    memset(c, 0xCC, 2 * sg::k_stride);
     for (int s = 0; s < 2; ++s) {
-        uint8_t* p = c + s * 64; const uint32_t va = cave_va + s * 64; int k = 0;
+        uint8_t* p = c + s * sg::k_stride; const uint32_t va = cave_va + s * sg::k_stride; int k = 0;
         p[k++] = 0xFF; p[k++] = 0x74; p[k++] = 0x24; p[k++] = 0x04;                 // push dword [esp+4]
         p[k++] = 0xE8; put32(p + k, rel(va + k + 4, get_va)); k += 4;               // call 0x6CC980 (ecx = this, untouched)
         p[k++] = 0x85; p[k++] = 0xC0;                                                // test eax, eax
@@ -9537,38 +9549,53 @@ static int sg_build(uint8_t* c, uint32_t cave_va, uint32_t get_va, uint32_t cont
         p[k++] = 0xC2; p[k++] = 0x04; p[k++] = 0x00;                                 // ret 4
         p[k++] = 0x83; p[k++] = 0xC4; p[k++] = 0x08;                                 // fail: add esp, 8
         p[k++] = 0xFF; p[k++] = 0x05; put32(p + k, hits_va); k += 4;                 // inc dword [g_sg_hits]
-        if (s == 0) {   // list 1: 0x6D1721's reload and 0x6D1733..0x6D174D without the two stores through the instance
-            const uint8_t t[] = { 0x8B, 0x55, 0xFC,  0xD9, 0x45, 0x1C,  0xD9, 0xE8,  0xDD, 0x45, 0xE4,  0x8B, 0x75, 0xF0,
+        if (s == 0) {   // list 1: the manager is [ebp-4]; 0x6D15A9's default store, then 0x6D1733..0x6D174D without the two stores
+            const uint8_t t[] = { 0x8B, 0x55, 0xFC,  0x8B, 0x82, 0xB8, 0x08, 0x00, 0x00,  0x89, 0x07,
+                                  0xD9, 0x45, 0x1C,  0xD9, 0xE8,  0xDD, 0x45, 0xE4,  0x8B, 0x75, 0xF0,
                                   0xD9, 0xEE, 0xD9, 0xEE,  0xD9, 0xCA, 0xD9, 0xCB, 0xD9, 0xCA, 0xD9, 0xC9 };
             memcpy(p + k, t, sizeof(t)); k += sizeof(t);
         }
-        else {          // list 0: 0x6D14E5..0x6D14F9 without the two stores
-            const uint8_t t[] = { 0xD9, 0x45, 0x1C,  0x8B, 0x4D, 0xF4,  0xDD, 0x45, 0xE4,  0x8B, 0x55, 0xF8,  0xD9, 0xE8,  0xD9, 0xEE };
+        else {          // list 0: the manager is ebx; 0x6D1355's default store, then 0x6D14E5..0x6D14F9 without the two stores
+            const uint8_t t[] = { 0x8B, 0x83, 0xB8, 0x08, 0x00, 0x00,  0x89, 0x07,
+                                  0xD9, 0x45, 0x1C,  0x8B, 0x4D, 0xF4,  0xDD, 0x45, 0xE4,  0x8B, 0x55, 0xF8,  0xD9, 0xE8,  0xD9, 0xEE };
             memcpy(p + k, t, sizeof(t)); k += sizeof(t);
         }
         p[k++] = 0xE9; put32(p + k, rel(va + k + 4, s == 0 ? cont_a : cont_b)); k += 4;   // jmp the continue point
     }
-    return 128;
+    return 2 * sg::k_stride;
 }
-/// The budget's decision (pure, unit-tested): skip the shadow request of an actor d2 (squared units) from the player when a
-/// budget is set, the actor is beyond it and the pool already holds `budget` instances.
-static bool sg_skip(float d2, float near_units, int used, int budget) { return near_units > 0.f && d2 > near_units * near_units && used >= budget; }
-static int sg_pool_used(int* u0, int* u1) {
-    const uint8_t* g = gva_to_rt(sg::k_mgr); if (!g) return 0;
-    const uint8_t* m = *reinterpret_cast<uint8_t* const*>(g); if (!m) return 0;
-    int a = 0, b = 0; for (int i = 0; i < 16; ++i) { a += m[0xDC4 + i] != 0; b += m[0xDD4 + i] != 0; }
-    if (u0) *u0 = a; if (u1) *u1 = b;
-    return a > b ? a : b;
+/// The budget's per-pass state (main thread only). Pure rules, host-tested with a model of Ch_DrawMain and the render.
+struct SgPass { int m_last = 0, near_this = 0, far_this = 0, near_prev = 0, last_total = 0, last_near = 0, peak = 0; };
+/// Before a shadow request: marks = this pass's casters so far (the active marks at +0xFE8). A drop means Ch_DrawMain
+/// cleared them: a new pass. Returns true to skip a far character: its pass's far casters already fill the budget left
+/// after the near ones (this pass's or the last pass's, whichever is larger).
+static bool sg_before(SgPass& p, int marks, bool is_near, int budget) {
+    if (marks < p.m_last) { p.last_total = p.m_last; p.last_near = p.near_this; p.near_prev = p.near_this; p.near_this = 0; p.far_this = 0; }
+    p.m_last = marks;
+    if (is_near) return false;
+    const int reserve = p.near_prev > p.near_this ? p.near_prev : p.near_this;
+    return p.far_this >= budget - reserve;
 }
-/// Replaces Ch_DrawMain's `call 0x830240(actor)` (cdecl, main thread): the budget, then the game's shadow request.
+/// After a request: the marks it added (0 when the game's own checks in 0x830240 gave the actor no shadow) count as near or far.
+static void sg_after(SgPass& p, int marks_after, bool is_near) {
+    const int d = marks_after - p.m_last;
+    if (d > 0) { if (is_near) p.near_this += d; else p.far_this += d; }
+    p.m_last = marks_after; if (marks_after > p.peak) p.peak = marks_after;
+}
+SgPass g_sgp;
+static const uint8_t* sg_mgr() { const uint8_t* g = gva_to_rt(sg::k_mgr); return g ? *reinterpret_cast<const uint8_t* const*>(g) : nullptr; }
+static int sg_marks(const uint8_t* m) { int n = 0; const int32_t* a = reinterpret_cast<const int32_t*>(m + 0xFE8); for (int i = 0; i < 64; ++i) n += a[i] == 1; return n; }
+/// Replaces Ch_DrawMain's `call 0x830240(actor)` (cdecl, main thread, loop 3): the budget, then the game's shadow request.
 static void __cdecl sg_gate(void* actor) {
-    if (actor && g_fp_have_pos && g_sg_near > 0.f) {
-        const float* t = reinterpret_cast<const float*>(static_cast<uint8_t*>(actor) + 0x200);   // the drawn root (game space; attached riders too)
-        const float dx = -t[0] - g_fp_pos[0], dy = -t[1] - g_fp_pos[1], dz = t[2] - g_fp_pos[2];  // render space negates X and Y
-        if (sg_skip(dx*dx + dy*dy + dz*dz, g_sg_near, sg_pool_used(nullptr, nullptr), g_sg_budget)) { InterlockedIncrement(&g_sg_skips); return; }
-    }
+    const uint8_t* m = sg_mgr();   // created once (0x6C952C) and never freed
+    if (!actor || !m || g_sg_near <= 0.f || !g_fp_have_pos) { InterlockedIncrement(&g_sg_reqs); g_sg_req(actor); return; }
+    const float* t = reinterpret_cast<const float*>(static_cast<uint8_t*>(actor) + 0x200);   // the drawn root (game space; riders too)
+    const float dx = -t[0] - g_fp_pos[0], dy = -t[1] - g_fp_pos[1], dz = t[2] - g_fp_pos[2];  // render space negates X and Y
+    const bool is_near = dx*dx + dy*dy + dz*dz <= g_sg_near * g_sg_near;
+    if (sg_before(g_sgp, sg_marks(m), is_near, g_sg_budget)) { InterlockedIncrement(&g_sg_skips); return; }
     InterlockedIncrement(&g_sg_reqs);
     g_sg_req(actor);
+    sg_after(g_sgp, sg_marks(m), is_near);
 }
 static bool sg_call_patch(uintptr_t site_gva, const uint8_t* expect, const void* target) {
     uint8_t* at = gva_to_rt(site_gva); if (!at || memcmp(at, expect, 5) != 0) return false;
@@ -9578,46 +9605,54 @@ static bool sg_call_patch(uintptr_t site_gva, const uint8_t* expect, const void*
     VirtualProtect(at, 5, old, &old); FlushInstructionCache(GetCurrentProcess(), at, 5);
     return true;
 }
-/// Installs the guard and the budget gate once (best called on the game's main thread, between frames: the job-join hook).
-/// Returns g_sg_state. Each part only if every byte it relies on is the expected one; a mismatch is logged and left alone.
+static bool sg_bytes(uintptr_t gva, const uint8_t* expect, size_t n) { const uint8_t* at = gva_to_rt(gva); return at && memcmp(at, expect, n) == 0; }
+/// Installs the guard and the budget gate once. Call it on the game's main thread only (managed: the job-join hook, after
+/// its main-thread filter): the main thread runs these sites every frame, so a write from another thread could be fetched
+/// torn (the gate's rel32 at 0x82F4BF straddles a cache line). Returns g_sg_state.
 extern "C" __declspec(dllexport) int ffxvr_shadow_guard_install() {
     if (g_sg_state & 0x100) return g_sg_state;
     g_sg_state |= 0x100;
-    uint8_t* get = gva_to_rt(sg::k_get); uint8_t* ta = gva_to_rt(sg::k_site_a + 5 + (0x6D1721 - 0x6D16FA)); uint8_t* tb = gva_to_rt(sg::k_site_b + 5 + (0x6D14E5 - 0x6D14AF));
-    const bool get_ok = get && memcmp(get, sg::k_get_entry, sizeof(sg::k_get_entry)) == 0;
-    const bool a_ok = get_ok && ta && memcmp(gva_to_rt(sg::k_site_a), sg::k_call_a, 5) == 0 && memcmp(ta, sg::k_tail_a, sizeof(sg::k_tail_a)) == 0;
-    const bool b_ok = get_ok && tb && memcmp(gva_to_rt(sg::k_site_b), sg::k_call_b, 5) == 0 && memcmp(tb, sg::k_tail_b, sizeof(sg::k_tail_b)) == 0;
+    const bool get_ok = sg_bytes(sg::k_get, sg::k_get_entry, sizeof(sg::k_get_entry));
+    const bool a_ok = get_ok && sg_bytes(sg::k_site_a, sg::k_call_a, 5) && sg_bytes(sg::k_tail_a_va, sg::k_tail_a, sizeof(sg::k_tail_a)) && sg_bytes(sg::k_def_a_va, sg::k_def_a, sizeof(sg::k_def_a));
+    const bool b_ok = get_ok && sg_bytes(sg::k_site_b, sg::k_call_b, 5) && sg_bytes(sg::k_tail_b_va, sg::k_tail_b, sizeof(sg::k_tail_b)) && sg_bytes(sg::k_def_b_va, sg::k_def_b, sizeof(sg::k_def_b))
+                      && sg_bytes(sg::k_def_b2_va, sg::k_def_b2, sizeof(sg::k_def_b2));
     if (a_ok || b_ok) {
-        uint8_t* cave = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        uint8_t* cave = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        DWORD old = 0;
         if (cave) {
-            sg_build(cave, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(cave)), static_cast<uint32_t>(reinterpret_cast<uintptr_t>(get)),
+            sg_build(cave, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(cave)), static_cast<uint32_t>(reinterpret_cast<uintptr_t>(gva_to_rt(sg::k_get))),
                      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(gva_to_rt(sg::k_cont_a))), static_cast<uint32_t>(reinterpret_cast<uintptr_t>(gva_to_rt(sg::k_cont_b))),
                      static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&g_sg_hits)));
-            FlushInstructionCache(GetCurrentProcess(), cave, 128);
+            if (!VirtualProtect(cave, 4096, PAGE_EXECUTE_READ, &old)) cave = nullptr;   // N1: executable, not writable
+            else FlushInstructionCache(GetCurrentProcess(), cave, 2 * sg::k_stride);
+        }
+        if (!cave) g_sg_state |= 0x200;
+        else {
             if (a_ok && sg_call_patch(sg::k_site_a, sg::k_call_a, cave)) g_sg_state |= 1;
-            if (b_ok && sg_call_patch(sg::k_site_b, sg::k_call_b, cave + 64)) g_sg_state |= 2;
+            if (b_ok && sg_call_patch(sg::k_site_b, sg::k_call_b, cave + sg::k_stride)) g_sg_state |= 2;
         }
     }
-    uint8_t* gc = gva_to_rt(sg::k_site_gate - 1);
-    if (gc && memcmp(gc, sg::k_gate_ctx, sizeof(sg::k_gate_ctx)) == 0) {
+    if (sg_bytes(sg::k_site_gate - 1, sg::k_gate_ctx, sizeof(sg::k_gate_ctx))) {
         g_sg_req = reinterpret_cast<SgReqFn>(gva_to_rt(sg::k_req));
         if (sg_call_patch(sg::k_site_gate, sg::k_gate_ctx + 1, reinterpret_cast<const void*>(&sg_gate))) g_sg_state |= 4;
     }
-    diag("shadow pool: guard on tile list 1 (0x6D16F5) %s, list 0 (0x6D14AA) %s; distance budget gate (0x82F4BE) %s | shadow_near %.0f units, budget %d of 16",
-         (g_sg_state & 1) ? "ON" : (a_ok ? "FAILED" : "bytes not as expected, not touched"), (g_sg_state & 2) ? "ON" : (b_ok ? "FAILED" : "bytes not as expected, not touched"),
+    auto why = [](bool bytes, bool on, bool nocave) { return on ? "ON" : !bytes ? "bytes not as expected, not touched" : nocave ? "no executable page" : "VirtualProtect failed"; };
+    diag("shadow pool: guard on tile list 1 (0x6D16F5) %s, list 0 (0x6D14AA) %s; distance budget gate (0x82F4BE) %s | shadow_near %.0f units, budget %d casters a pass",
+         why(a_ok, (g_sg_state & 1) != 0, (g_sg_state & 0x200) != 0), why(b_ok, (g_sg_state & 2) != 0, (g_sg_state & 0x200) != 0),
          (g_sg_state & 4) ? "ON" : "bytes not as expected, not touched", g_sg_near, g_sg_budget);
     return g_sg_state;
 }
-/// shadow_near (game units, 0 = no budget: every kept-drawn character asks for a shadow, as before) and shadow_budget (4..16).
+/// shadow_near (game units 0..2000, 0 = no budget: every kept-drawn character asks for a shadow, as before) and
+/// shadow_budget (shadowed characters a pass, 2..8; each takes up to 2 of the render's 16 instances).
 extern "C" __declspec(dllexport) void ffxvr_shadow_budget_set(float near_units, int budget) {
-    g_sg_near = std::isfinite(near_units) ? (near_units < 0.f ? 0.f : near_units > 5000.f ? 5000.f : near_units) : 300.f;
-    g_sg_budget = budget < 4 ? 4 : budget > 16 ? 16 : budget;
+    g_sg_near = std::isfinite(near_units) ? (near_units < 0.f ? 0.f : near_units > 2000.f ? 2000.f : near_units) : 300.f;
+    g_sg_budget = budget < 2 ? 2 : budget > 8 ? 8 : budget;
 }
-/// [state, guard hits, budget skips, shadow requests made, pool in use half 0, half 1] (session counts). Returns the count.
+/// [state, guard hits (renders where a shadow had no instance: would have crashed), far characters skipped, shadow requests
+/// made (session), casters last pass, near casters last pass, peak casters in a pass]. Returns the count written.
 extern "C" __declspec(dllexport) int ffxvr_shadow_pool_status(int* out, int n) {
-    int u0 = 0, u1 = 0; sg_pool_used(&u0, &u1);
-    const int v[6] = { g_sg_state, static_cast<int>(g_sg_hits), static_cast<int>(g_sg_skips), static_cast<int>(g_sg_reqs), u0, u1 };
-    int k = 0; for (; out && k < n && k < 6; ++k) out[k] = v[k];
+    const int v[7] = { g_sg_state, static_cast<int>(g_sg_hits), static_cast<int>(g_sg_skips), static_cast<int>(g_sg_reqs), g_sgp.last_total, g_sgp.last_near, g_sgp.peak };
+    int k = 0; for (; out && k < n && k < 7; ++k) out[k] = v[k];
     return k;
 }
 extern "C" __declspec(dllexport) int ffxvr_patch_count() { return (int)(sizeof(g_patches) / sizeof(g_patches[0])); }
