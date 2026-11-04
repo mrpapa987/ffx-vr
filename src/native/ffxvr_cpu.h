@@ -2,7 +2,7 @@
 // ffxvr_cpu.h -- cpu-lean (4 Nov 2026): pure helpers for the per-frame CPU timings (the cpu: line) and for range_readable's
 // region cache. No Windows, no D3D, no logging: ffxvr_native.cpp feeds them, a unit test (scratch) drives them with a fake
 // memory map. The page rule here is range_readable's, unchanged; ffxvr_native.cpp static_asserts the constants against
-// <windows.h>.
+// <windows.h>. vq-lean (4 Nov 2026): ffxvr_safe_read's per-frame run cache (RunCache, range_check_fast).
 #pragma once
 #include <cmath>
 #include <cstddef>
@@ -80,6 +80,131 @@ bool range_check(uintptr_t a, size_t len, Query&& query, RegionCache<N>* cache, 
     }
     return true;
 }
+
+// -- vq-lean: ffxvr_safe_read's per-frame run cache (ini fast_reads, default 1) ---------------------------------------
+// VirtualQuery scans the page table from the queried page to the end of the run of pages with the same attributes, so its
+// cost grows with the run: about 1 us in small regions, 100-160 us in the game's large committed blocks (the owner's battle
+// windows: 70+ queries, 6-9 ms a frame). These keep every run a query answered readable for the rest of the frame (any type:
+// heap, mapped, a module, the exe). Only ffxvr_safe_read consults them, and it copies out of a run that is not FFX.exe's own
+// image with ReadProcessMemory: the kernel's copy fails instead of faulting if the run was freed, decommitted or made
+// no-access since its query, so a stale entry can make a read fail but never fault. range_readable (whose callers read with
+// plain loads) never answers from here. Render thread only; cleared at every Present, after a failed copy, and after 50 ms.
+
+/// The runs [lo, hi) VirtualQuery answered readable this frame; img: inside FFX.exe's image (allocation base = the exe's
+/// module base, type MEM_IMAGE), which is never unloaded or decommitted, so a plain copy stays safe there as before.
+template <int N>
+struct RunCache {
+    uintptr_t lo[N] = {}, hi[N] = {}; bool img[N] = {}; int next = 0;
+    void clear() { for (int i = 0; i < N; ++i) { lo[i] = hi[i] = 0; img[i] = false; } next = 0; }
+    /// The entry holding address q, or -1.
+    int find(uintptr_t q) const {
+        for (int i = 0; i < N; ++i) if (hi[i] > lo[i] && q >= lo[i] && q < hi[i]) return i;
+        return -1;
+    }
+    /// Keeps [l, h): nothing if an entry already holds it (only its image flag can drop, the safe way); entries it holds are
+    /// dropped (a lower query of the same run returns a longer answer with the same end); else a free slot, else the oldest
+    /// (round robin).
+    void add(uintptr_t l, uintptr_t h, bool im) {
+        if (h <= l) return;
+        for (int i = 0; i < N; ++i) if (hi[i] > lo[i] && lo[i] <= l && h <= hi[i]) { img[i] = img[i] && im; return; }
+        int slot = -1;
+        for (int i = 0; i < N; ++i)
+            if (hi[i] > lo[i] && l <= lo[i] && hi[i] <= h) { lo[i] = hi[i] = 0; img[i] = false; if (slot < 0) slot = i; }
+        if (slot < 0) for (int i = 0; i < N; ++i) if (hi[i] <= lo[i]) { slot = i; break; }
+        if (slot < 0) { slot = next; next = (next + 1) % N; }
+        lo[slot] = l; hi[slot] = h; img[slot] = im;
+    }
+};
+
+/// The allocations whose first query this frame started above their base: VirtualQuery's answer starts at the queried page,
+/// so reads lower in the same block (an object list walked downwards, a random order) would each query again. The block's
+/// [base, lo) is known to belong to that allocation (lo: where the kept answer starts), so the next miss there queries once
+/// from the base instead, at most once per allocation per frame.
+template <int P>
+struct AllocSeen {
+    uintptr_t base[P] = {}, lo[P] = {}; uint8_t state[P] = {}; int next = 0;   // state 1: noted; 2: its base already queried
+    void clear() { for (int i = 0; i < P; ++i) { base[i] = lo[i] = 0; state[i] = 0; } next = 0; }
+    /// A query at lo (> ab) answered readable in the allocation at ab.
+    void note(uintptr_t ab, uintptr_t l) {
+        if (ab == 0 || ab >= l) return;
+        for (int i = 0; i < P; ++i) if (state[i] != 0 && base[i] == ab) return;
+        base[next] = ab; lo[next] = l; state[next] = 1; next = (next + 1) % P;
+    }
+    /// A miss at q in [base, lo) of a noted allocation not probed yet: true and its base (the caller queries there).
+    bool take_probe(uintptr_t q, uintptr_t& ab) {
+        for (int i = 0; i < P; ++i)
+            if (state[i] == 1 && q >= base[i] && q < lo[i]) { state[i] = 2; ab = base[i]; return true; }
+        return false;
+    }
+};
+
+struct FastStats { uint32_t queries = 0, hits = 0, probes = 0; };   // queries include the probes; hits: ranges answered with no query
+enum : int { k_fast_no = 0, k_fast_image = 1, k_fast_other = 2 };
+
+/// ffxvr_safe_read's walk with fast_reads: the same page rule as range_check (every page of [a, a + len) committed and
+/// readable when last queried), each address answered from a run kept this frame or by a query whose readable answer is kept.
+/// Returns k_fast_no (not readable), k_fast_image (every byte in runs of FFX.exe's image: a plain copy is safe) or
+/// k_fast_other (the copy must be the kernel's).
+template <class Query, int N, int P>
+int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, AllocSeen<P>& seen, uintptr_t image_base, FastStats* st) {
+    if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return k_fast_no;
+    const uintptr_t e = a + len;
+    bool all_img = true, queried = false;
+    uintptr_t q = a;
+    while (q < e) {
+        const int i = c.find(q);
+        if (i >= 0) { all_img = all_img && c.img[i]; q = c.hi[i]; continue; }
+        queried = true;
+        uintptr_t ab = 0;
+        if (seen.take_probe(q, ab)) {   // below a kept run of a noted allocation: one query from its base first
+            const Mbi b = query(ab);
+            if (st) { st->queries++; st->probes++; }
+            const uintptr_t be = b.base + b.size;
+            if (mbi_readable(b) && b.base == ab && be > ab) {
+                const bool bim = image_base != 0 && b.type == k_mem_image && b.alloc_base == image_base;
+                c.add(b.base, be, bim);
+                if (q < be) { all_img = all_img && bim; q = be; continue; }   // its run holds q: answered
+            }
+        }
+        const Mbi m = query(q);
+        if (st) st->queries++;
+        if (!mbi_readable(m)) return k_fast_no;
+        const uintptr_t end = m.base + m.size;
+        if (end <= q || m.base > q) return k_fast_no;   // (a broken answer; VirtualQuery never gives one)
+        const bool im = image_base != 0 && m.type == k_mem_image && m.alloc_base == image_base;
+        c.add(m.base, end, im);
+        all_img = all_img && im;
+        if (!im) seen.note(m.alloc_base, m.base);
+        q = end;
+    }
+    if (!queried && st) st->hits++;
+    return all_img ? k_fast_image : k_fast_other;
+}
+
+/// ffxvr_safe_read with fast_reads on (render thread): the kept runs, their age bound, the copy chosen by the walk's answer.
+/// plain(): the copy as before (memcpy under __try), used only when every byte lies in the exe's image; kernel(): the
+/// kernel's copy (ReadProcessMemory), true when every byte was copied. A failed kernel copy means the map changed under a
+/// kept run: everything kept is dropped, so the next reads query afresh.
+template <int N, int P>
+struct FastReader {
+    RunCache<N> runs; AllocSeen<P> seen; FastStats st;
+    int64_t t0 = 0; bool armed = false;   // when the kept runs were started (the first read after a clear)
+    uint32_t copies = 0, fails = 0;       // kernel copies, of them failed (this frame; the caller rolls them)
+    void clear() { runs.clear(); seen.clear(); armed = false; }
+    /// 1: copied; 0: not readable or the copy failed. now / max_age in the caller's clock (QPC ticks).
+    template <class Query, class Plain, class Kernel>
+    int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, Query&& query, Plain&& plain, Kernel&& kernel) {
+        if (!armed || now - t0 > max_age || now < t0) { clear(); armed = true; t0 = now; }
+        const int k = range_check_fast(a, len, query, runs, seen, image_base, &st);
+        if (k == k_fast_no) return 0;
+        if (k == k_fast_image) return plain() ? 1 : 0;
+        copies++;
+        if (kernel()) return 1;
+        fails++;
+        clear();
+        return 0;
+    }
+};
 
 // -- grid-timer: the game's main loop (SKS_WinMainLoop 0x62EE50) over one cpu: line window --------------------------------
 /// The limiter's period for one frame in ms: the game's divider ([0xC30E88], 1 or 2) x K ([0xB412D8], 1 / 59.94 s; FFX-60fps
