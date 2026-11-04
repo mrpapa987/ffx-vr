@@ -4434,3 +4434,74 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     timer to 1 ms, a pacing change; it is there for the A/B with PERF-001=0. 1 -> 0 at run time releases our 1 ms request only; the opt-out
     stays until the game restarts. The game's Sleep itself is not replaced.
   - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, so the ABI is unchanged (40 with npc-anchor).
+
+## Direct game-state gates and overdrive minigame state (4 Nov 2026)
+
+Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratchpad fixes/gates-impl.md.
+
+- **Sources, credited, nothing copied.** The facts below come from three community projects, read for the addresses and
+  the meaning of the game's own variables, and each was re-checked in our exe's disassembly before use (the evidence is
+  in the table): **Debug Revival** (the player actor `Sg_GetPlayer` = [0x1300788], 0 while control is off), **FFX-TAS /
+  FFX_TAS_Python** (GPL-3.0; its whole-game gates: control, the field menu flag, the text box byte, the choice cursors
+  and the slot each screen uses, the skippable-movie flag, and its use of the overdrive state words), and the **FFX
+  screen reader** (the message window and cursor pointer tables, the cursor's +0x01 / +0x02, the Tidus / Auron / Lulu
+  words in its translation table). Addresses, offsets and state values are facts about the game; no code, script or DLL
+  of theirs is in FFX VR (MIT).
+- **Builds.** FFX-TAS, FFX Project Editor and Zanarkand Workshop read the other Steam build (the screen reader's
+  "Reference" exe, sha256 3d13e5ed...); ours is the "Installed" one (0537b2a1..., exe-analysis.md). Fahrenheit alpha12
+  and Debug Revival match ours. The shift is per range, not one number: 0 for 0x85A03C / 0xD2A008 / 0x84DED0, +0x8 for the
+  chr lists, +0x10 for the save screen block, +0x40 for most of .data from 0xF01A44 up to 0x1471528, +0x48 for the player
+  block (their 0xF00740 is our 0x1300788 - 0x400000; +0x40 would land on a float). Their numbers are module offsets:
+  their 0xF3D6F4 is Tidus's word, and our module offset 0xF3D6F4 (VA 0x133D6F4) is Auron's. So never paste a number
+  from them: translate, then verify in our disassembly (this explains zanarkand.md's two "contradictions" too).
+- **The addresses (our VAs; the code reads them as module offsets, VA - 0x400000), with the evidence:**
+  | What | Where | Evidence in our exe |
+  |---|---|---|
+  | Player actor (0 = no control) | dword 0x1300788 | `Sg_GetPlayer` 0x82D860 `mov eax,[0x1300788]; ret`; the only writer is `Sg_SetPlayer` 0x82DAD6 (`mov [0x1300788],eax` from its argument) |
+  | A field (TkMenu) menu is up | dword 0x1340824 | set 1 at 0x8A9D8A when the TkMenu loop opens, cleared at 0x8A9FCB; 34 readers (Sg_MainLoop 0x820BD8.., the renderer 0x668EC0) |
+  | A message window reached "shown" | byte 0xC5A03C | written only by 0x8B6B70(i): 0 unless window i's u16 +0x2C == 2, then 1 if it was 0; 0x8B5680 turns 1 into 0xFF. Called per window from 0x8AB969 only for windows whose other-table +6 == 1, so it keeps its value when none runs, and **its image value is 0xFF** (.data): it counts only with a window open and shown (below) |
+  | Message windows | pointers [0x18676F0 + i*4], i < 8 | the pool initialiser 0x8B86F2 / 0x8B87B9: windows at 0x18663F0 + i*0x130 or 0x1866D70 + i*0x130. 0x8B8560 opens one (+0x00 = 1, +0x2C = 0), 0x8B5810 closes it (+0x2C = 3), 0x8B5850 runs it only while +0x00 == 1 |
+  | Choice cursor, row | pointers [0x1868A90 + i*4]; +0x01, +0x02 | the same initialiser: cursors at 0x1867710 + i*0x138 or 0x18680D0 + i*0x138. 0x8B5FB0(i): +0x01 = 1 only when window i's +0x2C == 2 (0x8B6004), draws while +0x01 == 1 with the row `movsx [cursor+2]`; confirmed = 2 (0x8B6483, 0x8B653C); reset to 0 by the text setup 0x8B88A2 |
+  | A skippable movie runs | dword 0x112A008 | 1 at 0x76EB62 / 0x76EBC0 (the skippable starts), 0 at 0x76E968 / 0x76E9D2 / 0x76EA9C / 0x76ECE9; the movie player tests it == 1 at 0x6D948A; the renderer's movie branch 0x668CED. A non-skippable movie leaves it 0 (those are screen frames anyway) |
+  | Movie id (F8 only) | dword 0xC40E28 | set at 0x76E937 / 0x76EBA4, -1 at 0x76EA1F / 0x76EA92 (the stops); the image's value is -1 |
+  | Overdrive minigame up | s16 0x133D734 Tidus, 0x133D6F4 Auron, 0x133D708 Lulu, u8 0x133C93F Wakka | the battle HUD's own test 0x89B38D..0x89B3B2 (any non-zero draws the overdrive bar 0x8A1CE0); handlers 0x892320 (`mov cx,[0x133D734]`, table 0x89255C), 0x890F70, 0x891BE9; Wakka 1 at 0x898DD9, 0 at 0x890F24 / 0x898249 |
+  | The shared timer | dword 0x133F77C (0 off, 1 armed, 2 running), f32 0x133F790 seconds left | TOBtlCtrlLimitTimer 0x891AC4 `cmp [0x133F77C],2`; 2 at 0x89AB5E, 1 at 0x89AB25 and the initialisers, 0 at 0x890E75 / 0x897F3F / 0x89B7F8; Tidus's state 4 compares 0 with [0x133F790] at 0x8923AA (time out -> 7) |
+  | Tidus's cursor and hit zone | s16 0x133D742; zone s16 0x133D73C .. 0x133D73E | state 4: a press with lo <= cursor <= hi -> 5 (0x8923CD..0x8923EA), outside -> sound 3 and it runs on; the cursor moves by 0x133D744 within [0x133D736, + 0x133D73A] |
+- **The tap gate, stricter and simpler.** Managed (game_gates.cs, hands.cs) sends five new game bits, native
+  (ffxvr_gates.h `tap_game_gate`, pure and unit-tested) maps them to a reason; the older gates are kept and ORed (any
+  shut reason shuts). Order: not readable, battle, sphere grid, save screen, blitzball, riding, **a movie** (0x2000),
+  **a field menu** (0x80), **a choice box** (0x800: always, whatever "also advance dialogue" says; a press in flight is let
+  go), **no player control** (0x40), a text box (8, or 0x1000 = the byte set and a window open and shown). The one way
+  past "no control" is the dialogue option with a text box waiting by both signals (the Atel bank's bit 8 and the render
+  side's 0x1000) and no choice box: then a tap advances a fully shown line. Choice = a cursor with +0x01 == 1 on a window
+  in state 1 or 2 (closing / confirmed windows do not count, so a stale cursor cannot kill the tap). F8's gate names
+  them ("a movie", "a field menu", "a choice box", "no player control"), and so do the `hands: tap gate (game): ...` lines,
+  with the render-side windows (`windows open 0x.. shown 0x.., byte 0x..`, the choice slot and row). The gestures readout
+  has a "direct gates" line (the player actor, the menu flag, the movie flag and id, the windows, the choice box).
+- **The hands' hide reasons**: + `movie` and `menu` (the game's own flags, bits 0x2000 / 0x80, read with the battle bit on
+  every frame that can draw the hands): the owner's "never in battle, menus or FMVs". Most of those frames were already
+  screen frames (hidden earlier); these catch a 3D frame under a menu or behind a movie. No hide for "no control": the
+  hands stay in cutscenes and dialogue.
+- **Reads and cost** (cpu-lean's plan kept: nothing on frames that cannot draw the hands). View bits plan (hands drawable,
+  no tap): battle, menu, movie (3 dword reads, was 1). Full plan (first person, tap on): those + the sphere grid, the
+  player, the byte, one 9.7 KB block (VA 0x18663F0..0x1868AB0: both window layouts, both tables, all 8 cursors), the
+  bank, the bank's 8 TOMesWinWork windows as one 352-byte read (was 16), the Atel controller (2): 11 calls, was about 21.
+  All in FFX.exe's image, so range_readable answers from its region cache.
+- **Overdrive minigame diagnostics** (for the Slice & Dice freeze, whose onset is bracketed only to a 10 s window).
+  slow_frame, every Present, in battle only (battle_state > 0): the state block 0x133D6F2..0x133D745 (one read: the three
+  words, the result bytes, Tidus's zone and cursor), the Wakka byte, and the timer block 0x133F77C.. while a minigame is
+  up (or the timer was not off last frame): 2 reads, 3 during a minigame; none outside battle. Output: an `od:` line per
+  change of the words or the timer's state with battle_state and the frame (diagnostic profile only; 24 per 5 s, 400 a
+  session, the dropped ones counted in the next line; one line when the battle ends with a minigame state last seen);
+  `overdrive minigame: ...` in the `slow:` onset line; an `od` column in the 600-frame dump (`T4/2` = Tidus state 4, timer
+  running; `-` none; two bytes in SlowFr's padding). Tidus's states: 1 loading, 2 waiting for the asset, 3 arming the
+  timer, 4 the gauge runs, 5 hit, 6 hit / unloading, 7 timed out, 8 timed out / unloading, 9 done, 10 the result to the
+  effect (0x7B0470, then the effect program). `g_od_active` (native) = the game's own "a minigame is up" test, for later
+  users (a VR minigame panel, the parked Auron sequence idea).
+- **The follow pick, cross-checked** (diagnostic only): in the field in first person, every 10th scan tick, is the
+  picked actor the one at [0x1300788]? A mismatch seen twice in a row is logged (`first person: the follow pick ... is
+  not the game's player actor ...`; one line per 10 s, the same pair again after 2 min, 50 a session); counts in F8. The
+  pick is unchanged until play shows whether the game's actor is the better rule.
+- **Not seen in play yet**: a Yes/No box with the tap (the gate should read "a choice box"), the field menu flag over a 3D
+  frame, the movie flag, an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
+  ("not located") and research exe-battle-ui.md:296 ("message queues") are corrected by the table above.

@@ -102,8 +102,10 @@ touch sensors. It is off by default while it is being tested.
 hand's width (10 cm) toward what you're facing**: it presses confirm (A: talk, examine, open) with a short tick on that
 controller. The grip is what arms it: a reach with the grip squeezed presses too, so let go of the grip when you don't mean
 it (tick **require a pointing finger** to also need the index off the trigger). Only in first person in the field: never in
-battle, a menu, the sphere grid, the save screen, a movie or blitzball, while you turn with the stick or move your head
-fast, and not while a text box is up unless you tick **also advance dialogue**. **tap sensitivity** sets the distance
+battle, a menu, the sphere grid, the save screen, a movie or blitzball, never with a choice box (Yes / No) up or while
+the game has taken control of the character (cutscenes, dialogue), while you turn with the stick or move your head fast,
+and not while a text box is up unless you tick **also advance dialogue** (then a tap advances a line once it is fully
+shown, never a choice). **tap sensitivity** sets the distance
 (2.0: 5 cm, 0.5: 20 cm); F8 shows "armed" and how far you have pushed. The grips are also LB / RB to the game; tick
 **don't pass the grip to the game while a tap can fire** if that ever gets in the way: a grip squeezed where a tap can
 fire is then held back from the game until you let go (in battle and menus the grips work as before).

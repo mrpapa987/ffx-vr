@@ -573,7 +573,7 @@ BtlWindow (base 0x133C950 / 0xF3C950, stride 0xF0, 8 windows, stack top `[0x23CC
 | 0x133F110 | 0xF3F110 | **popup queue**: 16-byte entries {s16 x, s16 y, int type, int value, rgba}, count 0x133F108, max 63. Drawn and cleared by **0x893290** → digits 0x8FB840 / popups 0x8FBCC0 → 0x903EE0(400) on battle.dds; glyph u = 444+49·(d%5), v = 254+65·(d/5), 49x65, drawn 34x45. **Damage digits are UI-pass 2D sprites** | H (UI-pass placement M) |
 | 0x8933C0 | 0x4933C0 | monster gauges at Chr+0xF54/F58 (update 0x891220 / 0x897AF0) | H/M |
 | 0x8E58E0 | 0x4E58E0 | CPU scissor for box/plate primitives: fully clipped rects are set to -100000 PS2 units (0xB368B8) and still drawn. This is the far-away (-376000, -260200) UI pair | M |
-| 0x891AC0 | 0x491AC0 | TOBtlCtrlLimitTimer: state [0x133F77C]==2, remaining 0x133F790. The overdrive minigame UIs were **not located** | M |
+| 0x891AC0 | 0x491AC0 | TOBtlCtrlLimitTimer: state [0x133F77C]==2, remaining 0x133F790. The overdrive minigame UIs were **not located** here; found since (4 Nov 2026, design-notes "Direct game-state gates and overdrive minigame state"): s16 0x133D734 Tidus, 0x133D6F4 Auron, 0x133D708 Lulu, u8 0x133C93F Wakka (the HUD's test 0x89B38D; research-2026-10-24/exe-battle-ui.md:296 calls the three words message queues: a mislabel) | M |
 | 0x781020 | 0x381020 | MsBattleExe: encounter transition = an effect from the common bank (`0x7FD7F0`, entries 8..11), may sample "FrameBuffer" | M |
 
 ## 20. 2D UI submit (all menus and battle UI)
