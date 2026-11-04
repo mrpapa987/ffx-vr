@@ -99,7 +99,8 @@ constexpr float    k_head_match  = 3.f;    // units: a head this near the model'
 constexpr float    k_head_margin = 1.5f;   // units: ... and nearer it than the other head by this much
 constexpr float    k_head_far    = k_head_match + k_head_margin;   // units: another actor's only when the player's head is this far from the model
 constexpr int      k_models      = 8;      // textures remembered
-constexpr int      k_s_max       = 8;      // the score's clamp
+constexpr int      k_s_max       = 8;      // the score's clamp (player side)
+constexpr int      k_s_min       = -4;     // ... and the other side (review SF1: a wrong "other" must not need many frames to undo)
 constexpr int      k_s_player    = 2;      // score >= this: the player's model
 constexpr int      k_s_other     = -3;     // score <= this: another actor's (three frames of evidence from an unknown start)
 constexpr uint32_t k_model_ttl   = 600;    // frames unseen before an entry is dropped
@@ -170,8 +171,11 @@ struct Models {
         for (Model& m : e) {
             if (m.tex == 0) continue;
             if (m.voted) {
-                const int ev = head_evidence(m.dp, m.dq);
-                m.s += ev; if (m.s > k_s_max) m.s = k_s_max; if (m.s < -k_s_max) m.s = -k_s_max;
+                int ev = head_evidence(m.dp, m.dq);
+                // review SF1: the recovery term. A frame with the player's head on this model undoes an "other" score step by
+                // step even while the other head is as near (no margin): a 3-frame transient cannot latch his body visible.
+                if (ev == 0 && m.s < 0 && m.dp < k_head_match) ev = 1;
+                m.s += ev; if (m.s > k_s_max) m.s = k_s_max; if (m.s < k_s_min) m.s = k_s_min;
                 m.last_dp = m.dp; m.last_dq = m.dq; m.dp = m.dq = 1e30f; m.voted = false;
             }
             else if (frame - m.seen > k_model_ttl) m = Model{};
