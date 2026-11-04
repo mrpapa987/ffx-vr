@@ -2535,11 +2535,15 @@ static bool range_readable(const void* p, size_t len) {
 // thing a kept run cannot rule out is a page turned PAGE_GUARD since its query, which the kernel's copy would consume (it
 // still fails, without a fault): only VirtualProtect(PAGE_GUARD) on committed memory, or a free and a new thread stack at
 // the same address, within the same frame (design notes, "VirtualQuery cost"). fast_reads=0: the old path, unchanged.
-// The setting rides on ffxvr_cpu_report (v[M_N + 2]); until managed sends it, the default.
-static bool g_fast_reads = true;
+// The setting comes from managed through ffxvr_cpu_report: alone (n = -3, right after the native loads, before any frame,
+// and on a frame that does not finish) and with every report (v[M_N + 2]). Off until it comes (review SF1): an older
+// ffxvr.dll that never sends it runs the old path.
+static volatile LONG g_fast_reads = 0;
 static cpu::FastReader<32, 16> g_fr;
 static uint32_t g_fr_frames = 0, g_fr_off = 0;   // frames of this cpu: window with fast_reads on / off (cpu_frame_roll)
 static LONGLONG g_fr_copy_q = 0;           // this frame's QPC ticks in ReadProcessMemory (render thread)
+static uint32_t g_fr_big_n = 0;            // this frame's kernel copies over 4 KB (the actor table snapshot, 104 KB) (review N7)
+static LONGLONG g_fr_big_q = 0;            // ... and their QPC ticks (also in g_fr_copy_q)
 static LONGLONG g_fr_qpf = 0;              // QPC ticks a second (the age bound is a twentieth of it, 50 ms)
 
 /// The plain copy, as ffxvr_safe_read always did it (only for ranges inside FFX.exe's image here).
@@ -2561,21 +2565,22 @@ static bool fr_kernel_copy(void* dst, const void* src, unsigned len) {
     return ReadProcessMemory(GetCurrentProcess(), src, dst, len, &got) && got == len;
 }
 
-/// The render thread's ffxvr_safe_read with fast_reads on. Counts and times as range_readable does (its time without the
-/// kernel copies, which are timed on their own).
+/// The render thread's ffxvr_safe_read with fast_reads on. Counts and times as range_readable does: its time is the walk's
+/// alone, without either copy (review N8); the kernel copies are timed on their own.
 static int safe_read_fast(const void* src, void* dst, unsigned len) {
     if (g_cpu_exe_base == 0) g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (g_fr_qpf == 0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_fr_qpf = f.QuadPart; }
     const LONGLONG t0 = cpu_q();
-    LONGLONG copy_q = 0;
+    LONGLONG copy_q = 0, plain_q = 0;
     const cpu::FastStats before = g_fr.st;
     const int ok = g_fr.read(reinterpret_cast<uintptr_t>(src), len, t0, g_fr_qpf / 20, g_cpu_exe_base, cpu_vq,
-        [&]() { return fr_plain_copy(dst, src, len); },
+        [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_plain_copy(dst, src, len); plain_q = cpu_q() - c0; return done; },
         [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_kernel_copy(dst, src, len); copy_q = cpu_q() - c0; return done; });
     g_cpu_rr.queries += g_fr.st.queries - before.queries;
     g_cpu_rr.hits += g_fr.st.hits - before.hits;
     g_fr_copy_q += copy_q;
-    g_cpu_rr_q += (cpu_q() - t0) - copy_q;
+    if (copy_q != 0 && len > 4096) { g_fr_big_n++; g_fr_big_q += copy_q; }
+    g_cpu_rr_q += (cpu_q() - t0) - copy_q - plain_q;
     return ok;
 }
 
@@ -2589,7 +2594,7 @@ extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst,
     if (src == nullptr || dst == nullptr || len == 0) return 0;
     if (g_render_tid != 0 && GetCurrentThreadId() == g_render_tid) {
         g_cpu_sr_calls++;
-        if (g_fast_reads) return safe_read_fast(src, dst, len);
+        if (g_fast_reads != 0) return safe_read_fast(src, dst, len);
     }
     if (!range_readable(src, len)) return 0;
     __try { memcpy(dst, src, len); return 1; }
@@ -5324,6 +5329,7 @@ enum { M_BEFORE, M_BF, M_MID, M_WIN, M_PUSH, M_PLAYER, M_BODY, M_RIDE, M_HANDS, 
 static cpu::Acc g_cpu_nat[cpu_line::N_N], g_cpu_man[cpu_line::M_ACC_N];
 static cpu::Acc g_cpu_srn, g_cpu_vqn, g_cpu_hitn, g_cpu_rrms;   // per frame: safe_read calls, VirtualQuery calls, cache hits, range_readable ms
 static cpu::Acc g_cpu_cpyn, g_cpu_cpyms, g_cpu_prbn;            // vq-lean, per frame: kernel copies, their ms, allocation-base probes
+static cpu::Acc g_cpu_bign, g_cpu_bigms;                        // vq-lean (review N7), per frame: kernel copies over 4 KB, their ms
 static uint32_t g_cpu_cpy_fail = 0;                             // vq-lean: failed kernel copies over the window
 static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
 static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
@@ -5343,8 +5349,9 @@ static void cpu_frame_roll() {
     if (g_cpu_win_t0 == 0) g_cpu_win_t0 = GetTickCount64();
     g_cpu_srn.add(g_cpu_sr_calls); g_cpu_vqn.add(g_cpu_rr.queries); g_cpu_hitn.add(g_cpu_rr.hits); g_cpu_rrms.add(cpu_ms(g_cpu_rr_q));
     g_cpu_cpyn.add(g_fr.copies); g_cpu_cpyms.add(cpu_ms(g_fr_copy_q)); g_cpu_prbn.add(g_fr.st.probes); g_cpu_cpy_fail += g_fr.fails;
-    if (g_fast_reads) g_fr_frames++; else g_fr_off++;
-    g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0;
+    g_cpu_bign.add(g_fr_big_n); g_cpu_bigms.add(cpu_ms(g_fr_big_q));
+    if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
+    g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
     g_cpu_rcache.clear();   // (a): cleared once per Present. A run can outlive a frame (render-thread reads before this call, a long
@@ -5367,16 +5374,26 @@ static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LO
 /// here: the cpu: line prints them with the next perf: line.
 /// grid-timer (same ABI): two settings ride after the timings, v[M_N] = ini timer_fix and v[M_N + 1] = ini limiter_probe (1 / 0;
 /// an older managed sends M_N values: nothing is applied or installed, as before). vq-lean (same ABI): v[M_N + 2] = ini
-/// fast_reads (1 / 0; not sent: stays on). Anything past them is ignored.
+/// fast_reads (1 / 0; not sent: stays off). Anything past them is ignored.
+/// vq-lean (review SF1): n < 0 is the settings alone, v[0..-n) = timer_fix, limiter_probe, fast_reads, from any thread
+/// (managed sends it right after the native loads, before any frame, and on a frame that does not finish). fast_reads is
+/// applied at once; the grid-timer pair only on the render thread (else with the next report). Natives before vq-lean
+/// return at n <= 0, so they ignore it.
 extern "C" __declspec(dllexport) void ffxvr_cpu_report(const float* v, int n) {
     using namespace cpu_line;
-    if (v == nullptr || n <= 0) return;
+    if (v == nullptr || n == 0) return;
+    if (n < 0) {
+        const int k = -n;
+        if (k > 2) InterlockedExchange(&g_fast_reads, v[2] != 0.f ? 1 : 0);
+        if (k > 1 && g_render_tid != 0 && GetCurrentThreadId() == g_render_tid) gt_settings(v[0] != 0.f, v[1] != 0.f);
+        return;
+    }
     if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return;   // the render thread's numbers only
     const int k = n < M_N ? n : M_N;
     for (int i = 0; i < k; ++i) g_cpu_man[i].add(std::isfinite(v[i]) ? v[i] : 0.0);
     if (k > M_HANDS) g_cpu_man[M_REST].add(static_cast<double>(v[M_PUSH]) - v[M_PLAYER] - v[M_HANDS]);
     if (n > M_N + 1) gt_settings(v[M_N] != 0.f, v[M_N + 1] != 0.f);   // grid-timer: applied on a change only
-    if (n > M_N + 2) g_fast_reads = v[M_N + 2] != 0.f;                // vq-lean: ini fast_reads (an older managed sends none: the default, on)
+    if (n > M_N + 2) InterlockedExchange(&g_fast_reads, v[M_N + 2] != 0.f ? 1 : 0);   // vq-lean: ini fast_reads (an older managed sends none: off)
     g_cpu_hook_end_q = cpu_q(); g_cpu_gap_armed = true;
 }
 /// With the perf: line (perf_tick, render thread): the window's line, then a new window.
@@ -5398,17 +5415,18 @@ static void cpu_log_line() {
                   M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
     char gt[1200];
     gt_line_part(gt, sizeof(gt));   // grid-timer: the timer, the game window, the main loop and the limiter's Sleep (a new window)
-    char fr[200];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
+    char fr[320];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
     if (g_fr_frames == 0) snprintf(fr, sizeof(fr), ", fast_reads off");
-    else snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms, %u failed, base probes %.0f/%.0f",
-                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx);
+    else snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f",
+                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
+                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx);
     diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms%s | after our hook to the ring wait %s%s",
          secs, g_cpu_frames, N[N_ALL].avg(), N[N_ALL].mx, N[N_HEAD].avg(), N[N_HEAD].mx, N[N_PRE].avg(), N[N_PRE].mx, N[N_XWAIT].avg(), N[N_XWAIT].mx, N[N_XREST].avg(), N[N_XREST].mx,
          N[N_PERF].avg(), N[N_PERF].mx, N[N_SLOW].avg(), N[N_SLOW].mx, N[N_TAIL].avg(), N[N_TAIL].mx, man,
          g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, fr, gap, gt);
     for (auto& a : g_cpu_nat) a = cpu::Acc{};
     for (auto& a : g_cpu_man) a = cpu::Acc{};
-    g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = cpu::Acc{};
+    g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = g_cpu_bign = g_cpu_bigms = cpu::Acc{};
     g_cpu_cpy_fail = 0; g_fr_frames = g_fr_off = 0;
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;
