@@ -22,6 +22,11 @@ public sealed unsafe partial class FFXVRModule {
     /// and the re-pick key (-1 none), and in the field the other actors' roots near it. centre (game space) is where the 30-unit
     /// range is measured from when the drawn root is not known.</summary>
     private void body_hide_push(Actor* actors, int pick, int key, bool field, Vector3 root, int root_kind, Vector3 centre) {
+        long t0 = cpu_now();   // cpu-lean: the cpu: line's body hide section
+        body_hide_push_inner(actors, pick, key, field, root, root_kind, centre);
+        _cpu_body += cpu_now() - t0;
+    }
+    private void body_hide_push_inner(Actor* actors, int pick, int key, bool field, Vector3 root, int root_kind, Vector3 centre) {
         if (_fn_fp_self_set != null) { float r = 0f; _fn_fp_self_set(-root.X, -root.Y, root.Z, root_kind, key, &r); _fph_radius = r; }
         if (_fn_fp_others_set == null) return;
         float* buf = stackalloc float[48 * 3]; float* dist = stackalloc float[48];

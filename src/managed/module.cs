@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 37;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set)
+    private const int k_abi = 38;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -423,6 +423,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_ride_stats   = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ride_stats");   // ABI 33
             _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, void>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs)
             _fn_fp_others_set = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_fp_others_set");
+            _fn_cpu_report   = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_cpu_report");   // ABI 38: the cpu: line's managed sections (cpu_report.cs)
             _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
             _fn_sg_budget    = (delegate* unmanaged[Cdecl]<float, int, void>)req("ffxvr_shadow_budget_set");
             _fn_sg_status    = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_pool_status");
@@ -2147,9 +2148,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         slow_push();     // the slow-GPU guard: slow_guard, slow_guard_restart (every frame)
         sr_push();       // stickrep: stick_reproject and its Debug knobs, the turn keys (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
-        push_player();   // before fp_set: it can switch the view for a battle
+        { long t = cpu_now(); push_player(); _cpu_player += cpu_now() - t; }   // before fp_set: it can switch the view for a battle (cpu-lean: timed)
         push_hands();
-        hands2_push();   // VR hands v2: vr_hands_*, the calibration (hands.cs)
+        { long t = cpu_now(); hands2_push(); _cpu_hands += cpu_now() - t; }   // VR hands v2: vr_hands_*, the calibration (hands.cs)
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
@@ -2531,7 +2532,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
+            long t_ride = cpu_now();
             bool att = !in_battle && ride_probe(actors, pick);
+            _cpu_ride += cpu_now() - t_ride;
             if (att && !_ride_built) have = false;   // CR-1: the rider's root is not built yet, nor his sub-positions: the eye is the stand-in root + eye height
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
             // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low).
@@ -2698,6 +2701,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// <summary>Fahrenheit calls this from inside Present. An exception escaping it fail-fasts the whole
     /// game (exit 0xC0000409, no dump), so everything runs under a catch that logs the stack instead.</summary>
     public override void render_imgui() {
+        cpu_frame_start();   // cpu-lean: this frame's Stopwatch sections (cpu_report.cs)
         try { dpi_apply(); _our_px = our_font_px(); }
         catch (Exception e) { _our_px = k_fh_font_px; if (_render_faults++ < 5) _logger.Error($"dpi_apply fault #{_render_faults}: {e}"); }
         ImGui.PushFont(null, _our_px);   // FH-2: one push around all our ImGui output (outside the try: a Pop never runs without it)
@@ -2706,6 +2710,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             if (_render_faults++ < 5) _logger.Error($"render_imgui fault #{_render_faults}: {e}");
         }
         finally { ImGui.PopFont(); }     // before Fahrenheit's next module; every Begin inside ends in its own finally / End
+        if (_native_ok) cpu_frame_report();   // cpu-lean: one ffxvr_cpu_report a frame (no allocation)
     }
 
     /// <summary>FH-1, every frame before our push (render thread, after Fahrenheit's NewFrame, so always after its platform_bind
@@ -2760,7 +2765,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
         // Marks the frame boundary for the native helper. Fahrenheit calls
         // render_imgui from inside Present, so this fires exactly once a frame.
-        if (_native_ok && _fn_begin_frame != null) _fn_begin_frame();
+        if (_native_ok && _fn_begin_frame != null) { _cpu_t_bf0 = cpu_now(); _fn_begin_frame(); _cpu_t_bf1 = cpu_now(); }
 
         handle_hotkeys();
         if (_native_ready) {
@@ -2773,12 +2778,15 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             poll_gestures();
         }
         if (_window_open) {   // widgets, status and one-shot buttons only; a fault in there must not stop push_all
+            _cpu_t_win0 = cpu_now();
             try { draw_window(); }
             catch (Exception e) { if (e.Message != _ui_fault_last) { _ui_fault_last = e.Message; _logger.Error($"overlay fault: {e}"); } }
+            _cpu_t_win1 = cpu_now();
         }
-        if (_native_ready) push_all();      // every setting, once per frame, open or closed
+        if (_native_ready) { _cpu_t_push0 = cpu_now(); push_all(); _cpu_t_push1 = cpu_now(); }      // every setting, once per frame, open or closed
         settings_reload_check();   // R31/R33: a hand edit, every second of _now
         settings_save_tick();      // R21: debounced save
+        _cpu_done = true;
     }
 
     /// <summary>The F8 window. Without a working native helper it shows why (and the hint), never an empty frame.</summary>

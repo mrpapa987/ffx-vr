@@ -262,7 +262,9 @@ public sealed unsafe partial class FFXVRModule {
     private void hands2_tap_push() {
         if (_fn_hands2_tap_set == null) return;
         bool on = _vr_hands && _vr_hands_tap;
+        long t_tap = cpu_now();
         int game = _vr_hands ? hands2_tap_game() : 0;   // read whenever VR hands are on: native also hides the hands in battle (bit 1), tap or not
+        _cpu_tap += cpu_now() - t_tap;
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
         var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0) | (_vr_hands_tap_point ? 8 : 0) | (_vr_hands_tap_hold_grip ? 16 : 0),
                                sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };

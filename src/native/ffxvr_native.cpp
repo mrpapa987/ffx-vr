@@ -31,6 +31,7 @@
 #include "ffxvr_xr.h"
 #include "ffxvr_hands.h"   // VR hands v2: the CPU half (box mesh, placement, calibration)
 #include "ffxvr_slow.h"    // od-guard: the slow-GPU guard's decisions (pure logic)
+#include "ffxvr_cpu.h"     // cpu-lean: the cpu: line's accumulators and range_readable's page rule / region cache (pure logic)
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
@@ -2421,22 +2422,35 @@ extern "C" __declspec(dllexport) void ffxvr_census_arm(unsigned min_size, unsign
 // Support for the mod's own in-world markers
 // ---------------------------------------------------------------------------
 
+// cpu-lean: the render thread's guarded reads, counted per frame for the cpu: line (render thread only: plain counters; the
+// other threads' calls are not counted). Rolled into the line's window at the top of ffxvr_begin_frame (cpu_frame_roll).
+static_assert(cpu::k_mem_commit == MEM_COMMIT && cpu::k_mem_image == MEM_IMAGE && cpu::k_page_guard == PAGE_GUARD && cpu::k_page_noaccess == PAGE_NOACCESS
+              && cpu::k_page_readonly == PAGE_READONLY && cpu::k_page_readwrite == PAGE_READWRITE && cpu::k_page_writecopy == PAGE_WRITECOPY
+              && cpu::k_page_execute_read == PAGE_EXECUTE_READ && cpu::k_page_execute_readwrite == PAGE_EXECUTE_READWRITE && cpu::k_page_execute_writecopy == PAGE_EXECUTE_WRITECOPY,
+              "ffxvr_cpu.h's page constants");
+static uint32_t g_cpu_sr_calls = 0;       // ffxvr_safe_read calls this frame (render thread)
+static cpu::RangeStats g_cpu_rr = {};     // this frame's VirtualQuery calls / cache hits in range_readable (render thread)
+static LONGLONG g_cpu_rr_q = 0;           // this frame's QPC ticks inside range_readable (render thread)
+static inline LONGLONG cpu_q() { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
+static cpu::Mbi cpu_vq(uintptr_t q) {
+    MEMORY_BASIC_INFORMATION mbi; cpu::Mbi m;
+    if (VirtualQuery(reinterpret_cast<const void*>(q), &mbi, sizeof(mbi)) == 0) return m;
+    m.ok = true; m.base = reinterpret_cast<uintptr_t>(mbi.BaseAddress); m.size = mbi.RegionSize; m.alloc_base = reinterpret_cast<uintptr_t>(mbi.AllocationBase);
+    m.state = mbi.State; m.protect = mbi.Protect; m.type = mbi.Type;
+    return m;
+}
+
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
 /// access violation fatal even inside __try, so this check, not SEH, is what keeps a stale pointer harmless.
+/// (cpu-lean: the loop is cpu::range_check, ffxvr_cpu.h, the same test; on the render thread it is timed and counted.)
 static bool range_readable(const void* p, size_t len) {
     const uintptr_t a = reinterpret_cast<uintptr_t>(p);
-    if (p == nullptr || len == 0 || a < 0x10000 || a + len < a) return false;
-    uintptr_t q = a;
-    while (q < a + len) {
-        MEMORY_BASIC_INFORMATION mbi;
-        if (VirtualQuery(reinterpret_cast<const void*>(q), &mbi, sizeof(mbi)) == 0) return false;
-        if (mbi.State != MEM_COMMIT) return false;
-        const DWORD prot = mbi.Protect & 0xFF;
-        if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
-        if (prot != PAGE_READONLY && prot != PAGE_READWRITE && prot != PAGE_EXECUTE_READ && prot != PAGE_EXECUTE_READWRITE && prot != PAGE_WRITECOPY && prot != PAGE_EXECUTE_WRITECOPY) return false;
-        q = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    }
-    return true;
+    if (g_render_tid == 0 || GetCurrentThreadId() != g_render_tid)
+        return cpu::range_check<cpu::Mbi (&)(uintptr_t), 1>(a, len, cpu_vq, nullptr, 0, nullptr);
+    const LONGLONG t0 = cpu_q();
+    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 1>(a, len, cpu_vq, nullptr, 0, &g_cpu_rr);
+    g_cpu_rr_q += cpu_q() - t0;
+    return ok;
 }
 
 /// Copies `len` bytes from game memory. Returns 1 on success, 0 if the range
@@ -2446,6 +2460,7 @@ static bool range_readable(const void* p, size_t len) {
 /// inside __try, so faulting on purpose is not an option.
 extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
     if (src == nullptr || dst == nullptr || len == 0) return 0;
+    if (g_render_tid != 0 && GetCurrentThreadId() == g_render_tid) g_cpu_sr_calls++;
     if (!range_readable(src, len)) return 0;
     __try { memcpy(dst, src, len); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -4625,7 +4640,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 37;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes)
+constexpr int FFXVR_ABI = 38;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5154,6 +5169,94 @@ static Perf g_perf = {};
 static LARGE_INTEGER g_qpf = {}, g_t_frame_prev = {}; static double g_acc_frame = 0, g_acc_xr = 0; static int g_acc_n = 0; static ULONGLONG g_perf_log_tick = 0;
 double g_xr_ms_this_frame = 0; double g_e2_ms_this_frame = 0; static double g_acc_wait = 0, g_acc_end = 0, g_acc_e2 = 0, g_acc_max = 0; LARGE_INTEGER g_e2_t0 = {};
 static IDXGIAdapter3* g_adapter3 = nullptr; static bool g_adapter3_tried = false;
+
+// -- cpu-lean: the cpu: line (design-notes "Sphere grid frame pacing and CPU timings (4 Nov 2026)") ----------------------
+// The render thread's CPU time per frame, summarised with every perf: line (the same diag() call site, so the same cadence
+// and the same logging profile: every 30 s, every 5 s while slow; the release profile keeps it, as it keeps perf:). Each
+// field is the average and the maximum per frame over the window since the last line (not the perf: line's last 60 frames).
+// QPC only, fixed storage, nothing logged per frame. Always on.
+//   Native, ffxvr_begin_frame: head (the canary and stickrep stamps, build 7, the frame clock, pick, C3, the hands' frame end),
+//   pre (the capture lock, tick, read_camera, the cache sweeps, the GPU span's end), xr wait (our xrWaitFrame with the load
+//   lock release / re-take around it: lr_wait_begin .. lr_wait_end), xr rest (xr_tick without the wait: copies, submit,
+//   xrEndFrame, xrBeginFrame, sync, locate, input), perf (C2, the pointer sprites, perf_tick without slow_frame), slow
+//   (slow_frame), tail (the end-of-frame bookkeeping); all = the whole call.
+//   Managed (ffxvr_cpu_report, once a frame at the end of render_imgui): its Stopwatch sections and the GC counts.
+//   Reads: ffxvr_safe_read calls, VirtualQuery calls and range_readable's time per frame (render thread).
+//   After our hook: the end of our managed hook (or of ffxvr_begin_frame without one) to the render thread's next ring wait
+//   (stickrep's rt_ring_wait: Fahrenheit's later ImGui work, the real Present, the rest of the Present list), and how far
+//   past the open slot's deadline the ring wait was entered; "skipped by us" counts the sr: line's skip_ours over this window.
+namespace cpu_line {
+enum { N_HEAD, N_PRE, N_XWAIT, N_XREST, N_PERF, N_SLOW, N_TAIL, N_ALL, N_N };
+// ffxvr_cpu_report's values, in this order (ms; the GC entries are collection-count deltas since the last report)
+enum { M_BEFORE, M_BF, M_MID, M_WIN, M_PUSH, M_PLAYER, M_BODY, M_RIDE, M_HANDS, M_TAP, M_AFTER, M_ALL, M_GC0, M_GC1, M_GC2, M_N,
+       M_REST = M_N, M_ACC_N };   // M_REST: push_all without push_player and hands2_push (computed here)
+}
+static cpu::Acc g_cpu_nat[cpu_line::N_N], g_cpu_man[cpu_line::M_ACC_N];
+static cpu::Acc g_cpu_srn, g_cpu_vqn, g_cpu_hitn, g_cpu_rrms;   // per frame: safe_read calls, VirtualQuery calls, cache hits, range_readable ms
+static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
+static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
+static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu_hook_end_q = 0;
+static bool g_cpu_gap_armed = false;
+static ULONGLONG g_cpu_win_t0 = 0;
+static inline double cpu_ms(LONGLONG d) { return g_qpf.QuadPart ? static_cast<double>(d) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0; }
+/// Top of ffxvr_begin_frame (render thread): the frame just ended goes into the window (its reads ran from the last Present
+/// to this one: push_all, the draws), and the per-frame counters start again.
+static void cpu_frame_roll() {
+    if (g_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_qpf);
+    if (g_cpu_win_t0 == 0) g_cpu_win_t0 = GetTickCount64();
+    g_cpu_srn.add(g_cpu_sr_calls); g_cpu_vqn.add(g_cpu_rr.queries); g_cpu_hitn.add(g_cpu_rr.hits); g_cpu_rrms.add(cpu_ms(g_cpu_rr_q));
+    g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
+}
+/// End of ffxvr_begin_frame: its sections; the "after our hook" clock starts (ffxvr_cpu_report moves it to managed's end).
+static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LONGLONG q4, LONGLONG wait, LONGLONG slow) {
+    using namespace cpu_line;
+    const LONGLONG q5 = cpu_q();
+    g_cpu_nat[N_HEAD].add(cpu_ms(q1 - q0)); g_cpu_nat[N_PRE].add(cpu_ms(q2 - q1));
+    g_cpu_nat[N_XWAIT].add(cpu_ms(wait)); g_cpu_nat[N_XREST].add(cpu_ms((q3 - q2) - wait));
+    g_cpu_nat[N_PERF].add(cpu_ms((q4 - q3) - slow)); g_cpu_nat[N_SLOW].add(cpu_ms(slow));
+    g_cpu_nat[N_TAIL].add(cpu_ms(q5 - q4)); g_cpu_nat[N_ALL].add(cpu_ms(q5 - q0));
+    g_cpu_frames++;
+    g_cpu_hook_end_q = q5; g_cpu_gap_armed = true;
+}
+/// cpu-lean (ABI 38): managed's per-frame timings, once a frame from render_imgui (render thread), after its push_all. v[0..n)
+/// in cpu_line::M_* order (ms; GC: collection-count deltas); a shorter array fills the first n, a longer one is cut. No
+/// allocation, nothing logged here: the cpu: line prints them with the next perf: line.
+extern "C" __declspec(dllexport) void ffxvr_cpu_report(const float* v, int n) {
+    using namespace cpu_line;
+    if (v == nullptr || n <= 0) return;
+    if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return;   // the render thread's numbers only
+    const int k = n < M_N ? n : M_N;
+    for (int i = 0; i < k; ++i) g_cpu_man[i].add(std::isfinite(v[i]) ? v[i] : 0.0);
+    if (k > M_HANDS) g_cpu_man[M_REST].add(static_cast<double>(v[M_PUSH]) - v[M_PLAYER] - v[M_HANDS]);
+    g_cpu_hook_end_q = cpu_q(); g_cpu_gap_armed = true;
+}
+/// With the perf: line (perf_tick, render thread): the window's line, then a new window.
+static void cpu_log_line() {
+    using namespace cpu_line;
+    const ULONGLONG now = GetTickCount64();
+    const double secs = g_cpu_win_t0 && now > g_cpu_win_t0 ? (now - g_cpu_win_t0) / 1000.0 : 0.0;
+    const cpu::Acc* N = g_cpu_nat; const cpu::Acc* M = g_cpu_man;
+    char gap[200];
+    if (g_cpu_rings == 0) snprintf(gap, sizeof(gap), "not measured (the ring wait is stickrep's: stick_reproject or keepalive, headset on)");
+    else snprintf(gap, sizeof(gap), "avg %.2f max %.1f ms (%u frames) | ring wait past the slot deadline: %u entries (avg %.2f max %.1f ms past), %u past it by more than the margin | skipped by us %u (%.1f/s)",
+                  g_cpu_gap.avg(), g_cpu_gap.mx, g_cpu_rings, g_cpu_late_n, g_cpu_late.avg(), g_cpu_late.mx, g_cpu_late_slot, g_cpu_skip_ours, secs > 0.0 ? g_cpu_skip_ours / secs : 0.0);
+    char man[480];
+    if (M[M_ALL].n == 0) snprintf(man, sizeof(man), "none reported");
+    else snprintf(man, sizeof(man), "total %.2f/%.1f (before begin_frame %.2f/%.1f, begin_frame call %.2f/%.1f, mid %.2f/%.1f, window %.2f/%.1f, push_all %.2f/%.1f = player %.2f/%.1f [body hide %.2f/%.1f, ride %.2f/%.1f] + hands %.2f/%.1f [tap gate %.2f/%.1f] + rest %.2f/%.1f, after %.2f/%.1f) | gc 0/1/2 %.0f/%.0f/%.0f",
+                  M[M_ALL].avg(), M[M_ALL].mx, M[M_BEFORE].avg(), M[M_BEFORE].mx, M[M_BF].avg(), M[M_BF].mx, M[M_MID].avg(), M[M_MID].mx, M[M_WIN].avg(), M[M_WIN].mx,
+                  M[M_PUSH].avg(), M[M_PUSH].mx, M[M_PLAYER].avg(), M[M_PLAYER].mx, M[M_BODY].avg(), M[M_BODY].mx, M[M_RIDE].avg(), M[M_RIDE].mx,
+                  M[M_HANDS].avg(), M[M_HANDS].mx, M[M_TAP].avg(), M[M_TAP].mx, M[M_REST].avg(), M[M_REST].mx, M[M_AFTER].avg(), M[M_AFTER].mx,
+                  M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
+    diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms | after our hook to the ring wait %s",
+         secs, g_cpu_frames, N[N_ALL].avg(), N[N_ALL].mx, N[N_HEAD].avg(), N[N_HEAD].mx, N[N_PRE].avg(), N[N_PRE].mx, N[N_XWAIT].avg(), N[N_XWAIT].mx, N[N_XREST].avg(), N[N_XREST].mx,
+         N[N_PERF].avg(), N[N_PERF].mx, N[N_SLOW].avg(), N[N_SLOW].mx, N[N_TAIL].avg(), N[N_TAIL].mx, man,
+         g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, gap);
+    for (auto& a : g_cpu_nat) a = cpu::Acc{};
+    for (auto& a : g_cpu_man) a = cpu::Acc{};
+    g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = cpu::Acc{};
+    g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
+    g_cpu_win_t0 = now;
+}
 // GPU time per frame: a ring of timestamp-disjoint queries spanning Present to
 // Present, read back a few frames late so the readback never stalls.
 constexpr int k_gpuq_ring = 6;
@@ -5695,7 +5798,7 @@ static void perf_tick() {
     }
     g_t_frame_prev = now; g_xr_ms_this_frame = 0; g_e2_ms_this_frame = 0;
     gpu_timing_tick();
-    slow_frame(fm, w, e);           // od-guard: the frame ring, the DLL lines, the slow-GPU guard (every Present, before the 60-frame return)
+    { const LONGLONG cs0 = cpu_q(); slow_frame(fm, w, e); g_cpu_slow_acc += cpu_q() - cs0; }   // od-guard: the frame ring, the DLL lines, the slow-GPU guard (every Present, before the 60-frame return); cpu-lean: timed
     if (g_acc_n < 60) return;
     g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_perf.frame_max_ms = g_acc_max;
     g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
@@ -5731,12 +5834,15 @@ static void perf_tick() {
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
              g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
+        cpu_log_line();   // cpu-lean: the cpu: line, with every perf: line
         g_ui_verts_read = g_ui_trunc = g_ui_start_nonzero = g_ui_start_bail = g_ui_base_nonzero = g_skip_overflow = 0;   // R39/R48: since the last perf: line
     }
 }
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    const LONGLONG cq0 = cpu_q();   // cpu-lean: the sections of this call (cpu_frame_end)
+    cpu_frame_roll();
     gpu_canary_stamp();             // od-guard (e): before anything of ours reaches the GPU queue in this hook
     sr_begin_frame_mark();          // stickrep: this list's start-to-Present time (c_est), a late fresh frame
     diag7_frame();                  // build 7: Present time for the stall watchdog, its "ended" line, rumble changes
@@ -5761,6 +5867,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     c3_frame();                     // cursor stage C3: the atlas check and log line after a find, the atlas dump, the atlas liveness
     g_ui_flat_pass = false; g_ui_flat_resolved = false; g_flat_scene_tex = nullptr; g_flat_scene_draws = 0; g_flat_draws_per_target.clear();
     hands_frame_end();              // VR hands v2: the frame just rendered (drawn or the hide reason), the 10 s hands: line
+    const LONGLONG cq1 = cpu_q();
     bool dump_now = false;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -5792,7 +5899,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     twin_srv_trim();                // R12: oversized twin SRV caches are trimmed here, where none of our views is mid-bind
     bb_dead_twin_release();         // R11b: the backbuffer's sentinel / 0x599210 signals; a dead backbuffer's twin 2 frames on
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
+    const LONGLONG cq2 = cpu_q(); g_cpu_wait_acc = 0;
     xr_tick();                      // submit the frame just finished, locate the head for the next one
+    const LONGLONG cq3 = cpu_q(), cwait = g_cpu_wait_acc;
     {   // cursor stage C2: skip the game's cursors only while the headset shows our markers (a 3D frame with the UI pass, markers in 3D)
         // C2-8: sticky on the UI pass. A 3D frame without the pass un-skips only after k_c2_nopass of them in a row, so the first 3D
         // frame after headset start or after a screen frame (no pass yet) is skipped too; if the pass never comes the cursors return.
@@ -5802,7 +5911,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         InterlockedExchange(&g_c2_skip, skip ? 1 : 0); if (skip) g_c2_skip_frames++;
     }
     ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
+    g_cpu_slow_acc = 0;
     perf_tick();
+    const LONGLONG cq4 = cpu_q(), cslow = g_cpu_slow_acc;
     g_overlay_phase = true;
     g_first_draw_pending = true;
     g_backbuffer_seen_this_frame = false;
@@ -5876,6 +5987,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     if (dump_now) dump_capture();
     // A deferred Measure (R3): once the frame just finished took a snapshot, or after 5 frames whatever happened.
     if (g_measure_pending && (g_snap_frame + 1 == g_frames || g_frames >= g_measure_deadline)) { g_measure_pending = false; measure_now(); }
+    cpu_frame_end(cq0, cq1, cq2, cq3, cq4, cwait, cslow);
 }
 
 // Fills 48 floats: view, projection, inverse view. Returns 1 if valid.
@@ -11743,8 +11855,8 @@ static void lr_release_end(int y, double t_released) {
 }
 static double g_lr_t_wait = 0;
 /// XrHost callbacks around xrWaitFrame (ffxvr_xr.cpp xr_frame). The wait itself is unchanged.
-static int lr_wait_begin() { const int y = lr_release_begin(); if (y) g_lr_t_wait = pf_qpc_ms(); return y; }
-static void lr_wait_end(int y) { lr_release_end(y, g_lr_t_wait); }
+static int lr_wait_begin() { g_cpu_wait_q0 = cpu_q(); const int y = lr_release_begin(); if (y) g_lr_t_wait = pf_qpc_ms(); return y; }
+static void lr_wait_end(int y) { lr_release_end(y, g_lr_t_wait); g_cpu_wait_acc += cpu_q() - g_cpu_wait_q0; }   // cpu-lean: the cpu: line's "xr wait" (Present path only: the extras have their own callbacks)
 
 // -- the profiler ----------------------------------------------------------------------------------------------------------
 enum PfStage : uint8_t { ST_NONE, ST_LOCKACQ, ST_LOCKWAIT, ST_RILGUARD, ST_LOCKREL, ST_MGR, ST_POOLALLOC, ST_POOL, ST_TEXC, ST_SRV, ST_READ, ST_OPEN, ST_CLOSE,
@@ -12751,13 +12863,26 @@ static bool sr_wait_list_or(HANDLE h, double ms) {
     WaitForSingleObject(h, INFINITE);                              // a wait error: the game's own wait
     return true;
 }
+/// cpu-lean: the first ring wait after a Present (render thread): the time since our hook ended, and how late against the open
+/// slot's deadline (the loop below skips the slot when it is past by more than the margin: skip_ours). Reads only.
+static void cpu_ring_entry(bool armed) {
+    g_cpu_gap_armed = false;
+    g_cpu_gap.add(cpu_ms(cpu_q() - g_cpu_hook_end_q)); g_cpu_rings++;
+    if (!armed || !xr_extra_possible(false)) return;
+    const double d = sr_deadline(), now = sr_ms();
+    if (!(d < k_sr_inf) || !(now > d)) return;
+    g_cpu_late.add(now - d); g_cpu_late_n++;
+    if (now > d + g_sr_margin_ms) g_cpu_late_slot++;
+}
 /// The ring wait (replaces `call 0x4302A0` at 0x616060). __fastcall: ECX = &entry.ready (a PEvent: its first member is the
 /// event HANDLE); returns 0 like 0x4302A0; ebx / esi / edi / ebp are preserved by the compiler (the loop keeps ebx and esi).
 static int __fastcall rt_ring_wait(void* ev) {
     const HANDLE h = *static_cast<HANDLE*>(ev);
     const bool rt = g_render_tid != 0 && GetCurrentThreadId() == g_render_tid;
     if (rt && g_sr_present_pending) { g_sr_present_pending = false; g_sr_first_list_pending = true; g_sr_draws_base = g_draw_in_frame; g_sr_clears_base = g_sr_clears; g_sr_cams_base = g_cam_uploads_frame; }
-    if (!rt || !sr_armed()) { WaitForSingleObject(h, INFINITE); if (rt) rw_list(sr_ms()); return 0; }   // off: the game's wait
+    const bool armed = rt && sr_armed();           // (evaluated once, as before)
+    if (rt && g_cpu_gap_armed) cpu_ring_entry(armed);   // cpu-lean: the first ring wait after our hook (before anything here waits)
+    if (!armed) { WaitForSingleObject(h, INFINITE); if (rt) rw_list(sr_ms()); return 0; }   // off: the game's wait
     if (WaitForSingleObject(h, 0) == WAIT_OBJECT_0) { rw_list(sr_ms()); return 0; }                      // a list is queued: never insert anything
     bool got = false;                  // the list's event was consumed (every exit below must have it: the interpreter runs the entry next)
     int blocked = 0;                   // why the open slot is still waiting: 2 the flush gate, 3 the game's lock busy
@@ -12781,7 +12906,7 @@ static int __fastcall rt_ring_wait(void* ev) {
                 const double kd = floor((now - d - g_sr_margin_ms) / P) + 1.0;                                // SR-R-6: clamped before the cast
                 const int k = static_cast<int>(kd < 1.0 ? 1.0 : kd > 100000.0 ? 100000.0 : kd);
                 const uint32_t uk = static_cast<uint32_t>(k);
-                if (blocked == 2) { g_sr_s.gate_skips += uk; g_sr_ep_lost_gate += uk; } else if (blocked == 3) { g_sr_s.lock_busy += uk; g_sr_ep_lost_lock += uk; } else { g_sr_s.skip_ours += uk; g_sr_ep_lost_late += uk; }
+                if (blocked == 2) { g_sr_s.gate_skips += uk; g_sr_ep_lost_gate += uk; } else if (blocked == 3) { g_sr_s.lock_busy += uk; g_sr_ep_lost_lock += uk; } else { g_sr_s.skip_ours += uk; g_sr_ep_lost_late += uk; g_cpu_skip_ours += uk; }
                 blocked = 0; g_sr_pace.skip_k += k;
                 continue;
             }
