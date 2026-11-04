@@ -5041,7 +5041,7 @@ static void sweep_caches() {
     }
 }
 
-struct Perf { double frame_ms, xr_ms, frame_max_ms, wait_ms, end_ms, e2_ms, gpu_ms, gpu_max_ms; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
+struct Perf { double frame_ms, xr_ms, frame_max_ms, wait_ms, end_ms, e2_ms, gpu_ms, gpu_max_ms, can_ms, can_max_ms; uint32_t can_over; uint32_t twins, twin_srvs, buffers, in_flight, plain_srvs; uint64_t private_mb, vram_mb, vram_budget_mb; };
 static Perf g_perf = {};
 static LARGE_INTEGER g_qpf = {}, g_t_frame_prev = {}; static double g_acc_frame = 0, g_acc_xr = 0; static int g_acc_n = 0; static ULONGLONG g_perf_log_tick = 0;
 double g_xr_ms_this_frame = 0; double g_e2_ms_this_frame = 0; static double g_acc_wait = 0, g_acc_end = 0, g_acc_e2 = 0, g_acc_max = 0; LARGE_INTEGER g_e2_t0 = {};
@@ -5052,11 +5052,27 @@ constexpr int k_gpuq_ring = 6;
 static ID3D11Query* g_gpuq_disjoint[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_t0[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_t1[k_gpuq_ring] = {};
 static int g_gpuq_cur = -1; static uint32_t g_gpuq_frames = 0; static bool g_gpuq_failed = false;
 static double g_acc_gpu = 0, g_acc_gpu_max = 0; static int g_acc_gpu_n = 0;
+// od-guard: the span read at this Present (g_gpu_last_ok: one was read; it is k_gpuq_ring - 1 frames old), for the slow guard.
+static double g_gpu_last_ms = 0; static bool g_gpu_last_ok = false;
+// od-guard (e), the GPU canary: two timestamps back to back at the very start of the Present hook, in the same disjoint
+// query as the span. Nothing of ours runs between them, so they are microseconds apart on an idle queue; far apart (over
+// 2 ms), the GPU was busy with another process's work (or this process's earlier work had not drained and the scheduler
+// switched away). Read with the span, non-blocking, k_gpuq_ring - 1 frames late.
+static ID3D11Query* g_gpuq_c0[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_c1[k_gpuq_ring] = {}; static bool g_gpuq_c_set[k_gpuq_ring] = {};
+static double g_can_last_ms = 0; static bool g_can_last_ok = false;
+static double g_acc_can = 0, g_acc_can_max = 0; static int g_acc_can_n = 0; static uint32_t g_acc_can_over = 0;
+constexpr double k_can_far_ms = 2.0;
 static bool g_gpuq_t0_pending = false;    // t0 is stamped at the game's first clear, so the idle before it is left out
 static void gpu_timing_start_span() {
     if (!g_gpuq_t0_pending || g_gpuq_cur < 0 || !g_ctx) return;
     g_gpuq_t0_pending = false;
     g_ctx->End(g_gpuq_t0[g_gpuq_cur]);
+}
+/// od-guard (e): the canary pair, first thing in the Present hook (render thread), into the open slot's disjoint query.
+static void gpu_canary_stamp() {
+    if (g_gpuq_failed || !g_ctx || g_gpuq_cur < 0 || !g_gpuq_c0[g_gpuq_cur] || g_gpuq_c_set[g_gpuq_cur]) return;
+    g_ctx->End(g_gpuq_c0[g_gpuq_cur]); g_ctx->End(g_gpuq_c1[g_gpuq_cur]);
+    g_gpuq_c_set[g_gpuq_cur] = true;
 }
 // The span closes at Present, before xrWaitFrame: a timestamp issued after
 // the wait would be reached late by an idle GPU and count the wait as GPU time.
@@ -5073,20 +5089,35 @@ static void gpu_timing_tick() {
         D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, ts = { D3D11_QUERY_TIMESTAMP, 0 };
         for (int i = 0; i < k_gpuq_ring; ++i)
             if (FAILED(g_device->CreateQuery(&dj, &g_gpuq_disjoint[i])) || FAILED(g_device->CreateQuery(&ts, &g_gpuq_t0[i])) || FAILED(g_device->CreateQuery(&ts, &g_gpuq_t1[i]))) { g_gpuq_failed = true; return; }
+        for (int i = 0; i < k_gpuq_ring; ++i)   // the canary's pair (od-guard e): without them only the canary is missing
+            if (FAILED(g_device->CreateQuery(&ts, &g_gpuq_c0[i])) || FAILED(g_device->CreateQuery(&ts, &g_gpuq_c1[i]))) {
+                for (int k = 0; k < k_gpuq_ring; ++k) { if (g_gpuq_c0[k]) g_gpuq_c0[k]->Release(); if (g_gpuq_c1[k]) g_gpuq_c1[k]->Release(); g_gpuq_c0[k] = g_gpuq_c1[k] = nullptr; }
+                break;
+            }
     }
     gpu_timing_end_span();
     g_gpuq_span_closed = false;
     g_gpuq_frames++;
     // Read the slot that is about to be reused (k_gpuq_ring - 1 frames old).
     const int next = (g_gpuq_cur + 1) % k_gpuq_ring;
+    g_gpu_last_ok = false; g_can_last_ok = false;
     if (g_gpuq_frames > (uint32_t)k_gpuq_ring) {
         D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {}; UINT64 t0 = 0, t1 = 0;
-        if (g_ctx->GetData(g_gpuq_disjoint[next], &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency &&
-            g_ctx->GetData(g_gpuq_t0[next], &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && g_ctx->GetData(g_gpuq_t1[next], &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && t1 >= t0) {
+        const bool dj_ok = g_ctx->GetData(g_gpuq_disjoint[next], &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency;
+        if (dj_ok && g_ctx->GetData(g_gpuq_t0[next], &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && g_ctx->GetData(g_gpuq_t1[next], &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && t1 >= t0) {
             const double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
             g_acc_gpu += ms; if (ms > g_acc_gpu_max) g_acc_gpu_max = ms; g_acc_gpu_n++;
+            g_gpu_last_ms = ms; g_gpu_last_ok = true;
+        }
+        UINT64 c0 = 0, c1 = 0;
+        if (dj_ok && g_gpuq_c_set[next] && g_ctx->GetData(g_gpuq_c0[next], &c0, sizeof(c0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+            g_ctx->GetData(g_gpuq_c1[next], &c1, sizeof(c1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && c1 >= c0) {
+            const double ms = (double)(c1 - c0) * 1000.0 / (double)dj.Frequency;
+            g_acc_can += ms; if (ms > g_acc_can_max) g_acc_can_max = ms; g_acc_can_n++; if (ms > k_can_far_ms) g_acc_can_over++;
+            g_can_last_ms = ms; g_can_last_ok = true;
         }
     }
+    g_gpuq_c_set[next] = false;   // the slot is reused from here: its canary is stamped at the next Present hook's start
     g_gpuq_cur = next;
     g_ctx->Begin(g_gpuq_disjoint[g_gpuq_cur]); g_gpuq_t0_pending = true;
 }
@@ -5105,6 +5136,7 @@ static void perf_tick() {
     g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
     g_acc_frame = g_acc_xr = g_acc_wait = g_acc_end = g_acc_e2 = g_acc_max = 0; g_acc_n = 0;
     if (g_acc_gpu_n > 0) { g_perf.gpu_ms = g_acc_gpu / g_acc_gpu_n; g_perf.gpu_max_ms = g_acc_gpu_max; g_acc_gpu = g_acc_gpu_max = 0; g_acc_gpu_n = 0; }
+    if (g_acc_can_n > 0) { g_perf.can_ms = g_acc_can / g_acc_can_n; g_perf.can_max_ms = g_acc_can_max; g_perf.can_over = g_acc_can_over; g_acc_can = g_acc_can_max = 0; g_acc_can_n = 0; g_acc_can_over = 0; }
     g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
     { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
     g_perf.plain_srvs = g_plain_srvs_count();
@@ -5129,8 +5161,8 @@ static void perf_tick() {
         char lc_extra[96] = "";   // shadow camera: only what is not zero
         if (g_lc_tilted_total || g_lc_self_hidden_report)
             snprintf(lc_extra, sizeof(lc_extra), ", not straight down %u this session, own shadow hidden %u", g_lc_tilted_total, g_lc_self_hidden_report);
-        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u | sr extras %.0f/s",
-             g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; canary %.2f max %.1f, over 2 ms %u; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u | sr extras %.0f/s",
+             g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.can_ms, g_perf.can_max_ms, g_perf.can_over, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
              g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
@@ -5140,6 +5172,7 @@ static void perf_tick() {
 
 extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     g_render_tid = GetCurrentThreadId();
+    gpu_canary_stamp();             // od-guard (e): before anything of ours reaches the GPU queue in this hook
     sr_begin_frame_mark();          // stickrep: this list's start-to-Present time (c_est), a late fresh frame
     diag7_frame();                  // build 7: Present time for the stall watchdog, its "ended" line, rumble changes
     pf_render_frame();              // load lock build: a prof block waiting for the log (only before the profiler's watcher exists)
