@@ -10829,6 +10829,9 @@ static void haptics_tick() {
 //   AFTER -> IDLE     handle 0 and a 3D camera in 2 frames in a row with battle_state a running battle state (1, 2 or
 //                     0x17..0x21; not the load chain) (BT-3); 90 Presents in those states without a camera; back on the field
 //                     (state 0 with a 3D camera, 30 Presents in: aborted).
+//   SHATTER / AFTER -> IDLE  BT-B-1: the battle intro, battle_state 0x16 with a 3D camera (2 frames), once the glass break
+//                     has stopped drawing (AFTER with handle 0, or real shards seen and 6 still Presents, the handle's tail
+//                     set or not): the Preemptive / Ambushed message is drawn there (bt_intro_live).
 //   any -> IDLE       the session gone, the headset off, 30 s. A recentre (Home or the headset's) or a pin the runtime
 //                     dropped only ends the freeze: the window goes on head-locked (no UI split, the mode held).
 // After a window, a new one opens only once every signal has been seen clear (a stuck byte cannot keep the UI split off).
@@ -10856,6 +10859,8 @@ static uint32_t g_bt_live_s = 0, g_bt_cam_s = 0, g_bt_dclr_s = 0, g_bt_caps_s = 
 static bool     g_bt_line_due = false;
 static bool     g_bt_bs_seen = false;      // BT-H-1: this window saw a BrokenScreen signal (+4 / +5, a capture adopted or a shard draw): a glass break
 static bool     g_bt_load_seen = false;    // BT-H-1 (N2): this window saw the load chain (battle_state 4..0x16)
+static uint32_t g_bt_still_n = 0;          // BT-B-1: Presents in a row with no BrokenScreen drawing (no shard draw, no capture of capturedFrame's size, +5 clear)
+static int      g_bt_amb = -99, g_bt_cue = -99;   // BT-B-1, logged only: Btl.ambush_state [0x112C9DC] (s8: 1 preemptive, 2 ambushed) and the cue slot [0x112C910] (!= 0: a battle message is up); -99 = not read
 static int      g_bt_st = -999, g_bt_st_open = -999;   // screen_transition [0x112A9D5] (s8; -999 = not readable): now / at the window's open
 static bool     g_bt_rearm_block = false;   // after a window: no new one until every signal has been seen clear (a stuck byte cannot keep the UI split off)
 static uint32_t g_bt_lines_win = 0, g_bt_lines_all = 0, g_bt_after_lines = 0, g_bt_dropped = 0;
@@ -10922,6 +10927,7 @@ static void bt_begin(bool encounter, bool trig, const char* why) {
     g_bt_m_rule = g_bt_m_slot = g_bt_m_cam = g_bt_m_nodsv = 0; g_bt_cap_other = 0; g_bt_other_logged = false;
     g_bt_cap_done = false; g_bt_real_seen = g_bt_detail_want = g_bt_detail_done = g_bt_detail_logged = false; g_bt_detail[0] = 0; g_bt_user_why = nullptr;
     g_bt_last_real_t = 0; g_bt_capsz_logged = false; g_bt_bs_seen = g_bt_load_seen = false; g_bt_st_open = g_bt_st;
+    g_bt_still_n = 0; g_bt_amb = g_bt_cue = -99;
     unsigned wt = 0; xr_counters(&g_bt_held0, &wt);
     g_bt_encounter = encounter; g_bt_h_seen = g_bt_r.h != 0; g_bt_recentre = false; g_bt_hold = false;
     g_bt_cap_tex = (g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h)) ? g_bt_cap_cand : nullptr;   // BT-2: the capture drawn in the frame just finished, before the window opened (BT-S-2: of the right size)
@@ -10958,8 +10964,9 @@ static void bt_end(const char* why) {
     if (g_bt_cap_adopted) snprintf(cap, sizeof(cap), "capture %ux%u x%u (candidate frames %u, %u with 2+ matches, %u with another target, ignored)", g_bt_capt_w, g_bt_capt_h, g_bt_capt_s, g_bt_capf, g_bt_capf2, g_bt_cap_other);
     else if (g_bt_capf) snprintf(cap, sizeof(cap), "no capture adopted (%u candidate frames)", g_bt_capf);
     char stb[16];
-    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s, screen_transition %s at the open): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
-             why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : g_bt_freeze_wait ? ", no freeze: no BrokenScreen signal" : "", bt_st_str(g_bt_st_open, stb, sizeof(stb)), g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
+    const char* amb = g_bt_amb == 1 ? "1 (preemptive)" : g_bt_amb == 2 ? "2 (ambushed)" : g_bt_amb == -99 ? "not read" : g_bt_amb == 0 ? "0" : "other";   // BT-B-1
+    snprintf(g_bt_summary, sizeof(g_bt_summary), "ended: %s | window %u (%s, mode %d%s, screen_transition %s at the open, ambush_state %s at the end): armed %llu ms, shatter %llu ms (shards in %u frames, battle_state %d..%d, %d at its end), after %llu ms; map free (state 8/9) %s; %u frames, %u held; longest Present gap %.0f ms; %s; shard matches: rule %u, slot 1-3 %u, camera image %u, no depth %u%s",
+             why, g_bt_win_n, g_bt_encounter ? "encounter" : "other", g_bt_mode, g_bt_was_frozen ? ", frozen" : g_bt_freeze_wait ? ", no freeze: no BrokenScreen signal" : "", bt_st_str(g_bt_st_open, stb, sizeof(stb)), amb, g_bt_t_ph[BT_ARMED], g_bt_t_ph[BT_SHATTER], g_bt_shard_frames,
              g_bt_bst_first_shard, g_bt_bst_last_shard, g_bt_bst_shatter_end, g_bt_t_ph[BT_AFTER], fr, g_frames - g_bt_win_frame, held - g_bt_held0, g_bt_gap_max, cap,
              g_bt_m_rule, g_bt_m_slot, g_bt_m_cam, g_bt_m_nodsv, g_bt_dropped ? " (some bt: lines were dropped: the log stayed busy)" : "");
     bt_add("bt: frame %u: %s -> idle: %s", g_frames, k_bt_names[g_bt_phase & 3], why);
@@ -10970,6 +10977,17 @@ static void bt_end(const char* why) {
     bt_flush();
 }
 static bool bt_running_state(int bst) { return bst == 1 || bst == 2 || (bst >= 0x17 && bst <= 0x21); }   // BT-3: in battle (1 <-> 2, 0x7917D0) or its end states; not 0, the load chain 4..0x16 or 0x22
+// BT-B-1: the battle intro. State 0x16 is the end of the load chain: the battle map and models are in and the battle is drawn
+// with its camera. The game holds it while a start message is up: the Preemptive / Ambushed cue is registered at state 0x15
+// from Btl.ambush_state (0x783569), processed in the same tick (0x790D83), and 0x16 goes to 1 only once the cue slot
+// [0x112C910] is clear (0x7835B3). That message is drawn in the UI pass, so a window still open there shows it in both eye
+// images at the flat position. An encounter window in SHATTER or AFTER counts 0x16 as live once the glass break has stopped
+// drawing: in AFTER with the handle 0 (the effect completed), or after real shards with 6 still Presents in a row (no shard
+// draw, no capture, +5 clear; the handle's tail may still be set). ARMED (a haze, BT-H-1) and every other state are unchanged.
+static bool bt_intro_live(int bst, int phase, uint32_t h, bool real_seen, uint32_t still_n) {
+    if (bst != 0x16 || (phase != BT_SHATTER && phase != BT_AFTER)) return false;
+    return (phase == BT_AFTER && h == 0) || (real_seen && still_n >= 6);
+}
 /// Top of xr_tick: the frame just finished (its counters, before xr_tick resets them) and the game's state now.
 static void bt_tick() {
     g_bt_line_due = false;
@@ -11008,6 +11026,11 @@ static void bt_tick() {
         bt_begin(trig || r.h != 0, trig, trig ? "battle_trigger 1 at battle_state 0" : r.h != 0 ? "the transition handle is set" : r.bs5 ? "BrokenScreen active" : "BrokenScreen capture requested");
     }
     g_bt_line_due = true;
+    {   // BT-B-1, logged only (inside a window): Btl.ambush_state [0x112C9DC] (s8) and the battle message cue slot [0x112C910] (s32)
+        int8_t amb = 0; int32_t cue = 0;
+        g_bt_amb = wd_read(base + 0xD2C9DC, &amb, 1) ? static_cast<int>(amb) : -99;
+        g_bt_cue = wd_read(base + 0xD2C910, &cue, 4) ? static_cast<int>(cue) : -99;
+    }
     if (!g_bt_capsz_logged) {
         g_bt_capsz_logged = true;
         if (g_bt_capsz_w) bt_add("bt: frame %u: BrokenScreen capture target %ux%u (singleton +0x6C/+0x70): only a candidate of that size is adopted", f, g_bt_capsz_w, g_bt_capsz_h);
@@ -11040,6 +11063,7 @@ static void bt_tick() {
     if (g_bt_shards_s) { g_bt_shard_frames++; if (g_bt_bst_first_shard == -99) g_bt_bst_first_shard = r.bst; g_bt_bst_last_shard = r.bst; }
     if (r.h != 0) g_bt_h_seen = true;
     g_bt_quiet   = (r.h == 0 && !r.bs5 && g_bt_shards_s < 8) ? g_bt_quiet + 1 : 0;   // BT-2; fewer than 8 counts as quiet (the real effect draws ~100 a frame; a stray match must not keep it alive)
+    g_bt_still_n = (!r.bs5 && g_bt_shards_s == 0 && !(g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h))) ? g_bt_still_n + 1 : 0;   // BT-B-1: not reset by a phase change
     g_bt_clear_n = (r.trig == 0 && r.bst == 0 && r.h == 0) ? g_bt_clear_n + 1 : 0;      // BT-1
     if (g_bt_gap > g_bt_gap_max) g_bt_gap_max = g_bt_gap;
     if (g_bt_gap > 50.0) g_bt_gap_sum += g_bt_gap;
@@ -11068,9 +11092,15 @@ static void bt_tick() {
     // break keep h == 0. A capture candidate of another size (BT-S-2: not the capture) does not count against it.
     const bool h_free = r.h != 0 && g_bt_phase == BT_ARMED && !g_bt_bs_seen && g_bt_load_seen && !(g_bt_caps_s && bt_cap_size_ok(g_bt_cap_w, g_bt_cap_h))
                      && g_bt_shards_s == 0 && (r.bst == 1 || r.bst == 2);
-    g_bt_live_n = (g_bt_encounter && running && (r.h == 0 || h_free) && g_bt_cam_s > 0) ? g_bt_live_n + 1 : 0;   // BT-3
+    const bool intro = bt_intro_live(r.bst, g_bt_phase, r.h, g_bt_real_seen, g_bt_still_n);   // BT-B-1
+    g_bt_live_n = (g_bt_encounter && ((running && (r.h == 0 || h_free)) || intro) && g_bt_cam_s > 0) ? g_bt_live_n + 1 : 0;   // BT-3
     if (g_bt_live_n >= 2) {   // BT-S-3: in every phase (armed included): a frozen pose never reaches a live battle
         char hs[112] = "";
+        if (intro) {   // BT-B-1 (state 0x16: never a running state)
+            snprintf(g_bt_why, sizeof(g_bt_why), "the battle intro in the %s phase (battle_state 22 with a 3D camera, 2 frames; no BrokenScreen drawing for %u Presents, handle %08X; ambush_state %d, message cue %s)",
+                     k_bt_names[g_bt_phase & 3], g_bt_still_n, r.h, g_bt_amb, g_bt_cue == -99 ? "not read" : g_bt_cue != 0 ? "up" : "none");
+            bt_end(g_bt_why); return;
+        }
         if (r.h != 0) snprintf(hs, sizeof(hs), "; the transition handle %08X still set, no BrokenScreen signal: a transition without a glass break", r.h);
         snprintf(g_bt_why, sizeof(g_bt_why), "the battle is live in the %s phase (battle_state %d with a 3D camera, 2 frames%s)", k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst), hs);
         bt_end(g_bt_why); return;
@@ -11123,9 +11153,9 @@ static void bt_frame_line(bool ui_frame, const char* e1src) {
     const BtRead& r = g_bt_r;
     const char* mode = g_xr_screen_now ? "SCREEN" : g_screen3d_now ? "S3" : "3D";
     {
-        struct Sig { int ph; BtRead r; const char* mode; const char* src; uint32_t live, cam, dclr, late, caps, shards; bool ui, frz; };
+        struct Sig { int ph; BtRead r; const char* mode; const char* src; uint32_t live, cam, dclr, late, caps, shards; int cue; bool ui, frz; };
         static Sig prev;                                    // static storage: zero-initialised, padding included
-        Sig s; memset(&s, 0, sizeof(s)); s.ph = g_bt_phase; s.r = r; s.mode = mode; s.src = e1src; s.live = g_bt_live_s; s.cam = g_bt_cam_s; s.dclr = g_bt_dclr_s;
+        Sig s; memset(&s, 0, sizeof(s)); s.ph = g_bt_phase; s.r = r; s.mode = mode; s.src = e1src; s.live = g_bt_live_s; s.cam = g_bt_cam_s; s.dclr = g_bt_dclr_s; s.cue = g_bt_cue;
         s.late = g_bt_late_s; s.caps = g_bt_caps_s; s.shards = g_bt_shards_s; s.ui = ui_frame; s.frz = g_bt_frozen;
         const bool same = memcmp(&s, &prev, sizeof(s)) == 0;   // memset / memcpy only: the padding compares equal
         memcpy(&prev, &s, sizeof(s));
@@ -11137,10 +11167,10 @@ static void bt_frame_line(bool ui_frame, const char* e1src) {
     }
     g_bt_lines_win++; g_bt_lines_all++;
     unsigned held = 0, wt = 0; xr_counters(&held, &wt);
-    bt_add("bt: f=%u ph=%s bst=%d trig=%u h=%08X bs4=%u bs5=%u mode=%s uiframe=%d uidraws=%u live=%u cam3d=%u dclr=%u late=%u cap=%u shard=%u held=%u e1src=%s frz=%d gap=%.0f",
+    bt_add("bt: f=%u ph=%s bst=%d trig=%u h=%08X bs4=%u bs5=%u mode=%s uiframe=%d uidraws=%u live=%u cam3d=%u dclr=%u late=%u cap=%u shard=%u held=%u e1src=%s frz=%d gap=%.0f amb=%d cue=%d",
            g_frames, k_bt_names[g_bt_phase & 3], static_cast<int>(r.bst), static_cast<unsigned>(r.trig), r.h, static_cast<unsigned>(r.bs4), static_cast<unsigned>(r.bs5),
            mode, ui_frame ? 1 : 0, ui_frame ? g_ui_draws_report : 0u, g_bt_live_s, g_bt_cam_s, g_bt_dclr_s,
-           g_bt_late_s, g_bt_caps_s, g_bt_shards_s, held - g_bt_held0, e1src, g_bt_frozen ? 1 : 0, g_bt_gap);
+           g_bt_late_s, g_bt_caps_s, g_bt_shards_s, held - g_bt_held0, e1src, g_bt_frozen ? 1 : 0, g_bt_gap, g_bt_amb, g_bt_cue);
     if (g_bt_len > sizeof(g_bt_buf) * 3 / 4) bt_flush();   // BT-5: otherwise only at phase changes and the window's end
 }
 /// Battle transition: the mode (0 old, 1 head-locked, 2 frozen world) and the per-frame bt: lines; managed, every frame.
