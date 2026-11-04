@@ -115,6 +115,55 @@ class FvdTest(unittest.TestCase):
             f.write(b'nope' * 40)
         self.assertIsNone(fvd.read_header(p))
 
+    def _patch(self, p, off, fmt, *vals):
+        with open(p, 'r+b') as f:
+            f.seek(off)
+            f.write(struct.pack(fmt, *vals))
+
+    def test_reader_validation(self):
+        """FORMAT.md, "Reader validation": every offset and size is checked before it is used."""
+        fr = _frames(4)
+        good = self._write(fr)
+        with open(good, 'rb') as f:
+            data = f.read()
+        idx_off, th_off = struct.unpack_from('<QQ', data, 40)
+
+        def fresh():
+            with open(good, 'wb') as f:
+                f.write(data)
+            return good
+
+        def bad(off, fmt, *vals, frame=None):
+            p = fresh()
+            self._patch(p, off, fmt, *vals)
+            with self.assertRaises(fvd.FvdError, msg=(off, vals)):
+                with fvd.FvdReader(p) as r:
+                    if frame is not None:
+                        r.frame(frame)
+
+        bad(4, '<H', 2)                                   # an unknown (major) version
+        bad(6, '<H', 64)                                  # header_size < 128
+        bad(24, '<B', 9)                                  # unknown codec
+        bad(40, '<Q', 100)                                # index before the payloads
+        bad(12, '<I', 10**6)                              # frame count: index past the end of the file
+        bad(48, '<Q', idx_off + 32)                       # thumbnails overlapping the index
+        e0 = idx_off                                      # frame 0's index entry
+        bad(e0 + 8, '<I', 320 * 180 + 1, frame=0)         # payload larger than w*h
+        bad(e0 + 8, '<I', 0, frame=0)                     # empty payload
+        bad(e0, '<Q', 64, frame=0)                        # payload inside the header
+        e3 = idx_off + 3 * 32                             # frame 3 is stored (noise): its size must be w*h exactly
+        p = fresh()
+        with fvd.FvdReader(p) as r:
+            self.assertTrue(r.entry(3).flags & fvd.FF_STORED)
+        bad(e3 + 8, '<I', 320 * 180 - 1, frame=3)
+        bad(e0 + 12, '<H', fvd.FF_STORED, frame=0)        # marked stored but compressed (size != w*h)
+        # unknown flag bits are ignored (room for compatible additions)
+        p = fresh()
+        self._patch(p, 27, '<B', data[27] | 0x80)
+        self._patch(p, e0 + 12, '<H', fvd.FF_CUT | 0x8000)
+        with fvd.FvdReader(p) as r:
+            np.testing.assert_array_equal(r.frame(0), fr[0])
+
     def test_bad_frame_shape(self):
         p = os.path.join(self.tmp.name, 'y.fvd')
         wr = fvd.FvdWriter(p, 320, 180, 30, 1)

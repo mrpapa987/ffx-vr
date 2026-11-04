@@ -115,7 +115,7 @@ class _Xpress:
             self.buf = ctypes.create_string_buffer(out.value + 4096)
             if not self.k.Compress(self.c, src, len(data), self.buf, len(self.buf), ctypes.byref(out)):
                 raise FvdError(f'Compress(XPRESS_HUFF) failed, error {ctypes.get_last_error()}')
-        return self.buf.raw[:out.value]
+        return ctypes.string_at(self.buf, out.value)
 
     def decompress(self, data, size):
         dst = ctypes.create_string_buffer(size)
@@ -336,20 +336,25 @@ class FvdReader:
             raise
 
     def _open(self):
+        """The checks of FORMAT.md, "Reader validation"."""
         path = self.path
         size = os.fstat(self.f.fileno()).st_size
         h = FvdHeader.unpack(self.f.read(HEADER_SIZE))
         if h.version != VERSION:
-            raise FvdError(f'{path}: version {h.version}, this reader knows {VERSION}')
+            raise FvdError(f'{path}: format version {h.version}, this reader knows {VERSION}')
         if not (h.flags & HF_COMPLETE):
             raise FvdError(f'{path}: incomplete (the converter did not finish it)')
         if h.header_size < HEADER_SIZE or h.width == 0 or h.height == 0:
             raise FvdError(f'{path}: bad header')
+        if h.codec not in CODEC_NAMES or h.predictor not in (PRED_NONE, PRED_LEFT):
+            raise FvdError(f'{path}: unknown codec {h.codec} or predictor {h.predictor}')
         iend = h.index_offset + h.frame_count * INDEX_ENTRY
         if h.index_offset < h.header_size or iend > size:
             raise FvdError(f'{path}: index outside the file')
-        if h.flags & HF_THUMBS and h.thumbs_offset + h.frame_count * h.thumb_w * h.thumb_h > size:
-            raise FvdError(f'{path}: thumbnails outside the file')
+        if h.flags & HF_THUMBS:
+            if not h.thumb_w or not h.thumb_h or h.thumbs_offset < iend or \
+                    h.thumbs_offset + h.frame_count * h.thumb_w * h.thumb_h > size:
+                raise FvdError(f'{path}: thumbnails outside the file')
         self.h = h
         self.f.seek(h.index_offset)
         self._index = self.f.read(h.frame_count * INDEX_ENTRY)
@@ -364,6 +369,9 @@ class FvdReader:
         e = IndexEntry.unpack_from(self._index, i * INDEX_ENTRY)
         if e.offset < self.h.header_size or e.offset + e.size > self.h.index_offset:
             raise FvdError(f'{self.path}: frame {i} outside the payload area')
+        stored = bool(e.flags & FF_STORED) or self.h.codec == CODEC_STORED
+        if e.size == 0 or e.size > self.frame_bytes or (stored and e.size != self.frame_bytes):
+            raise FvdError(f'{self.path}: frame {i} has a bad payload size {e.size}')
         return e
 
     def frame(self, i):
