@@ -34,6 +34,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -318,7 +319,7 @@ def select_videos(arc, a):
     if a.only:
         allv = {k[len(vbf.VIDEO_DIR):].lower(): k for k in vbf.all_videos(arc)}
         out, seen = [], set()
-        for raw in a.only.replace(';', ',').split(','):
+        for raw in re.split(r'[,;\s]+', a.only):
             n = raw.strip().lower()
             if not n:
                 continue

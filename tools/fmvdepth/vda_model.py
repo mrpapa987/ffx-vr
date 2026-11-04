@@ -191,3 +191,19 @@ class FakeModel:
 
     def describe(self):
         return 'fake model (pipeline check only: the output is not depth)'
+
+
+def main(argv):
+    """python vda_model.py verify <VDA checkout>   (used by convert-fmv-depth.ps1 after the download)"""
+    if len(argv) == 3 and argv[1] == 'verify':
+        bad = verify_vda(argv[2])
+        for b in bad:
+            print('  ' + b)
+        print(f'Video-Depth-Anything at {argv[2]}: ' + ('NOT the pinned commit' if bad else f'commit {VDA_COMMIT[:7]}, ok'))
+        return 1 if bad else 0
+    print(main.__doc__)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
