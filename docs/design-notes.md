@@ -4129,6 +4129,19 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   start here: the two share the anchor from the scene's first frame, so it is kept only as a second source of evidence. Vertex
   / index buffers or the actor's model handle (+0x830) would need the Phyre mesh structures mapped to D3D objects (not done;
   nothing in the logs to check it against). The draw order follows the actor table for the opaque pass only.
+- **The engine's model chain (debug-revival.md section 3, checked in the disassembly, not at runtime).** actor +0x830 -> a
+  handle {count | 0x80000000, instance pointers}; an instance's [0] = segment records (0x6C bytes: +0x18 part id, +0x14 the
+  visible byte, [+0] a material index into the instance's +0x10 list); a material's parameter block carries "MaterialColour"
+  (0x63BC80 writes it, then 0x651400). None of it reaches a D3D object in what was read: the draw side is the render-command
+  interpreter (0x615550 type 1 -> 0x61C400 -> 0x5934C0), whose records would have to be traced to the ID3D11 buffers and views
+  the hook sees. Not done; an exact draw -> actor map stays a lead (a runtime test: flip one segment's visible byte of actor A
+  and see which skinned draw goes). The MaterialColour value is normally the same for every actor, so the uploaded constant
+  buffers cannot tell actors apart by it.
+- **Shared roots in the module log.** When another live, drawn actor's root is within 0.05 of the followed one's, both actors'
+  attach fields (+0x19C parent as a table index, +0x1A0 bone, +0x1A4.. offset, +0x1B0 scale, +0x1B8), the override matrix
+  (+0x10C), +0x180, +0x0C and +0x6C, and the model chain's head (+0x830: instances, segments, materials) are logged once per
+  pairing (40 a session): "body hide: actors 0 'c101' and 1 'c102' share a root ...". The owner's next repro says whether one is
+  attached to the other.
 - **Limits.** Heads closer than about 4.5 units are often unresolved (hidden, the old behaviour): the scratch test resolves
   every tie with heads 6+ units apart in 97% of scenes, 4-6 units in 60%, under 4 rarely. A first tie shows the other model
   after three to five frames. The test models the head sub-position as within 3 units of the bind axis; Tidus stays hidden with

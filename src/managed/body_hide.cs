@@ -42,11 +42,54 @@ public sealed unsafe partial class FFXVRModule {
             // shared with the follow pick) when it reads in one piece, else slot by slot as before. Same rule, same order.
             Actor* snap = tbl_snap(actors);
             var o = new Span<float>(buf, 48 * 3); var d = new Span<float>(dist, 48); var h = new Span<float>(heads, 48 * 3);
-            if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d, h); }
+            if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d, h); body_hide_anchor_log(actors, snap, pick, c); }
             else if (_fn_safe_read != null) { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d, h); }   // (none bound: n = 0, as read() failing at slot 0 gave)
         }
         _fph_others_n = n;
         _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n > 0 ? heads : null, n);
+    }
+
+    // -- npc-anchor: who shares the followed actor's root ---------------------------------------------------------------
+    // The owner's repro (mi/mihn0100): the event Tidus and Yuna on one root. A root shared legitimately can be an attachment (one
+    // actor on another's bone, or both on one parent), a script override matrix, or a scene anchor. When another live, drawn
+    // actor's root is within 0.05 units of the followed one's, both actors' attach fields (+0x19C parent, +0x1A0 bone, +0x1A4..
+    // +0x1AC offset, +0x1B0 scale, +0x1B8 the parent's id), the override matrix pointer (+0x10C) and the head of their model chain
+    // (+0x830 handle -> instances -> the first instance's segment and material counts; debug-revival.md section 3) go to the
+    // module log: once per pairing (pick, other, both chr_ids, the attach words), at most 40 a session. The frame's table
+    // snapshot only, plus a few guarded reads on a logged change.
+    private int _fpa_lines; private ulong _fpa_last;
+    private void body_hide_anchor_log(Actor* actors, Actor* snap, int pick, Vector3 c) {
+        if (_fpa_lines >= 40 || snap == null || (uint)pick >= 48) return;
+        for (int i = 0; i < 48; i++) {
+            if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name) || slot_hidden(actors, snap, i)) continue;
+            Vector3 r = *(Vector3*)((byte*)(snap + i) + 0x200);
+            if (!finite(r) || Vector3.DistanceSquared(r, c) > 0.05f * 0.05f) continue;
+            byte* a = (byte*)(snap + pick), b = (byte*)(snap + i);
+            ulong key = (ulong)pick | (ulong)i << 6 | (ulong)snap[pick].chr_id << 12 | (ulong)snap[i].chr_id << 28 | (ulong)(*(uint*)(a + 0x19C) ^ *(uint*)(b + 0x19C) * 31u) << 44;
+            if (key == _fpa_last) return;
+            _fpa_last = key; _fpa_lines++;
+            _logger.Info(I($"body hide: actors {pick} '{actor_name(snap[pick].chr_name)}' and {i} '{actor_name(snap[i].chr_name)}' share a root ({r.X:F2}, {r.Y:F2}, {r.Z:F2}) on map {map_name()} (a scene anchor, an attachment or a script matrix?) | {pick}: {anchor_fields(actors, snap, pick)} | {i}: {anchor_fields(actors, snap, i)}") +
+                         (_fpa_lines == 40 ? " (no more of these lines this session)" : ""));
+            return;
+        }
+    }
+    /// <summary>One actor's attach fields, override matrix and model chain head, for body_hide_anchor_log.</summary>
+    private string anchor_fields(Actor* actors, Actor* snap, int i) {
+        byte* a = (byte*)(snap + i);
+        nint par = *(nint*)(a + 0x19C); int pi = par != 0 && (ulong)((byte*)par - (byte*)actors) < 48UL * (ulong)sizeof(Actor) ? (int)(((byte*)par - (byte*)actors) / sizeof(Actor)) : -1;
+        string attach = par == 0 ? "not attached" : I($"attached to {(pi >= 0 ? $"actor {pi}" : $"0x{(ulong)par:X}")}, bone {*(int*)(a + 0x1A0)}, offset ({*(float*)(a + 0x1A4):F2}, {*(float*)(a + 0x1A8):F2}, {*(float*)(a + 0x1AC):F2}), scale {*(float*)(a + 0x1B0):F2}");
+        string model = "model +0x830 none";
+        nint h = *(nint*)(a + 0x830);
+        if (h != 0) {
+            model = I($"model +0x830 0x{(ulong)h:X}");
+            if (read((void*)h, out uint hn) && read((byte*)h + 4, out nint inst) && inst != 0 && read((void*)inst, out nint i0) && i0 != 0) {
+                uint sn = 0, mn = 0; nint seg = 0, mat = 0;
+                bool ok = read((void*)i0, out seg) && seg != 0 && read((void*)seg, out sn);
+                bool okm = read((byte*)i0 + 0x10, out mat) && mat != 0 && read((void*)mat, out mn);
+                model += I($": {hn & 0x7FFFFFFF} instances, the first 0x{(ulong)i0:X} with {(ok ? (sn & 0x7FFFFFFF).ToString() : "?")} segments, {(okm ? (mn & 0x7FFFFFFF).ToString() : "?")} materials");
+            }
+        }
+        return I($"{attach} (+0x1B8 {*(int*)(a + 0x1B8)}), override matrix +0x10C {(*(nint*)(a + 0x10C) == 0 ? "none" : "set")}, +0x180 0x{a[0x180]:X2}, +0x0C ({*(float*)(a + 0x0C):F1}, {*(float*)(a + 0x10):F1}, {*(float*)(a + 0x14):F1}) + offset +0x6C ({*(float*)(a + 0x6C):F2}, {*(float*)(a + 0x70):F2}, {*(float*)(a + 0x74):F2}), {model}");
     }
 
     // -- cpu-lean (c, e): the actor table, once a frame ------------------------------------------------------------------
