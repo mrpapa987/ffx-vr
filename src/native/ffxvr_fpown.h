@@ -8,9 +8,12 @@
 //      k_margin_cap): the old test, with the step margin capped (it was unbounded: a scripted move under the 50-unit warp rule, a
 //      re-pick of the followed actor or 30 fps logic widened it to several units and NPCs beside Tidus went with him); and
 //   2. it is not nearer another actor's drawn root than the player's, by k_tol: an NPC's parts sit on its own root (distance
-//      about 0), so it is never taken for the player's however wide the margin is. The player's distance is the smaller of the
-//      distances to the hide centre and to his drawn root (+0x200; the hide centre is drawn - chr_offset +0x6C, or the 30 Hz
-//      logic position without the smooth anchor): his parts sit on one of the two.
+//      about 0), so it is never taken for the player's however wide the margin is.
+//      The player's parts sit on his drawn root, +0x200 = +0x0C + chr_offset (+0x6C). The hide centre is that root minus
+//      chr_offset (the smooth anchor's snapshot) or the 30 Hz +0x0C: chr_offset moves the centre off his parts, never the root.
+//      So when the root is the snapshot's (self_exact: what this frame draws) the player's distance is to it alone (review N2);
+//      when it is a Present-time read (the lerp the last frame drew or the canonical tick, up to a tick off) it is the smaller
+//      of the distances to it and to the centre, whichever is nearer what is drawn.
 // No other roots (none sent this frame) = test 1 only, as before. Riding is the chocobo rule, unchanged (rider / mount roots).
 #pragma once
 #include <cmath>
@@ -34,6 +37,7 @@ struct Foot {
     float radius = 0.75f;                   // g_fp_hide_radius
     float step_hide = 0.f;                  // g_fp_step_hide (SM-2)
     const float* self = nullptr;            // the followed actor's drawn root, or nullptr (then the centre only)
+    bool self_exact = false;                // self is the smooth anchor's post-join snapshot (used alone), not a Present-time read
     const float (*others)[3] = nullptr;     // other live actors' drawn roots
     int n = 0;                              // how many; <= 0 = none sent: the old behaviour
 };
@@ -41,7 +45,7 @@ struct Foot {
 /// What decided (for the diagnostics; filled only for a draw inside the radius).
 struct Why {
     float d_centre = 0.f;   // distance to the hide centre
-    float d_player = 0.f;   // the player's distance (min of centre and drawn root)
+    float d_player = 0.f;   // the player's distance (to the exact drawn root; else the min of centre and drawn root)
     float d_other = -1.f;   // the nearest other root's distance (-1: none sent)
     int   other = -1;       // its index in others
     bool  refused = false;  // inside the radius, but nearer another root: not the player's
@@ -57,7 +61,7 @@ inline int on_foot(const float* w, const Foot& f, Why* why = nullptr) {
         return 1;
     }
     float dp2 = dc2;
-    if (f.self) { const float ds2 = d2(w, f.self); if (ds2 < dp2) dp2 = ds2; }
+    if (f.self) { const float ds2 = d2(w, f.self); if (f.self_exact || ds2 < dp2) dp2 = ds2; }
     const float dp = std::sqrt(dp2);
     float bo2 = 1e30f; int bo = -1;
     for (int i = 0; i < f.n && i < k_others_max; ++i) { const float o2 = d2(w, f.others[i]); if (o2 < bo2) { bo2 = o2; bo = i; } }

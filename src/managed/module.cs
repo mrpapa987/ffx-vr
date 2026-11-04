@@ -2372,7 +2372,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
         _ride_att = false; _ride_mount_ok = false;   // ride_probe sets them again for an attached followed actor
-        if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); body_hide_push(null, -1, false, default, false, default); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
+        if (actors == null) { System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
         // like one before it is read.
@@ -2543,10 +2543,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
             if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, have ? 1 : 0);
             // the body hide's ownership (body_hide.cs): after player_set, so a re-pick resets the step margin it just widened
-            bool root_ok = body_hide_root(actors, pick, att, out Vector3 root3);
-            body_hide_push(actors, pick, !in_battle, root3, root_ok, att ? _ride_rider : pos3);
+            // the re-pick key: the index and the model (N1: lc/lchb0500 swaps c001 -> c101 in the same slot)
+            int root_kind = body_hide_root(actors, pick, att, out Vector3 root3);
+            body_hide_push(actors, pick, (pick << 16) | ((int)p.chr_id & 0xFFFF), !in_battle, root3, root_kind, att ? _ride_rider : pos3);
         }
-        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, false, default, false, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
+        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }
     /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,

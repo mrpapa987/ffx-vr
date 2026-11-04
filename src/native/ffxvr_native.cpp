@@ -764,7 +764,7 @@ double   g_ride_st[6] = {};   // frames, matched, missed, near-miss frames, near
 // of the other live actors within 30 units (not the mount). A draw nearer another root than the player's (by 0.5) is not his.
 // Used only when sent this frame or the one before; otherwise the old radius test. Render space.
 float    g_fp_others[fpown::k_others_max][3] = {}; int g_fp_others_n = 0; uint32_t g_fp_others_frame = 0;
-float    g_fp_self_root[3] = {}; bool g_fp_self_ok = false; uint32_t g_fp_self_frame = 0; int g_fp_pick = -2;
+float    g_fp_self_root[3] = {}; bool g_fp_self_ok = false, g_fp_self_exact = false; uint32_t g_fp_self_frame = 0; int g_fp_pick = -2;   // g_fp_pick: the re-pick key
 float    g_fp_d_call[2] = {};   // step_hide's two distances: this ffxvr_player_set call's, the one before (the body hide: line)
 uint32_t g_fph_refused = 0, g_fph_refused_last = 0;   // draws inside the radius refused as another actor's (NPC parts kept visible): this frame / last frame
 static inline bool fp_others_live() { return g_fp_others_n > 0 && g_frames - g_fp_others_frame <= 1u; }
@@ -788,7 +788,7 @@ static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
         fpown::Foot f; f.centre = g_fp_pos; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
         if (fp_others_live()) {   // nearest-root ownership; none sent this frame = the radius test alone, as before
             f.others = g_fp_others; f.n = g_fp_others_n;
-            if (g_fp_self_ok && g_frames - g_fp_self_frame <= 1u) f.self = g_fp_self_root;
+            if (g_fp_self_ok && g_frames - g_fp_self_frame <= 1u) { f.self = g_fp_self_root; f.self_exact = g_fp_self_exact; }
         }
         return fpown::on_foot(w, f, why);
     }
@@ -820,6 +820,7 @@ static void fp_hide_note(const float* w, int who, const fpown::Why& y) {
     else g_fph_clu_more++;
 }
 /// At Present (ffxvr_begin_frame): last frame's refusals for managed; the rate-limited body hide: line; the 10 s window.
+/// The body hide: line's "the player's drawn root" says (snapshot) when it is the smooth anchor's (used alone, N2).
 static void fp_hide_frame_end() {
     g_fph_refused_last = g_fph_refused;
     const ULONGLONG now = GetTickCount64();
@@ -842,7 +843,7 @@ static void fp_hide_frame_end() {
             char others[96], selfs[64], refs[120] = "";
             if (live) snprintf(others, sizeof(others), "other roots %d, nearest %.2f from the centre", g_fp_others_n, near_c);
             else snprintf(others, sizeof(others), "other roots none sent (the radius test alone)");
-            if (self) snprintf(selfs, sizeof(selfs), "%.2f from the centre", sqrtf(fpown::d2(g_fp_self_root, g_fp_pos)));
+            if (self) snprintf(selfs, sizeof(selfs), "%.2f from the centre (%s)", sqrtf(fpown::d2(g_fp_self_root, g_fp_pos)), g_fp_self_exact ? "snapshot" : "read at Present");
             else snprintf(selfs, sizeof(selfs), "not known (the centre alone)");
             if (g_fph_refused) snprintf(refs, sizeof(refs), " (nearest %.2f from the centre, up to %.2f nearer the other root)", g_fph_ref_dmin, g_fph_ref_by);
             diag("body hide: frame %u matched %u draws in %d places (count at distance from the centre): %s | radius %.2f = %.2f + margin %.2f (1.5 x step %.2f = %.2f + %.2f, cap %.0f) | %s | the player's drawn root %s | refused %u draws nearer another root%s%s",
@@ -10581,13 +10582,16 @@ extern "C" __declspec(dllexport) int ffxvr_ride_stats(float* out, int n) {
     return k;
 }
 /// On-foot ownership (ABI 37), every frame right after ffxvr_player_set: the followed actor's drawn root (+0x200, render space;
-/// root_ok 0 = not known: the player's side of the test is the hide centre g_fp_pos alone) and its table index (-1 none). A new
-/// index is a re-pick (a cutscene double: actor 0 hidden -> the event Tidus, a party swap), not a step: the jump ffxvr_player_set
-/// just counted (under its 50-unit warp rule) would widen the margin for two calls, so it starts again from 0, as ffxvr_ride_set's
-/// N4 does for a mount. radius (if not null) gets the on-foot hide radius now in effect (hide_radius + the capped margin).
+/// root_ok 0 = not known: the player's side of the test is the hide centre g_fp_pos alone; 1 = read at Present, up to a tick off:
+/// the nearer of it and the centre; 2 = the smooth anchor's post-join snapshot, what this frame draws: it alone) and a re-pick key
+/// (managed: the table index << 16 | chr_id, -1 none). A new key is a re-pick (a cutscene double: actor 0 hidden -> the event
+/// Tidus; a model swap in the same slot, c001 -> c101 on lc/lchb0500; a party swap), not a step: the jump ffxvr_player_set just
+/// counted (under its 50-unit warp rule) would widen the margin for two calls, so it starts again from 0, as ffxvr_ride_set's N4
+/// does for a mount. radius (if not null) gets the on-foot hide radius now in effect (hide_radius + the capped margin).
 extern "C" __declspec(dllexport) void ffxvr_fp_self_set(float x, float y, float z, int root_ok, int pick, float* radius) {
     if (pick != g_fp_pick) { g_fp_pick = pick; g_fp_step_hide = 0.f; g_fp_d_prev = 0.f; g_fp_d_call[0] = g_fp_d_call[1] = 0.f; }
     g_fp_self_ok = root_ok != 0 && std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+    g_fp_self_exact = g_fp_self_ok && root_ok == 2;
     if (g_fp_self_ok) { g_fp_self_root[0] = x; g_fp_self_root[1] = y; g_fp_self_root[2] = z; }
     g_fp_self_frame = g_frames;
     if (radius != nullptr) *radius = g_fp_hide_radius + fpown::margin(g_fp_step_hide);
