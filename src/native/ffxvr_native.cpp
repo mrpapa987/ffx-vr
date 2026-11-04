@@ -6768,8 +6768,11 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (why.refused) g_fph_refused++;         // inside the radius, nearer another actor's root: kept visible
             if (who == 1) {                           // exact identity by the index buffer, then shared-anchor ties by model (ffxvr_fpown.h)
                 uint32_t ibk, ibo; const int ibv = fp_ib_owner(&ibk, &ibo);   // 0 the player's, 1 another actor's, -1 undecided
-                const int v = ibv == 0 ? 1 : ibv == 1 ? -1 : fp_tie_resolve(why, g_eye2_cur, &tex);
                 const bool t = fpown::tied(why);
+                // review 2 N2: a tied draw still feeds the texture rule when the table decides it (its verdict unused), so the
+                // fallback is warm when the table drops out (a gap, a failed chain read)
+                const int tv = (ibv < 0 || t) ? fp_tie_resolve(why, g_eye2_cur, &tex) : 1;
+                const int v = ibv == 0 ? 1 : ibv == 1 ? -1 : tv;
                 if (!t && ibv == 1) g_fph_ib_free++;
                 if (t) { g_fph_tie++; if (ibv >= 0) g_fph_tie_ib++; if (v > 0) g_fph_tie_player++; else if (v == 0) g_fph_tie_unres++; else g_fph_tie_kept++; }
                 if (v < 0) { who = 0; g_fph_id_kept++; fp_census_note(idx, ibv == 1 ? "kept visible: another actor's segment (the IB table)" : "kept visible: another actor's model (a tie with the player's root)", g_eye2_cur->world_pos, why, tex); }
@@ -10890,12 +10893,16 @@ extern "C" __declspec(dllexport) int ffxvr_fp_others_set(const float* xyz, const
 /// Exact identity (ABI 40), every field frame in first person on foot with the body hide on, after ffxvr_fp_others_set: the
 /// index-buffer table, n quadruples (ID3D11Buffer* as a 32-bit key, byte offset, index count, owner 0 the player's / 1 another
 /// actor's): the segments of the followed actor's model chain (+0x830) and of the actors near him (managed, body_hide.cs). The
-/// entries are copied when gen differs from the last call's (managed bumps it on every rebuild); every call stamps the table,
-/// which is used only in the frame after a call (no call: the texture and position rules alone). n <= 0 empties it. Returns last
-/// frame's matched draws decided by it: the player's in the high 16 bits, another actor's in the low 16.
+/// entries are copied only when gen differs from the last call's (managed bumps it on every rebuild); every call stamps the table,
+/// which is used only in the frame after a call (no call: the texture and position rules alone). n <= 0 empties it, and so does
+/// a call after a gap (review 2 SF1: the previous call more than a frame ago) with the same gen: an old table is never re-armed,
+/// only a new build fills it (managed rebuilds after every gap). Returns last frame's matched draws decided by it: the player's
+/// in the high 16 bits, another actor's in the low 16.
 extern "C" __declspec(dllexport) int ffxvr_fp_ib_set(const uint32_t* q, int n, uint32_t gen) {
+    const bool gap = g_frames - g_fp_ib_frame > 1u;
     if (n <= 0 || q == nullptr) g_fp_ib.n = 0;
-    else if (gen != g_fp_ib_gen || g_fp_ib.n == 0) g_fp_ib.set(q, n);
+    else if (gen != g_fp_ib_gen) g_fp_ib.set(q, n);
+    else if (gap) g_fp_ib.n = 0;
     g_fp_ib_gen = gen; g_fp_ib_frame = g_frames;
     return static_cast<int>(g_fph_ib_report);
 }
