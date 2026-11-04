@@ -5273,6 +5273,11 @@ static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu
 static bool g_cpu_gap_armed = false;
 static ULONGLONG g_cpu_win_t0 = 0;
 static inline double cpu_ms(LONGLONG d) { return g_qpf.QuadPart ? static_cast<double>(d) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0; }
+// grid-timer (defined with the limiter probe, at the end): the timer and window samples (render thread, every frame: one in 30
+// samples), the settings that ride on ffxvr_cpu_report, and the cpu: line's timer / window / main-loop part.
+static void gt_render_frame();
+static void gt_settings(bool timer_fix, bool probe);
+static void gt_line_part(char* out, size_t n);
 /// Top of ffxvr_begin_frame (render thread): the frame just ended goes into the window (its reads ran from the last Present
 /// to this one: push_all, the draws), and the per-frame counters start again.
 static void cpu_frame_roll() {
@@ -5282,6 +5287,7 @@ static void cpu_frame_roll() {
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
     g_cpu_rcache.clear();   // (a): cleared once per Present. A run can outlive a frame (render-thread reads before this call, a long
                             // ring-wait stall, a Present without managed): harmless, the safety is the image-only filter, not the clear
+    gt_render_frame();      // grid-timer: the timer resolution and the game window's state, sampled
 }
 /// End of ffxvr_begin_frame: its sections; the "after our hook" clock starts (ffxvr_cpu_report moves it to managed's end).
 static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LONGLONG q4, LONGLONG wait, LONGLONG slow) {
@@ -5295,8 +5301,10 @@ static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LO
     g_cpu_hook_end_q = q5; g_cpu_gap_armed = true;
 }
 /// cpu-lean (ABI 38): managed's per-frame timings, once a frame from render_imgui (render thread), after its push_all. v[0..n)
-/// in cpu_line::M_* order (ms; GC: collection-count deltas); a shorter array fills the first n, a longer one is cut. No
-/// allocation, nothing logged here: the cpu: line prints them with the next perf: line.
+/// in cpu_line::M_* order (ms; GC: collection-count deltas); a shorter array fills the first n. No allocation, nothing logged
+/// here: the cpu: line prints them with the next perf: line.
+/// grid-timer (same ABI): two settings ride after the timings, v[M_N] = ini timer_fix and v[M_N + 1] = ini limiter_probe (1 / 0;
+/// an older managed sends M_N values: nothing is applied or installed, as before). Anything past them is ignored.
 extern "C" __declspec(dllexport) void ffxvr_cpu_report(const float* v, int n) {
     using namespace cpu_line;
     if (v == nullptr || n <= 0) return;
@@ -5304,6 +5312,7 @@ extern "C" __declspec(dllexport) void ffxvr_cpu_report(const float* v, int n) {
     const int k = n < M_N ? n : M_N;
     for (int i = 0; i < k; ++i) g_cpu_man[i].add(std::isfinite(v[i]) ? v[i] : 0.0);
     if (k > M_HANDS) g_cpu_man[M_REST].add(static_cast<double>(v[M_PUSH]) - v[M_PLAYER] - v[M_HANDS]);
+    if (n > M_N + 1) gt_settings(v[M_N] != 0.f, v[M_N + 1] != 0.f);   // grid-timer: applied on a change only
     g_cpu_hook_end_q = cpu_q(); g_cpu_gap_armed = true;
 }
 /// With the perf: line (perf_tick, render thread): the window's line, then a new window.
@@ -5323,10 +5332,12 @@ static void cpu_log_line() {
                   M[M_PUSH].avg(), M[M_PUSH].mx, M[M_PLAYER].avg(), M[M_PLAYER].mx, M[M_BODY].avg(), M[M_BODY].mx, M[M_RIDE].avg(), M[M_RIDE].mx,
                   M[M_HANDS].avg(), M[M_HANDS].mx, M[M_TAP].avg(), M[M_TAP].mx, M[M_REST].avg(), M[M_REST].mx, M[M_AFTER].avg(), M[M_AFTER].mx,
                   M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
-    diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms | after our hook to the ring wait %s",
+    char gt[1200];
+    gt_line_part(gt, sizeof(gt));   // grid-timer: the timer, the game window, the main loop and the limiter's Sleep (a new window)
+    diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms | after our hook to the ring wait %s%s",
          secs, g_cpu_frames, N[N_ALL].avg(), N[N_ALL].mx, N[N_HEAD].avg(), N[N_HEAD].mx, N[N_PRE].avg(), N[N_PRE].mx, N[N_XWAIT].avg(), N[N_XWAIT].mx, N[N_XREST].avg(), N[N_XREST].mx,
          N[N_PERF].avg(), N[N_PERF].mx, N[N_SLOW].avg(), N[N_SLOW].mx, N[N_TAIL].avg(), N[N_TAIL].mx, man,
-         g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, gap);
+         g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, gap, gt);
     for (auto& a : g_cpu_nat) a = cpu::Acc{};
     for (auto& a : g_cpu_man) a = cpu::Acc{};
     g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = cpu::Acc{};
@@ -13253,6 +13264,302 @@ extern "C" __declspec(dllexport) int ffxvr_sr_status(char* buf, int n) {
                 g_sr_rate_extras, g_sr_rate_skipped, pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? " HALF RATE (VD's SSW is on: no extras needed)" : "", g_sr_rate_yaw, g_sr_rate_delay_max,
                 g_sr_gate ? "main thread" : "free", g_sr_mt_on ? "on" : "off", g_sr_timer_hires ? "high resolution" : "standard");
     return 1;
+}
+
+// -- grid-timer: the game's frame limiter, the timer it sleeps on, the game window (design-notes "Sphere grid frame pacing") ----
+// The main loop SKS_WinMainLoop (0x62EE50, scratchpad/ffxexe) runs a frame when it is due (`call 0x62E340` at 0x62F350) and
+// otherwise sleeps the rest, truncated to whole ms (`Sleep((DWORD)(-left * 1000))` at 0x62F3BB, x87 rounding set to chop), on
+// the timer resolution of the process (the game asks timeBeginPeriod(5) at 0x42FE10; FFX-60fps' PERF-001 asks 1 ms and opts
+// the process out of timer-resolution throttling). Windows 11 may ignore a process's timer request while its windows are
+// minimized or covered, unless it opted out. This part makes all of that visible on the cpu: line:
+//   timer: NtQueryTimerResolution (ntdll, at run time): the current resolution now and its range over the window, the
+//          finest and coarsest the system offers; the timer_fix state.
+//   window: the game window (sr's rule: the largest visible unowned top-level window of the process), sampled every 30
+//          Presents: foreground, IsIconic, DWM-cloaked, not visible, the client area's centre and four inset points covered
+//          by another top-level window (WindowFromPoint) or off every monitor.
+//   main loop (limiter_probe=1): the frame call is redirected to gt_frame_call (one aligned 8-byte exchange, as sr_patch):
+//          the interval between frame starts against the limiter's period (the game's divider x FFX-60fps' K), the frame's
+//          run time, frames that started without a Sleep since the last one; FFX.exe's import slot of kernel32!Sleep points
+//          at gt_sleep, which times only the call that returns to 0x62F3C1 (the limiter's) and passes the other seven Sleep
+//          callers of FFX.exe straight through: asked vs took, Sleep(0) counts, oversleep. Never removed (sr's rule: the DLL
+//          stays loaded); limiter_probe=0 later only stops the recording.
+// timer_fix=1: SetProcessInformation(ProcessPowerThrottling, the timer-resolution and execution-speed opt-out added to
+// whatever is set) and timeBeginPeriod(1) for the session, both looked up at run time; logged once with the result.
+namespace gt {
+// FhUtil offsets (FFX.exe is DYNAMIC_BASE; the disassembly's base is 0x400000)
+constexpr uintptr_t k_frame_site = 0x22F350, k_frame_fn = 0x22E340, k_accum = 0x8C9D00;
+constexpr uintptr_t k_sleep_site = 0x22F3BB, k_sleep_ret = 0x22F3C1, k_sleep_iat = 0x70C100;
+constexpr uintptr_t k_divider = 0x830E88, k_period_k = 0x7412D8;
+constexpr ULONG k_ptt_exec = 0x1, k_ptt_timer = 0x4;   // PROCESS_POWER_THROTTLING_EXECUTION_SPEED / _IGNORE_TIMER_RESOLUTION
+constexpr int k_process_power_throttling = 4;          // PROCESS_INFORMATION_CLASS ProcessPowerThrottling
+struct PtState { ULONG Version, ControlMask, StateMask; };   // PROCESS_POWER_THROTTLING_STATE
+struct Win { uint32_t n = 0, fg = 0, iconic = 0, cloaked = 0, hidden = 0, pts = 0, covered = 0, offscreen = 0, nowin = 0; };
+}
+typedef int (__cdecl* gt_frame_fn)();
+typedef void (WINAPI* gt_sleep_fn)(DWORD);
+typedef LONG (NTAPI* gt_ntqtr_fn)(PULONG, PULONG, PULONG);
+typedef HRESULT (WINAPI* gt_dwmattr_fn)(HWND, DWORD, PVOID, DWORD);
+typedef BOOL (WINAPI* gt_procinfo_fn)(HANDLE, int, LPVOID, DWORD);
+typedef UINT (WINAPI* gt_period_fn)(UINT);
+// main thread (the hooks) -> render thread (the cpu: line), under g_gt_lock
+static SRWLOCK g_gt_lock = SRWLOCK_INIT;
+static cpu::Limiter g_gt_lim;
+static volatile LONG g_gt_probe_on = 0;            // ini limiter_probe (render thread writes; the hooks read)
+static uintptr_t g_gt_base = 0, g_gt_sleep_ret = 0;
+static gt_frame_fn g_gt_frame_orig = nullptr;
+static gt_sleep_fn g_gt_sleep_orig = nullptr;
+static LONGLONG g_gt_prev_start = 0;               // main thread only
+static bool g_gt_slept = false;                    // main thread only: a limiter Sleep since the last frame start
+// render thread
+static bool g_gt_install_tried = false, g_gt_frame_on = false, g_gt_sleep_on = false;
+static char g_gt_install_why[200] = "";
+static int g_gt_fix_set = -1;                      // timer_fix as last applied (-1: no setting seen yet)
+static bool g_gt_period = false, g_gt_ptt = false; // our timeBeginPeriod(1) is held; our opt-out went through
+static char g_gt_fix_state[64] = "no setting yet";
+static gt_ntqtr_fn g_gt_ntqtr = nullptr; static gt_dwmattr_fn g_gt_dwmattr = nullptr; static bool g_gt_fns_tried = false;
+static ULONG g_gt_res_cur = 0, g_gt_res_lo = 0, g_gt_res_hi = 0, g_gt_res_fine = 0, g_gt_res_coarse = 0; static uint32_t g_gt_res_n = 0;
+static gt::Win g_gt_win;
+static HWND g_gt_hwnd = nullptr; static ULONGLONG g_gt_hwnd_next = 0;
+static uint32_t g_gt_frame_ctr = 0;
+
+/// The limiter's frame call (replaces `call 0x62E340` at 0x62F350; main thread). 0x62E340 takes no arguments (it does not
+/// read ecx / edx) and returns in eax; ebx / esi / edi / ebp are preserved by the compiler. Integer and QPC work only.
+static int __cdecl gt_frame_call() {
+    if (g_gt_probe_on == 0) return g_gt_frame_orig();
+    const LONGLONG t0 = cpu_q();
+    const double want = cpu::limiter_period_ms(*reinterpret_cast<volatile int32_t*>(g_gt_base + gt::k_divider),
+                                               *reinterpret_cast<volatile double*>(g_gt_base + gt::k_period_k));   // this thread writes them
+    const double iv = g_gt_prev_start != 0 ? cpu_ms(t0 - g_gt_prev_start) : -1.0;
+    AcquireSRWLockExclusive(&g_gt_lock); g_gt_lim.frame_start(iv, want, g_gt_slept); ReleaseSRWLockExclusive(&g_gt_lock);
+    g_gt_prev_start = t0; g_gt_slept = false;
+    const int r = g_gt_frame_orig();
+    const double run = cpu_ms(cpu_q() - t0);
+    AcquireSRWLockExclusive(&g_gt_lock); g_gt_lim.frame_end(run); ReleaseSRWLockExclusive(&g_gt_lock);
+    return r;
+}
+/// FFX.exe's kernel32!Sleep (its import slot points here): the limiter's call (returning to 0x62F3C1) is timed, every other
+/// caller goes straight to what the slot held before.
+static void WINAPI gt_sleep(DWORD ms) {
+    if (reinterpret_cast<uintptr_t>(_ReturnAddress()) != g_gt_sleep_ret || g_gt_probe_on == 0) { g_gt_sleep_orig(ms); return; }
+    const LONGLONG t0 = cpu_q();
+    g_gt_sleep_orig(ms);
+    const double took = cpu_ms(cpu_q() - t0);
+    g_gt_slept = true;
+    AcquireSRWLockExclusive(&g_gt_lock); g_gt_lim.sleep(ms, took); ReleaseSRWLockExclusive(&g_gt_lock);
+}
+static bool gt_abs_is(const uint8_t* p, uintptr_t va) { uint32_t v = 0; memcpy(&v, p, 4); return v == static_cast<uint32_t>(va); }
+/// Render thread, once (limiter_probe=1 at the first setting): both redirects, each checked against FFX.exe's bytes first.
+static void gt_install() {
+    g_gt_install_tried = true;
+    const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    g_gt_base = b;
+    char fw[96] = "", sw[96] = "";
+    // the frame call: lea ecx,[ebp-0x424]; fstp qword [accum]; call 0x62E340; test eax,eax; jne +0x19
+    {
+        const uintptr_t site = b + gt::k_frame_site, fn = b + gt::k_frame_fn;
+        static const uint8_t k_pre[] = { 0x8D, 0x8D, 0xDC, 0xFB, 0xFF, 0xFF, 0xDD, 0x1D };
+        static const uint8_t k_post[] = { 0x85, 0xC0, 0x75, 0x19 };
+        const uint8_t* sp = reinterpret_cast<const uint8_t*>(site);
+        if ((site & 7) != 0 || !range_readable(sp - 12, 21)) snprintf(fw, sizeof(fw), "FFX+0x22F350 not readable");
+        else {
+            int32_t rel = 0; memcpy(&rel, sp + 1, 4);
+            const bool call_ok = sp[0] == 0xE8 && site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) == fn;
+            const bool bytes_ok = memcmp(sp - 12, k_pre, sizeof(k_pre)) == 0 && gt_abs_is(sp - 4, b + gt::k_accum) && memcmp(sp + 5, k_post, sizeof(k_post)) == 0;
+            if (!call_ok || !bytes_ok) snprintf(fw, sizeof(fw), "%s", !call_ok ? "the call at FFX+0x22F350 does not go to FFX+0x22E340 (another mod?)" : "the bytes around FFX+0x22F350 differ (another game version?)");
+            else {
+                LONGLONG oldq = 0; memcpy(&oldq, sp, 8);
+                uint8_t nb[8]; memcpy(nb, sp, 8);
+                const int32_t nrel = static_cast<int32_t>(reinterpret_cast<uintptr_t>(&gt_frame_call) - (site + 5));
+                memcpy(nb + 1, &nrel, 4);                          // E8 and the three bytes after the call stay
+                LONGLONG newq = 0; memcpy(&newq, nb, 8);
+                g_gt_frame_orig = reinterpret_cast<gt_frame_fn>(fn);
+                DWORD prot = 0, tmp = 0;
+                if (!VirtualProtect(reinterpret_cast<void*>(site), 8, PAGE_EXECUTE_READWRITE, &prot)) snprintf(fw, sizeof(fw), "VirtualProtect failed (%lu)", GetLastError());
+                else {
+                    const LONGLONG prev = InterlockedCompareExchange64(reinterpret_cast<volatile LONGLONG*>(site), newq, oldq);   // one aligned exchange
+                    VirtualProtect(reinterpret_cast<void*>(site), 8, prot, &tmp);
+                    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 8);
+                    if (prev != oldq) snprintf(fw, sizeof(fw), "the call site changed while patching");
+                    else g_gt_frame_on = true;
+                }
+            }
+        }
+    }
+    // Sleep: `call [Sleep slot]` at 0x62F3BB, `cmp dword [ebp-0x440],0x12` after it; the slot is FFX.exe's import of kernel32!Sleep
+    {
+        const uintptr_t site = b + gt::k_sleep_site, slot = b + gt::k_sleep_iat;
+        static const uint8_t k_post[] = { 0x83, 0xBD, 0xC0, 0xFB, 0xFF, 0xFF, 0x12 };
+        const uint8_t* sp = reinterpret_cast<const uint8_t*>(site);
+        if (!range_readable(sp, 13) || !range_readable(reinterpret_cast<const void*>(slot), 4) || (slot & 3) != 0) snprintf(sw, sizeof(sw), "FFX+0x22F3BB or the import slot not readable");
+        else if (!(sp[0] == 0xFF && sp[1] == 0x15 && gt_abs_is(sp + 2, slot) && memcmp(sp + 6, k_post, sizeof(k_post)) == 0)) snprintf(sw, sizeof(sw), "the bytes at FFX+0x22F3BB differ (another game version?)");
+        else {
+            const uintptr_t cur = *reinterpret_cast<volatile uintptr_t*>(slot);
+            const FARPROC k32 = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "Sleep");
+            DWORD prot = 0, tmp = 0;
+            if (cur == 0) snprintf(sw, sizeof(sw), "the import slot is empty");
+            else if (cur == reinterpret_cast<uintptr_t>(&gt_sleep)) g_gt_sleep_on = true;
+            else if (!VirtualProtect(reinterpret_cast<void*>(slot), 4, PAGE_READWRITE, &prot)) snprintf(sw, sizeof(sw), "VirtualProtect failed (%lu)", GetLastError());
+            else {
+                g_gt_sleep_orig = reinterpret_cast<gt_sleep_fn>(cur);
+                g_gt_sleep_ret = b + gt::k_sleep_ret;
+                MemoryBarrier();
+                const LONG prev = InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(slot), static_cast<LONG>(reinterpret_cast<uintptr_t>(&gt_sleep)), static_cast<LONG>(cur));
+                VirtualProtect(reinterpret_cast<void*>(slot), 4, prot, &tmp);
+                if (static_cast<uintptr_t>(static_cast<ULONG>(prev)) != cur) snprintf(sw, sizeof(sw), "the import slot changed while patching");
+                else {
+                    g_gt_sleep_on = true;
+                    if (reinterpret_cast<uintptr_t>(k32) != cur) snprintf(sw, sizeof(sw), "the slot held 0x%p, not kernel32!Sleep 0x%p: chained to it", reinterpret_cast<void*>(cur), reinterpret_cast<void*>(k32));
+                }
+            }
+        }
+    }
+    snprintf(g_gt_install_why, sizeof(g_gt_install_why), "frame call %s%s%s, Sleep %s%s%s", g_gt_frame_on ? "on" : "off", *fw ? ": " : "", fw, g_gt_sleep_on ? "on" : "off", *sw ? ": " : "", sw);
+    diag("timer: limiter probe (limiter_probe=1): the frame call FFX+0x22F350 %s%s%s; the limiter's Sleep FFX+0x22F3BB through FFX.exe's import of kernel32!Sleep (slot FFX+0x70C100) %s%s%s (FFX.exe's other Sleep callers pass straight through). Never removed; limiter_probe=0 stops the recording",
+         g_gt_frame_on ? "-> ours (frame starts and run time)" : "not hooked", *fw ? ": " : "", fw, g_gt_sleep_on ? "-> ours (asked vs took)" : "not hooked", *sw ? ": " : "", sw);
+}
+static void gt_fns() {
+    if (g_gt_fns_tried) return;
+    g_gt_fns_tried = true;
+    if (HMODULE nt = GetModuleHandleW(L"ntdll.dll")) g_gt_ntqtr = reinterpret_cast<gt_ntqtr_fn>(GetProcAddress(nt, "NtQueryTimerResolution"));
+    HMODULE dwm = GetModuleHandleW(L"dwmapi.dll");
+    if (dwm == nullptr) dwm = LoadLibraryW(L"dwmapi.dll");   // a system DLL, kept for the session
+    if (dwm != nullptr) g_gt_dwmattr = reinterpret_cast<gt_dwmattr_fn>(GetProcAddress(dwm, "DwmGetWindowAttribute"));
+}
+static void gt_sample_timer() {
+    if (g_gt_ntqtr == nullptr) return;
+    ULONG coarse = 0, fine = 0, cur = 0;   // 100 ns units; "maximum" is the coarsest
+    if (g_gt_ntqtr(&coarse, &fine, &cur) < 0) return;
+    g_gt_res_cur = cur; g_gt_res_fine = fine; g_gt_res_coarse = coarse;
+    if (g_gt_res_n == 0 || cur < g_gt_res_lo) g_gt_res_lo = cur;
+    if (cur > g_gt_res_hi) g_gt_res_hi = cur;
+    g_gt_res_n++;
+}
+static void gt_sample_window() {
+    gt::Win& w = g_gt_win; w.n++;
+    if (g_gt_hwnd != nullptr && !IsWindow(g_gt_hwnd)) g_gt_hwnd = nullptr;
+    if (g_gt_hwnd == nullptr) {
+        if (g_sr_hwnd != nullptr && IsWindow(g_sr_hwnd)) g_gt_hwnd = g_sr_hwnd;
+        else {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= g_gt_hwnd_next) {
+                g_gt_hwnd_next = now + 1000;
+                std::pair<HWND, LONG> best(nullptr, 0);
+                EnumWindows(sr_find_window_cb, reinterpret_cast<LPARAM>(&best));   // sr's rule, without its log line
+                g_gt_hwnd = best.first;
+            }
+        }
+    }
+    const HWND h = g_gt_hwnd;
+    if (h == nullptr) { w.nowin++; return; }
+    if (GetForegroundWindow() == h) w.fg++;
+    const bool iconic = IsIconic(h) != FALSE;
+    if (iconic) w.iconic++;
+    if (!IsWindowVisible(h)) w.hidden++;
+    DWORD cloaked = 0;
+    if (g_gt_dwmattr != nullptr && SUCCEEDED(g_gt_dwmattr(h, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked))) && cloaked != 0) w.cloaked++;
+    RECT r = {};
+    if (iconic || !GetClientRect(h, &r) || r.right <= r.left || r.bottom <= r.top) return;
+    const LONG cw = r.right - r.left, ch = r.bottom - r.top;
+    const POINT rel[5] = { { cw / 2, ch / 2 }, { cw / 10, ch / 10 }, { cw - cw / 10, ch / 10 }, { cw / 10, ch - ch / 10 }, { cw - cw / 10, ch - ch / 10 } };
+    for (const POINT& q : rel) {
+        POINT p = q;
+        if (!ClientToScreen(h, &p)) continue;
+        w.pts++;
+        if (MonitorFromPoint(p, MONITOR_DEFAULTTONULL) == nullptr) { w.offscreen++; continue; }
+        const HWND at = WindowFromPoint(p);
+        if (at == nullptr || GetAncestor(at, GA_ROOT) != h) w.covered++;
+    }
+}
+/// Render thread, from cpu_frame_roll (every Present): one sample in 30 (about 4 a second at 120 Hz, 2 at 60).
+static void gt_render_frame() {
+    if (++g_gt_frame_ctr % 30 != 0) return;
+    gt_fns();
+    gt_sample_timer();
+    gt_sample_window();
+}
+static void gt_timer_fix(bool on) {
+    char ptt[200] = "", per[64] = "";
+    if (on) {
+        if (!g_gt_ptt) {
+            HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+            const auto set = k32 ? reinterpret_cast<gt_procinfo_fn>(GetProcAddress(k32, "SetProcessInformation")) : nullptr;
+            const auto get = k32 ? reinterpret_cast<gt_procinfo_fn>(GetProcAddress(k32, "GetProcessInformation")) : nullptr;
+            if (set == nullptr) snprintf(ptt, sizeof(ptt), "power throttling opt-out: SetProcessInformation not available (before Windows 8): skipped");
+            else {
+                gt::PtState before = { 1, 0, 0 }; bool have = false; DWORD gerr = 0;
+                if (get != nullptr) { have = get(GetCurrentProcess(), gt::k_process_power_throttling, &before, sizeof(before)) != FALSE; if (!have) gerr = GetLastError(); }
+                gt::PtState st = { 1, (have ? before.ControlMask : 0) | gt::k_ptt_exec | gt::k_ptt_timer, (have ? before.StateMask : 0) & ~(gt::k_ptt_exec | gt::k_ptt_timer) };
+                BOOL ok = set(GetCurrentProcess(), gt::k_process_power_throttling, &st, sizeof(st));
+                DWORD serr = ok ? 0 : GetLastError();
+                bool timer_flag = true;
+                if (!ok) {   // a Windows before 11 rejects the timer flag: the execution-speed opt-out alone
+                    st.ControlMask &= ~gt::k_ptt_timer; st.StateMask &= ~gt::k_ptt_timer; timer_flag = false;
+                    ok = set(GetCurrentProcess(), gt::k_process_power_throttling, &st, sizeof(st));
+                }
+                g_gt_ptt = ok != FALSE;
+                char bf[64];
+                if (have) snprintf(bf, sizeof(bf), "control 0x%lX state 0x%lX", before.ControlMask, before.StateMask);
+                else snprintf(bf, sizeof(bf), "not readable (%s %lu)", get ? "error" : "no GetProcessInformation", gerr);
+                snprintf(ptt, sizeof(ptt), "power throttling opt-out %s (control 0x%lX state 0x%lX%s; before: %s)", ok ? "ok" : "failed", st.ControlMask, st.StateMask,
+                         timer_flag ? "" : serr ? ", the timer flag refused: execution speed only" : "", bf);
+            }
+        }
+        if (!g_gt_period) {
+            HMODULE mm = GetModuleHandleW(L"winmm.dll");
+            if (mm == nullptr) mm = LoadLibraryW(L"winmm.dll");
+            const auto begin = mm ? reinterpret_cast<gt_period_fn>(GetProcAddress(mm, "timeBeginPeriod")) : nullptr;
+            g_gt_period = begin != nullptr && begin(1) == 0;   // TIMERR_NOERROR
+            snprintf(per, sizeof(per), "timeBeginPeriod(1) %s", g_gt_period ? "ok" : begin ? "failed" : "not available");
+        }
+        snprintf(g_gt_fix_state, sizeof(g_gt_fix_state), "on (opt-out %s, 1 ms %s)", g_gt_ptt ? "ok" : "no", g_gt_period ? "held" : "no");
+    } else {
+        if (g_gt_period) {
+            HMODULE mm = GetModuleHandleW(L"winmm.dll");
+            const auto end = mm ? reinterpret_cast<gt_period_fn>(GetProcAddress(mm, "timeEndPeriod")) : nullptr;
+            if (end != nullptr) end(1);
+            g_gt_period = false;
+            snprintf(per, sizeof(per), "our timeBeginPeriod(1) released");
+        }
+        snprintf(g_gt_fix_state, sizeof(g_gt_fix_state), "off%s", g_gt_ptt ? " (the opt-out stays until the game restarts)" : "");
+    }
+    gt_fns(); gt_sample_timer();
+    if (!*ptt && !*per) snprintf(per, sizeof(per), "%s", on ? "already applied" : "nothing of ours to release");
+    diag("timer: timer_fix=%d: %s%s%s | timer resolution now %.3f ms (finest %.3f, coarsest %.3f; the system's, the finest any process asks for) | FFX-60fps' PERF-001 asks for the same opt-out and 1 ms (see fps60.log)",
+         on ? 1 : 0, ptt, *ptt && *per ? "; " : "", per, g_gt_res_cur / 1e4, g_gt_res_fine / 1e4, g_gt_res_coarse / 1e4);
+}
+/// From ffxvr_cpu_report (render thread, every frame): acts on a change only.
+static void gt_settings(bool timer_fix, bool probe) {
+    InterlockedExchange(&g_gt_probe_on, probe ? 1 : 0);
+    if (probe && !g_gt_install_tried) gt_install();
+    const int f = timer_fix ? 1 : 0;
+    if (f != g_gt_fix_set) { g_gt_fix_set = f; gt_timer_fix(timer_fix); }
+}
+/// The cpu: line's grid-timer part (render thread, with the line); the window's numbers start again.
+static void gt_line_part(char* out, size_t n) {
+    cpu::Limiter L;
+    AcquireSRWLockExclusive(&g_gt_lock); L = g_gt_lim; g_gt_lim = cpu::Limiter{}; ReleaseSRWLockExclusive(&g_gt_lock);
+    const gt::Win w = g_gt_win; g_gt_win = gt::Win{};
+    char tm[160];
+    if (g_gt_res_n == 0) snprintf(tm, sizeof(tm), "%s", g_gt_ntqtr ? "not sampled yet" : g_gt_fns_tried ? "NtQueryTimerResolution not available" : "not sampled yet");
+    else snprintf(tm, sizeof(tm), "%.3f ms now (%.3f-%.3f over %u samples; finest %.3f, coarsest %.3f)", g_gt_res_cur / 1e4, g_gt_res_lo / 1e4, g_gt_res_hi / 1e4, g_gt_res_n, g_gt_res_fine / 1e4, g_gt_res_coarse / 1e4);
+    g_gt_res_n = 0; g_gt_res_lo = g_gt_res_hi = 0;
+    char wn[220];
+    if (w.n == 0) snprintf(wn, sizeof(wn), "not sampled yet");
+    else if (w.nowin == w.n) snprintf(wn, sizeof(wn), "not found (%u samples)", w.n);
+    else snprintf(wn, sizeof(wn), "foreground %u/%u, minimized %u, cloaked %u, hidden %u, covered %u of %u points, off-screen %u", w.fg, w.n - w.nowin, w.iconic, w.cloaked, w.hidden, w.covered, w.pts, w.offscreen);
+    char ml[480], sl[320];
+    if (!g_gt_install_tried) { snprintf(ml, sizeof(ml), "not measured (limiter_probe=0: not installed)"); sl[0] = '\0'; }
+    else {
+        if (!g_gt_frame_on) snprintf(ml, sizeof(ml), "not measured (%s)", g_gt_install_why);
+        else if (L.frames == 0) snprintf(ml, sizeof(ml), "%sno frame interval in the window (gaps over 250 ms %u)", g_gt_probe_on ? "" : "limiter_probe=0, not recording: ", L.gaps);
+        else snprintf(ml, sizeof(ml), "%u frames, interval avg %.2f sd %.2f min %.1f max %.1f ms (limiter period %.2f; late by >1 ms %u, >2 ms %u, >1 slot %u; early by >2 ms %u; gaps over 250 ms %u), frame run avg %.2f max %.1f ms, started without a sleep %u",
+                      L.frames, L.iv_avg(), L.iv_sd(), L.iv_min, L.iv_max, L.want_avg(), L.late1, L.late2, L.late_slot, L.early2, L.gaps, L.work.avg(), L.work.mx, L.no_sleep);
+        if (!g_gt_sleep_on) snprintf(sl, sizeof(sl), " | limiter Sleep: not measured");
+        else if (L.sleeps == 0) snprintf(sl, sizeof(sl), " | limiter Sleep: no calls");
+        else snprintf(sl, sizeof(sl), " | limiter Sleep: %u calls (%u of 0 ms), asked avg %.2f max %u ms, took avg %.2f max %.1f ms, over the ask avg %.2f max %.1f ms (by >1 ms %u, >2 ms %u)",
+                      L.sleeps, L.sleep0, L.ask_sum / L.sleeps, L.ask_max, L.took_sum / L.sleeps, L.took_max, L.over_avg(), L.over_max, L.over1, L.over2);
+    }
+    snprintf(out, n, " | timer %s, timer_fix %s | game window: %s | main loop: %s%s", tm, g_gt_fix_state, wn, ml, sl);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
