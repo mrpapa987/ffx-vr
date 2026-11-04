@@ -2583,7 +2583,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             sa_apply((nint)(actors + pick), ref pos3, ref head3, ref have, att);
             if (att) ride_eye(ref pos3, ref head3);   // the body-hide centre stays the rider's root; the eye base gets the bob filtered
             _fn_player_set(-pos3.X, -pos3.Y, pos3.Z, 1);   // first: the head is stored as an offset from it
-            if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, have ? 1 : 0);
+            // npc-anchor round 3: bit 1 = the body is drawn away from its root (a shared scene anchor): the eye's horizontal position
+            // from the head (fp_head_anchor 0 / 1 used the root's). Field, on foot only; riding and battle are unchanged.
+            int hv = have ? 1 : 0;
+            if (have && eye_disp_step(ref p, (pick << 16) | ((int)p.chr_id & 0xFFFF), !att && !in_battle)) hv |= 2;
+            if (_fn_player_head_set != null) _fn_player_head_set(-head3.X, -head3.Y, head3.Z, hv);
             // the body hide's ownership (body_hide.cs): after player_set, so a re-pick resets the step margin it just widened
             // the re-pick key: the index and the model (N1: lc/lchb0500 swaps c001 -> c101 in the same slot)
             int root_kind = body_hide_root(actors, pick, att, out Vector3 root3);

@@ -57,6 +57,25 @@ public sealed unsafe partial class FFXVRModule {
         if (ib_used) body_hide_ib(actors, tbl_snap(actors), pick, root_kind != 0 ? root : centre);   // after the roots: native's order of use
     }
 
+    // -- npc-anchor round 3: the eye on a body drawn away from its root --------------------------------------------------
+    // On mi/mihn0100 the event Tidus's root is the scene anchor (shared with Yuna) and the animation places his body up to ~70 units
+    // from it. Every sub-position (built by the game from his skeleton) is then far from the root, while in normal play one of them
+    // (the hips, the feet) is always near it, also swimming (prone) or crouching. EyeLogic decides from the nearest sub-position's
+    // horizontal distance, with hysteresis over frames; the module log gets each change (40 a session).
+    private EyeDisp _eye_disp; private int _eye_key = -1, _eye_lines;
+    private bool eye_disp_step(ref Actor p, int key, bool allowed) {
+        if (!allowed || key != _eye_key) { _eye_disp = default; _eye_key = key; if (!allowed) return false; }
+        fixed (Actor* pp = &p) {
+            Vector3 root = *(Vector3*)((byte*)pp + 0x200);
+            float d = EyeLogic.BodyOffset(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root);
+            if (EyeLogic.Step(ref _eye_disp, d) && _eye_lines < 40) {
+                _eye_lines++;
+                _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head" : "back to the root")}: the nearest of '{actor_name(p.chr_name)}''s sub-positions is {d:F1} units from its root horizontally (over {EyeLogic.k_frames} frames; on above {EyeLogic.k_enter:F0}, off below {EyeLogic.k_exit:F0}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
+            }
+        }
+        return _eye_disp.on;
+    }
+
     // -- review SF2: the scene generation ---------------------------------------------------------------------------------
     private ulong _fph_scene_sig; private uint _fph_scene_gen;
     private uint body_hide_scene_gen(Actor* actors, int pick) {
@@ -304,6 +323,34 @@ internal static class FphWalk {
         for (int k = 0; k < optpos.Length && k < 26; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = new Vector3(sp.X, sp.Y, sp.Z); have = true; } }
         if (have && !attached && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
         return have;
+    }
+}
+
+/// <summary>npc-anchor round 3: the eye's displaced-body state (EyeLogic.Step).</summary>
+internal struct EyeDisp { public bool on; public int n_in, n_out; }
+/// <summary>npc-anchor round 3: is the followed actor's body drawn away from its root? Pure (the scratch test drives it).</summary>
+internal static class EyeLogic {
+    public const float k_enter = 6f, k_exit = 3f, k_max = 400f;   // units (horizontal); a prone Tidus has sub-positions on his root
+    public const int k_frames = 10;                                // consecutive frames to switch either way
+    /// <summary>The horizontal distance from the root to the nearest sub-position (those off the origin's axis, push_player's
+    /// rule), game space; -1 when none is set.</summary>
+    public static float BodyOffset(ReadOnlySpan<Vector4> optpos, Vector3 root) {
+        float best = float.MaxValue;
+        for (int k = 0; k < optpos.Length && k < 26; k++) {
+            Vector4 sp = optpos[k];
+            if (!(MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) || !float.IsFinite(sp.X) || !float.IsFinite(sp.Z)) continue;
+            float dx = sp.X - root.X, dz = sp.Z - root.Z, d = MathF.Sqrt(dx * dx + dz * dz);
+            if (d < best) best = d;
+        }
+        return best == float.MaxValue ? -1f : best;
+    }
+    /// <summary>One frame: on after k_frames frames with the nearest sub-position over k_enter, off after k_frames under k_exit.
+    /// An unknown or implausible distance (none, over k_max) breaks a run in progress and changes nothing. True when it switched.</summary>
+    public static bool Step(ref EyeDisp s, float d) {
+        if (!(d >= 0f) || d > k_max) { s.n_in = 0; s.n_out = 0; return false; }
+        if (!s.on) { s.n_in = d > k_enter ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
+        else { s.n_out = d < k_exit ? s.n_out + 1 : 0; if (s.n_out >= k_frames) { s.on = false; s.n_in = 0; s.n_out = 0; return true; } }
+        return false;
     }
 }
 

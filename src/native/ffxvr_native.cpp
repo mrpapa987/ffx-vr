@@ -724,6 +724,15 @@ float g_fp_head_smooth = 0.35f;   // per-frame blend toward the raw head positio
 // direction while moving (that is where the body leans), else the heading.
 float g_fp_head_fwd = 1.5f; float g_fp_move_dir[3] = {}; bool g_fp_move_dir_valid = false;
 float g_fp_head[3] = {}; bool g_fp_have_head = false; float g_fp_head_s[3] = {}; bool g_fp_head_s_valid = false;
+// The body drawn away from its root (npc-anchor round 3, mi/mihn0100): two event actors on one scene anchor, the animation
+// placing Tidus's body up to ~70 units from it. fp_head_anchor 1 (and 0) take the eye's horizontal position from the root, so the
+// eye sat on the anchor, above Yuna. Managed sets bit 1 of ffxvr_player_head_set's `valid` when every sub-position of the
+// followed actor has been far from its root for a while (body_hide.cs EyeLogic); the eye's horizontal position then comes from
+// the head sub-position (built by the game from his own skeleton; the IB-identified palette agrees with it to 0.1 units in the
+// owner's log). A head that jumps more than k_head_spike from the smoothed one is held for up to 3 frames (a one-frame bad value
+// never moves the view; a real move is taken on the 4th).
+bool g_fp_head_disp = false; int g_fp_head_hold = 0; uint32_t g_fp_head_disp_lines = 0;
+constexpr float k_head_spike = 8.f;
 float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
 // Third person: life-size, the camera just behind and above the player; the
 // heading slews round behind the direction he runs (rate-limited, 0 = fixed),
@@ -1887,6 +1896,31 @@ static void turn_advance(int64_t T, bool extra) {
     if (deg != 0.f) turn_by(deg);
 }
 
+/// The first-person eye's base from the player's position and head (fy = the view heading's forward, render space).
+/// fp_head_anchor 1: the head's height over the actor's horizontal position; 2: the full head offset plus a head-length along
+/// the lean; 0: a fixed eye height. Round 3: with the body drawn away from its root (g_fp_head_disp) modes 1 and 0 take the
+/// horizontal position from the head too (mode 2 always does).
+static void fp_eye_base(const float* fy, float* P) {
+    const bool head = g_fp_have_head && g_fp_head_s_valid;
+    const float hx = head && g_fp_head_disp ? g_fp_head_s[0] : 0.f, hz = head && g_fp_head_disp ? g_fp_head_s[2] : 0.f;
+    if (g_fp_head_anchor == 1 && head) {
+        // Height from the head bone (prone when swimming, low when crouching),
+        // horizontal position from the actor origin: no lean, nothing to see.
+        P[0] = g_fp_pos[0] + hx; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2] + hz;
+    }
+    else if (g_fp_head_anchor == 2 && head) {
+        // g_fp_head_s is the smoothed head offset from the actor origin; the
+        // eye is the current origin plus that, so it never trails a sprint.
+        P[0] = g_fp_pos[0] + g_fp_head_s[0]; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2] + g_fp_head_s[2];
+        // Forward = the way the torso leans (the horizontal part of that
+        // offset), which is the facing while moving; the heading when upright.
+        const float lx = g_fp_head_s[0], lz = g_fp_head_s[2], ll = sqrtf(lx*lx + lz*lz);
+        float d[3] = { fy[0], 0.f, fy[2] };
+        if (ll > 0.3f) { d[0] = lx / ll; d[2] = lz / ll; }
+        P[0] += d[0] * g_fp_head_fwd; P[2] += d[2] * g_fp_head_fwd;
+    }
+    else { P[0] = g_fp_pos[0] + hx; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2] + hz; }
+}
 /// advance = this call moves the per-frame filters on (once per frame: write_camera's first eye-1 3D upload). Every
 /// other caller (eye 2, ffxvr_project, the markers) passes false and only reads them. The latches (fp heading, seat
 /// heading) still fire from any caller; they are idempotent within a frame (every reset happens at Present), and
@@ -1939,23 +1973,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         const float fy[3] = { -sinf(g_fp_yaw), 0.f, -cosf(g_fp_yaw) };
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
-        if (g_fp_head_anchor == 1 && g_fp_have_head && g_fp_head_s_valid) {
-            // Height from the head bone (prone when swimming, low when crouching),
-            // horizontal position from the actor origin: no lean, nothing to see.
-            P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2];
-        }
-        else if (g_fp_head_anchor == 2 && g_fp_have_head && g_fp_head_s_valid) {
-            // g_fp_head_s is the smoothed head offset from the actor origin; the
-            // eye is the current origin plus that, so it never trails a sprint.
-            P[0] = g_fp_pos[0] + g_fp_head_s[0]; P[1] = g_fp_pos[1] + g_fp_head_s[1] + g_fp_head_up; P[2] = g_fp_pos[2] + g_fp_head_s[2];
-            // Forward = the way the torso leans (the horizontal part of that
-            // offset), which is the facing while moving; the heading when upright.
-            const float lx = g_fp_head_s[0], lz = g_fp_head_s[2], ll = sqrtf(lx*lx + lz*lz);
-            float d[3] = { fy[0], 0.f, fy[2] };
-            if (ll > 0.3f) { d[0] = lx / ll; d[2] = lz / ll; }
-            P[0] += d[0] * g_fp_head_fwd; P[2] += d[2] * g_fp_head_fwd;
-        }
-        else { P[0] = g_fp_pos[0]; P[1] = g_fp_pos[1] + g_fp_eye_h; P[2] = g_fp_pos[2]; }
+        fp_eye_base(fy, P);
         if (g_fp_mode >= 2) {
             // Diorama / third person: anchored to the player (smoothed), the offset
             // lives in the heading frame as g_gest_move (right, up, forward; behind =
@@ -10811,11 +10829,34 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
     g_fp_step_hide = d_hide + g_fp_d_prev; g_fp_d_call[1] = g_fp_d_prev; g_fp_d_call[0] = d_hide; g_fp_d_prev = d_hide;
     g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0;
 }
+/// valid: 0 no head (the eye height instead), bit 0 the head is set; round 3: bit 1 = the followed actor's body is drawn away from
+/// its root (every sub-position far from it for a while, managed EyeLogic): the eye takes its horizontal position from the head
+/// in fp_head_anchor 0 and 1 too. Old managed sends 0 / 1 only (the signature is unchanged).
 extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {
-    g_fp_have_head = valid != 0;
+    g_fp_have_head = (valid & 1) != 0;
+    const bool disp = g_fp_have_head && (valid & 2) != 0;
+    if (disp != g_fp_head_disp) {   // the eye's source changes (the view moves to the head, or back to the root): logged
+        if (g_fp_head_disp_lines < 60) {
+            g_fp_head_disp_lines++;
+            const float hx = x - g_fp_pos[0], hz = z - g_fp_pos[2];
+            float pal = -1.f;   // the palette's head points of the player's models (the texture table) against the head sub-position
+            for (const fpown::Model& m : g_fp_models.e) if (m.tex && g_fp_models.verdict(m.tex) > 0 && m.last_dp >= 0.f && (pal < 0.f || m.last_dp < pal)) pal = m.last_dp;
+            char ps[64]; if (pal >= 0.f) snprintf(ps, sizeof(ps), "%.1f units", pal); else snprintf(ps, sizeof(ps), "not measured");
+            diag(disp ? "eye: from the drawn head: the followed actor's body is drawn away from its root (head sub-position %.1f units from the root horizontally; the palette's head points %s from it), fp_head_anchor %d%s"
+                      : "eye: back to the root's horizontal position (head sub-position %.1f units from the root horizontally; the palette's head points %s from it), fp_head_anchor %d%s",
+                 sqrtf(hx * hx + hz * hz), ps, g_fp_head_anchor, g_fp_head_disp_lines == 60 ? " (no more of these lines this session)" : "");
+        }
+        g_fp_head_disp = disp; g_fp_head_hold = 0;
+    }
     if (!g_fp_have_head) { g_fp_head_s_valid = false; return; }
     // Stored and smoothed as the offset from the actor origin (player_set is called first).
-    g_fp_head[0] = x - g_fp_pos[0]; g_fp_head[1] = y - g_fp_pos[1]; g_fp_head[2] = z - g_fp_pos[2];
+    const float nh[3] = { x - g_fp_pos[0], y - g_fp_pos[1], z - g_fp_pos[2] };
+    if (g_fp_head_disp && g_fp_head_s_valid) {   // round 3: a spike in the head while the eye follows it is held (3 frames at most)
+        const float sx = nh[0] - g_fp_head_s[0], sy = nh[1] - g_fp_head_s[1], sz = nh[2] - g_fp_head_s[2];
+        if (sx*sx + sy*sy + sz*sz > k_head_spike * k_head_spike && g_fp_head_hold < 3) { g_fp_head_hold++; return; }
+    }
+    g_fp_head_hold = 0;
+    g_fp_head[0] = nh[0]; g_fp_head[1] = nh[1]; g_fp_head[2] = nh[2];
     const float dx = g_fp_head[0] - g_fp_head_s[0], dy = g_fp_head[1] - g_fp_head_s[1], dz = g_fp_head[2] - g_fp_head_s[2];
     if (!g_fp_head_s_valid || dx*dx + dy*dy + dz*dz > 50.f * 50.f) { memcpy(g_fp_head_s, g_fp_head, sizeof(g_fp_head)); g_fp_head_s_valid = true; return; }   // first value, or a warp
     const float k = g_fp_head_smooth < 0.02f ? 0.02f : (g_fp_head_smooth > 1.f ? 1.f : g_fp_head_smooth);
