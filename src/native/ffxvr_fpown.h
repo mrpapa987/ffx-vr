@@ -185,6 +185,42 @@ struct Models {
     int verdict(uintptr_t t) const { const Model* m = find(t); if (m == nullptr) return 0; return m->s >= k_s_player ? 1 : m->s <= k_s_other ? -1 : 0; }
 };
 
+// ---- Exact identity: the index buffer (npc-anchor round 2, research/fh-structs.md 1a, checked in the disassembly) ---------------
+// Phyre draws every character segment with 0x592C60: IASetIndexBuffer(block->buffers[k].+0, R16/R32, block->+0x2C byte offset)
+// then DrawIndexed(count, 0, 0). The block is the segment's index data (PMeshSegmentD3D11 +0x30), reached from an actor through
+// +0x830 (model object: +0 count, +4 PMeshInstance*[]) -> instance +0 PMesh -> +0 count, +4 segments (0x6C each). Managed walks
+// the followed actor's chain and those of the actors near him and sends (buffer, byte offset, index count, owner) entries: a
+// matched draw whose bound index buffer and offset are in the table belongs to that owner exactly. Two actors of one model share
+// the mesh (the same keys): such a key has both owners and decides nothing (the other rules then apply). Pure: the native glue
+// queries IAGetIndexBuffer for matched draws only; a test drives this with fake keys.
+constexpr int k_ib_max = 192;   // entries kept (a character has about 13-20 segments)
+struct IbEntry { uint32_t ib = 0, off = 0, count = 0; int32_t owner = -1; };   // owner 0 the player's, 1 another actor's
+struct IbTable {
+    IbEntry e[k_ib_max]; int n = 0;
+    /// Replaces the table from (ib, off, count, owner) quadruples; malformed owners are dropped. Returns the count kept.
+    int set(const uint32_t* q, int m) {
+        n = 0;
+        for (int i = 0; q != nullptr && i < m && n < k_ib_max; ++i) {
+            const uint32_t* r = q + 4 * i;
+            if (r[0] == 0 || r[3] > 1u) continue;
+            e[n].ib = r[0]; e[n].off = r[1]; e[n].count = r[2]; e[n].owner = static_cast<int32_t>(r[3]); ++n;
+        }
+        return n;
+    }
+    /// The owner of a draw: 0 the player's, 1 another actor's, -1 not in the table, -2 both (identical models: undecided).
+    /// count_ok (if not null) says whether an entry with this key also has the draw's index count (diagnostics only: the key
+    /// is the buffer and the byte offset, which the segment owns whatever count the caller draws).
+    int owner(uint32_t ib, uint32_t off, uint32_t count, bool* count_ok = nullptr) const {
+        bool p = false, o = false, c = false;
+        for (int i = 0; i < n; ++i) {
+            if (e[i].ib != ib || e[i].off != off) continue;
+            (e[i].owner == 0 ? p : o) = true; if (e[i].count == count) c = true;
+        }
+        if (count_ok) *count_ok = c;
+        return p && o ? -2 : p ? 0 : o ? 1 : -1;
+    }
+};
+
 /// Riding (the chocobo rule, ffxvr_ride_set): within max(hide_radius, ride_radius) of the rider's drawn root and not nearer the
 /// mount's root than the rider's = 1; within that radius of the mount's root = 2 (its parts); else 0. flags 2 = the mount is known.
 inline int riding(const float* w, int flags, const float* rider, const float* mount, float hide_radius, float ride_radius) {

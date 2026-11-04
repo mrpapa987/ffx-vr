@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 39;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor)
+    private const int k_abi = 40;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -424,6 +424,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_ride_stats   = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_ride_stats");   // ABI 33
             _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, int>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs); ABI 38: + its return
             _fn_fp_others_set = (delegate* unmanaged[Cdecl]<float*, float*, int, int>)req("ffxvr_fp_others_set");   // ABI 39: + the heads (npc-anchor)
+            _fn_fp_ib_set    = (delegate* unmanaged[Cdecl]<uint*, int, uint, int>)req("ffxvr_fp_ib_set");   // ABI 40: the exact owner by index buffer (npc-anchor round 2)
             _fn_cpu_report   = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_cpu_report");   // ABI 38: the cpu: line's managed sections (cpu_report.cs)
             _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
             _fn_sg_budget    = (delegate* unmanaged[Cdecl]<float, int, void>)req("ffxvr_shadow_budget_set");
@@ -565,7 +566,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
-        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_cpu_report = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
+        _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_fp_ib_set = null; _fn_cpu_report = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
         _fn_anchor_override = null; _fn_floor_set = null; _fn_fp_head_set = null; _fn_fp_hidden = null; _fn_markers_set = null; _fn_markers_3d = null;
         _fn_markers_game_art = null; _fn_markers_scale = null; _fn_ui_atlas_dump = null; _fn_motion_log = null; _fn_xr_screen_now = null; _fn_screen3d = null;
         _fn_screen3d_status = null; _fn_dump_seq = null; _fn_shutdown = null; _fn_xr_status = null; _fn_eye2_srv = null; _fn_eye2_draws = null; _fn_eye2_same_inputs = null; _fn_diag_keepalive = null; _fn_log_config = null; _fn_build_info = null;

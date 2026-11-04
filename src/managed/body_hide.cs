@@ -14,6 +14,7 @@ public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, int> _fn_fp_self_set;    // ABI 37; ABI 38: returns 1 when the coming frame uses the other roots
     private delegate* unmanaged[Cdecl]<float*, float*, int, int> _fn_fp_others_set;                   // ABI 37; ABI 39: + the heads
+    private delegate* unmanaged[Cdecl]<uint*, int, uint, int> _fn_fp_ib_set;                          // ABI 40: the index-buffer table
     private float _fph_radius = 0.75f;   // native: the on-foot hide radius in effect (hide_radius + the capped margin)
     private int   _fph_kept, _fph_others_n;   // native: last frame's draws refused as another actor's; the roots sent this frame
 
@@ -27,6 +28,7 @@ public sealed unsafe partial class FFXVRModule {
         _cpu_body += cpu_now() - t0;
     }
     private void body_hide_push_inner(Actor* actors, int pick, int key, bool field, Vector3 root, int root_kind, Vector3 centre) {
+        bool ib_used = false;
         // cpu-lean (c): native says whether the frame about to render can use the other actors' roots at all (ABI 38: 0 = the
         // frame goes to the virtual screen, as the menus and the sphere grid do: the override is suspended there, and every
         // user of the roots needs it; fixed until the next Present). Then nothing is walked: n = 0, which those draws ignore.
@@ -48,9 +50,11 @@ public sealed unsafe partial class FFXVRModule {
             var o = new Span<float>(buf, 48 * 3); var d = new Span<float>(dist, 48); var h = new Span<float>(heads, 48 * 3);
             if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d, h); body_hide_anchor_log(actors, snap, pick, c); }
             else if (_fn_safe_read != null) { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d, h); }   // (none bound: n = 0, as read() failing at slot 0 gave)
+            ib_used = true;
         }
         _fph_others_n = n;
         _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n > 0 ? heads : null, n);
+        if (ib_used) body_hide_ib(actors, tbl_snap(actors), pick, root_kind != 0 ? root : centre);   // after the roots: native's order of use
     }
 
     // -- review SF2: the scene generation ---------------------------------------------------------------------------------
@@ -62,6 +66,56 @@ public sealed unsafe partial class FFXVRModule {
         if (actors != null && (uint)pick < 48 && read((byte*)(actors + pick) + 0x830, out nint mh)) sig = (sig ^ (ulong)mh) * 1099511628211UL;
         if (sig != _fph_scene_sig) { _fph_scene_sig = sig; _fph_scene_gen++; }
         return _fph_scene_gen;
+    }
+
+    // -- npc-anchor round 2: the exact owner by index buffer ----------------------------------------------------------------
+    // research/fh-structs.md 1a, checked in the disassembly (0x63BC80 reads the chain, 0x63C540 / 0x66F7D0 build it, 0x592C60
+    // binds it): actor +0x830 -> model object {+0 count | 0x80000000, +4 PMeshInstance*[]} -> instance +0 PMesh -> {+0 count,
+    // +4 segments, 0x6C each}; a segment's index data at +0x30: +0x08 index count, +0x14 buffer count (0x7FFFFFFF), +0x18 the
+    // buffer entries (inline when 1, else a pointer; 0x14 bytes each, ID3D11Buffer* at +0), +0x2C the byte offset, +0x30 bit 0 a
+    // GPU buffer. Phyre draws a segment with IASetIndexBuffer(that buffer, format, that offset) and DrawIndexed(count, 0, 0).
+    // The followed actor's segments and those of the live, drawn actors within 6 units go to native as (buffer, offset, count,
+    // owner): a matched draw in the table belongs to that owner. Rebuilt when the set of actors, an actor's +0x830 or +0x1C4
+    // (the shared model resource), the pick or the scene changes (and every 30 frames while a chain did not read whole); sent
+    // every frame (native uses it only in the frame after a call). +0x830 is 0 for a few frames after a load (deferred
+    // creation): that actor adds nothing until it is set. Two actors of one model share the mesh: their keys have both owners
+    // and decide nothing. Each build is dumped to the module log (30 a session).
+    private const int k_ib_max = 192, k_ib_segs = 96; private const float k_ib_range = 6f;
+    private uint* _ib_q; byte* _ib_seg; private int _ib_n, _ib_dumps, _fph_ib_dec; private uint _ib_gen; private ulong _ib_sig, _ib_built; private bool _ib_incomplete;
+    private void body_hide_ib(Actor* actors, Actor* snap, int pick, Vector3 c) {
+        if (_fn_fp_ib_set == null) return;
+        if (snap == null || (uint)pick >= 48) { _fph_ib_dec = _fn_fp_ib_set(null, 0, _ib_gen); return; }
+        int* idx = stackalloc int[48]; int m = 0; idx[m++] = pick;
+        for (int i = 0; i < 48; i++) {
+            if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name) || slot_hidden(actors, snap, i)) continue;
+            Vector3 r = *(Vector3*)((byte*)(snap + i) + 0x200);
+            if (finite(r) && Vector3.DistanceSquared(r, c) < k_ib_range * k_ib_range) idx[m++] = i;
+        }
+        ulong sig = 1469598103934665603UL ^ _fph_scene_gen;
+        for (int k = 0; k < m; k++) {
+            byte* a = (byte*)(snap + idx[k]);
+            sig = (sig ^ (ulong)idx[k]) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x830)) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x1C4)) * 1099511628211UL;
+        }
+        if (sig != _ib_sig || (_ib_incomplete && _frames - _ib_built >= 30)) ib_build(actors, snap, idx, m, sig);
+        _fph_ib_dec = _fn_fp_ib_set(_ib_n > 0 ? _ib_q : null, _ib_n, _ib_gen);
+    }
+    private void ib_build(Actor* actors, Actor* snap, int* idx, int m, ulong sig) {
+        if (_ib_q == null) { _ib_q = (uint*)Marshal.AllocHGlobal(k_ib_max * 16); _ib_seg = (byte*)Marshal.AllocHGlobal(k_ib_segs * 0x6C); }   // kept for the session
+        _ib_sig = sig; _ib_built = _frames; _ib_gen++; _ib_n = 0; _ib_incomplete = false;
+        var sb = _ib_dumps < 30 ? new System.Text.StringBuilder() : null;
+        uint res0 = *(uint*)((byte*)(snap + idx[0]) + 0x1C4);
+        for (int k = 0; k < m; k++) {
+            byte* a = (byte*)(snap + idx[k]);
+            int n0 = _ib_n; int segs = IbChain.Walk(*(nint*)(a + 0x830), k == 0 ? 0u : 1u, _ib_q, ref _ib_n, k_ib_max, _ib_seg, k_ib_segs, _fn_safe_read, out bool fail);
+            if (fail) _ib_incomplete = true;
+            if (sb != null) {
+                uint res = *(uint*)(a + 0x1C4);
+                sb.Append(I($" | actor {idx[k]} '{actor_name(snap[idx[k]].chr_name)}' {(k == 0 ? "the player's" : res == res0 ? "another actor's, SAME MODEL as the player's (its keys decide nothing)" : "another actor's")}: +0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{res:X}, {segs} segments, {_ib_n - n0} keys{(fail ? " (a read failed: retried)" : "")}"));
+                for (int e = n0; e < _ib_n && e < n0 + 4; e++) sb.Append(I($" {_ib_q[e * 4]:X8}+{_ib_q[e * 4 + 1]}/{_ib_q[e * 4 + 2]}"));
+                if (_ib_n - n0 > 4) sb.Append(" ...");
+            }
+        }
+        if (sb != null) { _ib_dumps++; _logger.Info(I($"body hide: IB table build {_ib_gen} on map {map_name()}: {_ib_n} entries (buffer+offset/count){sb}") + (_ib_dumps == 30 ? " (no more of these lines this session)" : "")); }
     }
 
     // -- npc-anchor: who shares the followed actor's root ---------------------------------------------------------------
@@ -167,6 +221,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_ride_att) { ImGui.TextDisabled(esc($"body hide: riding (the chocobo rule, radius {_ride_hide_radius:F1})")); return; }
         ImGui.Text(esc($"body hide: radius {_fph_radius:F2}, NPC parts kept visible last frame {_fph_kept}") + "  "); ImGui.SameLine();
         ImGui.TextDisabled(esc($"(other actors' roots sent: {_fph_others_n}; a draw nearer one of them than the player's root is theirs; a draw tied with one, a shared scene anchor, goes by its model)"));
+        ImGui.TextDisabled(esc($"IB table: {_ib_n} segment keys (build {_ib_gen}); matched draws decided by it last frame: the player's {(uint)_fph_ib_dec >> 16}, another actor's {_fph_ib_dec & 0xFFFF}"));
     }
 }
 
@@ -229,5 +284,42 @@ internal static class FphWalk {
         for (int k = 0; k < optpos.Length && k < 26; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = new Vector3(sp.X, sp.Y, sp.Z); have = true; } }
         if (have && !attached && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
         return have;
+    }
+}
+
+/// <summary>npc-anchor round 2: one actor's model chain to its segments' index-buffer keys (the layout in body_hide_ib's comment).
+/// Pure but for the guarded reads (rd: the native safe_read; a test passes its own). Appends (buffer, byte offset, index count,
+/// owner) quadruples to q from n (up to max); seg is scratch for up to max_segs segment records. Returns the segments read;
+/// fail = a read inside a set chain failed (the caller retries later).</summary>
+internal static unsafe class IbChain {
+    public static int Walk(nint h, uint owner, uint* q, ref int n, int max, byte* seg, int max_segs, delegate* unmanaged[Cdecl]<void*, void*, uint, int> rd, out bool fail) {
+        fail = false; int segs = 0;
+        if (h == 0 || rd == null) return 0;
+        uint hc = 0; nint arr = 0;
+        if (rd((void*)h, &hc, 4) == 0 || rd((byte*)h + 4, &arr, (uint)sizeof(nint)) == 0 || arr == 0) { fail = true; return 0; }
+        int ni = (int)(hc & 0x7FFFFFFF); if (ni > 16) ni = 16;
+        for (int i = 0; i < ni; i++) {
+            nint inst = 0, mesh = 0, sp = 0; uint sc = 0;
+            if (rd((byte*)arr + i * sizeof(nint), &inst, (uint)sizeof(nint)) == 0 || inst == 0 || rd((void*)inst, &mesh, (uint)sizeof(nint)) == 0 || mesh == 0
+                || rd((void*)mesh, &sc, 4) == 0 || rd((byte*)mesh + 4, &sp, (uint)sizeof(nint)) == 0) { fail = true; continue; }
+            int ns = (int)(sc & 0x7FFFFFFF); if (ns > max_segs) ns = max_segs;
+            if (ns == 0 || sp == 0) continue;
+            if (rd((void*)sp, seg, (uint)(ns * 0x6C)) == 0) { fail = true; continue; }
+            for (int s = 0; s < ns; s++) {
+                byte* blk = seg + s * 0x6C + 0x30;   // PIndexDataBlockD3D11, inline in the segment
+                if ((blk[0x30] & 1) == 0) continue;   // no GPU buffer (0x592C60 binds none)
+                uint cnt = *(uint*)(blk + 0x08), off = *(uint*)(blk + 0x2C), bc = *(uint*)(blk + 0x14) & 0x7FFFFFFF;
+                if (bc == 0) continue;
+                segs++;
+                for (int k = 0; k < (int)bc && k < 4 && n < max; k++) {
+                    uint ib = 0;
+                    if (bc == 1) ib = *(uint*)(blk + 0x18);   // the one entry inline: its ID3D11Buffer* first
+                    else { nint ea = *(nint*)(blk + 0x18); if (ea == 0 || rd((byte*)ea + 0x14 * k, &ib, 4) == 0) { fail = true; continue; } }
+                    if (ib == 0) continue;
+                    q[n * 4] = ib; q[n * 4 + 1] = off; q[n * 4 + 2] = cnt; q[n * 4 + 3] = owner; n++;
+                }
+            }
+        }
+        return segs;
     }
 }

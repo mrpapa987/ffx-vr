@@ -774,6 +774,13 @@ uint32_t g_fph_refused = 0, g_fph_refused_last = 0;   // draws inside the radius
 float    g_fp_others_head[fpown::k_others_max][3] = {}; bool g_fp_others_head_ok[fpown::k_others_max] = {};
 fpown::Models g_fp_models;
 uint32_t g_fph_tie = 0, g_fph_tie_kept = 0, g_fph_tie_player = 0, g_fph_tie_unres = 0;
+// Exact identity (ABI 40, ffxvr_fp_ib_set; ffxvr_fpown.h IbTable): the index-buffer keys of the followed actor's and nearby actors'
+// segments, sent every frame by managed (stamped; stale after a frame without a call), and this frame's matched draws decided by
+// it: the player's, another actor's, a key of both (identical models: the other rules), not in the table, with another count.
+fpown::IbTable g_fp_ib; uint32_t g_fp_ib_frame = 0, g_fp_ib_gen = 0;
+uint32_t g_fph_ib_player = 0, g_fph_ib_other = 0, g_fph_ib_both = 0, g_fph_ib_miss = 0, g_fph_ib_cnt = 0, g_fph_ib_report = 0;
+uint32_t g_fph_id_kept = 0, g_fph_tie_ib = 0, g_fph_ib_free = 0;   // ... the tied draws the IB table decided; untied draws it kept visible   // this frame's matched draws kept visible by identity (the IB table or a tie's model)
+static inline bool fp_ib_live() { return g_fp_ib.n > 0 && g_frames - g_fp_ib_frame <= 1u; }
 static inline bool fp_others_live() { return g_fp_others_n > 0 && g_frames - g_fp_others_frame <= 1u; }
 static inline bool fp_others_sent() { return g_frames - g_fp_others_frame <= 1u; }   // managed walked the table (n may be 0)
 static void ride_d2(const float* w, float* dr, float* dm) {
@@ -812,6 +819,8 @@ FpHideClu g_fph_clu[4] = {}; int g_fph_clu_n = 0; uint32_t g_fph_clu_more = 0, g
 bool     g_fph_frame = false; float g_fph_radius = 0.f, g_fph_match_max = 0.f, g_fph_match_pmax = 0.f, g_fph_ref_dmin = 1e30f, g_fph_ref_by = 0.f;
 uint32_t g_fph_lines = 0, g_fph_w_frames = 0, g_fph_w_ref_frames = 0, g_fph_w_refused = 0, g_fph_w_wide = 0, g_fph_w_lines = 0;
 uint32_t g_fph_w_tie_frames = 0, g_fph_w_tie = 0, g_fph_w_tie_kept = 0;   // the 10 s window's shared-anchor ties (frames, draws, kept visible)
+uint32_t g_fph_tie_lines = 0;   // review N4: the tie lines' own budget (120 a session, one every 2 s), apart from the refusal lines'
+uint32_t g_fph_w_ib_player = 0, g_fph_w_ib_other = 0, g_fph_w_ib_both = 0, g_fph_w_ib_miss = 0, g_fph_w_ib_cnt = 0;   // the 10 s window's IB-table decisions
 float    g_fph_w_rmax = 0.f, g_fph_w_match_max = 0.f;
 /// One skinned draw tested by the body hide on foot (fp_hiding): counted for this frame's diagnostics.
 static void fp_hide_note(const float* w, int who, const fpown::Why& y) {
@@ -831,19 +840,27 @@ static void fp_hide_note(const float* w, int who, const fpown::Why& y) {
 /// At Present (ffxvr_begin_frame): last frame's refusals for managed; the rate-limited body hide: line; the 10 s window.
 /// The body hide: line's "the player's drawn root" says (snapshot) when it is the smooth anchor's (used alone, N2).
 static void fp_hide_frame_end() {
-    g_fph_refused_last = g_fph_refused + g_fph_tie_kept;   // NPC parts kept visible (F8): by the roots, and in ties by model identity
+    g_fph_refused_last = g_fph_refused + g_fph_id_kept;   // NPC parts kept visible (F8): by the roots, and by identity (the IB table, a tie's model)
+    g_fph_ib_report = (g_fph_ib_player > 0xFFFF ? 0xFFFFu : g_fph_ib_player) << 16 | (g_fph_ib_other > 0xFFFF ? 0xFFFFu : g_fph_ib_other);
     g_fp_models.frame_end(g_frames);                      // this frame's head evidence steps the per-texture scores
     const ULONGLONG now = GetTickCount64();
     if (g_fph_frame) {
         g_fph_w_frames++; if (g_fph_refused) { g_fph_w_ref_frames++; g_fph_w_refused += g_fph_refused; }
         if (g_fph_tie) { g_fph_w_tie_frames++; g_fph_w_tie += g_fph_tie; g_fph_w_tie_kept += g_fph_tie_kept; }
+        g_fph_w_ib_player += g_fph_ib_player; g_fph_w_ib_other += g_fph_ib_other; g_fph_w_ib_both += g_fph_ib_both; g_fph_w_ib_miss += g_fph_ib_miss; g_fph_w_ib_cnt += g_fph_ib_cnt;
         if (g_fph_radius > g_fph_w_rmax) g_fph_w_rmax = g_fph_radius;
         if (g_fph_match_max > g_fph_w_match_max) g_fph_w_match_max = g_fph_match_max;
         if (g_fph_radius > 1.5f) g_fph_w_wide++;
-        const bool wide = g_fph_refused > 0 || g_fph_match_pmax > 0.75f || g_fph_tie > 0;   // SF1: a refusal, or a match 0.75 from the player (an NPC whose root was not sent?); npc-anchor: a tie
-        static ULONGLONG next = 0;
-        if (wide && g_fph_lines < 200 && now >= next) {
-            next = now + 1000; g_fph_lines++;
+        // SF1: a refusal, or a match 0.75 from the player (an NPC whose root was not sent?), or (round 2) a draw the IB table kept
+        // visible outside a tie; review N4: a frame with only ties writes on its own budget, so a long shared-anchor scene does not
+        // silence the refusal lines
+        const bool wide = g_fph_refused > 0 || g_fph_match_pmax > 0.75f || g_fph_ib_free > 0;
+        static ULONGLONG next = 0, next_tie = 0;
+        const bool line = wide ? g_fph_lines < 200 && now >= next : g_fph_tie > 0 && g_fph_tie_lines < 120 && now >= next_tie;
+        if (line) {
+            const char* last = "";
+            if (wide) { next = now + 1000; if (++g_fph_lines == 200) last = " (no more of these lines this session)"; }
+            else { next_tie = now + 2000; if (++g_fph_tie_lines == 120) last = " (no more shared-anchor lines this session)"; }
             char places[200] = "none"; int len = 0;
             for (int i = 0; i < g_fph_clu_n && len >= 0 && len < (int)sizeof(places); ++i)
                 len += snprintf(places + len, sizeof(places) - (size_t)len, "%s%u at %.2f", i ? ", " : "", g_fph_clu[i].n, g_fph_clu[i].d);
@@ -858,10 +875,10 @@ static void fp_hide_frame_end() {
             else snprintf(selfs, sizeof(selfs), "not known (the centre alone)");
             if (g_fph_refused) snprintf(refs, sizeof(refs), " (nearest %.2f from the centre, up to %.2f nearer the other root)", g_fph_ref_dmin, g_fph_ref_by);
             // npc-anchor: the shared-anchor ties and the model table (texture: score, last head distances to the player's / the tied actor's head)
-            char ties[900] = "";
+            char ties[1100] = "";
             if (g_fph_tie) {
-                int tl = snprintf(ties, sizeof(ties), " | %u draws tied with another actor's root (same anchor, within %.2f): resolved by model identity (the palette's head vs each actor's head sub-position, per texture): %u kept visible as another actor's, %u hidden as the player's, %u unresolved (hidden, the tie rule) | the player's head sub-position %s%.2f from the centre (the eye's base) | models:",
-                                  g_fph_tie, fpown::k_tol, g_fph_tie_kept, g_fph_tie_player, g_fph_tie_unres, g_fp_have_head ? "" : "NOT known (no evidence; last) ",
+                int tl = snprintf(ties, sizeof(ties), " | %u draws tied with another actor's root (same anchor, within %.2f): resolved by model identity (%u by the IB table, the rest by the palette's head vs each actor's head sub-position, per texture): %u kept visible as another actor's, %u hidden as the player's, %u unresolved (hidden, the tie rule) | the player's head sub-position %s%.2f from the centre (the eye's base) | models:",
+                                  g_fph_tie, fpown::k_tol, g_fph_tie_ib, g_fph_tie_kept, g_fph_tie_player, g_fph_tie_unres, g_fp_have_head ? "" : "NOT known (no evidence; last) ",
                                   sqrtf(g_fp_head[0] * g_fp_head[0] + g_fp_head[1] * g_fp_head[1] + g_fp_head[2] * g_fp_head[2]));
                 for (const fpown::Model& m : g_fp_models.e) {
                     if (m.tex == 0 || tl < 0 || tl >= (int)sizeof(ties)) continue;
@@ -869,24 +886,31 @@ static void fp_hide_frame_end() {
                     tl += snprintf(ties + tl, sizeof(ties) - (size_t)tl, " %p %s (score %d, head %.1f / %.1f)", reinterpret_cast<void*>(m.tex), v > 0 ? "player" : v < 0 ? "other" : "?", m.s, m.last_dp, m.last_dq);
                 }
             }
-            diag("body hide: frame %u matched %u draws in %d places (count at distance from the centre): %s | radius %.2f = %.2f + margin %.2f (1.5 x step %.2f = %.2f + %.2f, cap %.0f) | %s | the player's drawn root %s | refused %u draws nearer another root%s%s%s",
+            char ibs[200];
+            if (fp_ib_live()) snprintf(ibs, sizeof(ibs), " | IB table (%d entries, build %u): matched draws decided %u (the player's %u, another actor's %u), a key of both (identical models) %u, not in it %u, count differs %u",
+                                        g_fp_ib.n, g_fp_ib_gen, g_fph_ib_player + g_fph_ib_other, g_fph_ib_player, g_fph_ib_other, g_fph_ib_both, g_fph_ib_miss, g_fph_ib_cnt);
+            else snprintf(ibs, sizeof(ibs), " | IB table none");
+            diag("body hide: frame %u matched %u draws in %d places (count at distance from the centre): %s | radius %.2f = %.2f + margin %.2f (1.5 x step %.2f = %.2f + %.2f, cap %.0f) | %s | the player's drawn root %s | refused %u draws nearer another root%s%s%s%s",
                  g_frames, g_fph_matched, g_fph_clu_n, places, g_fph_radius, g_fp_hide_radius, g_fph_radius - g_fp_hide_radius, g_fp_step_hide, g_fp_d_call[0], g_fp_d_call[1], fpown::k_margin_cap,
-                 others, selfs, g_fph_refused, refs, ties, g_fph_lines == 200 ? " (no more of these lines this session)" : "");
+                 others, selfs, g_fph_refused, refs, ties, ibs, last);
         }
     }
     g_fph_frame = false; g_fph_clu_n = 0; g_fph_clu_more = 0; g_fph_matched = 0; g_fph_refused = 0;
     g_fph_tie = g_fph_tie_kept = g_fph_tie_player = g_fph_tie_unres = 0;
+    g_fph_ib_player = g_fph_ib_other = g_fph_ib_both = g_fph_ib_miss = g_fph_ib_cnt = 0; g_fph_id_kept = g_fph_tie_ib = g_fph_ib_free = 0;
     g_fph_match_max = g_fph_match_pmax = 0.f; g_fph_ref_dmin = 1e30f; g_fph_ref_by = 0.f;
     static ULONGLONG next10 = 0;
     if (now < next10) return;
     next10 = now + 10000;
-    if (g_fph_w_frames && (g_fph_w_refused || g_fph_w_tie) && g_fph_w_lines < 100) {   // SF1: only when something was refused (npc-anchor: or tied)
+    if (g_fph_w_frames && (g_fph_w_refused || g_fph_w_tie || g_fph_w_ib_other) && g_fph_w_lines < 100) {   // SF1: only when something was refused (npc-anchor: or tied, or kept by the IB table)
         g_fph_w_lines++;
-        diag("body hide (10 s, first person on foot): frames %u, with NPC parts kept visible %u (draws %u) | radius over 1.5 in %u frames, up to %.2f, matched parts up to %.2f from the centre | tied with another actor's root (same anchor) in %u frames (draws %u), kept visible by model identity %u%s",
-             g_fph_w_frames, g_fph_w_ref_frames, g_fph_w_refused, g_fph_w_wide, g_fph_w_rmax, g_fph_w_match_max, g_fph_w_tie_frames, g_fph_w_tie, g_fph_w_tie_kept, g_fph_w_lines == 100 ? " (no more of these lines this session)" : "");
+        diag("body hide (10 s, first person on foot): frames %u, with NPC parts kept visible %u (draws %u) | radius over 1.5 in %u frames, up to %.2f, matched parts up to %.2f from the centre | tied with another actor's root (same anchor) in %u frames (draws %u), kept visible by model identity %u | IB table: the player's %u, another actor's %u, both %u, not in it %u, count differs %u%s",
+             g_fph_w_frames, g_fph_w_ref_frames, g_fph_w_refused, g_fph_w_wide, g_fph_w_rmax, g_fph_w_match_max, g_fph_w_tie_frames, g_fph_w_tie, g_fph_w_tie_kept,
+             g_fph_w_ib_player, g_fph_w_ib_other, g_fph_w_ib_both, g_fph_w_ib_miss, g_fph_w_ib_cnt, g_fph_w_lines == 100 ? " (no more of these lines this session)" : "");
     }
     g_fph_w_frames = g_fph_w_ref_frames = g_fph_w_refused = g_fph_w_wide = 0; g_fph_w_rmax = g_fph_w_match_max = 0.f;
     g_fph_w_tie_frames = g_fph_w_tie = g_fph_w_tie_kept = 0;
+    g_fph_w_ib_player = g_fph_w_ib_other = g_fph_w_ib_both = g_fph_w_ib_miss = g_fph_w_ib_cnt = 0;
 }
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
@@ -4672,7 +4696,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 39;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity)
+constexpr int FFXVR_ABI = 40;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6627,6 +6651,23 @@ extern "C" __declspec(dllexport) int ffxvr_haze_status(int* out, int n) {
     return k;
 }
 
+/// Exact identity (ffxvr_fpown.h IbTable): the owner of the draw being reported by its bound index buffer and byte offset (Phyre's
+/// DrawIndexed(count, 0, 0) after IASetIndexBuffer(segment buffer, format, segment offset), 0x592C60): 0 the player's, 1 another
+/// actor's, -1 not decided (no live table, not an indexed draw from index 0, not in the table, or a key of both). ib / off get
+/// the bound buffer and offset (0 when not read). Called for matched draws only, and only when managed sent a table.
+static int fp_ib_owner(uint32_t* ib, uint32_t* off) {
+    *ib = 0; *off = 0;
+    if (!fp_ib_live() || g_ctx == nullptr || g_draw_kind != 1 || g_draw_start != 0) return -1;
+    ID3D11Buffer* b = nullptr; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN; UINT o = 0; g_ctx->IAGetIndexBuffer(&b, &f, &o);
+    if (b == nullptr) return -1;
+    *ib = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(b)); *off = o; b->Release();   // the pointer as a key only
+    bool cnt = false; const int w = g_fp_ib.owner(*ib, o, g_draw_n, &cnt);
+    if (w == -1) { g_fph_ib_miss++; return -1; }
+    if (!cnt) g_fph_ib_cnt++;
+    if (w == -2) { g_fph_ib_both++; return -1; }
+    (w == 0 ? g_fph_ib_player : g_fph_ib_other)++;
+    return w;
+}
 /// Shared-anchor ties (ffxvr_fpown.h): a skinned draw that fp_part_of matched as the player's on foot. Tied (another actor's root
 /// as near as his): its model's verdict, by its PS slot-0 texture, after noting this draw's head distances (its palette, from the
 /// eye image's game bytes, against the player's head sub-position and the nearest tied actor's) for the frame-end score.
@@ -6669,9 +6710,15 @@ static int fp_tie_resolve(const fpown::Why& y, const EyeImage* e, uintptr_t* tex
 static void fp_census_note(int idx, const char* what, const float* w, const fpown::Why& y, uintptr_t tex) {
     if (!g_frame_live) return;
     if (tex == 0) tex = reinterpret_cast<uintptr_t>(ps_tex(0));
+    // round 2 (review SF3): the bound index buffer, its byte offset and the draw's count, start and base, and the IB table's owner
+    ID3D11Buffer* b = nullptr; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN; UINT o = 0; if (g_ctx) g_ctx->IAGetIndexBuffer(&b, &f, &o);
+    const uint32_t ibk = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(b)); if (b) b->Release();
+    bool cnt = false; const int own = fp_ib_live() ? g_fp_ib.owner(ibk, o, g_draw_n, &cnt) : -3;
     FrameEv ev;
-    snprintf(ev.text, sizeof(ev.text), "      body hide: frame draw %d %s | world (%.2f %.2f %.2f) | s0 %p | from the player %.2f, the nearest other root %.2f%s | model %d",
-             idx, what, w[0], w[1], w[2], reinterpret_cast<void*>(tex), y.d_player, y.d_other, fpown::tied(y) ? " (tied)" : "", g_fp_models.verdict(tex));
+    snprintf(ev.text, sizeof(ev.text), "      body hide: frame draw %d %s | world (%.2f %.2f %.2f) | s0 %p | ib %08X +%u fmt %d, %s %u from %u base %d | IB table %s%s | from the player %.2f, the nearest other root %.2f%s | model %d",
+             idx, what, w[0], w[1], w[2], reinterpret_cast<void*>(tex), ibk, o, (int)f, g_draw_kind == 1 ? "DrawIndexed" : "Draw", g_draw_n, g_draw_start, g_draw_base,
+             own == 0 ? "the player's" : own == 1 ? "another actor's" : own == -2 ? "both (identical models)" : own == -1 ? "not in it" : "none", own >= 0 && !cnt ? " (count differs)" : "",
+             y.d_player, y.d_other, fpown::tied(y) ? " (tied)" : "", g_fp_models.verdict(tex));
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_frame_ev.size() < 2000) g_frame_ev.push_back(ev);
 }
@@ -6708,7 +6755,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         const bool whole = bm == 0 || (g_hands_on && g_hands_show >= 2);
         fpown::Why lw; int who = fp_part_of(lc->wpos, &lw);   // riding: the bird's shadow goes too only with "hide the chocobo"
         // a shared-anchor tie (on foot): the model's verdict by texture, if the scene pass has given one (no palette is kept here)
-        if (who == 1 && (g_ride_flags & 1) == 0 && fpown::tied(lw) && g_fp_models.verdict(reinterpret_cast<uintptr_t>(ps_tex(0))) < 0) who = 0;
+        if (who == 1 && (g_ride_flags & 1) == 0) {   // the exact owner by the index buffer first (round 2)
+            uint32_t ibk, ibo; const int ibv = fp_ib_owner(&ibk, &ibo);
+            if (ibv == 1 || (ibv < 0 && fpown::tied(lw) && g_fp_models.verdict(reinterpret_cast<uintptr_t>(ps_tex(0))) < 0)) who = 0;
+        }
         if (whole && (who == 1 || (who == 2 && (g_ride_flags & 4)))) { g_lc_self_hidden++; return -1; }
     }
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
@@ -6716,14 +6766,13 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         uintptr_t tex = 0;
         if (fp_hiding && (g_ride_flags & 1) == 0) {   // on foot: the body hide: line's counts
             if (why.refused) g_fph_refused++;         // inside the radius, nearer another actor's root: kept visible
-            if (who == 1) {                           // shared-anchor ties: resolved by model identity (ffxvr_fpown.h)
-                const int v = fp_tie_resolve(why, g_eye2_cur, &tex);
-                if (fpown::tied(why)) {
-                    g_fph_tie++;
-                    if (v < 0) { g_fph_tie_kept++; who = 0; fp_census_note(idx, "kept visible: another actor's model (a tie with the player's root)", g_eye2_cur->world_pos, why, tex); }
-                    else if (v > 0) g_fph_tie_player++;
-                    else g_fph_tie_unres++;
-                }
+            if (who == 1) {                           // exact identity by the index buffer, then shared-anchor ties by model (ffxvr_fpown.h)
+                uint32_t ibk, ibo; const int ibv = fp_ib_owner(&ibk, &ibo);   // 0 the player's, 1 another actor's, -1 undecided
+                const int v = ibv == 0 ? 1 : ibv == 1 ? -1 : fp_tie_resolve(why, g_eye2_cur, &tex);
+                const bool t = fpown::tied(why);
+                if (!t && ibv == 1) g_fph_ib_free++;
+                if (t) { g_fph_tie++; if (ibv >= 0) g_fph_tie_ib++; if (v > 0) g_fph_tie_player++; else if (v == 0) g_fph_tie_unres++; else g_fph_tie_kept++; }
+                if (v < 0) { who = 0; g_fph_id_kept++; fp_census_note(idx, ibv == 1 ? "kept visible: another actor's segment (the IB table)" : "kept visible: another actor's model (a tie with the player's root)", g_eye2_cur->world_pos, why, tex); }
             }
             fp_hide_note(g_eye2_cur->world_pos, who, why);
         }
@@ -6741,11 +6790,11 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             const bool scene = g_cur_rtv_n > 0 && g_scene_tex != nullptr && g_cur_rtv0_tex == g_scene_tex;
             const int bm = (g_hands_on && g_fp_body_mode == 0) ? 1 : g_fp_body_mode;   // VR hands: the body is shown, head parts hidden
             if (fp_hiding && bm == 0 && g_fp_solo < 0) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's part", g_eye2_cur->world_pos, why, tex); return -1; }       // the whole body, in every pass
-            if (g_hands_on && g_hands_show >= 2 && fp_hiding && g_fp_solo < 0 && !g_eye2_cur->pal_hands) { g_fp_hidden_draws++; return -1; }   // floating hands: parts without hand bones are not drawn at all
+            if (g_hands_on && g_hands_show >= 2 && fp_hiding && g_fp_solo < 0 && !g_eye2_cur->pal_hands) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's part (floating hands: no hand bones)", g_eye2_cur->world_pos, why, tex); return -1; }   // floating hands: parts without hand bones are not drawn at all
             if (scene) {
-                const uint32_t idx = g_fp_part_idx++;
-                if (g_fp_solo >= 0) { if ((int)idx != g_fp_solo) { g_fp_hidden_draws++; return -1; } }
-                else if (fp_hiding && bm == 1 && idx < 32 && ((g_fp_head_mask >> idx) & 1u)) { g_fp_hidden_draws++; return -1; }   // a head part
+                const uint32_t pidx = g_fp_part_idx++;
+                if (g_fp_solo >= 0) { if ((int)pidx != g_fp_solo) { g_fp_hidden_draws++; return -1; } }
+                else if (fp_hiding && bm == 1 && pidx < 32 && ((g_fp_head_mask >> pidx) & 1u)) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's head part", g_eye2_cur->world_pos, why, tex); return -1; }   // a head part
             }
         }
     }
@@ -10837,6 +10886,18 @@ extern "C" __declspec(dllexport) int ffxvr_fp_others_set(const float* xyz, const
     }
     g_fp_others_n = k; g_fp_others_frame = g_frames;
     return static_cast<int>(g_fph_refused_last);
+}
+/// Exact identity (ABI 40), every field frame in first person on foot with the body hide on, after ffxvr_fp_others_set: the
+/// index-buffer table, n quadruples (ID3D11Buffer* as a 32-bit key, byte offset, index count, owner 0 the player's / 1 another
+/// actor's): the segments of the followed actor's model chain (+0x830) and of the actors near him (managed, body_hide.cs). The
+/// entries are copied when gen differs from the last call's (managed bumps it on every rebuild); every call stamps the table,
+/// which is used only in the frame after a call (no call: the texture and position rules alone). n <= 0 empties it. Returns last
+/// frame's matched draws decided by it: the player's in the high 16 bits, another actor's in the low 16.
+extern "C" __declspec(dllexport) int ffxvr_fp_ib_set(const uint32_t* q, int n, uint32_t gen) {
+    if (n <= 0 || q == nullptr) g_fp_ib.n = 0;
+    else if (gen != g_fp_ib_gen || g_fp_ib.n == 0) g_fp_ib.set(q, n);
+    g_fp_ib_gen = gen; g_fp_ib_frame = g_frames;
+    return static_cast<int>(g_fph_ib_report);
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_head_set(int anchor, float up, float smooth, float fwd) { g_fp_head_anchor = anchor; g_fp_head_up = up; g_fp_head_smooth = smooth; g_fp_head_fwd = fwd; }
 extern "C" __declspec(dllexport) int  ffxvr_fp_hidden() { return static_cast<int>(g_fp_hidden_draws); }
