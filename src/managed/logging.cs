@@ -46,7 +46,8 @@ public sealed unsafe partial class FFXVRModule {
         catch { return "?"; }
     }
 
-    /// <summary>Every diagnostic key that is on (the keys tools/set-logging.ps1 -Profile Release turns off).</summary>
+    /// <summary>Every diagnostic key that is on (the keys tools/set-logging.ps1 -Profile Release turns off). Builds a list: for
+    /// the log lines and the UI only; the per-frame path uses diag_any (cpu-lean).</summary>
     private List<string> diag_on() {
         var on = new List<string>();
         if (_diag_verbose) on.Add("diag_verbose");
@@ -71,7 +72,11 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     /// <summary>The session log's cap: 64 MB while any diagnostic is on (they are the big writers), else 4 MB.</summary>
-    private int log_cap_mb() => diag_on().Count > 0 ? k_log_cap_verbose_mb : k_log_cap_mb;
+    private int log_cap_mb() => diag_any() ? k_log_cap_verbose_mb : k_log_cap_mb;
+    /// <summary>cpu-lean: diag_on().Count > 0 without the list and the interpolated string (log_push runs every frame). The same
+    /// keys as diag_on, in the same order: keep the two in step.</summary>
+    private bool diag_any() => _diag_verbose || _diag7 || _diag_load || _diag_load_lines || _diag_actors || _diag_cluster_bytes || _diag_va_log || _diag_transition
+                               || _diag_load_prof != 0;
 
     /// <summary>From push_all, every frame: diag_verbose and the cap, sent only when they change.</summary>
     private void log_push() {
