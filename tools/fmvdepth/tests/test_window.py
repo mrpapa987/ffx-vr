@@ -9,9 +9,42 @@ import window as W
 H, WD = 6, 8
 
 
+# reference(), compute_scale_and_shift_full() and get_interpolate_frames() below are adapted from Video-Depth-Anything at
+# commit 4f5ae23 (video_depth_anything/video_depth.py infer_video_depth, utils/util.py; Copyright (2025) Bytedance Ltd.
+# and/or its affiliates; Apache License 2.0, http://www.apache.org/licenses/LICENSE-2.0): the model call is a parameter
+# and the full-resolution resize is left out. They are kept close to upstream (float32 sums included) so that the
+# streaming generator in window.py is checked against upstream's own arithmetic, not against its own helpers.
+
+
+def compute_scale_and_shift_full(prediction, target, mask):
+    prediction = prediction.astype(np.float32)
+    target = target.astype(np.float32)
+    mask = mask.astype(np.float32)
+    a_00 = np.sum(mask * prediction * prediction)
+    a_01 = np.sum(mask * prediction)
+    a_11 = np.sum(mask)
+    b_0 = np.sum(mask * prediction * target)
+    b_1 = np.sum(mask * target)
+    x_0, x_1 = 1, 0
+    det = a_00 * a_11 - a_01 * a_01
+    if det != 0:
+        x_0 = (a_11 * b_0 - a_01 * b_1) / det
+        x_1 = (-a_01 * b_0 + a_00 * b_1) / det
+    return x_0, x_1
+
+
+def get_interpolate_frames(frame_list_pre, frame_list_post):
+    assert len(frame_list_pre) == len(frame_list_post)
+    min_w, max_w = 0.0, 1.0
+    step = (max_w - min_w) / (len(frame_list_pre) - 1)
+    post_w_list = [min_w] + [i * step for i in range(1, len(frame_list_pre) - 1)] + [max_w]
+    return [frame_list_pre[i] * (1 - post_w_list[i]) + frame_list_post[i] * post_w_list[i]
+            for i in range(len(frame_list_pre))]
+
+
 def reference(frames, model):
     """Upstream VideoDepthAnything.infer_video_depth's windowing and alignment, batch style (all frames and all depth
-    maps in lists), written from video_depth.py at 4f5ae23 so the streaming generator can be checked against it."""
+    maps in lists), so the streaming generator can be checked against it."""
     INFER_LEN, OVERLAP, KEYFRAMES, INTERP_LEN = 32, 10, [0, 12, 24, 25, 26, 27, 28, 29, 30, 31], 8
     frame_list = list(frames)
     step = INFER_LEN - OVERLAP
@@ -35,11 +68,11 @@ def reference(frames, model):
                 ref.append(depth_list[frame_id + k])
         else:
             curr = [depth_list[frame_id + i] for i in range(len(kf_align))]
-            s, t = W.scale_and_shift(np.concatenate([c.ravel() for c in curr]), np.concatenate([r.ravel() for r in ref]))
+            s, t = compute_scale_and_shift_full(np.concatenate(curr), np.concatenate(ref),
+                                                np.concatenate(np.ones_like(ref)) == 1)
             pre_d = aligned[-INTERP_LEN:]
             post = [np.maximum(depth_list[frame_id + i] * s + t, 0) for i in range(align_len, OVERLAP)]
-            ws = W.interp_weights(INTERP_LEN)
-            aligned[-INTERP_LEN:] = [pre_d[i] * (1 - ws[i]) + post[i] * ws[i] for i in range(INTERP_LEN)]
+            aligned[-INTERP_LEN:] = get_interpolate_frames(pre_d, post)
             for i in range(OVERLAP, INFER_LEN):
                 aligned.append(np.maximum(depth_list[frame_id + i] * s + t, 0))
             ref = ref[:1] + [np.maximum(depth_list[frame_id + k] * s + t, 0) for k in kf_align[1:]]

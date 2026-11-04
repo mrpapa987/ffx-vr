@@ -18,6 +18,9 @@ class VdaFilesTest(unittest.TestCase):
                 f.write('tampered')
             bad = vda_model.verify_vda(t)
             self.assertIn('video_depth_anything/video_depth.py: differs from commit 4f5ae23', bad)
+            with open(os.path.join(t, 'video_depth_anything', '__init__.py'), 'w') as f:
+                f.write('print(1)')                      # would run on import: refused
+            self.assertIn('video_depth_anything/__init__.py: not in commit 4f5ae23', vda_model.verify_vda(t))
 
     def test_pins(self):
         self.assertEqual(len(vda_model.VDA_COMMIT), 40)

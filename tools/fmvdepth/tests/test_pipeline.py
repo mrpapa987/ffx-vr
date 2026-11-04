@@ -11,9 +11,12 @@ import numpy as np
 
 import helpers
 import convert
+import depthproc
 import fvd
 import preview
 import vbf
+import vda_model
+from window import windowed_depth
 
 FF = shutil.which('ffmpeg')
 FP = shutil.which('ffprobe')
@@ -93,6 +96,9 @@ class PipelineTest(unittest.TestCase):
                 self.assertEqual((r.h.fps_num, r.h.fps_den), (30000, 1001))
                 self.assertEqual(r.h.codec, fvd.CODEC_ZLIB)
                 self.assertEqual(r.h.src_size, rec['source_size'])
+                # src_name: as the VBF stores it (lower case); compare with the game's names case-insensitively
+                self.assertEqual(r.h.src_name, rec['source'].lower())
+                self.assertEqual(r.h.src_name.lower(), {'tst_us': 'TST_us.webm', 'four_480': 'Four_480.webm'}[key].lower())
                 cuts = [i for i in range(n) if r.entry(i).flags & fvd.FF_CUT]
                 self.assertEqual(cuts[0], 0)
                 self.assertEqual(len(cuts), 2, cuts)                   # the scene change
@@ -136,6 +142,33 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(preview.main(['--vbf', self.vbf, '--dir', self.out, 'tst_us', '--gray', '--frame', '0',
                                        '--ffmpeg', FF]), 0)
 
+    def test_2b_frame_i_is_video_frame_i(self):
+        """Depth frame i comes from video frame i: decode the clip independently (from the .webm file, not through the
+        VBF), run the same per-frame steps with the content-keyed fake model, and compare with the .fvd."""
+        if not os.path.exists(os.path.join(self.out, 'tst_us.fvd')):
+            self.assertEqual(self.run_convert('--only', 'TST_us'), 0)
+        path = os.path.join(self.tmp.name, 'a.webm')
+        iw, ih = depthproc.model_input_size(320, 180, 518)
+        raw = subprocess.run([FF, '-hide_banner', '-loglevel', 'error', '-i', path, '-map', '0:v:0', '-an', '-vf',
+                              f'scale={iw}:{ih}:flags=bicubic:in_color_matrix=bt601:in_range=tv', '-fps_mode',
+                              'passthrough', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'],
+                             capture_output=True, timeout=120, check=True).stdout
+        n = len(raw) // (iw * ih * 3)
+        self.assertEqual(n, self.frames_a)
+        frames = [np.frombuffer(raw, np.uint8, iw * ih * 3, i * iw * ih * 3).reshape(ih, iw, 3) for i in range(n)]
+        m = vda_model.FakeModel()
+        m.prepare(iw, ih, 320, 180)
+        cuts, norm = depthproc.CutDetector(320, 180), depthproc.ShotNormalizer()
+        flags = [cuts(f)[0] for f in frames]
+        expect = [norm(d, flags[i])[0] for i, d in windowed_depth(frames, m)]
+        with fvd.FvdReader(os.path.join(self.out, 'tst_us.fvd')) as r:
+            got = [r.frame(i).astype(int) for i in range(len(r))]
+        same = [int(np.abs(g - e).max()) for g, e in zip(got, expect)]
+        self.assertLessEqual(max(same), 1, same)                      # frame i == video frame i (rounding at most)
+        moving = range(1, 40)                                          # the first scene moves; the colour bars do not
+        off_by_one = [float(np.abs(got[i] - expect[i - 1]).mean()) for i in moving]
+        self.assertGreater(min(off_by_one), 4 * max(float(np.abs(got[i] - expect[i]).mean()) for i in moving) + 0.05)
+
     def test_3_refusals(self):
         # never inside a git checkout, never inside the game's data folder
         repo = os.path.join(self.tmp.name, 'repo')
@@ -146,7 +179,24 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(os.path.dirname(self.vbf), 'd'),
                                        '--model', 'fake', '--codec', 'zlib']), 1)
         self.assertEqual(self.run_convert('--only', 'NOPE_us'), 1)
-        self.assertEqual(self.run_convert('--list'), 0)
+        # --list and --check-out write nothing
+        fresh = os.path.join(self.tmp.name, 'mods2', 'fmvdepth')
+        for extra in (['--list'], ['--check-out']):
+            self.assertEqual(convert.main(['--vbf', self.vbf, '--out', fresh, '--model', 'fake', '--codec', 'zlib']
+                                          + extra), 0)
+            self.assertFalse(os.path.exists(fresh), extra)
+        self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(repo, 'y'), '--check-out']), 1)
+        # a symbolic link into the repository is refused too
+        link = os.path.join(self.tmp.name, 'link-to-repo')
+        os.symlink(repo, link)
+        self.assertEqual(convert.main(['--vbf', self.vbf, '--out', os.path.join(link, 'z'), '--check-out']), 1)
+
+    def test_names(self):
+        for bad in ('con.webm', 'NUL.webm', 'com1.webm', 'a/b.webm', '..\\x.webm', 'x y.webm', 'x.mp4', '.webm'):
+            with self.assertRaises(convert.ConvertError, msg=bad):
+                convert.check_name(bad)
+        for good in ('OPN_us.webm', 'WithoutEvent_480.webm', '1_480_new.webm', 'console.webm'):
+            convert.check_name(good)
 
 
 if __name__ == '__main__':

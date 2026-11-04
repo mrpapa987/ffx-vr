@@ -57,8 +57,15 @@ def sha256_file(path, bufsize=1 << 20):
     return h.hexdigest()
 
 
+# Python files at VDA_COMMIT that we do not import (so not hashed) but that may be there. Any other .py file in the two
+# imported package folders (an added __init__.py above all: it would run on import) fails the check.
+VDA_OTHER_PY = {'utils/dc_utils.py', 'video_depth_anything/video_depth_stream.py'}
+VDA_PACKAGES = ('video_depth_anything', 'utils')
+
+
 def verify_vda(vda_dir):
-    """[] if the VDA checkout has exactly the pinned files we import, else a list of problems."""
+    """[] if the VDA checkout has exactly the pinned files we import, and no unexpected .py file in the imported
+    packages, else a list of problems."""
     bad = []
     for rel, want in VDA_FILES.items():
         p = os.path.join(vda_dir, *rel.split('/'))
@@ -66,6 +73,14 @@ def verify_vda(vda_dir):
             bad.append(f'{rel}: missing')
         elif sha256_file(p) != want:
             bad.append(f'{rel}: differs from commit {VDA_COMMIT[:7]}')
+    known = set(VDA_FILES) | VDA_OTHER_PY
+    for pkg in VDA_PACKAGES:
+        for d, _dirs, files in os.walk(os.path.join(vda_dir, pkg)):
+            for f in files:
+                if f.endswith(('.py', '.pyc', '.pyd', '.so')) and '__pycache__' not in d:
+                    rel = os.path.relpath(os.path.join(d, f), vda_dir).replace(os.sep, '/')
+                    if rel not in known:
+                        bad.append(f'{rel}: not in commit {VDA_COMMIT[:7]}')
     return bad
 
 
@@ -100,8 +115,9 @@ class VdaSmall:
             m = types.ModuleType('utils')
             m.__path__ = [os.path.join(vda_dir, 'utils')]
             sys.modules['utils'] = m
-        if vda_dir not in sys.path:
-            sys.path.append(vda_dir)
+        if vda_dir in sys.path:
+            sys.path.remove(vda_dir)
+        sys.path.insert(0, vda_dir)          # the verified checkout wins over anything else named video_depth_anything
         from video_depth_anything.video_depth import VideoDepthAnything
         if attention == 'sdpa':
             self._patch_attention()
@@ -118,6 +134,9 @@ class VdaSmall:
 
     @staticmethod
     def _patch_attention():
+        # forward() below is adapted from DINOv2's Attention.forward (video_depth_anything/dinov2_layers/attention.py
+        # at VDA commit 4f5ae23; Copyright (c) Meta Platforms, Inc. and affiliates, Apache-2.0): the same projections,
+        # with the explicit softmax(q @ k^T) @ v replaced by torch's scaled_dot_product_attention.
         import torch.nn.functional as F
         from video_depth_anything.dinov2_layers import attention as A
 

@@ -51,10 +51,11 @@ import vbf  # noqa: E402
 import vda_model  # noqa: E402
 from window import windowed_depth  # noqa: E402
 
-CONVERTER_VERSION = '0.1.0'
+CONVERTER_VERSION = '0.1.1'
 ALGO_VERSION = 1          # bump when the depth a given input produces changes (forces reconversion)
 MANIFEST = 'manifest.json'
 EXIT_OOM = 3
+PREVIEW_DEFAULT = 'SIN_us,BTS_us'
 
 PRIVATE_TXT = """This folder holds depth data that FFX VR's converter (tools/fmvdepth/convert.py) made on this PC from the
 videos in YOUR copy of FINAL FANTASY X HD Remaster.
@@ -73,8 +74,14 @@ class ConvertError(Exception):
 
 
 # ==================================================================== helpers
+def real(path):
+    """The absolute path with junctions and symbolic links resolved (also for a folder that does not exist yet: its
+    nearest existing parent is resolved)."""
+    return os.path.realpath(os.path.abspath(path))
+
+
 def in_git_checkout(path):
-    p = os.path.abspath(path)
+    p = real(path)
     while True:
         if os.path.exists(os.path.join(p, '.git')):
             return p
@@ -85,7 +92,7 @@ def in_git_checkout(path):
 
 
 def is_inside(child, parent):
-    c, p = os.path.normcase(os.path.abspath(child)), os.path.normcase(os.path.abspath(parent))
+    c, p = os.path.normcase(real(child)), os.path.normcase(real(parent))
     return c == p or c.startswith(p.rstrip('\\/') + os.sep)
 
 
@@ -94,7 +101,7 @@ def check_out_dir(out, vbf_path):
     if g:
         raise ConvertError(f'--out {out} is inside a git checkout ({g}): depth made from the game\'s videos must never '
                            'go near a repository. Use the mod folder (<game>/fahrenheit/mods/ffxvr/fmvdepth).')
-    data_dir = os.path.dirname(os.path.abspath(vbf_path))
+    data_dir = os.path.dirname(real(vbf_path))
     if is_inside(out, data_dir):
         raise ConvertError(f'--out {out} is inside the game\'s data folder: never write there.')
 
@@ -105,6 +112,16 @@ def write_private_note(folder):
     if not os.path.exists(p):
         with open(p, 'w', encoding='utf-8', newline='\r\n') as f:
             f.write(PRIVATE_TXT.format(date=datetime.date.today().isoformat(), folder=folder))
+
+
+RESERVED = {'con', 'prn', 'aux', 'nul'} | {f'com{i}' for i in range(10)} | {f'lpt{i}' for i in range(10)}
+NAME_RE = re.compile(r'^[A-Za-z0-9_]{1,40}\.webm$')
+
+
+def check_name(file_name):
+    """A video name we are willing to turn into a file name: letters, digits, '_' + '.webm', not a Windows device name."""
+    if not NAME_RE.match(file_name) or file_name[:-5].lower() in RESERVED:
+        raise ConvertError(f'{file_name!r}: not a name the converter writes a file for')
 
 
 def out_name(file_name):
@@ -246,7 +263,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     t0 = time.perf_counter()
     w = fvd.FvdWriter(part, out_w, out_h, info['fps_num'], info['fps_den'], codec=a.codec_id, predictor=fvd.PRED_LEFT,
                       model_id=fvd.MODEL_VDA_SMALL if model.model_name == 'vda-small' else fvd.MODEL_FAKE,
-                      input_w=in_w, input_h=in_h, settings_hash=settings_hash, src_name=entry.name.split('/')[-1],
+                      input_w=in_w, input_h=in_h, settings_hash=settings_hash, src_name=entry.name.split('/')[-1].lower(),
                       src_size=entry.size, src_offset=entry.offset, thumb_w=cuts.tw, thumb_h=cuts.th)
     ok = False
     reader = None
@@ -315,7 +332,20 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
 
 # ==================================================================== selection
 def select_videos(arc, a):
-    """[(file name, entry)] in conversion order."""
+    """[(file name, entry)] in conversion order. Names are checked (check_name); two videos that would write the same
+    .fvd are refused."""
+    out = _select(arc, a)
+    seen = {}
+    for n, _e in out:
+        check_name(n)
+        k = out_name(n)
+        if k in seen and seen[k] != n:
+            raise ConvertError(f'{seen[k]} and {n} would both write {k}.fvd')
+        seen[k] = n
+    return out
+
+
+def _select(arc, a):
     if a.only:
         allv = {k[len(vbf.VIDEO_DIR):].lower(): k for k in vbf.all_videos(arc)}
         out, seen = [], set()
@@ -374,6 +404,7 @@ def parse_args(argv):
     p.add_argument('--ema', type=float, default=0.9)
     p.add_argument('--ffmpeg', default='ffmpeg')
     p.add_argument('--ffprobe', default='')
+    p.add_argument('--check-out', action='store_true', help='only check that --out is an allowed place, write nothing')
     a = p.parse_args(argv)
     if a.all and a.only:
         p.error('--all and --only do not go together')
@@ -383,8 +414,14 @@ def parse_args(argv):
         d, b = os.path.split(a.ffmpeg)
         a.ffprobe = os.path.join(d, b.lower().replace('ffmpeg', 'ffprobe')) if d else 'ffprobe'
     a.codec_id = {'auto': fvd.default_codec(), 'xpress': fvd.CODEC_XPRESS_HUFF, 'zlib': fvd.CODEC_ZLIB}[a.codec]
-    if a.preview and not a.only:
-        a.only = 'SIN_us,BTS_us'
+    a.preview_note = ''
+    if a.preview and not a.only and not a.all:
+        a.only = PREVIEW_DEFAULT
+        a.preview_note = (f'--preview without --only: converting (if needed) and previewing {PREVIEW_DEFAULT} only'
+                          + (f' (--region {a.region} is not used)' if a.region != 'us' else ''))
+    elif a.preview and a.all:
+        a.preview_note = f'--preview with --all: converting every video, then previewing {PREVIEW_DEFAULT} only'
+    a.preview_names = a.only or PREVIEW_DEFAULT
     return a
 
 
@@ -412,22 +449,29 @@ def main(argv=None):
     except ConvertError as e:
         print(f'ERROR: {e}')
         return 1
+    if a.check_out:
+        print(f'--out {out}: allowed')
+        return 0
     if a.codec_id == fvd.CODEC_XPRESS_HUFF and not fvd.xpress_available():
         print('ERROR: XPRESS_HUFF (Windows cabinet.dll) is not available here; the game\'s reader needs it. '
               '(--codec zlib is for tests only.)')
         return 1
-    os.makedirs(out, exist_ok=True)
-    write_private_note(out)
-    log = Log(os.path.join(out, 'convert.log'))
     try:
         arc = vbf.VbfArchive(a.vbf)
         todo = select_videos(arc, a)
+        pv = select_videos(arc, argparse.Namespace(only=a.preview_names, all=False, region=a.region)) if a.preview else []
     except (vbf.VbfError, ConvertError, OSError) as e:
         print(f'ERROR: {e}')
         return 1
     if not todo:
         print('Nothing selected.')
         return 1
+    if not a.list:                      # --list writes nothing
+        os.makedirs(out, exist_ok=True)
+        write_private_note(out)
+    log = Log(None if a.list else os.path.join(out, 'convert.log'))
+    if a.preview_note:
+        log(f'  note: {a.preview_note}')
     scope = f'--only {a.only}' if a.only else ('--all' if a.all else f'the {a.region} video list')
     total_mb = sum(e.size for _n, e in todo) / 2**20
     log(f'FFX VR FMV depth converter {CONVERTER_VERSION}: {len(todo)} videos ({scope}), {total_mb:,.0f} MB of video')
@@ -513,14 +557,18 @@ def main(argv=None):
     if a.preview:
         import preview
         pdir = os.path.join(out, 'preview')
-        for n, e in todo:
+        for n, e in pv:
             f = os.path.join(out, out_name(n) + '.fvd')
             if not os.path.exists(f):
+                log(f'  no preview of {n}: it has no .fvd')
                 continue
             try:
                 preview.render(arc, e, f, pdir, a.ffmpeg, passthrough, gray=a.gray, log=log)
                 if a.frame >= 0:
                     preview.frame_png(arc, e, f, a.frame, pdir, a.ffmpeg, passthrough, gray=a.gray, log=log)
+            except KeyboardInterrupt:
+                log('Stopped (Ctrl+C) during the previews. The depth files are complete.')
+                return 130
             except (media.MediaError, fvd.FvdError, OSError, ValueError) as ex:
                 log(f'ERROR: preview of {n}: {ex}')
                 rc = 1
