@@ -8,10 +8,12 @@ namespace FFXVR;
 // native the followed actor's drawn root and a re-pick key (index and model: a new key resets the margin), and in the field, in
 // first person on foot with the body hide on, the drawn roots (+0x200) of the other live actors within 30 units: a draw nearer
 // another actor's root than the player's is not the player's (ffxvr_fpown.h). Riding is unchanged (native's chocobo rule).
+// npc-anchor (ABI 39): with the roots go the actors' head sub-positions. Two actors on one root (a scene anchor: the event Tidus
+// and Yuna on mi/mihn0100) tie every draw; native resolves a tie by the model whose palette carries a head at the tied actor's head.
 public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, int> _fn_fp_self_set;    // ABI 37; ABI 38: returns 1 when the coming frame uses the other roots
-    private delegate* unmanaged[Cdecl]<float*, int, int> _fn_fp_others_set;                           // ABI 37
+    private delegate* unmanaged[Cdecl]<float*, float*, int, int> _fn_fp_others_set;                   // ABI 37; ABI 39: + the heads
     private float _fph_radius = 0.75f;   // native: the on-foot hide radius in effect (hide_radius + the capped margin)
     private int   _fph_kept, _fph_others_n;   // native: last frame's draws refused as another actor's; the roots sent this frame
 
@@ -31,7 +33,7 @@ public sealed unsafe partial class FFXVRModule {
         bool used = false;
         if (_fn_fp_self_set != null) { float r = 0f; used = _fn_fp_self_set(-root.X, -root.Y, root.Z, root_kind, key, &r) != 0; _fph_radius = r; }
         if (_fn_fp_others_set == null) return;
-        float* buf = stackalloc float[48 * 3]; float* dist = stackalloc float[48];
+        float* buf = stackalloc float[48 * 3]; float* dist = stackalloc float[48]; float* heads = stackalloc float[48 * 3];
         int n = 0;
         // N4: only where native uses them (first person on foot, the body hide on); the table walk reads the bytes live() needs
         if (used && field && actors != null && pick >= 0 && _fp_mode == 1 && _fp_hide_body && !_ride_att) {
@@ -39,12 +41,12 @@ public sealed unsafe partial class FFXVRModule {
             // cpu-lean (c): the walk runs every frame, on this frame's snapshot of the table (one guarded read for all 48 slots,
             // shared with the follow pick) when it reads in one piece, else slot by slot as before. Same rule, same order.
             Actor* snap = tbl_snap(actors);
-            var o = new Span<float>(buf, 48 * 3); var d = new Span<float>(dist, 48);
-            if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d); }
-            else if (_fn_safe_read != null) { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d); }   // (none bound: n = 0, as read() failing at slot 0 gave)
+            var o = new Span<float>(buf, 48 * 3); var d = new Span<float>(dist, 48); var h = new Span<float>(heads, 48 * 3);
+            if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d, h); }
+            else if (_fn_safe_read != null) { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d, h); }   // (none bound: n = 0, as read() failing at slot 0 gave)
         }
         _fph_others_n = n;
-        _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n);
+        _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n > 0 ? heads : null, n);
     }
 
     // -- cpu-lean (c, e): the actor table, once a frame ------------------------------------------------------------------
@@ -72,6 +74,11 @@ public sealed unsafe partial class FFXVRModule {
         public bool NamePtr(int i, out nint v) { nint p = 0; bool ok = _rd(&_t[i].chr_name, &p, (uint)sizeof(nint)) != 0; v = p; return ok; }
         public bool Hidden(int i) { byte h = 0; return _rd((byte*)(_t + i) + 0x180, &h, 1) != 0 && (h & 0x13) != 0; }
         public bool Root(int i, out Vector3 v) { Vector3 r = default; bool ok = _rd((byte*)(_t + i) + 0x200, &r, (uint)sizeof(Vector3)) != 0; v = r; return ok; }
+        public bool Head(int i, out Vector3 v) {
+            Vector4* op = stackalloc Vector4[26]; Vector3 pos = default; v = default;
+            if (_rd((byte*)(_t + i) + 0x524, op, 26 * 16) == 0 || _rd((byte*)(_t + i) + 0x0C, &pos, (uint)sizeof(Vector3)) == 0) return false;
+            return FphWalk.HeadOf(new ReadOnlySpan<Vector4>(op, 26), pos, out v);
+        }
     }
     /// <summary>... and from this frame's snapshot of the table (plain memory).</summary>
     private readonly struct FphSnapReader : IFphReader {
@@ -81,6 +88,7 @@ public sealed unsafe partial class FFXVRModule {
         public bool NamePtr(int i, out nint v) { v = (nint)_t[i].chr_name; return true; }
         public bool Hidden(int i) => (((byte*)(_t + i))[0x180] & 0x13) != 0;
         public bool Root(int i, out Vector3 v) { v = *(Vector3*)((byte*)(_t + i) + 0x200); return true; }
+        public bool Head(int i, out Vector3 v) => FphWalk.HeadOf(new ReadOnlySpan<Vector4>((byte*)(_t + i) + 0x524, 26), *(Vector3*)((byte*)(_t + i) + 0x0C), out v);
     }
 
     /// <summary>The followed actor's drawn root for the ownership test (game space): 2 = on foot, the smooth anchor's post-join
@@ -110,6 +118,7 @@ internal interface IFphReader {
     bool NamePtr(int i, out nint v);      // chr_name (the pointer only: live() tests its range, the walk never reads the name)
     bool Hidden(int i);                   // the game's script hide, +0x180 & 0x13 (false when unreadable: script_hidden's rule)
     bool Root(int i, out Vector3 v);      // the drawn root, +0x200
+    bool Head(int i, out Vector3 v);      // npc-anchor: the head sub-position (chr_optpos +0x524, push_player's rule; FphWalk.HeadOf), game space
 }
 
 /// <summary>The body hide's table walk (npc-hide N4, unchanged by cpu-lean apart from where the bytes come from): the other live,
@@ -118,9 +127,13 @@ internal interface IFphReader {
 internal static class FphWalk {
     public const int k_max = 32;      // native keeps at most 32 (fpown::k_others_max)
     public const float k_range = 30f; // units around the followed actor's root (an NPC's parts sit on its own root)
+    public const float k_head_range = 12f;   // npc-anchor: heads are read for roots this near (a tie needs a root within the hide radius + 0.5 of a matched draw)
     public static bool Live(int enabled, nint name) => enabled == 1 && name > 0x10000 && name < 0x7FFF0000;   // = FFXVRModule.live
     public static bool Finite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z) && MathF.Abs(v.X) < 1e5f && MathF.Abs(v.Y) < 1e5f && MathF.Abs(v.Z) < 1e5f;   // = FFXVRModule.finite
-    public static int Collect<R>(ref R rd, int pick, Vector3 c, Span<float> o, Span<float> d) where R : struct, IFphReader {
+    public static int Collect<R>(ref R rd, int pick, Vector3 c, Span<float> o, Span<float> d) where R : struct, IFphReader => Collect(ref rd, pick, c, o, d, default);
+    /// <summary>npc-anchor: with h (x y z per root, render space; all zero = not known; empty = not wanted) the actors' head
+    /// sub-positions in the same order, for roots within k_head_range of c. o, d and n are those of the call without h.</summary>
+    public static int Collect<R>(ref R rd, int pick, Vector3 c, Span<float> o, Span<float> d, Span<float> h) where R : struct, IFphReader {
         int n = 0;
         for (int i = 0; i < 48; i++) {
             if (!rd.Enabled(i, out int en)) break;   // (the other table walks stop at the first unreadable slot too)
@@ -130,7 +143,12 @@ internal static class FphWalk {
             if (MathF.Abs(td.X) + MathF.Abs(td.Y) + MathF.Abs(td.Z) < 0.01f) continue;   // not built (a fresh slot, a parked model)
             float dd = Vector3.Distance(td, c);
             if (!(dd < k_range)) continue;
-            o[n * 3] = -td.X; o[n * 3 + 1] = -td.Y; o[n * 3 + 2] = td.Z; d[n] = dd; n++;   // render space negates X and Y
+            o[n * 3] = -td.X; o[n * 3 + 1] = -td.Y; o[n * 3 + 2] = td.Z; d[n] = dd;   // render space negates X and Y
+            if (h.Length >= (n + 1) * 3) {
+                Vector3 hd = default; bool hk = dd < k_head_range && rd.Head(i, out hd) && Finite(hd);
+                h[n * 3] = hk ? -hd.X : 0f; h[n * 3 + 1] = hk ? -hd.Y : 0f; h[n * 3 + 2] = hk ? hd.Z : 0f;
+            }
+            n++;
         }
         if (n > k_max) {   // nearest first: a partial selection sort of the 32 nearest
             for (int k = 0; k < k_max; k++) {
@@ -138,9 +156,19 @@ internal static class FphWalk {
                 if (b == k) continue;
                 (d[k], d[b]) = (d[b], d[k]);
                 for (int q = 0; q < 3; q++) (o[k * 3 + q], o[b * 3 + q]) = (o[b * 3 + q], o[k * 3 + q]);
+                if (h.Length >= n * 3) for (int q = 0; q < 3; q++) (h[k * 3 + q], h[b * 3 + q]) = (h[b * 3 + q], h[k * 3 + q]);
             }
             n = k_max;
         }
         return n;
+    }
+    /// <summary>npc-anchor: an actor's head as push_player picks the followed actor's (the eye): the highest sub-position (the
+    /// lowest game-space Y) not on the vertical axis through the origin, folded onto the actor's position when it looks relative
+    /// (more than 100 units off it). False when none is set. Game space.</summary>
+    public static bool HeadOf(ReadOnlySpan<Vector4> optpos, Vector3 pos, out Vector3 head) {
+        float hy = float.MaxValue; head = default; bool have = false;
+        for (int k = 0; k < optpos.Length && k < 26; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = new Vector3(sp.X, sp.Y, sp.Z); have = true; } }
+        if (have && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
+        return have;
     }
 }
