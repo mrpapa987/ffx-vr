@@ -731,7 +731,7 @@ float g_fp_head[3] = {}; bool g_fp_have_head = false; float g_fp_head_s[3] = {};
 // the head sub-position (built by the game from his own skeleton; the IB-identified palette agrees with it to 0.1 units in the
 // owner's log). A head that jumps more than k_head_spike from the smoothed one is held for up to 3 frames (a one-frame bad value
 // never moves the view; a real move is taken on the 4th).
-bool g_fp_head_disp = false; int g_fp_head_hold = 0; uint32_t g_fp_head_disp_lines = 0;
+bool g_fp_head_disp = false; int g_fp_head_hold = 0, g_fp_head_miss = 0; uint32_t g_fp_head_disp_lines = 0;
 constexpr float k_head_spike = 8.f;
 float g_fp_follow_dist = 60.f, g_fp_follow_h = 25.f;   // follow: behind and above (units)
 // Third person: life-size, the camera just behind and above the player; the
@@ -10833,6 +10833,10 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
 /// its root (every sub-position far from it for a while, managed EyeLogic): the eye takes its horizontal position from the head
 /// in fp_head_anchor 0 and 1 too. Old managed sends 0 / 1 only (the signature is unchanged).
 extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {
+    // eye review N1: a frame or two with no head while the eye follows a displaced body keeps the last eye (no cut to the root
+    // and back); a third switches back as before
+    if ((valid & 1) == 0 && g_fp_head_disp && g_fp_have_head && g_fp_head_miss < 2) { g_fp_head_miss++; return; }
+    g_fp_head_miss = 0;
     g_fp_have_head = (valid & 1) != 0;
     const bool disp = g_fp_have_head && (valid & 2) != 0;
     if (disp != g_fp_head_disp) {   // the eye's source changes (the view moves to the head, or back to the root): logged
@@ -10847,12 +10851,14 @@ extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, fl
                  sqrtf(hx * hx + hz * hz), ps, g_fp_head_anchor, g_fp_head_disp_lines == 60 ? " (no more of these lines this session)" : "");
         }
         g_fp_head_disp = disp; g_fp_head_hold = 0;
+        if (g_blink_frames < 4) g_blink_frames = 4;   // eye review N2: the switch is a cut of at least 6 units: blinked like a camera cut
     }
     if (!g_fp_have_head) { g_fp_head_s_valid = false; return; }
     // Stored and smoothed as the offset from the actor origin (player_set is called first).
     const float nh[3] = { x - g_fp_pos[0], y - g_fp_pos[1], z - g_fp_pos[2] };
     if (g_fp_head_disp && g_fp_head_s_valid) {   // round 3: a spike in the head while the eye follows it is held (3 frames at most)
-        const float sx = nh[0] - g_fp_head_s[0], sy = nh[1] - g_fp_head_s[1], sz = nh[2] - g_fp_head_s[2];
+        // eye review SF3: against the last accepted raw head, not the smoothed one (heavy smoothing lags a moving head past 8)
+        const float sx = nh[0] - g_fp_head[0], sy = nh[1] - g_fp_head[1], sz = nh[2] - g_fp_head[2];
         if (sx*sx + sy*sy + sz*sz > k_head_spike * k_head_spike && g_fp_head_hold < 3) { g_fp_head_hold++; return; }
     }
     g_fp_head_hold = 0;
