@@ -82,6 +82,9 @@ static void diag_close(FILE* f);
 // lines, the camera trace in ffxvr_trace.log) and the Ctrl+F9 constant-buffer dump need it.
 static volatile LONG g_log_verbose = 0;
 static volatile LONG g_log_cap_mb  = 4;
+/// od-guard (review SF2): a diagnostic key is on (tools\set-logging.ps1 -Profile Release turns them all off). Managed raises
+/// the cap to 64 MB whenever any of them is on (logging.cs log_cap_mb), so the cap says it without another export.
+static inline bool diag_profile_on() { return g_log_verbose != 0 || g_log_cap_mb > 4; }
 static void haze_tick();                 // heat haze: at Present (defined before ffxvr_on_draw)
 static void bt_flush();                   // battle transition log batch (defined with bt_tick)
 static void bt_add(const char* fmt, ...);
@@ -3108,11 +3111,14 @@ extern "C" __declspec(dllexport) void ffxvr_frame_arm() {
 /// at the first live battle frame). It never clears or truncates a census in progress: with one armed or live, it waits
 /// (pending) and is armed after that one is written. od-guard: one automatic census can wait; a second arm while one waits is
 /// refused (false) instead of taking the waiting one's place.
-static bool frame_arm_auto(const char* reason) {
+/// (review N4) `prio`: 2 the first shatter and the slow onset, 1 the slow guard's baseline. A waiting census of a lower
+/// priority gives its place to a higher one; one of the same or a higher priority keeps it.
+static int g_frame_auto_prio = 0;
+static bool frame_arm_auto(const char* reason, int prio = 2) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_frame_arm || g_frame_live) {
-        if (g_frame_auto_pending) return false;
-        g_frame_auto_pending = true; strncpy_s(g_frame_auto_reason, reason ? reason : "", _TRUNCATE); return true;
+        if (g_frame_auto_pending && g_frame_auto_prio >= prio) return false;
+        g_frame_auto_pending = true; g_frame_auto_prio = prio; strncpy_s(g_frame_auto_reason, reason ? reason : "", _TRUNCATE); return true;
     }
     frame_arm_locked(FD_AUTO, reason);
     return true;
@@ -5074,10 +5080,12 @@ static int g_gpuq_cur = -1; static uint32_t g_gpuq_frames = 0; static bool g_gpu
 static double g_acc_gpu = 0, g_acc_gpu_max = 0; static int g_acc_gpu_n = 0;
 // od-guard: the span read at this Present (g_gpu_last_ok: one was read; it is k_gpuq_ring - 1 frames old), for the slow guard.
 static double g_gpu_last_ms = 0; static bool g_gpu_last_ok = false;
+static uint8_t g_gpuq_mode[k_gpuq_ring] = {}; static uint8_t g_gpu_last_mode = 0;   // (review N8) the view of each slot's frame
 // od-guard (e), the GPU canary: two timestamps back to back at the very start of the Present hook, in the same disjoint
-// query as the span. Nothing of ours runs between them, so they are microseconds apart on an idle queue; far apart (over
-// 2 ms), the GPU was busy with another process's work (or this process's earlier work had not drained and the scheduler
-// switched away). Read with the span, non-blocking, k_gpuq_ring - 1 frames late.
+// query as the span, read with it (non-blocking, k_gpuq_ring - 1 frames late). WEAK evidence, a raw number (review SF3):
+// they sit in the same command stream with no flush between them, so another process's GPU work shows up only when the
+// scheduler preempts or switches exactly between them. Far apart (over 2 ms) does mean the GPU was shared at that moment;
+// close together says nothing either way (a time-sliced GPU delays the frame's work, i.e. the span, far more often).
 static ID3D11Query* g_gpuq_c0[k_gpuq_ring] = {}; static ID3D11Query* g_gpuq_c1[k_gpuq_ring] = {}; static bool g_gpuq_c_set[k_gpuq_ring] = {};
 static double g_can_last_ms = 0; static bool g_can_last_ok = false;
 static double g_acc_can = 0, g_acc_can_max = 0; static int g_acc_can_n = 0; static uint32_t g_acc_can_over = 0;
@@ -5127,7 +5135,7 @@ static void gpu_timing_tick() {
         if (dj_ok && g_ctx->GetData(g_gpuq_t0[next], &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && g_ctx->GetData(g_gpuq_t1[next], &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && t1 >= t0) {
             const double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
             g_acc_gpu += ms; if (ms > g_acc_gpu_max) g_acc_gpu_max = ms; g_acc_gpu_n++;
-            g_gpu_last_ms = ms; g_gpu_last_ok = true;
+            g_gpu_last_ms = ms; g_gpu_last_ok = true; g_gpu_last_mode = g_gpuq_mode[next];
         }
         UINT64 c0 = 0, c1 = 0;
         if (dj_ok && g_gpuq_c_set[next] && g_ctx->GetData(g_gpuq_c0[next], &c0, sizeof(c0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
@@ -5155,10 +5163,11 @@ static void slow_apply();              // the effective settings: the user's wit
 static void slow_restart_session();    // xr_stop, the flat state, a 1 s pause before managed starts it again (with ffxvr_xr_set)
 static slow::Guard g_slow;
 static bool g_slow_on = true, g_slow_restart_on = true;   // ini slow_guard, slow_guard_restart (managed, every frame)
+static bool g_xr_user_on = false;   // (review N2) managed's headset tick (ffxvr_xr_set's `on`), whatever the session does
 static unsigned g_slow_applied = 0;                        // the off mask slow_apply last applied
-// The user's values (the setters' arguments); the effective globals (g_ui_enabled, g_uid_on, g_uid_backing, g_imgui_layer,
-// g_h2cfg.on) are these with the guard's items off. The setters and slow_apply run on the render thread (push_all, perf_tick).
-static bool g_ui_enabled_user = true, g_uid_on_user = true, g_imgui_layer_user = true; static float g_uid_backing_user = 0.35f;
+// The user's values (the setters' arguments); the effective globals (g_ui_enabled, g_uid_on, g_uid_backing, g_h2cfg.on) are
+// these with the guard's items off. The ImGui layer is never an item (review SF1): F8 and Fahrenheit's save screen are on it. The setters and slow_apply run on the render thread (push_all, perf_tick).
+static bool g_ui_enabled_user = true, g_uid_on_user = true; static float g_uid_backing_user = 0.35f;
 static VrHandsCfg g_h2_user = { static_cast<int>(sizeof(VrHandsCfg)), 0, 1, 0, { 0.f, 0.f, 0.f }, { 0.f, 0.f, 0.f }, 0.20f, 1.f };
 static inline bool slow_is_off(int item) { return ((g_slow.off >> item) & 1u) != 0; }
 // The screen item: the mono virtual screen is forced, and eye 2 is not re-issued for frames that go to it. The skip starts
@@ -5168,10 +5177,11 @@ volatile LONG g_slow_active = 0;   // an episode is under way: the GPU-engine sn
 volatile LONG g_slow_bst = -1;     // battle_state [0x112A8E0] at the last Present (-1: not readable); the texture log reads it
 static SYSTEMTIME g_slow_onset_st = {};
 static uint32_t g_slow_census_n = 0, g_slow_dumps = 0; static bool g_slow_bcensus_done = false;
-constexpr uint32_t k_slow_census_max = 2, k_slow_dumps_max = 3;
+constexpr uint32_t k_slow_census_max = 2;
+static uint32_t slow_dumps_max() { return diag_profile_on() ? 3u : 1u; }   // (review SF2) the Release profile: one 600-frame dump a session
 
 // (c) The last 600 frames, dumped at the trigger (render thread only; 600 x 40 bytes, a plain array).
-struct SlowFr { double t; uint32_t frame; float fm, gpu, can, wait, end; uint16_t draws, e2; uint8_t mode, flags; int16_t bst; };   // flags: 1 gpu read, 2 canary read, 4 excluded
+struct SlowFr { double t; uint32_t frame; float fm, gpu, can, wait, end; uint16_t draws, e2; uint8_t mode, gmode, flags; int16_t bst; };   // gmode: the span's frame's view; flags: 1 gpu read, 2 canary read, 4 excluded
 constexpr int k_slow_ring = 600;
 static SlowFr g_slow_ring[k_slow_ring]; static uint32_t g_slow_ring_n = 0;
 static char g_slow_dump[k_slow_ring * 72 + 512]; static bool g_slow_dump_pending = false; static int g_slow_dump_tries = 0;
@@ -5179,11 +5189,11 @@ static const char k_slow_mode_ch[4] = { 'F', '3', 'S', 's' };   // flat (no head
 
 static void slow_dump_build() {
     const uint32_t n = g_slow_ring_n < (uint32_t)k_slow_ring ? g_slow_ring_n : (uint32_t)k_slow_ring;
-    size_t len = (size_t)snprintf(g_slow_dump, sizeof(g_slow_dump), "slow: the last %u frames, oldest first: frame | t s (QPC) | frame ms | gpu span ms | canary ms | xr wait ms | xr end ms | draws | eye2 draws | view (F flat, 3 3D, S screen, s stereo screen) | battle_state | x = excluded (transition window, load phase, session not focused)", n);
+    size_t len = (size_t)snprintf(g_slow_dump, sizeof(g_slow_dump), "slow: the last %u frames, oldest first: frame | t s (QPC) | frame ms | gpu span ms and the view of the frame it timed (5 frames earlier) | canary ms | xr wait ms | xr end ms | draws | eye2 draws | view (F flat, 3 3D, S screen, s stereo screen) | battle_state | x = excluded (transition window, load phase, session not focused)", n);
     for (uint32_t k = 0; k < n && len + 96 < sizeof(g_slow_dump); ++k) {
         const SlowFr& r = g_slow_ring[(g_slow_ring_n - n + k) % k_slow_ring];
         char g[16] = "-", c[16] = "-";
-        if (r.flags & 1) snprintf(g, sizeof(g), "%.1f", r.gpu);
+        if (r.flags & 1) snprintf(g, sizeof(g), "%.1f%c", r.gpu, k_slow_mode_ch[r.gmode & 3]);
         if (r.flags & 2) snprintf(c, sizeof(c), "%.2f", r.can);
         len += (size_t)snprintf(g_slow_dump + len, sizeof(g_slow_dump) - len, "\n  %u %.3f %.1f %s %s %.1f %.1f %u %u %c %d%s",
                                 r.frame, r.t / 1000.0, r.fm, g, c, r.wait, r.end, r.draws, r.e2, k_slow_mode_ch[r.mode & 3], r.bst, (r.flags & 4) ? " x" : "");
@@ -5200,7 +5210,7 @@ typedef VOID (CALLBACK* DllNotifFn)(ULONG reason, const DllNotifData* data, PVOI
 typedef LONG (NTAPI* LdrRegisterFn)(ULONG flags, DllNotifFn fn, PVOID ctx, PVOID* cookie);
 typedef LONG (NTAPI* LdrUnregisterFn)(PVOID cookie);
 struct DllEv { wchar_t name[48]; uint32_t base, size; uint8_t loaded; SYSTEMTIME st; uint32_t frame; DWORD tid; };
-constexpr int k_dll_ring = 64; constexpr uint32_t k_dll_log_max = 150, k_dll_magic_max = 300;
+constexpr int k_dll_ring = 64; constexpr uint32_t k_dll_log_max = 150, k_dll_log_release = 20, k_dll_magic_max = 300;   // others: 20 without diagnostics (SF2)
 static DllEv g_dll_ring[k_dll_ring]; static volatile LONG g_dll_w = 0, g_dll_r = 0, g_dll_dropped = 0;
 static PVOID g_dll_cookie = nullptr; static uint32_t g_dll_logged = 0, g_dll_magic = 0, g_dll_capped = 0; static bool g_dll_cap_said = false;
 static VOID CALLBACK dll_notify(ULONG reason, const DllNotifData* d, PVOID) {
@@ -5225,7 +5235,7 @@ static void dll_notify_install() {
     LdrRegisterFn reg = nt ? reinterpret_cast<LdrRegisterFn>(GetProcAddress(nt, "LdrRegisterDllNotification")) : nullptr;
     const LONG st = reg ? reg(0, dll_notify, nullptr, &g_dll_cookie) : -1;
     if (st != 0) { g_dll_cookie = nullptr; diag("dll: LdrRegisterDllNotification %s (0x%08lX): DLL loads are not logged", reg ? "failed" : "not found", (unsigned long)st); }
-    else diag("dll: DLL loads and unloads from now on are logged (dll: lines; magic_*.dll up to %u, others up to %u a session)", k_dll_magic_max, k_dll_log_max);
+    else diag("dll: DLL loads and unloads from now on are logged (dll: lines; magic_*.dll up to %u, others up to %u a session, %u with a diagnostic on)", k_dll_magic_max, k_dll_log_release, k_dll_log_max);
 }
 static void dll_notify_remove() {
     if (!g_dll_cookie) return;
@@ -5234,6 +5244,7 @@ static void dll_notify_remove() {
     if (un) un(g_dll_cookie);
     g_dll_cookie = nullptr;
 }
+static bool dll_others_ok() { return g_dll_logged < (diag_profile_on() ? k_dll_log_max : k_dll_log_release); }
 static bool dll_is_magic(const wchar_t* n) {
     const wchar_t* p = L"magic_";
     for (int i = 0; p[i]; ++i) { wchar_t c = n[i]; if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32); if (c != p[i]) return false; }
@@ -5246,7 +5257,7 @@ static void dll_drain() {
         const DllEv e = g_dll_ring[g_dll_r & (k_dll_ring - 1)];
         InterlockedIncrement(&g_dll_r);
         const bool magic = dll_is_magic(e.name);
-        if (magic ? g_dll_magic >= k_dll_magic_max : g_dll_logged >= k_dll_log_max) { g_dll_capped++; continue; }
+        if (magic ? g_dll_magic >= k_dll_magic_max : g_dll_logged >= (diag_profile_on() ? k_dll_log_max : k_dll_log_release)) { g_dll_capped++; continue; }
         if (magic) g_dll_magic++; else g_dll_logged++;
         diag("dll: %s %ls at %02u:%02u:%02u.%03u (frame %u, thread %lu; base 0x%08X, %u KB) | battle_state %ld, GPU-slow episode %s",
              e.loaded ? "loaded" : "unloaded", e.name, e.st.wHour, e.st.wMinute, e.st.wSecond, e.st.wMilliseconds, e.frame, (unsigned long)e.tid,
@@ -5254,7 +5265,7 @@ static void dll_drain() {
     }
     const LONG dr = g_dll_dropped;
     if (dr > 0 && InterlockedCompareExchange(&g_dll_dropped, 0, dr) == dr) diag("dll: %ld load / unload events lost (more than %d queued between two Presents)", (long)dr, k_dll_ring);
-    if (g_dll_capped && !g_dll_cap_said && g_dll_logged >= k_dll_log_max) { g_dll_cap_said = true; diag("dll: %u lines this session: other DLLs are no longer logged (magic_*.dll still are, up to %u)", k_dll_log_max, k_dll_magic_max); }
+    if (g_dll_capped && !g_dll_cap_said && !dll_others_ok()) { g_dll_cap_said = true; diag("dll: %u lines this session: other DLLs are no longer logged (magic_*.dll still are, up to %u; any diagnostic on: %u)", g_dll_logged, k_dll_magic_max, k_dll_log_max); }
 }
 
 // (g) Per-process GPU engine use (PDH "\GPU Engine(*)\Utilization Percentage"), only during a slow episode: at its start and
@@ -5266,7 +5277,7 @@ typedef PDH_STATUS (WINAPI* PdhAddEnglishCounterWFn)(PDH_HQUERY, LPCWSTR, DWORD_
 typedef PDH_STATUS (WINAPI* PdhCollectQueryDataFn)(PDH_HQUERY);
 typedef PDH_STATUS (WINAPI* PdhGetFormattedCounterArrayWFn)(PDH_HCOUNTER, DWORD, LPDWORD, LPDWORD, PPDH_FMT_COUNTERVALUE_ITEM_W);
 typedef PDH_STATUS (WINAPI* PdhCloseQueryFn)(PDH_HQUERY);
-static HANDLE g_pdh_thread = nullptr, g_pdh_kick = nullptr, g_pdh_stop = nullptr;
+static HANDLE g_pdh_thread = nullptr, g_pdh_kick = nullptr, g_pdh_stop = nullptr; static bool g_pdh_failed = false;
 static void pdh_proc_name(DWORD pid, char* out, size_t n) {
     snprintf(out, n, "pid %lu", (unsigned long)pid);
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -5335,7 +5346,7 @@ static DWORD WINAPI pdh_thread(LPVOID) {
                     }
                     if (shown == 0 && len < sizeof(line)) len += (size_t)snprintf(line + len, sizeof(line) - len, " none over 0.5%%");
                 }
-                diag("%s", line);
+                if (WaitForSingleObject(g_pdh_stop, 0) != WAIT_OBJECT_0) diag("%s", line);   // nothing after the stop (N6)
             }
             if (WaitForSingleObject(g_pdh_stop, 4000) == WAIT_OBJECT_0) { cl(q); return 0; }   // every 5 s while the episode lasts
         }
@@ -5344,15 +5355,33 @@ static DWORD WINAPI pdh_thread(LPVOID) {
     return 0;
 }
 static void pdh_kick() {
+    if (g_pdh_failed) return;
     if (!g_pdh_thread) {
         g_pdh_kick = CreateEventA(nullptr, FALSE, FALSE, nullptr); g_pdh_stop = CreateEventA(nullptr, TRUE, FALSE, nullptr);
         if (g_pdh_kick && g_pdh_stop) g_pdh_thread = CreateThread(nullptr, 256 * 1024, pdh_thread, nullptr, 0, nullptr);
-        if (!g_pdh_thread) { diag("slow: GPU engines (PDH): the snapshot thread did not start"); return; }
+        if (!g_pdh_thread) {   // (review N6) once: no new events at every onset
+            g_pdh_failed = true;
+            if (g_pdh_kick) CloseHandle(g_pdh_kick); if (g_pdh_stop) CloseHandle(g_pdh_stop);
+            g_pdh_kick = g_pdh_stop = nullptr;
+            diag("slow: GPU engines (PDH): the snapshot thread did not start");
+            return;
+        }
     }
     SetEvent(g_pdh_kick);
 }
+/// ffxvr_shutdown: the thread stops at its next wait. It waits between samples, so it is out at once unless a sample is being
+/// taken (PdhCollectQueryData on the GPU Engine counters can take some hundreds of ms): up to 1.5 s, then the handles are
+/// closed; a thread still sampling then is left to the process exit (it writes nothing after the stop: it checks first).
+static void pdh_stop() {
+    if (!g_pdh_thread) return;
+    SetEvent(g_pdh_stop);
+    if (WaitForSingleObject(g_pdh_thread, 1500) != WAIT_OBJECT_0) return;
+    CloseHandle(g_pdh_thread); CloseHandle(g_pdh_kick); CloseHandle(g_pdh_stop);
+    g_pdh_thread = g_pdh_kick = g_pdh_stop = nullptr;
+}
 
-// (f) Render-target and depth textures the game creates (any sample count) during a battle or a slow episode: the first 40
+// (f) Render-target and depth textures the game creates (any sample count) during a battle or a slow episode, with a
+// diagnostic key on (the Release logging profile has none): the first 40
 // a session, then only a new size / format / sample count / bind combination (64 kept). Any thread (hk_CreateTexture2D);
 // ours (the return address in this DLL) are left out. Decided under a small lock of its own, logged after it.
 extern "C" IMAGE_DOS_HEADER __ImageBase;
@@ -5361,7 +5390,7 @@ static uint64_t g_rtl_keys[64];
 static void rt_log_create(const D3D11_TEXTURE2D_DESC* d, const void* ra) {
     if (d == nullptr || (d->BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL)) == 0) return;
     const LONG bst = g_slow_bst; const bool slow_now = g_slow_active != 0;
-    if (!(bst > 0) && !slow_now) return;
+    if ((!(bst > 0) && !slow_now) || !diag_profile_on()) return;   // (review SF2) only with a diagnostic key on
     static uintptr_t lo = 0, hi = 0;
     if (hi == 0) {
         lo = reinterpret_cast<uintptr_t>(&__ImageBase);
@@ -5400,7 +5429,6 @@ static unsigned slow_avail() {
     if (g_ui_enabled_user) a |= 1u << slow::IT_UI;
     if (g_uid_on_user || g_uid_backing_user > 0.001f) a |= 1u << slow::IT_UIDEPTH;
     if (g_h2_user.on) a |= 1u << slow::IT_HANDS;
-    if (g_imgui_layer_user && !g_imgui_menu) a |= 1u << slow::IT_IMGUI;   // not while Fahrenheit's save screen lies on the screen
     return a;
 }
 static const char* slow_item_long(int i) {
@@ -5408,14 +5436,14 @@ static const char* slow_item_long(int i) {
         case slow::IT_UI:      return "ui_capture (the UI pass split; the UI stays in the eye images)";
         case slow::IT_UIDEPTH: return "ui_depth (the adaptive UI distance and its backing plate)";
         case slow::IT_HANDS:   return "vr_hands";
-        case slow::IT_IMGUI:   return "imgui_layer (the overlay / Fahrenheit's menus in the headset)";
         case slow::IT_SCREEN:  return "screen_mono (the mono virtual screen, eye 2 not re-issued)";
         default:               return "?";
     }
 }
-static void slow_event(const slow::Out& o) {
+static void slow_event(const slow::Out& o, double now) {
     using namespace slow;
     const Guard& g = g_slow;
+    const double cool_s = g.cool_until > now ? (g.cool_until - now) / 1000.0 : 0.0;
     switch (o.ev) {
         case EV_ONSET: {
             GetLocalTime(&g_slow_onset_st);
@@ -5431,12 +5459,12 @@ static void slow_event(const slow::Out& o) {
             if (g_slow_census_n >= k_slow_census_max) snprintf(census, sizeof(census), "no frame census (%u a session already)", k_slow_census_max);
             else if (frame_arm_auto("the slow GPU guard: a slow state started")) { g_slow_census_n++; snprintf(census, sizeof(census), "frame census armed (ffxvr_frame_auto.log, %u of %u a session)", g_slow_census_n, k_slow_census_max); }
             else snprintf(census, sizeof(census), "no frame census (another automatic one is waiting)");
-            const bool dump = g_slow_dumps < k_slow_dumps_max;
+            const bool dump = g_slow_dumps < slow_dumps_max();
             diag("slow: GPU-slow for %d frames (%.1f s) in %s: gpu span avg %.1f ms, max %.0f (baseline %.1f, trigger over %.1f), xrEndFrame avg %.1f ms, frame %.1f ms | "
                  "canary avg %.2f ms, max %.1f, over %.0f ms in %d of %d frames | draws %u, eye2 %u | battle_state %ld, map '%s' | episode %d of at most %d: %s, %s; then the optional work goes off one item at a time",
                  o.n, g.last_dur / 1000.0, g.last_screen ? "SCREEN" : "3D", o.span_avg, gm, g.last_base, g.thr_slow(g.last_screen), o.end_avg, g.last_frame,
                  cn ? cs / cn : 0.0, cm, k_can_far_ms, cover, cn, (unsigned)g_draw_in_frame, g_eye2_draws, (long)g_slow_bst, map, g.episodes, g.c.episodes_max, census,
-                 dump ? "the last 600 frames below" : "no frame dump (3 a session already)");
+                 dump ? "the last 600 frames below" : "no frame dump (the session's dumps are used up)");
             if (dump) { g_slow_dumps++; slow_dump_build(); }
             pdh_kick();
         } break;
@@ -5446,8 +5474,22 @@ static void slow_event(const slow::Out& o) {
             else diag("slow: %s off: no change (fast frames %d of %d; gpu avg %.1f ms, xrEndFrame avg %.1f ms): back on", item_name(o.item), o.fast, o.n, o.span_avg, o.end_avg);
             break;
         case EV_HOLD_END:    diag("slow: %s back on: checking the frames for 3 s", item_name(o.item)); break;
+        case EV_LOG_ONLY:   // B2: a slow run in a view without a learnt baseline: only this line
+            diag("slow: GPU-slow for %d frames in %s (gpu span avg %.1f ms, xrEndFrame avg %.1f ms), but this view has no learnt baseline yet (%d of %d frames): only logged, nothing is switched off (the next such line in 10 min at the earliest)",
+                 o.n, g.last_screen ? "SCREEN" : "3D", o.span_avg, o.end_avg, g.hist_n(g.last_screen ? 1 : 0), g.c.base_min);
+            break;
+        case EV_UNMEASURED:   // B1 / B3: a window with too few measured frames (all excluded: a menu, a load, a transition window)
+            if (g.st == ST_VERIFY || (o.why != WHY_REPEAT && o.why != WHY_SKIPPED))
+                diag("slow: the re-check with %s back on: only %d measured frames (most excluded: a menu, a load, a transition window): once more", item_name(o.item), o.n);
+            else if (o.why == WHY_REPEAT) diag("slow: %s off: only %d measured frames (most excluded: a menu, a load, a transition window): once more", item_name(o.item), o.n);
+            else diag("slow: %s off: not measured twice: skipped, back on (it does not count as a step)", item_name(o.item));
+            break;
+        case EV_PRE_CHECK:
+            diag("slow: %d steps measured and none helped: everything is back on; measuring the slow state once more before a session restart", g.measured_steps);
+            break;
         case EV_RECOVERED:
-            if (g.last_fix == FIX_RESTART) diag("slow: recovered after %.1f s (by the session restart; fast frames %d of %d, gpu avg %.1f ms, xrEndFrame avg %.1f ms)", g.last_dur / 1000.0, o.fast, o.n, o.span_avg, o.end_avg);
+            if (g.last_fix == FIX_PASSED && g.last_fix_item < 0) diag("slow: recovered after %.1f s (by itself: with everything back on the frames are fast, %d of %d; no restart)", g.last_dur / 1000.0, o.fast, o.n);
+            else if (g.last_fix == FIX_RESTART) diag("slow: recovered after %.1f s (by the session restart; fast frames %d of %d, gpu avg %.1f ms, xrEndFrame avg %.1f ms)", g.last_dur / 1000.0, o.fast, o.n, o.span_avg, o.end_avg);
             else diag("slow: recovered after %.1f s (by %s off; it is back on and the frames stay fast (%d of %d): the cause had passed)", g.last_dur / 1000.0, item_name(g.last_fix_item), o.fast, o.n);
             break;
         case EV_LATCHED:     diag("slow: recovered after %.1f s (by %s off; slow again with it back on, fast frames %d of %d: it stays off for 5 min)", g.last_dur / 1000.0, item_name(o.item), o.fast, o.n); break;
@@ -5456,7 +5498,7 @@ static void slow_event(const slow::Out& o) {
             diag("slow: nothing helped: restarting the VR session (restart %d of at most %d a session, at most one per 5 min)", g.restarts, g.c.restarts_max);
             slow_restart_session();
             break;
-        case EV_GAVE_UP:     diag("slow: gave up after %.1f s: %s; everything is back on; the guard watches again in 5 min", g.last_dur / 1000.0, why_text(o.why)); break;
+        case EV_GAVE_UP:     diag("slow: gave up after %.1f s: %s; everything is back on; the guard watches again in %.0f s", g.last_dur / 1000.0, why_text(o.why), cool_s); break;
         case EV_ABORT:       diag("slow: stopped (%s): everything back on", why_text(o.why)); break;
         case EV_SPENT:       diag("slow: GPU-slow again (gpu avg %.1f ms, xrEndFrame avg %.1f ms), but the guard had its %d episodes this session: it only logs now (one line a minute at most)", o.span_avg, o.end_avg, g.c.episodes_max); break;
         default: break;
@@ -5472,27 +5514,30 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
     const uint8_t mode = !g_xr_want ? 0 : g_xr_screen_now ? 2 : g_screen3d_now ? 3 : 1;
     // not counted: a battle transition window, a load phase, the pick tool's slow motion, and a session that is not FOCUSED
     // (VISIBLE: the Quest or Virtual Desktop menu is over the game and the runtime throttles it by design; the 10-26 case)
-    const bool excluded = g_bt_phase != BT_IDLE || pf_phase_live() || g_slowmo_ms > 0 || (g_xr_want && xr_running() && !xr_focused());
+    const bool focused = g_xr_want && xr_running() && xr_focused();
+    const bool excluded = g_bt_phase != BT_IDLE || pf_phase_live() || g_slowmo_ms > 0 || (g_xr_want && xr_running() && !focused);
+    if (g_gpuq_cur >= 0) g_gpuq_mode[g_gpuq_cur] = mode;   // (N8) the view of the frame the slot just begun will time
     {
         SlowFr& r = g_slow_ring[g_slow_ring_n % k_slow_ring]; g_slow_ring_n++;
         r.t = now; r.frame = g_frames; r.fm = (float)fm; r.gpu = (float)g_gpu_last_ms; r.can = (float)g_can_last_ms; r.wait = (float)wait_ms; r.end = (float)end_ms;
         r.draws = (uint16_t)(g_draw_in_frame > 0xFFFF ? 0xFFFF : g_draw_in_frame); r.e2 = (uint16_t)(g_eye2_draws > 0xFFFF ? 0xFFFF : g_eye2_draws);
-        r.mode = mode; r.bst = (int16_t)bst; r.flags = (uint8_t)((g_gpu_last_ok ? 1 : 0) | (g_can_last_ok ? 2 : 0) | (excluded ? 4 : 0));
+        r.mode = mode; r.gmode = g_gpu_last_mode; r.bst = (int16_t)bst; r.flags = (uint8_t)((g_gpu_last_ok ? 1 : 0) | (g_can_last_ok ? 2 : 0) | (excluded ? 4 : 0));
     }
     if (g_dll_w != g_dll_r || g_dll_dropped) dll_drain();
-    if (g_slow_on && !g_slow_bcensus_done && (bst == 1 || bst == 2) && mode != 0 && g_bt_phase == BT_IDLE && xr_running()) {   // (d) a baseline for a slow census (slow_guard=1 only)
+    if (g_slow_on && diag_profile_on() && !g_slow_bcensus_done && (bst == 1 || bst == 2) && mode != 0 && g_bt_phase == BT_IDLE && xr_running()) {   // (d) a baseline for a slow census (slow_guard=1 and a diagnostic key on: SF2)
         g_slow_bcensus_done = true;
-        if (frame_arm_auto("the session's first live battle frame in the headset (a baseline for the slow guard's census)"))
+        if (frame_arm_auto("the session's first live battle frame in the headset (a baseline for the slow guard's census)", 1))
             diag("census: frame %u: the session's first live battle frame in the headset: the next frame goes to ffxvr_frame_auto.log (once a session; a baseline for a slow-state census)", g_frames);
     }
     slow::In in;
     in.now = now; in.frame_ms = fm; in.span_ok = g_gpu_last_ok; in.span = g_gpu_last_ms; in.end = end_ms;
-    in.screen = mode == 2; in.running = g_xr_want && xr_running(); in.excluded = excluded; in.avail = slow_avail();
+    in.screen = g_gpu_last_mode == 2;   // (N8) the span's own frame's view, not this Present's
+    in.running = g_xr_want && xr_running(); in.focused = focused; in.wanted = g_xr_user_on; in.excluded = excluded; in.avail = slow_avail();
     in.enabled = g_slow_on; in.restart_ok = g_slow_restart_on;
     slow::Out out[4];
     const int n = g_slow.tick(in, out, 4);
     InterlockedExchange(&g_slow_active, g_slow.active() ? 1 : 0);
-    for (int i = 0; i < n; ++i) slow_event(out[i]);
+    for (int i = 0; i < n; ++i) slow_event(out[i], now);
     if (g_slow.off != g_slow_applied) slow_apply();
     if (g_slow_dump_pending) {   // one append; the render thread never waits for the log, so a busy log is tried again next Present
         if (diag_try(g_slow_dump) || ++g_slow_dump_tries > 120) g_slow_dump_pending = false;
@@ -5518,17 +5563,23 @@ static const char* slow_status_text() {
         case ST_ITEM:            slow_text_add(len, "slow guard: SLOW, testing %s off", item_name(g.item)); break;
         case ST_HOLD:            slow_text_add(len, "slow guard: SLOW, %s off helped (10 s)", item_name(g.item)); break;
         case ST_VERIFY:          slow_text_add(len, "slow guard: SLOW, %s back on, checking", item_name(g.item)); break;
+        case ST_PRE_RESTART:     slow_text_add(len, "slow guard: SLOW, checking before a restart"); break;
+        case ST_RESTART_ARM:     slow_text_add(len, "slow guard: SLOW, restart waits for a focused frame"); break;
         case ST_RESTART_WAIT:    slow_text_add(len, "slow guard: SLOW, restarting the session"); break;
         case ST_RESTART_MEASURE: slow_text_add(len, "slow guard: SLOW, checking after the restart"); break;
         case ST_COOL:            slow_text_add(len, "slow guard: cooling down"); break;
         default:                 slow_text_add(len, "slow guard: ?"); break;
     }
-    slow_text_add(len, " | baseline 3D %.1f ms, screen %.1f ms", g.base[0], g.base[1]);
+    char b3[24], bs[24];
+    if (g.learnt[0]) snprintf(b3, sizeof(b3), "%.1f ms", g.base[0]); else snprintf(b3, sizeof(b3), "learning");
+    if (g.learnt[1]) snprintf(bs, sizeof(bs), "%.1f ms", g.base[1]); else snprintf(bs, sizeof(bs), "learning");
+    slow_text_add(len, " | baseline 3D %s, screen %s", b3, bs);
     for (int i = 0; i < IT_N; ++i) if ((g.latched >> i) & 1u) slow_text_add(len, " | %s kept off", item_name(i));
     if (g.episodes == 0) { slow_text_add(len, " | never triggered"); return g_slow_text; }
     char fix[64];
     if (!g.last_ended) snprintf(fix, sizeof(fix), "under way");
     else if (g.last_fix == FIX_RESTART) snprintf(fix, sizeof(fix), "fixed by the session restart");
+    else if (g.last_fix == FIX_PASSED && g.last_fix_item < 0) snprintf(fix, sizeof(fix), "passed by itself");
     else if (g.last_fix == FIX_PASSED) snprintf(fix, sizeof(fix), "passed (with %s off)", item_name(g.last_fix_item));
     else if (g.last_fix == FIX_NOTHING) snprintf(fix, sizeof(fix), "nothing helped");
     else if (g.last_fix == FIX_ABORTED) snprintf(fix, sizeof(fix), "stopped");
@@ -10205,6 +10256,7 @@ static void leave_xr_state() {
     diag("xr: headset off, VR-only state reset");
 }
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
+    g_xr_user_on = on != 0;
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
     if (!on) { g_xr_fails = 0; g_xr_retry_at = 0; if (g_xr_want) { xr_stop(); leave_xr_state(); } return 0; }   // unticking resets the back-off
     if (g_xr_want) return 1;
@@ -10223,9 +10275,11 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
 }
 /// od-guard step 3 (render thread, perf_tick): the stuck-swapchain recovery's restart (ffxvr_xr.cpp B5-2: xr_stop, then the
 /// flat state as xr_tick does when the session went away). Managed's ffxvr_xr_set starts it again after 1 s; not counted as
-/// a failed start. The guard itself allows one per 5 min and 3 a session.
+/// a failed start. The guard itself allows one per 5 min and 3 a session, after 2 measured steps and the slow state measured
+/// right before, from a FOCUSED frame outside a transition window or a load phase (ffxvr_slow.h).
 static void slow_restart_session() {
     if (!g_xr_want) return;
+    InEye2 guard;   // (review N1) as B5-2's stop inside xr_frame: the runtime's context work during the stop is not ours to hook
     xr_stop();
     leave_xr_state();
     g_xr_retry_at = GetTickCount64() + 1000;
@@ -10237,7 +10291,6 @@ static void slow_apply() {
     g_ui_enabled = g_ui_enabled_user && !slow_is_off(slow::IT_UI);
     g_uid_on = g_uid_on_user && !slow_is_off(slow::IT_UIDEPTH);
     g_uid_backing = slow_is_off(slow::IT_UIDEPTH) ? 0.f : g_uid_backing_user;
-    g_imgui_layer = g_imgui_layer_user && !slow_is_off(slow::IT_IMGUI);
     VrHandsCfg n = g_h2_user; if (slow_is_off(slow::IT_HANDS)) n.on = 0;
     if (n.on != g_h2cfg.on) h2_cfg_apply(n);
 }
@@ -10271,7 +10324,7 @@ extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
 /// ABI 21: + `menu` (saveui): 0, or 1 | (state << 8) while fh_menu_on_screen is on and Fahrenheit's save screen is open (managed
 /// latches 0x8CB994 from OPEN to CLOSED, guarded read; `state` is this frame's raw word, 2 = OPEN). Managed, every frame; xr_tick
 /// acts on the edges.
-extern "C" __declspec(dllexport) void ffxvr_imgui_layer_set(int on, int force_show, int min_draws, int menu) { g_imgui_layer_user = on != 0; g_imgui_layer = g_imgui_layer_user && !slow_is_off(slow::IT_IMGUI); g_imgui_force = force_show != 0; g_imgui_min_draws = (uint32_t)(min_draws < 1 ? 1 : min_draws); g_imgui_menu = (menu & 1) != 0; g_imgui_menu_state = (menu >> 8) & 0xFF; }
+extern "C" __declspec(dllexport) void ffxvr_imgui_layer_set(int on, int force_show, int min_draws, int menu) { g_imgui_layer = on != 0; g_imgui_force = force_show != 0; g_imgui_min_draws = (uint32_t)(min_draws < 1 ? 1 : min_draws); g_imgui_menu = (menu & 1) != 0; g_imgui_menu_state = (menu >> 8) & 0xFF; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_draws() { return g_imgui_draws_last; }
 static int g_imgui_where = 0;   // the ImGui layer last frame: 0 not shown, 1 head-locked, 2 on the virtual screen (the menu)
 /// ABI 21 (saveui): for the overlay. out[0] the menu is open and forcing the screen (1) or not (0), [1] where the ImGui layer went
@@ -10481,7 +10534,7 @@ extern "C" __declspec(dllexport) void ffxvr_shutdown() {
     bt_exit_flush();   // BT-4 / BT-R-4: the kept bt: lines first, and the buffer is taken for good (the render thread may still present)
     pf_shutdown();     // load lock build: the profiler's watcher stops (its last block written); the lock release needs no teardown
     if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
-    if (g_pdh_stop) { SetEvent(g_pdh_stop); if (g_pdh_thread) WaitForSingleObject(g_pdh_thread, 200); }   // od-guard (g): no GPU snapshot during exit
+    pdh_stop();            // od-guard (g): no GPU snapshot during exit
     dll_notify_remove();   // od-guard (b)
     InterlockedExchange(&g_va_on, 0);   // the reservation log: nothing recorded during exit (the patch stays: the DLL is never unloaded)
     {   // SR-1: an extra frame already past its checks finishes (or stops at its next OpenXR call) before the session goes away
@@ -10717,8 +10770,9 @@ static void bt_set_phase(int ph, const char* why) {
     if (ph == BT_SHATTER && g_bt_diag && !g_bt_census_done) {   // BT-11.6 / BT-R-3: one frame census (ffxvr_frame_auto.log) of the session's first shatter, only with diag_transition=1
         g_bt_census_done = true;
         char reason[96]; snprintf(reason, sizeof(reason), "first glass break of the session (bt window %u)", g_bt_win_n);
-        frame_arm_auto(reason);   // never clears a manual census in progress: it waits for it (dream-overlay.md section 5)
-        bt_add("bt: frame %u: the next frame is written to ffxvr_frame_auto.log (the frame census, once a session; after a manual census if one is in progress)", g_frames);
+        if (frame_arm_auto(reason))   // never clears a manual census in progress: it waits for it (dream-overlay.md section 5)
+            bt_add("bt: frame %u: the next frame is written to ffxvr_frame_auto.log (the frame census, once a session; after a manual census if one is in progress)", g_frames);
+        else bt_add("bt: frame %u: no frame census for this glass break (another automatic census is already waiting)", g_frames);
     }
     bt_flush();
 }

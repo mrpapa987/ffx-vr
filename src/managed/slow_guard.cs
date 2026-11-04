@@ -5,9 +5,10 @@ namespace FFXVR;
 // The slow-GPU guard (design-notes "Slow-GPU guard and overdrive freeze diagnostics"; research overdrive-freeze.md). At Tidus's
 // Slice & Dice the headset view fell to about 15 fps for good: the GPU span went from ~12 to ~60 ms and xrEndFrame to ~55 ms,
 // on the flat screen too. The native side (ffxvr_native.cpp, "slow-GPU guard"; the decisions in ffxvr_slow.h) watches every
-// Present for that state and, when it lasts ~120 frames, logs it (slow: lines), arms a frame census, switches the optional
-// work off one item at a time for ~2 s (ui_capture, ui_depth, vr_hands, imgui_layer, screen_mono) and, if nothing helps,
-// restarts the VR session (at most once per 5 min, 3 a session). This side owns the two settings and the Debug row.
+// Present for that state and, when it lasts ~120 frames against a learnt baseline, logs it (slow: lines), arms a frame census,
+// switches the optional work off one item at a time for ~2.5 s (ui_capture, ui_depth, vr_hands, screen_mono; never the ImGui
+// layer, which carries this overlay) and, if two measured steps did not help and it is still measurably slow, restarts the
+// VR session (at most once per 5 min, 3 a session). This side owns the two settings and the Debug row.
 //
 //   slow_guard (ini, default 1): the guard; 0 = it only keeps its frame ring and baselines (no step, no restart).
 //   slow_guard_restart (ini, default 1): its last step, the VR session restart.
@@ -30,7 +31,7 @@ public sealed unsafe partial class FFXVRModule {
         int* v = stackalloc int[6];
         byte* p = _fn_slow_status(v, 6);
         string line = p != null ? System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)p) ?? "" : "";
-        if (v[0] >= 2 && v[0] <= 7) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(line)); ImGui.PopStyleColor(1); }   // an episode under way
+        if (v[0] >= 2 && v[0] <= 9) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(line)); ImGui.PopStyleColor(1); }   // an episode under way
         else ImGui.TextDisabled(esc(line));
     }
 }
