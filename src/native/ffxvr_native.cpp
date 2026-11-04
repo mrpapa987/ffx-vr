@@ -5245,11 +5245,11 @@ static void cpu_log_line() {
     const ULONGLONG now = GetTickCount64();
     const double secs = g_cpu_win_t0 && now > g_cpu_win_t0 ? (now - g_cpu_win_t0) / 1000.0 : 0.0;
     const cpu::Acc* N = g_cpu_nat; const cpu::Acc* M = g_cpu_man;
-    char gap[200];
+    char gap[320];
     if (g_cpu_rings == 0) snprintf(gap, sizeof(gap), "not measured (the ring wait is stickrep's: stick_reproject or keepalive, headset on)");
     else snprintf(gap, sizeof(gap), "avg %.2f max %.1f ms (%u frames) | ring wait past the slot deadline: %u entries (avg %.2f max %.1f ms past), %u past it by more than the margin | skipped by us %u (%.1f/s)",
                   g_cpu_gap.avg(), g_cpu_gap.mx, g_cpu_rings, g_cpu_late_n, g_cpu_late.avg(), g_cpu_late.mx, g_cpu_late_slot, g_cpu_skip_ours, secs > 0.0 ? g_cpu_skip_ours / secs : 0.0);
-    char man[480];
+    char man[640];
     if (M[M_ALL].n == 0) snprintf(man, sizeof(man), "none reported");
     else snprintf(man, sizeof(man), "total %.2f/%.1f (before begin_frame %.2f/%.1f, begin_frame call %.2f/%.1f, mid %.2f/%.1f, window %.2f/%.1f, push_all %.2f/%.1f = player %.2f/%.1f [body hide %.2f/%.1f, ride %.2f/%.1f] + hands %.2f/%.1f [tap gate %.2f/%.1f] + rest %.2f/%.1f, after %.2f/%.1f) | gc 0/1/2 %.0f/%.0f/%.0f",
                   M[M_ALL].avg(), M[M_ALL].mx, M[M_BEFORE].avg(), M[M_BEFORE].mx, M[M_BF].avg(), M[M_BF].mx, M[M_MID].avg(), M[M_MID].mx, M[M_WIN].avg(), M[M_WIN].mx,
