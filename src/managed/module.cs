@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 35;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
+    private const int k_abi = 36;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -521,6 +521,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_shadow_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_shadow_set"); _fn_shadow_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_shadow_status");   // ABI 19: shadow camera
             _fn_uidepth_set = (delegate* unmanaged[Cdecl]<int, float, float, float, int, void>)req("ffxvr_uidepth_set"); _fn_uidepth_status = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_uidepth_status");   // ABI 20: adaptive UI panel
             _fn_haze_set = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_haze_set"); _fn_haze_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_haze_status");   // ABI 22: heat haze
+            _fn_slow_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_slow_set"); _fn_slow_status = (delegate* unmanaged[Cdecl]<int*, int, byte*>)req("ffxvr_slow_status");   // ABI 36: the slow-GPU guard (slow_guard.cs)
             _fn_load_info = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_load_info");   // ABI 23: loads build (the load: lines, the lock release per load kind); 24: 60 values
             _fn_sr_set = (delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void>)req("ffxvr_sr_set"); _fn_sr_gate = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_sr_gate");   // ABI 25: stickrep
             _fn_sr_status = (delegate* unmanaged[Cdecl]<byte*, int, int>)req("ffxvr_sr_status"); _fn_turn_keys = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_turn_keys");
@@ -586,6 +587,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_uidepth_set = null; _fn_uidepth_status = null;
         _fn_imgui_status = null;   // ABI 21 (saveui; _fn_imgui_layer_set is cleared above)
         _fn_haze_set = null; _fn_haze_status = null;   // ABI 22 (heat haze)
+        _fn_slow_set = null; _fn_slow_status = null;   // ABI 36 (the slow-GPU guard)
         _fn_load_info = null;   // ABI 23 (loads)
         _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
         _fn_pre_resolve = null; _fn_hands2_set = null; _fn_hands2_status = null; _fn_hands2_cal = null; _fn_hands2_pack = null; _fn_hands2_pack_error = null;   // ABI 27, 28, 29 (VR hands v2)
@@ -976,6 +978,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "vrpad":             pb(k, v, ref _vrpad); break;
                 case "haptics":           pb(k, v, ref _haptics); break;                  // the game's rumble on the Quest controllers
                 case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
+                case "slow_guard":        pb(k, v, ref _slow_guard); break;               // the slow-GPU guard (default 1; slow_guard.cs)
+                case "slow_guard_restart": pb(k, v, ref _slow_guard_restart); break;      // ... its last step, the VR session restart (default 1)
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
                 case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
                 case "fh_dpi_fix":        pb(k, v, ref _fh_dpi_fix); break;                   // FH-1: Fahrenheit's ImGui text ignores the Windows display scale, as Fahrenheit #376 (default 1; applies at once)
@@ -1331,6 +1335,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"vrpad={(_vrpad ? 1 : 0)}\n" +
             $"haptics={(_haptics ? 1 : 0)}\n" +
             $"haptics_gain={_haptics_gain.ToString("0.##", ci)}\n" +
+            $"slow_guard={(_slow_guard ? 1 : 0)}\n" +
+            $"slow_guard_restart={(_slow_guard_restart ? 1 : 0)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
             $"fh_menu_on_screen={(_fh_menu_on_screen ? 1 : 0)}\n" +
             $"fh_dpi_fix={(_fh_dpi_fix ? 1 : 0)}\n" +
@@ -1634,6 +1640,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         diag7_ui();   // build 7: status line, "show cursor anchors"
         if (_fn_counter != null)
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
+        slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
 
         if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
             float* c = stackalloc float[48];
@@ -2134,6 +2141,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)
         haze_push();     // heat haze: heat_haze (every frame; applied at the next Present)
+        slow_push();     // the slow-GPU guard: slow_guard, slow_guard_restart (every frame)
         sr_push();       // stickrep: stick_reproject and its Debug knobs, the turn keys (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         push_player();   // before fp_set: it can switch the view for a battle

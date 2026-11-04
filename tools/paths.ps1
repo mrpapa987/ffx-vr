@@ -62,7 +62,7 @@ $FfxvrFmvDepthDir = 'fmvdepth'
 # What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
 $FfxvrLogPatterns = @(   # install-mod -DeleteLogs deletes exactly these
                       'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
-                      'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',
+                      'ffxvr_frame.log', 'ffxvr_frame_auto.log', 'ffxvr_frame_auto.prev.log', 'ffxvr_cbdump_*.txt', 'ffxvr_bones_*.bin',
                       'img_*.bmp', 'seq_*.bmp', 'ui_atlas_*.dds', 'battle_atlas.dds', 'ffxvr.ini.tmp')
 
 # The diagnostics an ffxvr.ini text has on, as the mod reads them: @('diag_load=1', ...). A key listed twice counts as
