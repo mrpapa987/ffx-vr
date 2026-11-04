@@ -1247,7 +1247,11 @@ collision; intro credits double vision.
 Battle: aeon handling for every aeon (Magus Sisters are three ids); boss
 diorama; transitions (shatter, results, game over); overdrive inputs
 (Lulu's stick spin); target-name labels; cursor art from the atlas dump;
-damage numbers / status text (scene-pass draws).
+damage numbers / status text (scene-pass draws). Battle first person (4 Nov
+2026): when the view switches to Wakka, his eye sits about 2 ft (~0.6 m, ~7
+units) too high; the other characters are fine. Suspect the head point
+picked for his model (tall hair?). Needs a battle census, actor table and
+motion log while viewing as Wakka.
 
 Field / modes: per-area diorama memory by event_id; swimming / underwater
 eye height and the distortion pass; blitzball and chocobo (doc only);
@@ -4254,6 +4258,23 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   isolated spike does not switch; an unknown distance breaks a run.
 - **Not verified.** Whether some normal-play pose (swimming) leaves every sub-position 6+ units from the root (then the eye
   would follow the head there too); the headset.
+
+### Round 3 review fixes (eye-head-review.md, 4 Nov 2026)
+
+- **SF1:** a displaced head is never folded onto +0x0C (the "looks relative" rule for heads 100+ units off): push_player
+  decides the flag before the fold and skips it while the flag is on; the post-join snapshot marks a folded head (D7Join flags
+  4) and sa_apply undoes the fold for a displaced body. (Before: a body 75 units out on a diagonal put the eye ~257 units off.)
+- **SF2:** the flag can turn on only while another live, drawn actor's root is within 0.5 of the followed actor's root (the
+  shared-anchor signature itself), in first person, on foot, in the field, not in blitzball. Normal play cannot turn it on,
+  whichever joints the 26 sub-positions are.
+- **SF3:** the spike hold compares with the last accepted raw head, not the smoothed one (heavy smoothing no longer runs away).
+- **N1:** one or two frames without a head while displaced keep the last eye. **N2:** the switch in and out blinks (4 frames,
+  the camera-cut blink). **N3:** the flag's state key carries the scene generation.
+- **Left (eye review N4-N8).** N4: a root jump while displaced moves the eye with the root for up to 3 frames, then it glides
+  back (offsets are relative to the root); real 8-50 unit moves glide over ~10 frames at the default smoothing. N5: during a
+  hold the raw head is stale for the tie rule and the census (harmless: a stale dp gives no "other" evidence). N6: without the
+  flag the eye base is equal in value, not always in bits (-0.0 + 0.0). N7: with a +0x10C script matrix the metric (+0x200)
+  and the eye base (+0x0C) use different origins (pre-existing). N8: k_frames counts Presents (10 = 167 ms at 60 fps).
 
 ## Battle-start banners in double (4 Nov 2026)
 
