@@ -54,6 +54,11 @@ $FfxvrDiagKeys = [ordered]@{
 # write and remove only these folders: any other folder under hands\ is a user's own pack (often made from a game model) and
 # is never copied, packaged or deleted, except by install-mod -Uninstall -Purge, which names it first.
 $FfxvrHandPacks = @('generic-glove', 'generic')
+# FMV depth: <game>\fahrenheit\mods\ffxvr\fmvdepth\ (.fvd files, manifest.json, convert.log, preview\), made on the user's PC
+# by tools\convert-fmv-depth.ps1 from the game's own videos (1-2 hours of GPU time to remake). It is private and derived
+# from the game: no tool may package, copy or collect it, and no tool deletes it - install-mod -Uninstall -Purge included,
+# which keeps it and says so.
+$FfxvrFmvDepthDir = 'fmvdepth'
 # What the mod writes into its folder besides its DLLs, settings (ffxvr.ini*) and bone_labels.txt: logs, dumps, captures.
 $FfxvrLogPatterns = @(   # install-mod -DeleteLogs deletes exactly these
                       'ffxvr_diag.log', 'ffxvr_diag.prev.log', 'ffxvr_native.log', 'ffxvr_trace.log', 'ffxvr_stacks.log',
