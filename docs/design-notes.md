@@ -4395,3 +4395,36 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   total` minus `begin_frame call`; `after our hook to the ring wait` is everything after it. If the grid still misses slots
   while our own work is well under a millisecond and the ring wait is entered late, the time is outside our hook
   (Fahrenheit's ImGui, the real Present, the game's list, or the slot clock itself), and the next step is there.
+- **The limiter and its timer (grid-timer, 4 Nov 2026).** A lead from UnX: the game's main loop (SKS_WinMainLoop 0x62EE50)
+  runs a frame when due (`call 0x62E340` at 0x62F350) and otherwise sleeps the rest, truncated to whole milliseconds
+  (`Sleep` at 0x62F3BB; the x87 rounding is set to chop), on the process's timer (the game asks 5 ms at 0x42FE10; FFX-60fps'
+  PERF-001 asks 1 ms and opts the process out of timer-resolution throttling). Windows 11 may coarsen the timer of a process
+  whose windows are minimized or covered, likely in the headset, unless it opted out. A light scene leaves the most sleep,
+  so a coarse timer would show there first (frames of 3-5 slots with the GPU idle). The first cpu-lean sessions never
+  opened the grid. They do show FFX-60fps' opt-out and 1 ms request succeeding (fps60.log PERF-001), on 2 Nov as today, so
+  this is a lead to measure, not a known cause.
+  - The `cpu:` line's new part: `timer` (NtQueryTimerResolution: now, the window's range, finest / coarsest; it is the
+    system's resolution, the finest any process holds, so the limiter's own Sleep is the real test), `timer_fix`'s state;
+    `game window` sampled every 30 Presents (foreground, minimized, DWM-cloaked, hidden, five client points covered by
+    another window or off-screen); `main loop` (limiter_probe=1): frame-start intervals against the limiter's period (the
+    game's divider x FFX-60fps' K: 16.68 ms at 60, 33.37 at stock), late by > 1 / > 2 ms / > a slot, early by > 2 ms, gaps
+    over 250 ms kept out, each frame's run time (0x62E340, its waits on the render thread included), frames that started
+    without a sleep (already due); `limiter Sleep`: calls, Sleep(0) count, asked vs took, oversleep (> 1 / > 2 ms).
+    The job join could not give the frame starts: it does not run in the grid (no join calls there).
+  - How it is measured: the frame call's rel32 is redirected to a plain cdecl wrapper (0x62E340 takes no arguments and
+    returns in eax) with one aligned 8-byte compare-exchange, as sr_patch; FFX.exe's import slot of kernel32!Sleep points at
+    a wrapper that times only the call returning to 0x62F3C1 and passes FFX.exe's seven other Sleep callers straight to the
+    slot's previous value. Both sites are checked against the exe's bytes first (refused and logged otherwise). Never
+    removed (the DLL stays loaded); limiter_probe=0 later only stops the recording. FFX-60fps writes only K (data) there.
+  - Reading it: with a 1 ms timer the oversleep stays under about 1 ms and frame starts within about 1 ms of the period;
+    the game's 5 ms gives oversleeps up to 4-5 ms and frames up to 20 ms at 60; the 15.6 ms default gives oversleeps up to
+    15 ms and frames of 25-31 ms (a scratch model of the loop, grid-timer notes). Lateness with small oversleeps and long
+    frame runs points to the frame itself (or the render thread it waits on); covered / minimized samples together with
+    big oversleeps point to the timer.
+  - `timer_fix` (ini, default 1): SetProcessInformation(ProcessPowerThrottling) adds the timer-resolution and execution-
+    speed opt-out to whatever policy is set (read first with GetProcessInformation where Windows allows it), plus
+    timeBeginPeriod(1) for the session; all looked up at run time, harmless where missing (if Windows refuses the
+    timer flag, as older builds may: the execution-speed opt-out alone), logged once (`timer:` line). It duplicates PERF-001 when FFX-60fps runs it;
+    it matters with PERF-001 off or a build without it. 1 -> 0 at run time releases our 1 ms request only; the opt-out
+    stays until the game restarts. The game's Sleep itself is not replaced.
+  - The settings ride on ffxvr_cpu_report (two values after the 15 timings): no export changed, ABI 38.
