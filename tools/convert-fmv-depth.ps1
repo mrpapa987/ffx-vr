@@ -71,7 +71,7 @@ $WeightsMinMB = 50; $WeightsMaxMB = 250     # 28.4M parameters x 4 bytes = ~114 
 $TorchIndex  = 'https://download.pytorch.org/whl/cu124'
 $TorchPins   = @('torch==2.6.0', 'torchvision==0.21.0')
 $PyPiPins    = @('numpy==2.1.3', 'opencv-python-headless==4.10.0.84', 'einops==0.8.0', 'easydict==1.13', 'tqdm==4.67.1')
-$DepsSpec    = "v1; $($PyPiPins -join ' '); $($TorchPins -join ' ') from $TorchIndex"
+$DepsSpec    = "v2; $($PyPiPins -join ' '); $($TorchPins -join ' ') from $TorchIndex"
 
 $root    = Join-Path $env:LOCALAPPDATA 'ffxvr'
 $venv    = Join-Path $root 'fmvdepth-venv'
@@ -104,7 +104,9 @@ if (-not (Test-Path -LiteralPath $vbf)) { Fail "no data\FFX_Data.vbf in $game. I
 Write-Host "  $game"
 Write-Host ('  data\FFX_Data.vbf  {0:N1} GB (read only)' -f ((Get-Item -LiteralPath $vbf).Length / 1GB))
 if ($OutDir) {
-    $out = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir).TrimEnd('\', '/')
+    # Full path; a trailing separator is dropped, except for a drive root ('D:\' must not become the drive-relative 'D:')
+    $out = [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir))
+    if ($out.Length -gt 3) { $out = $out.TrimEnd('\', '/') }
 } else {
     $mod = [IO.Path]::Combine($game, 'fahrenheit', 'mods', 'ffxvr')
     if (-not (Test-Path -LiteralPath (Join-Path $mod 'ffxvr.dll'))) {
@@ -114,7 +116,7 @@ if ($OutDir) {
 }
 Write-Host "  output: $out"
 if ((Get-FfxvrGameProcess).Count -gt 0) { Write-Host '  NOTE: the game is running. That works (the archive is only read), but the GPU is shared: close it for full speed.' }
-Assert-FfxvrWritable $out
+# (The write test comes after convert.py --check-out has refused a git checkout or the game's data folder, below.)
 
 # ------------------------------------------------------------------ the GPU
 Step 'GPU'
@@ -205,15 +207,21 @@ $marker = Join-Path $venv 'ffxvr-deps.txt'
 $have = if (Test-Path -LiteralPath $marker) { [IO.File]::ReadAllText($marker).Trim() } else { '' }
 if ($have -ne $DepsSpec) {
     Write-Host '  installing the pinned packages (PyTorch with CUDA is a ~2.5 GB download; this takes a while) ...'
-    & $vpy -m pip install --disable-pip-version-check --no-input @PyPiPins
+    # Binary wheels only for the big ones (no surprise source build without a compiler); easydict may be an sdist.
+    & $vpy -m pip install --disable-pip-version-check --no-input --only-binary=numpy,opencv-python-headless,tqdm @PyPiPins
     if ($LASTEXITCODE -ne 0) { Fail 'pip could not install numpy / opencv / einops / easydict / tqdm (see above).' }
-    & $vpy -m pip install --disable-pip-version-check --no-input @TorchPins --index-url $TorchIndex
+    & $vpy -m pip install --disable-pip-version-check --no-input --only-binary=torch,torchvision,numpy @TorchPins --index-url $TorchIndex
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install PyTorch from $TorchIndex (see above)." }
     [IO.File]::WriteAllText($marker, $DepsSpec, $FfxvrUtf8)
 } else { Write-Host '  packages: as pinned' }
 $tv = @(& $vpy -c 'import torch, numpy, cv2, einops, easydict, tqdm; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())' 2>&1)
 if ($LASTEXITCODE -ne 0) { Write-Host ($tv -join "`n"); Fail "the venv's packages do not import. Delete $venv and run this again." }
 $tvl = "$($tv[-1])".Trim()
+# The output place: refused inside a git checkout or the game's data folder (junctions resolved), checked by the same
+# code the converter uses, before anything is written there - the write test included.
+& $vpy -X utf8 $convert --vbf $vbf --out $out --check-out
+if ($LASTEXITCODE -ne 0) { Fail "the output folder $out is not allowed (see above). Use the mod folder, or another -OutDir." }
+Assert-FfxvrWritable $out
 Write-Host "  torch $tvl"
 if ($tvl -notmatch 'True$') { Fail 'PyTorch sees no CUDA GPU. Update the NVIDIA driver; if that does not help, delete the venv folder and run this again.' }
 
@@ -248,13 +256,67 @@ if ($LASTEXITCODE -ne 0) { Fail "the Video-Depth-Anything code in $vdaDir is not
 Step 'model weights'
 New-Item -ItemType Directory -Force -Path $models | Out-Null
 $wPath = Join-Path $models $WeightsName
-$wRec  = "$wPath.sha256"
+$wRec  = "$wPath.sha256"           # the hash this PC trusts (first download) while $WeightsSha256 is not pinned
+$wInfo = "$wPath.download.txt"     # what Hugging Face said about the download: URL, redirect, commit, ETag, size
+
+# A HEAD request that does not follow the redirect. For a large (LFS) file Hugging Face answers /resolve/ with a 302
+# whose headers give the file's SHA-256 (X-Linked-Etag), its size (X-Linked-Size) and the repository commit
+# (X-Repo-Commit); Location is where the bytes really come from. Any of them may be missing: all optional.
+function Get-HfLinkInfo([string]$Url) {
+    $info = [ordered]@{ url = $Url }
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.Method = 'HEAD'; $req.AllowAutoRedirect = $false; $req.Timeout = 30000
+        $req.UserAgent = 'ffxvr-convert-fmv-depth'
+        $resp = $null
+        try { $resp = $req.GetResponse() } catch [System.Net.WebException] { $resp = $_.Exception.Response }
+        if ($resp) {
+            $info['status'] = [int]$resp.StatusCode
+            foreach ($k in 'Location', 'X-Repo-Commit', 'X-Linked-Etag', 'X-Linked-Size', 'ETag', 'Content-Length') {
+                $v = $resp.Headers[$k]
+                if ($v) { $info[$k] = ("$v" -replace '^W/', '').Trim('"') }
+            }
+            $resp.Close()
+        }
+    } catch { $info['error'] = $_.Exception.Message }
+    return $info
+}
+function Read-KeyValues([string]$Path) {
+    $kv = [ordered]@{}
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($l in [IO.File]::ReadAllLines($Path)) { $i = $l.IndexOf(':'); if ($i -gt 0) { $kv[$l.Substring(0, $i).Trim()] = $l.Substring($i + 1).Trim() } }
+    }
+    return $kv
+}
+function Show-Unpinned([string]$Hash, [long]$Size, $Info) {
+    $bar = '=' * 78
+    Write-Host ''
+    Write-Host $bar
+    Write-Host '  THE MODEL WEIGHTS ARE NOT PINNED YET  (TODO: $WeightsSha256 in tools\convert-fmv-depth.ps1)'
+    Write-Host ''
+    Write-Host '  Please send the lines below to the FFX VR developers, so the hash (and the Hugging Face commit) can be'
+    Write-Host '  pinned in the script. Until then this PC trusts its first download and checks the file against it on'
+    Write-Host '  every run. They identify a public file; they contain nothing about you or your game.'
+    Write-Host ''
+    Write-Host "    file          : $WeightsName"
+    Write-Host "    size          : $Size bytes"
+    Write-Host "    sha256        : $Hash"
+    foreach ($k in 'X-Repo-Commit', 'X-Linked-Etag', 'X-Linked-Size', 'ETag', 'Location', 'status', 'downloaded') {
+        if ($Info -and $Info[$k]) { Write-Host ('    {0,-14}: {1}' -f $k, $Info[$k]) }
+    }
+    Write-Host ''
+    Write-Host "  (saved in $wInfo)"
+    Write-Host $bar
+}
+
 if (-not (Test-Path -LiteralPath $wPath)) {
     Write-Host "  downloading $WeightsName (Video-Depth-Anything-Small, Apache-2.0) from Hugging Face ..."
+    $info = Get-HfLinkInfo $WeightsUrl
     $part = "$wPath.part"
     try { Invoke-WebRequest -UseBasicParsing -Uri $WeightsUrl -OutFile $part -ErrorAction Stop }
     catch { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue; Fail "the download of $WeightsUrl failed: $($_.Exception.Message)" }
-    $mb = (Get-Item -LiteralPath $part).Length / 1MB
+    $len = (Get-Item -LiteralPath $part).Length
+    $mb = $len / 1MB
     if ($mb -lt $WeightsMinMB -or $mb -gt $WeightsMaxMB) {
         Remove-Item -LiteralPath $part -Force
         Fail ("the download is {0:N1} MB, not the ~110 MB weights file (an error page?). Try again later." -f $mb)
@@ -264,15 +326,25 @@ if (-not (Test-Path -LiteralPath $wPath)) {
         Remove-Item -LiteralPath $part -Force
         Fail "the downloaded weights have SHA-256 $h, expected $WeightsSha256. Not used."
     }
-    Move-Item -LiteralPath $part -Destination $wPath -Force
-    if (-not $WeightsSha256) {
-        [IO.File]::WriteAllText($wRec, "$h  $WeightsName`r`n", $FfxvrUtf8)
-        Write-Host "  first download: SHA-256 $h"
-        Write-Host "  recorded in $wRec; later runs check the file against it."
-        Write-Host '  (TODO for the repository: pin this hash as $WeightsSha256 in tools\convert-fmv-depth.ps1.)'
+    # Hugging Face's own record of the file, when its headers gave one: a mismatch means a broken or changed download.
+    $le = "$($info['X-Linked-Etag'])".ToLowerInvariant()
+    if ($le -match '^[0-9a-f]{64}$' -and $le -ne $h) {
+        Remove-Item -LiteralPath $part -Force
+        Fail "the download's SHA-256 $h is not the one Hugging Face lists for the file ($le). Not used; try again."
     }
+    if ($info['X-Linked-Size'] -and "$($info['X-Linked-Size'])" -ne "$len") {
+        Remove-Item -LiteralPath $part -Force
+        Fail "the download has $len bytes, Hugging Face lists $($info['X-Linked-Size']). Not used; try again."
+    }
+    if ($le -eq $h) { Write-Host "  SHA-256 matches the one Hugging Face lists for the file (X-Linked-Etag)." }
+    Move-Item -LiteralPath $part -Destination $wPath -Force
+    $info['downloaded'] = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+    $lines = @("sha256: $h", "size: $len") + @($info.Keys | ForEach-Object { "${_}: $($info[$_])" })
+    [IO.File]::WriteAllText($wInfo, (($lines -join "`r`n") + "`r`n"), $FfxvrUtf8)
+    if (-not $WeightsSha256) { [IO.File]::WriteAllText($wRec, "$h  $WeightsName`r`n", $FfxvrUtf8) }
 }
 $wHash = (Get-FileHash -LiteralPath $wPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$wLen  = (Get-Item -LiteralPath $wPath).Length
 $expect = $WeightsSha256
 if (-not $expect -and (Test-Path -LiteralPath $wRec)) { $expect = ([IO.File]::ReadAllText($wRec).Trim() -split '\s+')[0].ToLowerInvariant() }
 if (-not $expect) {
@@ -281,7 +353,8 @@ if (-not $expect) {
     $expect = $wHash
 }
 if ($wHash -ne $expect) { Fail "$wPath has SHA-256 $wHash, expected $expect. Delete it (and $WeightsName.sha256 if you are sure) and run this again." }
-Write-Host ('  {0}  {1:N1} MB  sha256 {2}{3}' -f $wPath, ((Get-Item -LiteralPath $wPath).Length / 1MB), $wHash, $(if ($WeightsSha256) { ' (pinned)' } else { ' (recorded; not pinned yet)' }))
+Write-Host ('  {0}  {1:N1} MB  sha256 {2}{3}' -f $wPath, ($wLen / 1MB), $wHash, $(if ($WeightsSha256) { ' (pinned)' } else { ' (recorded on this PC; NOT pinned)' }))
+if (-not $WeightsSha256) { Show-Unpinned $wHash $wLen (Read-KeyValues $wInfo) }
 
 if ($SetupOnly) { Write-Host ''; Write-Host 'Set up. Run without -SetupOnly to convert.'; exit 0 }
 
