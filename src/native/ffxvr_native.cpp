@@ -794,6 +794,72 @@ static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
     }
     return fpown::riding(w, g_ride_flags, g_ride_rider, g_ride_mount, g_fp_hide_radius, g_ride_radius);
 }
+// The body hide: line (first person on foot, the main draw site): this frame's matched draws grouped by place (0.25 units; all the
+// parts of one character share its root), the draws refused as another actor's, the radius and its step. At most one line a
+// second, 200 a session, only on frames whose radius is over 1.5 or with a match beyond 0.75 units of the centre (the cases that
+// hid NPCs); and every 10 s, when anything was refused or the radius went over 1.5, a body hide (10 s): line (100 a session).
+struct FpHideClu { float p[3]; float d; uint32_t n; };
+FpHideClu g_fph_clu[4] = {}; int g_fph_clu_n = 0; uint32_t g_fph_clu_more = 0, g_fph_matched = 0;
+bool     g_fph_frame = false; float g_fph_radius = 0.f, g_fph_match_max = 0.f, g_fph_ref_dmin = 1e30f, g_fph_ref_by = 0.f;
+uint32_t g_fph_lines = 0, g_fph_w_frames = 0, g_fph_w_ref_frames = 0, g_fph_w_refused = 0, g_fph_w_wide = 0, g_fph_w_lines = 0;
+float    g_fph_w_rmax = 0.f, g_fph_w_match_max = 0.f;
+/// One skinned draw tested by the body hide on foot (fp_hiding): counted for this frame's diagnostics.
+static void fp_hide_note(const float* w, int who, const fpown::Why& y) {
+    if (!g_fph_frame) { g_fph_frame = true; g_fph_radius = g_fp_hide_radius + fpown::margin(g_fp_step_hide); }
+    if (y.refused) {   // (counted in g_fph_refused at the draw site)
+        if (y.d_centre < g_fph_ref_dmin) g_fph_ref_dmin = y.d_centre;
+        if (y.d_player - y.d_other > g_fph_ref_by) g_fph_ref_by = y.d_player - y.d_other;
+        return;
+    }
+    if (who != 1) return;
+    g_fph_matched++; if (y.d_centre > g_fph_match_max) g_fph_match_max = y.d_centre;
+    for (int i = 0; i < g_fph_clu_n; ++i) if (fpown::d2(w, g_fph_clu[i].p) < 0.25f * 0.25f) { g_fph_clu[i].n++; return; }
+    if (g_fph_clu_n < 4) { FpHideClu& c = g_fph_clu[g_fph_clu_n++]; c.p[0] = w[0]; c.p[1] = w[1]; c.p[2] = w[2]; c.d = y.d_centre; c.n = 1; }
+    else g_fph_clu_more++;
+}
+/// At Present (ffxvr_begin_frame): last frame's refusals for managed; the rate-limited body hide: line; the 10 s window.
+static void fp_hide_frame_end() {
+    g_fph_refused_last = g_fph_refused;
+    const ULONGLONG now = GetTickCount64();
+    if (g_fph_frame) {
+        g_fph_w_frames++; if (g_fph_refused) { g_fph_w_ref_frames++; g_fph_w_refused += g_fph_refused; }
+        if (g_fph_radius > g_fph_w_rmax) g_fph_w_rmax = g_fph_radius;
+        if (g_fph_match_max > g_fph_w_match_max) g_fph_w_match_max = g_fph_match_max;
+        const bool wide = g_fph_radius > 1.5f || g_fph_match_max > 0.75f;
+        if (wide) g_fph_w_wide++;
+        static ULONGLONG next = 0;
+        if (wide && g_fph_lines < 200 && now >= next) {
+            next = now + 1000; g_fph_lines++;
+            char places[200] = "none"; int len = 0;
+            for (int i = 0; i < g_fph_clu_n && len >= 0 && len < (int)sizeof(places); ++i)
+                len += snprintf(places + len, sizeof(places) - (size_t)len, "%s%u at %.2f", i ? ", " : "", g_fph_clu[i].n, g_fph_clu[i].d);
+            if (g_fph_clu_more && len >= 0 && len < (int)sizeof(places)) snprintf(places + len, sizeof(places) - (size_t)len, " (+%u elsewhere)", g_fph_clu_more);
+            const bool live = fp_others_live(), self = g_fp_self_ok && g_frames - g_fp_self_frame <= 1u;
+            float near_c = -1.f;
+            for (int i = 0; live && i < g_fp_others_n; ++i) { const float d = sqrtf(fpown::d2(g_fp_others[i], g_fp_pos)); if (near_c < 0.f || d < near_c) near_c = d; }
+            char others[96], selfs[64], refs[120] = "";
+            if (live) snprintf(others, sizeof(others), "other roots %d, nearest %.2f from the centre", g_fp_others_n, near_c);
+            else snprintf(others, sizeof(others), "other roots none sent (the radius test alone)");
+            if (self) snprintf(selfs, sizeof(selfs), "%.2f from the centre", sqrtf(fpown::d2(g_fp_self_root, g_fp_pos)));
+            else snprintf(selfs, sizeof(selfs), "not known (the centre alone)");
+            if (g_fph_refused) snprintf(refs, sizeof(refs), " (nearest %.2f from the centre, up to %.2f nearer the other root)", g_fph_ref_dmin, g_fph_ref_by);
+            diag("body hide: frame %u matched %u draws in %d places (count at distance from the centre): %s | radius %.2f = %.2f + margin %.2f (1.5 x step %.2f = %.2f + %.2f, cap %.0f) | %s | the player's drawn root %s | refused %u draws nearer another root%s%s",
+                 g_frames, g_fph_matched, g_fph_clu_n, places, g_fph_radius, g_fp_hide_radius, g_fph_radius - g_fp_hide_radius, g_fp_step_hide, g_fp_d_call[0], g_fp_d_call[1], fpown::k_margin_cap,
+                 others, selfs, g_fph_refused, refs, g_fph_lines == 200 ? " (no more of these lines this session)" : "");
+        }
+    }
+    g_fph_frame = false; g_fph_clu_n = 0; g_fph_clu_more = 0; g_fph_matched = 0; g_fph_refused = 0;
+    g_fph_match_max = 0.f; g_fph_ref_dmin = 1e30f; g_fph_ref_by = 0.f;
+    static ULONGLONG next10 = 0;
+    if (now < next10) return;
+    next10 = now + 10000;
+    if (g_fph_w_frames && (g_fph_w_refused || g_fph_w_rmax > 1.5f) && g_fph_w_lines < 100) {
+        g_fph_w_lines++;
+        diag("body hide (10 s, first person on foot): frames %u, with NPC parts kept visible %u (draws %u) | radius over 1.5 or a match beyond 0.75 in %u frames; radius up to %.2f, matched parts up to %.2f from the centre%s",
+             g_fph_w_frames, g_fph_w_ref_frames, g_fph_w_refused, g_fph_w_wide, g_fph_w_rmax, g_fph_w_match_max, g_fph_w_lines == 100 ? " (no more of these lines this session)" : "");
+    }
+    g_fph_w_frames = g_fph_w_ref_frames = g_fph_w_refused = g_fph_w_wide = 0; g_fph_w_rmax = g_fph_w_match_max = 0.f;
+}
 // Experiment: scene-pass draws with no eye-2 camera image (fog, water, effects
 // with a constant-buffer layout we do not patch). 0 draw identically in both
 // eyes, 1 eye 1 only, 2 hide in both.
@@ -5755,7 +5821,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     lightcam_frame_end();           // shadow camera: the frame's light-camera count, the per-map line, shadow_cam applied for the next frame
     haze_tick();                    // heat haze: heat_haze applied for the next frame, the frame's counts, the 10 s haze: line
     g_fp_parts_last = g_fp_part_idx; g_fp_part_idx = 0;
-    g_fph_refused_last = g_fph_refused; g_fph_refused = 0;
+    fp_hide_frame_end();            // the body hide: line (first person on foot), its 10 s window, last frame's refusals
     g_ride_report = ((g_ride_mount_n > 0xFFFFu ? 0xFFFFu : g_ride_mount_n) << 16) | (g_ride_rider_n > 0xFFFFu ? 0xFFFFu : g_ride_rider_n);
     if (g_ride_fp_frame) {
         g_ride_st[0] += 1.0; if (g_ride_rider_n > 0) g_ride_st[1] += 1.0; else g_ride_st[2] += 1.0;
@@ -6448,7 +6514,10 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     }
     if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         fpown::Why why; const int who = fp_part_of(g_eye2_cur->world_pos, &why);
-        if (why.refused && fp_hiding) g_fph_refused++;   // on foot: inside the radius, nearer another actor's root (kept visible)
+        if (fp_hiding && (g_ride_flags & 1) == 0) {   // on foot: the body hide: line's counts
+            if (why.refused) g_fph_refused++;         // inside the radius, nearer another actor's root: kept visible
+            fp_hide_note(g_eye2_cur->world_pos, who, why);
+        }
         if ((g_ride_flags & 1) && fp_hiding) {   // riding statistics (ffxvr_ride_stats)
             g_ride_fp_frame = true; float dr, dm; ride_d2(g_eye2_cur->world_pos, &dr, &dm);
             if (who == 1) { const float d = sqrtf(dr); if (d > g_ride_match_max) g_ride_match_max = d; }
