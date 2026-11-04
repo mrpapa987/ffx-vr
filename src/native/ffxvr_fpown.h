@@ -8,7 +8,10 @@
 //      k_margin_cap): the old test, with the step margin capped (it was unbounded: a scripted move under the 50-unit warp rule, a
 //      re-pick of the followed actor or 30 fps logic widened it to several units and NPCs beside Tidus went with him); and
 //   2. it is not nearer another actor's drawn root than the player's, by k_tol: an NPC's parts sit on its own root (distance
-//      about 0), so it is never taken for the player's however wide the margin is.
+//      about 0), so it is never taken for the player's however wide the margin is. Nor is a draw within k_own of the player
+//      (review N3): while his root is known to within 0.75 his body does not flash on because another root is close. (With
+//      both his roots a tick off what is drawn, no snapshot, it still can: all his parts share one translation, so they are
+//      refused together and his whole body shows for that frame. The safer failure.)
 //      The player's parts sit on his drawn root, +0x200 = +0x0C + chr_offset (+0x6C). The hide centre is that root minus
 //      chr_offset (the smooth anchor's snapshot) or the 30 Hz +0x0C: chr_offset moves the centre off his parts, never the root.
 //      So when the root is the snapshot's (self_exact: what this frame draws) the player's distance is to it alone (review N2);
@@ -22,6 +25,7 @@ namespace fpown {
 
 constexpr float k_margin_cap = 4.f;   // units: the step margin's cap (the fixed part, hide_radius, is not included)
 constexpr float k_tol        = 0.5f;  // units: another root must be this much nearer than the player's to take the draw
+constexpr float k_own        = 0.75f; // units: a draw this near the player's (his distance) is never refused (review N3)
 constexpr int   k_others_max = 32;    // other actors' roots per frame (managed sends those within ~30 units, nearest first)
 
 /// The step margin: 1.5 x step_hide, capped; 0 for a negative or NaN step.
@@ -65,9 +69,9 @@ inline int on_foot(const float* w, const Foot& f, Why* why = nullptr) {
     const float dp = std::sqrt(dp2);
     float bo2 = 1e30f; int bo = -1;
     for (int i = 0; i < f.n && i < k_others_max; ++i) { const float o2 = d2(w, f.others[i]); if (o2 < bo2) { bo2 = o2; bo = i; } }
-    // refused iff d_other + tol < d_player (a tie, or within the tolerance, is the player's: his parts never flicker on)
+    // refused iff d_player > k_own and d_other + tol < d_player (a tie, within the tolerance or within k_own of him is his)
     const float lim = dp - k_tol;
-    const bool refused = bo >= 0 && lim > 0.f && bo2 < lim * lim;
+    const bool refused = bo >= 0 && dp > k_own && lim > 0.f && bo2 < lim * lim;
     if (why) { why->d_centre = std::sqrt(dc2); why->d_player = dp; why->d_other = bo >= 0 ? std::sqrt(bo2) : -1.f; why->other = bo; why->refused = refused; }
     return refused ? 0 : 1;
 }
