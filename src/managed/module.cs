@@ -2564,6 +2564,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
             }
             if (pick < 0) { _fp_how = ""; _fp_chr_id = -1; }
+            // gates (4 Nov): the pick against the game's own player actor ([0x1300788], Sg_GetPlayer), every 10th scan tick in
+            // the field in first person: a mismatch is logged (rate-limited), the pick is not changed yet (game_gates.cs).
+            if (!in_battle && _fp_mode == 1 && (_fp_scan_tick % 10) == 0) gates_pick_check(actors, pick);
         }
         _fp_actor_idx = pick;
         System.Threading.Volatile.Write(ref _d7_follow_actor, pick >= 0 ? (nint)(actors + pick) : 0);   // build 7: the actor the main-thread snapshot reads
