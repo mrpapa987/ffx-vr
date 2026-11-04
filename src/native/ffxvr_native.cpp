@@ -71,6 +71,7 @@ static void diag(const char* fmt, ...);   // ffxvr_diag.log, defined below
 static void diagv(const char* fmt, ...);  // ... the same, only with diag_verbose=1 (the periodic summaries)
 static bool diag_try(const char* text);   // ... the same append, false when the log is busy on the render thread (a bt: batch keeps it)
 static FILE* diag_open_ex(bool* drop);    // the log file for one append (session start, cap), or nullptr; closed with diag_close
+static void diag_stamp(FILE* f);          // od-guard (a): the "hh:mm:ss.mmm " local-time prefix every diag line starts with
 static void diag_close(FILE* f);
 // Release prep: ffxvr_diag.log per session and capped (diag_open). g_log_verbose = ini diag_verbose (managed pushes it with
 // ffxvr_log_config before ffxvr_init): the periodic lines (the 10 s summaries, the 1 s cursor-art line, the shadow per-map
@@ -1626,6 +1627,7 @@ static DWORD WINAPI stall_watchdog(LPVOID) {
             bool drop = false;
             FILE* f = diag_open_ex(&drop);   // the session file and its cap, as every diag line
             if (f) {
+                diag_stamp(f);
                 fprintf(f, "stall #%u: no Present for %ld ms (frame %u): app+0x3A0 %d, renderer +0x1196 %d +0x1197 %d, battle_state %d, map '%s' | main thread %lu %s: eip %s, stack (FhUtil, first 16 in .text):%s\n",
                         g_stalls, static_cast<long>(now - last), g_frames, app_flag, r96, r97, bstate, map, th_tid, th ? (ctx_ok ? "" : "(no context)") : "(not known yet)", where, sl ? st : " -");
                 diag_close(f); break;
@@ -6328,14 +6330,23 @@ static FILE* diag_open() { bool drop = false; return diag_open_ex(&drop); }
 static void diag_close(FILE* f) {
     if (f == nullptr) return;
     const long cap = static_cast<long>(g_log_cap_mb) * 1048576L;
-    if (ftell(f) > cap && InterlockedCompareExchange(&g_log_state, 3, 2) == 2)
+    if (ftell(f) > cap && InterlockedCompareExchange(&g_log_state, 3, 2) == 2) {
+        diag_stamp(f);
         fprintf(f, "log: this session's cap of %ld MB is reached; nothing more is written to ffxvr_diag.log until the next start (any diagnostic on, e.g. diag_verbose=1, raises the cap to 64 MB)\n",
                 static_cast<long>(g_log_cap_mb));
+    }
     fclose(f);
+}
+/// od-guard (a): every line of ffxvr_diag.log starts with the local time, "hh:mm:ss.mmm " (GetLocalTime:
+/// cheap), so the log lines up with Fahrenheit's core.log and the module log (UTC there: compare the minutes and seconds).
+static void diag_stamp(FILE* f) {
+    SYSTEMTIME t; GetLocalTime(&t);
+    fprintf(f, "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
 }
 static void diag_va(const char* fmt, va_list ap) {
     FILE* f = diag_open();
     if (f == nullptr) return;
+    diag_stamp(f);
     vfprintf(f, fmt, ap);
     fputc('\n', f);
     diag_close(f);
@@ -6357,7 +6368,17 @@ static bool diag_try(const char* text) {
     bool drop = false;
     FILE* f = diag_open_ex(&drop);
     if (f == nullptr) return drop;
-    fputs(text, f); fputc('\n', f);
+    SYSTEMTIME t; GetLocalTime(&t);   // od-guard (a): one time for the batch, at the start of each of its lines
+    char stamp[16]; snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    for (const char* p = text; ; ) {
+        const char* nl = strchr(p, '\n');
+        fputs(stamp, f);
+        if (nl == nullptr) { fputs(p, f); break; }
+        fwrite(p, 1, static_cast<size_t>(nl - p) + 1, f);
+        p = nl + 1;
+        if (*p == 0) { diag_close(f); return true; }   // a batch that ends in a newline: no empty stamped line after it
+    }
+    fputc('\n', f);
     diag_close(f);
     return true;
 }
