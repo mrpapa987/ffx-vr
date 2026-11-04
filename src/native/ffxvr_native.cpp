@@ -796,11 +796,12 @@ static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
 }
 // The body hide: line (first person on foot, the main draw site): this frame's matched draws grouped by place (0.25 units; all the
 // parts of one character share its root), the draws refused as another actor's, the radius and its step. At most one line a
-// second, 200 a session, only on frames whose radius is over 1.5 or with a match beyond 0.75 units of the centre (the cases that
-// hid NPCs); and every 10 s, when anything was refused or the radius went over 1.5, a body hide (10 s): line (100 a session).
+// second, 200 a session, only on frames with a draw refused or a match beyond 0.75 units of the player (his drawn root when known,
+// else the centre; review SF1: not on the radius, so running alone spends nothing); and every 10 s, when anything was refused,
+// a body hide (10 s): line (100 a session).
 struct FpHideClu { float p[3]; float d; uint32_t n; };
 FpHideClu g_fph_clu[4] = {}; int g_fph_clu_n = 0; uint32_t g_fph_clu_more = 0, g_fph_matched = 0;
-bool     g_fph_frame = false; float g_fph_radius = 0.f, g_fph_match_max = 0.f, g_fph_ref_dmin = 1e30f, g_fph_ref_by = 0.f;
+bool     g_fph_frame = false; float g_fph_radius = 0.f, g_fph_match_max = 0.f, g_fph_match_pmax = 0.f, g_fph_ref_dmin = 1e30f, g_fph_ref_by = 0.f;
 uint32_t g_fph_lines = 0, g_fph_w_frames = 0, g_fph_w_ref_frames = 0, g_fph_w_refused = 0, g_fph_w_wide = 0, g_fph_w_lines = 0;
 float    g_fph_w_rmax = 0.f, g_fph_w_match_max = 0.f;
 /// One skinned draw tested by the body hide on foot (fp_hiding): counted for this frame's diagnostics.
@@ -813,6 +814,7 @@ static void fp_hide_note(const float* w, int who, const fpown::Why& y) {
     }
     if (who != 1) return;
     g_fph_matched++; if (y.d_centre > g_fph_match_max) g_fph_match_max = y.d_centre;
+    if (y.d_player > g_fph_match_pmax) g_fph_match_pmax = y.d_player;   // from the player (his drawn root when known): the trigger
     for (int i = 0; i < g_fph_clu_n; ++i) if (fpown::d2(w, g_fph_clu[i].p) < 0.25f * 0.25f) { g_fph_clu[i].n++; return; }
     if (g_fph_clu_n < 4) { FpHideClu& c = g_fph_clu[g_fph_clu_n++]; c.p[0] = w[0]; c.p[1] = w[1]; c.p[2] = w[2]; c.d = y.d_centre; c.n = 1; }
     else g_fph_clu_more++;
@@ -825,8 +827,8 @@ static void fp_hide_frame_end() {
         g_fph_w_frames++; if (g_fph_refused) { g_fph_w_ref_frames++; g_fph_w_refused += g_fph_refused; }
         if (g_fph_radius > g_fph_w_rmax) g_fph_w_rmax = g_fph_radius;
         if (g_fph_match_max > g_fph_w_match_max) g_fph_w_match_max = g_fph_match_max;
-        const bool wide = g_fph_radius > 1.5f || g_fph_match_max > 0.75f;
-        if (wide) g_fph_w_wide++;
+        if (g_fph_radius > 1.5f) g_fph_w_wide++;
+        const bool wide = g_fph_refused > 0 || g_fph_match_pmax > 0.75f;   // SF1: a refusal, or a match 0.75 from the player (an NPC whose root was not sent?)
         static ULONGLONG next = 0;
         if (wide && g_fph_lines < 200 && now >= next) {
             next = now + 1000; g_fph_lines++;
@@ -849,13 +851,13 @@ static void fp_hide_frame_end() {
         }
     }
     g_fph_frame = false; g_fph_clu_n = 0; g_fph_clu_more = 0; g_fph_matched = 0; g_fph_refused = 0;
-    g_fph_match_max = 0.f; g_fph_ref_dmin = 1e30f; g_fph_ref_by = 0.f;
+    g_fph_match_max = g_fph_match_pmax = 0.f; g_fph_ref_dmin = 1e30f; g_fph_ref_by = 0.f;
     static ULONGLONG next10 = 0;
     if (now < next10) return;
     next10 = now + 10000;
-    if (g_fph_w_frames && (g_fph_w_refused || g_fph_w_rmax > 1.5f) && g_fph_w_lines < 100) {
+    if (g_fph_w_frames && g_fph_w_refused && g_fph_w_lines < 100) {   // SF1: only when something was refused
         g_fph_w_lines++;
-        diag("body hide (10 s, first person on foot): frames %u, with NPC parts kept visible %u (draws %u) | radius over 1.5 or a match beyond 0.75 in %u frames; radius up to %.2f, matched parts up to %.2f from the centre%s",
+        diag("body hide (10 s, first person on foot): frames %u, with NPC parts kept visible %u (draws %u) | radius over 1.5 in %u frames, up to %.2f, matched parts up to %.2f from the centre%s",
              g_fph_w_frames, g_fph_w_ref_frames, g_fph_w_refused, g_fph_w_wide, g_fph_w_rmax, g_fph_w_match_max, g_fph_w_lines == 100 ? " (no more of these lines this session)" : "");
     }
     g_fph_w_frames = g_fph_w_ref_frames = g_fph_w_refused = g_fph_w_wide = 0; g_fph_w_rmax = g_fph_w_match_max = 0.f;
