@@ -34,8 +34,9 @@ inline bool mbi_readable(const Mbi& m) {
 }
 
 /// range_readable's region cache: the last N page runs VirtualQuery reported readable that lie in FFX.exe's own image (type
-/// MEM_IMAGE, allocation base = the exe's module base). Render thread only, cleared at every Present (ffxvr_begin_frame), so
-/// an entry lives one frame at most. Only the exe's image is kept because it is the one kind of region that cannot be freed
+/// MEM_IMAGE, allocation base = the exe's module base). Render thread only, cleared at every Present (ffxvr_begin_frame); an
+/// entry can outlive a frame (reads before that call, a long ring-wait stall), which is harmless: the safety is the filter,
+/// not the clear. Only the exe's image is kept because it is the one kind of region that cannot be freed
 /// mid-frame: the exe is never unloaded and its sections are never decommitted; the protection changes the mod and Fahrenheit
 /// make there (code patches) go between readable protections. Heap, mapped and other modules' regions (the game's magic_*.dll
 /// unload mid-session) are never cached: those keep the query on every read, as before.

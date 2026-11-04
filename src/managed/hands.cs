@@ -64,6 +64,7 @@ public sealed unsafe partial class FFXVRModule {
     private string _vr_hands_tap_button = "a";
     private int    _vr_hands_tap_press_ms = 100;
     private int    _tap_game_last = -1;             // the game gate bits last logged
+    private int    _tap_plan = TapPlan.k_off;       // cpu-lean (review N7): this frame's TapPlan, for F8's game field
     private int    _tap_game_logs;                  // game gate lines this session (200 at most)
     private string _tap_text_info = "";             // the text box windows as last read (F8)
     private delegate* unmanaged[Cdecl]<VrTapCfg*, int, void> _fn_hands2_tap_set;              // ABI 30: the tap's settings and the game gate
@@ -267,7 +268,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_hands2_tap_set == null) return;
         bool on = _vr_hands && _vr_hands_tap;
         long t_tap = cpu_now();
-        int plan = TapPlan.Of(_vr_hands, on, _h2_can_draw, _fp_mode);
+        int plan = TapPlan.Of(_vr_hands, on, _h2_can_draw, _fp_mode); _tap_plan = plan;
         int game = plan == TapPlan.k_full ? hands2_tap_game() : plan == TapPlan.k_battle ? hands2_battle_bit() | 0x400 : plan == TapPlan.k_none ? 0x200 : 0;
         _cpu_tap += cpu_now() - t_tap;
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
@@ -275,7 +276,7 @@ public sealed unsafe partial class FFXVRModule {
                                sens = _vr_hands_tap_sens, button = btn, game = game, press_ms = _vr_hands_tap_press_ms };
         _fn_hands2_tap_set(&t, sizeof(VrTapCfg));
         if (!on) { _tap_game_last = -1; return; }
-        if ((game & 0x600) != 0) return;   // not read this frame: no event line, the last gate read is kept (F8 shows it)
+        if ((game & 0x600) != 0) return;   // not read this frame: no event line (F8 says "not read this frame"), the last full read is kept for the next change
         if (game != _tap_game_last) {   // a change of the game gate: an event line (200 at most a session), so a test shows what the gate saw
             if (_tap_game_last >= 0 && _tap_game_logs < 200) {
                 _tap_game_logs++;
@@ -521,7 +522,7 @@ public sealed unsafe partial class FFXVRModule {
             string arm = v[2] > 0.5f && v[3] > 0.5f ? "armed (grip L + R)" : v[3] > 0.5f ? "armed (grip R)" : v[2] > 0.5f ? "armed (grip L)" : "not armed (squeeze a grip)";
             ImGui.Text(esc(I($"{arm} | push forward: L {v[15] * 100f,4:F1}  R {v[16] * 100f,4:F1} cm of {v[7] * 100f:F0} cm (the last push stays 2 s){(v[8] > 0.5f ? " | PRESSING" : "")}{(v[17] > 0.5f ? " | grips held back from the game" : "")}")));
             ImGui.TextDisabled(esc(ln));
-            ImGui.TextDisabled(esc(I($"taps: L {v[5]:F0} R {v[6]:F0}, not taps {v[9]:F0} | game: {(_vr_hands && _vr_hands_tap ? hands2_tap_game_text(_tap_game_last < 0 ? 0 : _tap_game_last) : "-")} | text boxes: {(_tap_text_info.Length > 0 ? _tap_text_info : "-")}")));
+            ImGui.TextDisabled(esc(I($"taps: L {v[5]:F0} R {v[6]:F0}, not taps {v[9]:F0} | game: {(!(_vr_hands && _vr_hands_tap) ? "-" : _tap_plan == TapPlan.k_none ? "not read this frame (hands can't show)" : _tap_plan == TapPlan.k_battle ? "not read this frame (no tap outside first person)" : hands2_tap_game_text(_tap_game_last < 0 ? 0 : _tap_game_last))} | text boxes: {(_tap_text_info.Length > 0 ? _tap_text_info : "-")}")));
         }
         ImGui.TreePop();
     }

@@ -4176,7 +4176,9 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     to the next Present). Managed reads every game bit only when the tap is on in first person, only the battle bit
     (`| 0x400`, gate shut) when the hands can be drawn otherwise, nothing (`0x200`: hidden as in battle, gate shut) when they
     cannot. The hands stay hidden in every battle. Side effect: no `hands: tap gate (game)` line from the virtual screen (the
-    sphere grid's "sphere grid" line goes; the gate is shut there anyway).
+    sphere grid's "sphere grid" line goes; the gate is shut there anyway), and F8's tap `game:` field says "not read this
+    frame (hands can't show)" there ("... (no tap outside first person)" in the other views). The first line after such a
+    stretch compares with the last full read.
   - (c) the body hide: `ffxvr_fp_self_set` returns 0 when the frame goes to the virtual screen (g_ovr_suspend: the menus,
     the sphere grid); every user of the other roots (the two body-hide draw sites and maybe_override's bone record) needs the
     override live, so nothing is walked. Elsewhere the walk runs every frame as before, but from one guarded read of the whole
@@ -4193,6 +4195,9 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     again every 30 scan ticks). Same result, cadence and tie rule; the hidden-party fallback no longer costs 48+ reads a frame.
     Assumption: the name under an unchanged pointer and chr_id does not change (the name is the model's).
   - Untouched: "keep characters drawn", the distance culls and every cull patch, the pacing (stickrep, lock release).
+- **Reading the maxima (review N1).** The `cpu:` and `perf:` lines are written inside perf_tick, so the frame that writes
+  them (two log appends) lands in the next window's `perf` and `begin_frame`: their maxima can be the log write itself,
+  not our work. The averages are not affected.
 - **ABI 38:** + ffxvr_cpu_report; ffxvr_hands2_set and ffxvr_fp_self_set return int; tap game bits 0x200 / 0x400.
 - **Reading the A/B.** The savings have no switch: the A/B is this build against bt-banner (521d237) at the same save,
   each in the grid for a minute (fps60.log PERF-002, the `sr:` line's fresh and skipped-by-us counts). On this build the

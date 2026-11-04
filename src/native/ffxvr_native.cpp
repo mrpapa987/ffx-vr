@@ -2432,7 +2432,7 @@ static uint32_t g_cpu_sr_calls = 0;       // ffxvr_safe_read calls this frame (r
 static cpu::RangeStats g_cpu_rr = {};     // this frame's VirtualQuery calls / cache hits in range_readable (render thread)
 static LONGLONG g_cpu_rr_q = 0;           // this frame's QPC ticks inside range_readable (render thread)
 // cpu-lean (a): range_readable's region cache (ffxvr_cpu.h RegionCache): the render thread's last four readable page runs of
-// FFX.exe's own image, cleared at every Present (cpu_frame_roll). Other threads, and every heap, mapped or other-module region,
+// FFX.exe's own image, cleared at every Present (cpu_frame_roll; it can outlive a frame: the safety is the image-only filter). Other threads, and every heap, mapped or other-module region,
 // query as before.
 static cpu::RegionCache<4> g_cpu_rcache;
 static uintptr_t g_cpu_exe_base = 0;
@@ -5214,7 +5214,8 @@ static void cpu_frame_roll() {
     if (g_cpu_win_t0 == 0) g_cpu_win_t0 = GetTickCount64();
     g_cpu_srn.add(g_cpu_sr_calls); g_cpu_vqn.add(g_cpu_rr.queries); g_cpu_hitn.add(g_cpu_rr.hits); g_cpu_rrms.add(cpu_ms(g_cpu_rr_q));
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
-    g_cpu_rcache.clear();   // (a): a cached page run lives one frame at most
+    g_cpu_rcache.clear();   // (a): cleared once per Present. A run can outlive a frame (render-thread reads before this call, a long
+                            // ring-wait stall, a Present without managed): harmless, the safety is the image-only filter, not the clear
 }
 /// End of ffxvr_begin_frame: its sections; the "after our hook" clock starts (ffxvr_cpu_report moves it to managed's end).
 static void cpu_frame_end(LONGLONG q0, LONGLONG q1, LONGLONG q2, LONGLONG q3, LONGLONG q4, LONGLONG wait, LONGLONG slow) {

@@ -41,7 +41,7 @@ public sealed unsafe partial class FFXVRModule {
             Actor* snap = tbl_snap(actors);
             var o = new Span<float>(buf, 48 * 3); var d = new Span<float>(dist, 48);
             if (snap != null) { var rd = new FphSnapReader(snap); n = FphWalk.Collect(ref rd, pick, c, o, d); }
-            else { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d); }
+            else if (_fn_safe_read != null) { var rd = new FphLiveReader(actors, _fn_safe_read); n = FphWalk.Collect(ref rd, pick, c, o, d); }   // (none bound: n = 0, as read() failing at slot 0 gave)
         }
         _fph_others_n = n;
         _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n);
