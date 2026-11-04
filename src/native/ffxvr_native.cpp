@@ -33,6 +33,7 @@
 #include "ffxvr_slow.h"    // od-guard: the slow-GPU guard's decisions (pure logic)
 #include "ffxvr_cpu.h"     // cpu-lean: the cpu: line's accumulators and range_readable's page rule / region cache (pure logic)
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
+#include "ffxvr_gates.h"   // gates: the tap gate's reasons from the game bits, the hands' game hide rule, the overdrive minigame tracker (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -9200,14 +9201,15 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
 // kind, calibration); the 10 s hands: line with diag_verbose only; the frame census gets HANDS lines.
 
 enum H2Why { H2_NONE = 0, H2_OFF, H2_NO_XR, H2_SUSPEND, H2_SCREEN3D, H2_BACKDROP, H2_BT, H2_DREAM, H2_FREEZE, H2_VIEW, H2_BODY,
-             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_BATTLE, H2_N };
+             H2_NO_TICK, H2_NO_PASS, H2_NO_PROJ, H2_NO_RESOLVE, H2_NO_GRIPS, H2_NO_DSV, H2_WRONG_RT, H2_NOT_PREV, H2_PUT_DOWN, H2_BATTLE, H2_MOVIE, H2_MENU, H2_N };
 static const char* const k_h2_why[H2_N] = { "", "off", "xr", "suspend", "screen3d", "backdrop", "bt", "dream", "freeze", "view", "body",
-                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down", "battle" };
+                                             "no_tick", "no_pass", "no_proj", "no_resolve", "no_grips", "no_dsv", "wrong_rt", "not_prev", "put_down", "battle", "movie", "menu" };
 static const char* const k_h2_why_long[H2_N] = { "", "off", "the headset is off", "a screen frame (FMV, menu, save screen)", "the stereo screen",
     "a painted-backdrop room", "a battle transition", "the dream filter", "the frozen view", "a view the hands are not set to show in",
     "your body is shown (fp_body_mode)", "no camera this frame", "the shader pass is not ready", "no scene projection this frame",
     "no scene resolve this frame", "no controller tracked", "no depth target at the scene resolve", "another target at the scene resolve",
-    "the first scene resolve was not last frame's scene target", "the controllers are put down", "a battle (hands are hidden in battle)" };
+    "the first scene resolve was not last frame's scene target", "the controllers are put down", "a battle (hands are hidden in battle)",
+    "a movie (the game's skippable-movie flag)", "a field menu (the game's menu flag)" };
 struct H2Stat { uint32_t frames, e1, e2, why[H2_N], no_twin_dsv, no_twin, pkt_mismatch, grip_lost[2], put_down[2], mode_drawn[4], mesh_frames; float pv_diff, pv_diff2; bool pv_done; };
 H2Stat g_h2w = {}, g_h2_last = {}, g_h2_tot = {};       // the live 10 s window, the last complete one, this on-session
 bool g_h2_last_valid = false;
@@ -9251,9 +9253,7 @@ struct VrTapCfg { int bytes, flags; float sens; int button, game, press_ms; };  
 static_assert(sizeof(VrTapCfg) == 24, "VrTapCfg: 24 bytes, as hands.cs declares it");
 VrTapCfg g_tapcfg = { static_cast<int>(sizeof(VrTapCfg)), 0, 1.f, 0x1000, 0, 100 };
 uint32_t g_tapcfg_frame = 0xFFFFFFFFu;                   // g_frames at the last ffxvr_hands2_tap_set (managed pushes every frame; older = stale)
-enum TapGate { TG_OPEN = 0, TG_OFF, TG_VIEW, TG_NO_TOUCH, TG_FOCUS, TG_PAD, TG_CHORD, TG_STALE, TG_BATTLE, TG_SPHERE, TG_SAVE, TG_TEXT, TG_BLITZ, TG_READ, TG_HIDDEN, TG_RIDING, TG_N };
-static const char* const k_tap_gate[TG_N] = { "open", "off", "not first person", "no touch sensors", "headset not focused", "VR pad off", "a chord or grab",
-    "no game state", "battle", "sphere grid", "save / load screen", "a text box", "blitzball", "game state not readable", "hands not drawn", "riding" };
+// TapGate and k_tap_gate: ffxvr_gates.h (gates: + a movie, a field menu, a choice box, no player control)
 HvTapState g_tap[2]; HvTapCfg g_tap_c;
 struct TapPoseDb { double t = 0.0; float on_s = 0.f, off_s = 0.f; bool finger_off = false, grip = false; };   // armed from the raw bits: the grip (hysteresis), the finger (debounced) (tap_sample)
 TapPoseDb g_tap_pose_db[2];
@@ -9632,7 +9632,15 @@ static int hands_hide_why() {
     // frames: managed not running) is not read as a battle.
     // cpu-lean (b): managed reads the game state only when this frame can draw the hands (ffxvr_hands2_set's return); bit 0x200
     // = nothing read: hidden as in battle (never reached when the prediction holds: an earlier rule already hid the frame).
-    if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3 && (g_tapcfg.game & 0x201)) return H2_BATTLE;
+    // gates (4 Nov): and a movie or a field menu by the game's own flags (managed's bits 0x2000 / 0x80, read with the battle bit
+    // on every frame that can draw the hands; the owner's rule: never in battle, menus or FMVs; most of those are screen frames,
+    // hidden above already).
+    if (g_tapcfg_frame != 0xFFFFFFFFu && g_frames - g_tapcfg_frame <= 3) {
+        const int gh = gates::hands_game_hide(g_tapcfg.game);
+        if (gh == 1) return H2_BATTLE;
+        if (gh == 2) return H2_MOVIE;
+        if (gh == 3) return H2_MENU;
+    }
     if (g_dream_gate) return H2_DREAM;
     if (g_ovr_freeze) return H2_FREEZE;
     if (!hands_view_ok(g_fp_mode) && !hands_view_ok(0)) return H2_VIEW;   // the exact view (first person may fall back to the seat) is checked at the draw
@@ -9688,14 +9696,13 @@ static int tap_gate_now(int mode) {
     else if (!g_vrpad_enabled) g = TG_PAD;
     else if (g_vrpad_suppress) g = TG_CHORD;
     else if (g_tapcfg_frame == 0xFFFFFFFFu || g_frames - g_tapcfg_frame > 3) g = TG_STALE;
-    else if (gm & 0x700) g = TG_READ;   // 0x100 a read failed; cpu-lean (b): 0x200 nothing read, 0x400 only the battle bit read (the gate stays shut)
-    else if (gm & 1) g = TG_BATTLE;
-    else if (gm & 2) g = TG_SPHERE;
-    else if (gm & 4) g = TG_SAVE;
-    else if (gm & 16) g = TG_BLITZ;
-    else if (gm & 32) g = TG_RIDING;   // the owner (3 Nov): you cannot touch anyone from the bird; press A. The hands move with the bird, so pushes fired by accident
-    else if ((gm & 8) && !(g_tapcfg.flags & 2)) g = TG_TEXT;
+    // The game part (ffxvr_gates.h tap_game_gate): 0x100 a read failed; cpu-lean (b): 0x200 nothing read, 0x400 only the view bits
+    // read (the gate stays shut); battle, the sphere grid, the save screen, blitzball, riding (the owner, 3 Nov: you cannot touch
+    // anyone from the bird; press A); gates (4 Nov): a movie, a field menu, a choice box (always: a confirm takes the highlighted
+    // answer), no player control (except "also advance dialogue" with a text box waiting for the confirm); a text box.
+    else g = gates::tap_game_gate(gm, (g_tapcfg.flags & 2) != 0);
     if (g != TG_OFF && mode == 1) { g_tap_w_drawn++; if (g == TG_OPEN) g_tap_w_open++; }
+    if (g == TG_CHOICE && g_tap_press != 0) tap_release("a choice box is up");   // never hold the confirm into a choice
     g_tap_gate_now = g;
     return g;
 }
