@@ -261,8 +261,9 @@ public sealed unsafe partial class FFXVRModule {
     /// 4 Fahrenheit's save / load screen (0x8CB994 not closed, or latched open), 8 a text box is up (a TOMesWinWork window of
     /// the current bank with a non-zero status), 16 blitzball (a bltz map), 32 riding (the followed actor is attached), 0x100 a read failed.
     /// gates (4 Nov, game_gates.cs, the game's own flags): 0x40 no player control, 0x80 a field menu, 0x800 a choice box, 0x1000
-    /// a text box waiting (render side), 0x2000 a movie. Native (ffxvr_gates.h tap_game_gate) shuts on any of them; a choice box
-    /// always, no control except "also advance dialogue" with a text box waiting by both 8 and 0x1000.
+    /// a line fully shown (render side: a window in state 2), 0x2000 a movie (the skippable flag with the player playing). Native
+    /// (ffxvr_gates.h tap_game_gate) shuts on any of them; a choice box always; a text box (and no control) unless "also advance
+    /// dialogue" is on and the line is fully shown (8 with 0x1000).
     /// cpu-lean (b): read only when native can use them (TapPlan): all of them when the tap is on in first person and the frame
     /// can draw the hands; the view bits (battle, a field menu, a movie: native hides the hands on them) | 0x400 when the frame
     /// can draw them otherwise; nothing (0x200) when it cannot draw them (the virtual screen: menus, the sphere grid; the stereo
@@ -295,7 +296,7 @@ public sealed unsafe partial class FFXVRModule {
         if ((g & 1) != 0) l.Add("battle"); if ((g & 2) != 0) l.Add("sphere grid"); if ((g & 4) != 0) l.Add("save / load screen");
         if ((g & 8) != 0) l.Add("a text box"); if ((g & 16) != 0) l.Add("blitzball"); if ((g & 32) != 0) l.Add("riding"); if ((g & 0x100) != 0) l.Add("not readable");
         if ((g & 0x2000) != 0) l.Add("a movie"); if ((g & 0x80) != 0) l.Add("a field menu"); if ((g & 0x800) != 0) l.Add("a choice box");
-        if ((g & 0x1000) != 0) l.Add("a text box waiting"); if ((g & 0x40) != 0) l.Add("no player control");
+        if ((g & 0x1000) != 0) l.Add("a line fully shown"); if ((g & 0x40) != 0) l.Add("no player control");
         return string.Join(", ", l);
     }
     /// <summary>The log line's render-side part: the windows shown and the choice box.</summary>
@@ -309,7 +310,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>The game gate bits (hands2_tap_push). Every read guarded (native safe_read).</summary>
     private int hands2_tap_game() {
         if (_fn_safe_read == null) return 0x100;
-        int g = hands2_view_bits() | gates_direct_bits();   // gates: battle, a field menu, a movie; no control, a choice box, a text box waiting
+        int g = hands2_view_bits() | gates_direct_bits();   // gates: battle, a field menu, a movie; no control, a choice box, a line fully shown
         if (!read(FhUtil.ptr_at<byte>(0x1685F70), out byte sg)) g |= 0x100; else if (sg != 0) g |= 2;   // Fahrenheit Globals.SphereGrid.is_open (FhUtil 0x1685F70)
         if (_save_st != 0 || _fh_menu_open) g |= 4;   // cpu-lean: push_all's read of this frame (save_screen_state)
         if (_in_blitz) g |= 16;

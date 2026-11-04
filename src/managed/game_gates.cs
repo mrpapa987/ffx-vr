@@ -8,7 +8,11 @@ namespace FFXVR;
 // exe's disassembly; no code from any of them. Module offsets (VA - 0x400000), as FhUtil.ptr_at takes them:
 //   0xF00788  dword  the player actor (Sg_GetPlayer 0x82D860 returns [0x1300788]); 0 = the player has no control
 //   0xF40824  dword  a field (TkMenu) menu is up (1 at 0x8A9D8A, 0 at 0x8A9FCB; the post-battle results too)
-//   0xD2A008  dword  a skippable movie runs (1 at 0x76EB62 / 0x76EBC0, 0 at 0x76E968 / 0x76EA9C / 0x76ECE9)
+//   0xD2A008  dword  a skippable movie was started (1 at 0x76EB62 / 0x76EBC0, 0 at 0x76E968 / 0x76E9D2 / 0x76EA9C / 0x76ECE9);
+//                    it can linger after the movie (review B1: the skippable play's wait never clears it), so it counts only
+//                    with the movie player playing, as every reader in the game pairs them (0x6D947D, 0x6DA4B3, 0x6DAC06):
+//   0x8DED3C  dword  the movie player (made at 0x6D717E, 0 at 0x6D738B); +0x6D0 byte playing (1 at 0x6D9159, 0 at 0x6D6A89,
+//                    0x6D7884, 0x6D9559). A null or unreadable player = no movie.
 //   0x840E28  dword  the movie id (-1 none; the image's value is -1), F8 only
 //   0x85A03C  byte   a message window reached state 2 (0x8B6B70); its image value is 0xFF, so it counts only with a window
 //                    that is open and shown in the block below
@@ -19,6 +23,7 @@ namespace FFXVR;
 public sealed unsafe partial class FFXVRModule {
 
     private uint   _gs_player, _gs_menu, _gs_movie;   // the last direct reads (F8)
+    private int    _gs_movie_play = -1;               // the movie player's playing byte (-1: not read: no flag, no player, unreadable)
     private byte   _gs_text_byte;
     private GameGates.Text _gs_text;                  // the window / choice scan last read
     private bool   _gs_have;                          // the direct reads ran at least once
@@ -34,12 +39,18 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     /// <summary>The view bits (battle, a field menu, a movie): read on every frame that can draw the hands (TapPlan k_battle
-    /// and k_full); native hides the hands on any of them. 0x100: a read failed.</summary>
+    /// and k_full); native hides the hands in battle and menus, and shuts the tap on all three. 0x100: a read failed. The
+    /// movie bit needs the skippable flag AND the player playing (review B1); the player is read only when the flag is set.</summary>
     private int hands2_view_bits() {
         if (_fn_safe_read == null) return 0x100;
         int g = hands2_battle_bit();
         if (!read(FhUtil.ptr_at<uint>(GameGates.k_menu), out uint menu)) g |= 0x100; else { _gs_menu = menu; if (menu != 0) g |= 0x80; }
-        if (!read(FhUtil.ptr_at<uint>(GameGates.k_movie_skip), out uint mv)) g |= 0x100; else { _gs_movie = mv; if (mv != 0) g |= 0x2000; }
+        if (!read(FhUtil.ptr_at<uint>(GameGates.k_movie_skip), out uint mv)) g |= 0x100;
+        else {
+            _gs_movie = mv; _gs_movie_play = -1;
+            if (mv != 0 && read(FhUtil.ptr_at<uint>(GameGates.k_movie_player), out uint mp) && mp != 0 && read((byte*)(nint)mp + GameGates.k_movie_playing, out byte pl)) _gs_movie_play = pl;
+            if (GameGates.Movie(mv, _gs_movie_play)) g |= 0x2000;
+        }
         return g;
     }
 
@@ -69,8 +80,8 @@ public sealed unsafe partial class FFXVRModule {
         long d = (long)player - (long)(nint)actors; int gi = d >= 0 && d % sizeof(Actor) == 0 && d / sizeof(Actor) < 48 ? (int)(d / sizeof(Actor)) : -1;
         string gn = gi >= 0 && read(actors + gi, out Actor ga) ? I($"actor {gi} '{actor_name(ga.chr_name)}'") : I($"0x{player:X8} (not in the actor table)");
         string m = I($"first person: the follow pick ({(pick >= 0 ? _fp_how : "none")}) is not the game's player actor ({gn}, [0x1300788]) on map {map_name()}: the pick is kept (a diagnostic; checks {_gs_pick.checks}, agree {_gs_pick.agree}, differ {_gs_pick.mismatch}, no control {_gs_pick.no_control}){(_gs_pick.lines == PickCheck.k_lines_max ? " (no more of these lines this session)" : "")}");
-        _gs_pick_last = m;
-        _logger.Info(m); d7_log(m);
+        _gs_pick_last = m;   // F8 shows it in every profile
+        if (diag_any()) { _logger.Info(m); d7_log(m); }   // review N5: a pure diagnostic, logged only with a diagnostic key on
     }
 
     /// <summary>F8 (the gestures readout): the direct gates as last read, and the movie id read now (UI only).</summary>
@@ -79,7 +90,7 @@ public sealed unsafe partial class FFXVRModule {
         int movie_id = 0; bool mid = read(FhUtil.ptr_at<int>(GameGates.k_movie_id), out movie_id);
         var sb = new System.Text.StringBuilder();
         sb.Append(I($"direct gates: player actor {(_gs_player_ok ? (_gs_player != 0 ? I($"0x{_gs_player:X8} (control)") : "0 (no control)") : "not readable")}"));
-        sb.Append(I($" | field menu {_gs_menu} | movie skippable {_gs_movie}, id {(mid ? movie_id.ToString(CI) : "?")}"));
+        sb.Append(I($" | field menu {_gs_menu} | movie skippable {_gs_movie}, playing {(_gs_movie_play < 0 ? "-" : _gs_movie_play.ToString(CI))}, id {(mid ? movie_id.ToString(CI) : "?")}"));
         sb.Append(I($" | text byte 0x{_gs_text_byte:X2}, windows open 0x{_gs_text.open:X2} shown 0x{_gs_text.shown:X2}"));
         sb.Append(_gs_text.choice_slot >= 0 ? I($" | CHOICE BOX: slot {_gs_text.choice_slot}, row {_gs_text.choice_row}") : " | no choice box");
         if (_gs_text.odd != 0) sb.Append(I($" | pointers outside the pools 0x{_gs_text.odd:X4}"));
@@ -91,6 +102,7 @@ public sealed unsafe partial class FFXVRModule {
 /// <summary>The direct gates' pure part (offsets, the window / cursor scan, the bits). Kept free of game types for the scratch test.</summary>
 internal static class GameGates {
     public const int k_player = 0xF00788, k_menu = 0xF40824, k_movie_skip = 0xD2A008, k_movie_id = 0x840E28, k_text_wait = 0x85A03C;
+    public const int k_movie_player = 0x8DED3C, k_movie_playing = 0x6D0;   // VA 0xCDED3C: the movie player; +0x6D0 its playing byte
     public const int k_blk = 0x14663F0, k_blk_len = 0x26C0;           // VA 0x18663F0 .. 0x1868AB0
     public const int k_win_tab = 0x1300, k_cur_lo = 0x1320, k_cur_tab = 0x26A0;   // in the block: the window pointers, the first cursor, the cursor pointers
     public const int k_win_len = 0x130, k_cur_len = 0x138;
@@ -127,8 +139,12 @@ internal static class GameGates {
         }
         return t;
     }
-    /// <summary>The direct bits: 0x40 no player control (read and 0), 0x80 a field menu, 0x2000 a movie, 0x800 a choice box,
-    /// 0x1000 a text box waiting (the byte set and a window open and shown; the byte alone is 0xFF from the start).</summary>
+    /// <summary>A movie for the gate: the skippable flag set and the movie player playing (playing: its +0x6D0 byte, -1 when
+    /// not read: a null or unreadable player). The flag alone never counts (review B1: it lingers after the movie).</summary>
+    public static bool Movie(uint flag, int playing) => flag != 0 && playing > 0;
+    /// <summary>The direct bits: 0x40 no player control (read and 0), 0x80 a field menu, 0x2000 a movie (the caller's Movie()),
+    /// 0x800 a choice box, 0x1000 a line fully shown on the render side (a window open in state 2, the typewriter done, with
+    /// the byte set; the byte alone is 0xFF from the start and is overwritten per window, so it adds little).</summary>
     public static int Bits(uint player, bool player_ok, uint menu, uint movie, byte text_byte, in Text t) {
         int g = 0;
         if (player_ok && player == 0) g |= 0x40;
