@@ -4091,3 +4091,42 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   between; stale roots off by a step; the 30 fps margin, its cap and the re-pick reset; N1 (a model swap in the same slot), N2
   (the phantom centre), N3 (and its documented limit). sf1_test drives the extracted diagnostics: ten minutes of running write
   no line; refusals write about one a second and the 10 s lines. Not verified: MSVC build, the headset.
+
+## Battle-start banners in double (4 Nov 2026)
+
+- **What the owner saw.** In battles that start with a message ("Preemptive Strike!", "Ambushed!") the 2D UI is not on the
+  VR panel yet: the banner is doubled, impossible to fuse.
+- **The mechanism (EXE and log; high confidence).** The banner is drawn at battle_state 0x16, the end of the load chain,
+  where the battle is already drawn with its camera. MsBattle's state machine (0x783020) sets state 0x15, registers the cue
+  from Btl.ambush_state [0x112C9DC] (1 -> MsMessageCueRegist type 2 PREEMPTIVE, 2 -> type 3 AMBUSH; 0x783569), sets 0x16
+  (0x7835AC), and leaves 0x16 for 1 only once the cue slot [0x112C910] is clear (0x7835B3). The battle main (0x790C10)
+  processes the cue in the same tick for any non-zero state (0x790D83 -> 0x79CDF0 -> TOBtlDrawFirstStrike*MessageWindow
+  0x8934F0 / 0x8934D0), and the battle UI draw puts the message window in the UI pass. BT-3 counted 0x16 as the load chain,
+  so the transition window stayed open through it, with no UI split (bt_no_split): the UI pass went into both eye images.
+  The doubling was there in every battle (4 Nov log: 60-231 frames per battle at state 22 with `cam3d=329 dclr=1
+  uiframe=0`), but only the banner is visible there: the command, CTB and party windows come at state 1.
+- **The glass break overlaps it.** State 22 starts while the shatter's last pieces still fly (23-45 frames with shard draws
+  in 11 of 13 random windows), and the handle stays set ~50 frames after the last shard. So "AFTER at 0x16" alone would fix
+  little: in most battles the banner is up in the shatter phase.
+- **BT-B-1, the fix (native, bt_tick).** `bt_intro_live`: an encounter window in SHATTER or AFTER counts state 0x16 with a
+  3D camera (BT-3's 2 frames) as live when the glass break has stopped drawing: AFTER with handle 0 (the effect completed),
+  or real shards seen this window (`g_bt_real_seen`) and 6 still Presents in a row (`g_bt_still_n`: no shard draw, no
+  capture of capturedFrame's size, +5 clear), the handle's tail set or not. Real shards are required for the second case so
+  a window whose shard detection failed keeps the old behaviour. ARMED (a haze, BT-H-1) and every other state are unchanged.
+  After such an end the re-arm block (`every signal clear`) waits for the handle's tail, as after BT-H-1. In mode 2 the freeze
+  and the AFTER hold (the pinned frame over the load black) also end at the intro instead of at state 1. No ABI change.
+- **Effect (replayed on the 4 Nov log).** Doubled frames at state 22 go from 60-231 per battle to 2-52; e.g. window 5 ends at
+  f=26520 instead of 26703. What is left is the 6 still + 2 live frames, plus the frames where the glass still flies.
+- **Not fixed: the banner over the flying glass (0.4-0.75 s).** While shards are drawn, the shatter's fade pass has the UI
+  pass's signature (battle-transition.md 2.2), so the split stays off. A follow-up could open the UI pass at a depth clear
+  that comes after this frame's shard draws (the second clear: `dclr=2` on those frames). That changes the UI detector
+  inside the glass break, so it is not part of this fix.
+- **Diagnostics.** `bt: f=` lines end with `amb=N cue=M` (ambush_state; the cue slot, non-zero while a battle message is up;
+  -99 = not read; the AFTER-phase thinning never hides a cue change). The new release: `bt: frame N: shatter -> idle: the
+  battle intro in the shatter phase (battle_state 22 with a 3D camera, 2 frames; no BrokenScreen drawing for K Presents,
+  handle H; ambush_state A, message cue up|none)`. The summary's window part gets `ambush_state N at the end` (`1
+  (preemptive)`, `2 (ambushed)`).
+- **Tests (container):** bt_intro_test (bt_intro_live and bt_running_state extracted verbatim): every state and phase, the
+  handle's tail, a replay of window 5 (release at 26520), no shards detected (26570, AFTER with handle 0), a stray
+  capture-sampling draw, a capture candidate every frame, no camera, a non-encounter window. Not verified: MSVC build, the
+  headset, which logged battles had a banner.
