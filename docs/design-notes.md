@@ -3889,7 +3889,8 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
   maps (linear per pixel; only the fit's sample set changes). A test checks the generator against a batch
   re-statement of upstream (with copies of upstream's own fit and interpolation helpers) on 19 lengths (1-333 frames) to
   2e-5; another test checks that .fvd frame i comes from video frame i.
-- **Normalisation**: `q = 255 * clamp((d - lo) / (hi - lo))`, 0 far ... 255 near (relative disparity), lo/hi = p2/p98
+- **Normalisation**: `q = 255 * clamp((d - lo) / (hi - lo))` rounded to nearest, with a floor on `hi - lo` for flat
+  frames (the exact rule: FORMAT.md, "The values"), 0 far ... 255 near (relative disparity), lo/hi = p2/p98
   EMA-smoothed (alpha 0.9 on the past) within a shot and reset at a cut. Cut = mean absolute luma change of 64x36
   thumbnails >= 28 levels and >= 3x the recent average (+1), so fades and pans do not flag every frame. Raw p2/p98
   and the lo/hi used go into the index; the runtime picks strength and pivot itself.
@@ -3909,20 +3910,25 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
   with the same source and settings hash and the .fvd header agrees; `--force` redoes it. A crash leaves only a .part,
   deleted on the next attempt. Out of VRAM: a plain message suggesting `-InputSize 392`, exit 3.
 - **Pins**: VDA code at 4f5ae23 (GitHub zip; the 17 imported files + LICENSE checked by SHA-256, and no unexpected
-  .py file allowed in the imported packages), Small weights only
+  .py file allowed in the imported packages: the known list is `git ls-tree -r 4f5ae23 -- video_depth_anything utils`,
+  recorded in vda_model.py and tested against VDA_FILES; verify passes on a clone of that commit), Small weights only
   (Base and Large are CC-BY-NC-4.0 and are not offered), torch 2.6.0 / torchvision 0.21.0 (cu124 index), numpy 2.1.3,
   opencv-python-headless 4.10.0.84, einops 0.8.0, easydict 1.13, tqdm 4.67.1; no xformers. The weights' SHA-256 is not
   known yet (Hugging Face was unreachable while writing): recorded on the first download and checked on later runs.
   The launcher also records what Hugging Face says about the file (a HEAD request without redirect: X-Repo-Commit,
-  X-Linked-Etag = its SHA-256, X-Linked-Size, ETag, Location) and refuses a download that disagrees with them; while
-  unpinned it prints a block on every run asking the owner to send those lines. `$WeightsSha256` (and a `resolve/<commit>`
-  URL) is the TODO to pin.
+  X-Linked-Etag, X-Linked-Size, ETag, Location). Of those, only two are compared: a download whose SHA-256 differs from
+  X-Linked-Etag (when that is a 64-digit hash) or whose size differs from X-Linked-Size is refused; the others are only
+  recorded. A re-download that differs from the hash this PC recorded the first time is refused too (deleting the
+  `.sha256` record is the explicit way to accept a changed file). While unpinned it prints a block on every run asking
+  the owner to send those lines. `$WeightsSha256` (and a `resolve/<commit>` URL) is the TODO to pin.
 - **Protection** (like the private hand packs): PRIVATE-do-not-share.txt in `fmvdepth\` and `fmvdepth\preview\`;
   package-release fails on any fmvdepth path, .fvd, .part, video or preview; install-mod never deletes it (-Purge keeps
   it and names it, and still refuses when the mod folder itself is a junction); build-mod reports it separately; run-ffx
   does not collect it (prefix from the normalised game path, plus a path-component test); .gitignore (`**/fmvdepth/`
   except `tools/fmvdepth/`, `*.fvd`, previews); the converter refuses a git checkout and the game's data folder as
-  output, junctions and symlinks resolved, and the launcher asks it (`--check-out`) before its write test. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
+  output, by the literal path and with junctions and symlinks resolved; the launcher pre-checks the literal cases in
+  PowerShell before the install and asks the converter (`--check-out`) before its write test. A video name that is
+  not `[A-Za-z0-9_]+.webm` (or is a Windows device name) is skipped with a warning. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
 - **For the runtime later** (static analysis of FFX.exe, not yet confirmed in game): manager `*(void**)0xCDED3C`
   (FhUtil 0x8DED3C); playing = byte mgr+0x6D2; file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, mixed case as in
   FFX_VideoList.txt, "" when idle; the .fvd's src_name is lower-case: compare case-insensitively); id =

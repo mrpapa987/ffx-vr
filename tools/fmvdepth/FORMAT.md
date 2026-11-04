@@ -117,7 +117,8 @@ model's raw range moved (e.g. to damp a frame whose range collapsed).
 reduction of the captured video image) if the decoder's frame counter ever disagrees with the video. Exactly:
 
 1. the video frame as RGB at the model's input size (`input_w x input_h`; ffmpeg bicubic, BT.601 limited range in);
-2. every second pixel in both directions (`rgb[::2, ::2]`);
+2. every second pixel in both directions (`rgb[::2, ::2]`; the converter does this whenever the input is at least 144
+   lines high, which it always is at input sizes 392 and 518);
 3. luma `Y = 0.299 R + 0.587 G + 0.114 B` (float);
 4. box-filtered to 64x36 (48x36 for 4:3); output pixel `j` of an axis of n inputs and m outputs averages inputs
    `floor(j*n/m)` up to (not including) `floor((j+1)*n/m)`;
@@ -144,8 +145,10 @@ At open (`S` = the file size):
 
 Per frame, before reading its payload:
 6. `offset >= header_size` and `offset + size <= index_offset`;
-7. `0 < size <= width * height`, and `size == width * height` exactly when FF_STORED is set or the codec is 0. So one
-   buffer of `width * height` bytes per open file holds any payload, and one more holds the decoded frame;
+7. `0 < size <= width * height`; when FF_STORED is set or the codec is 0, `size == width * height`; otherwise
+   (compressed) `size < width * height` - the writer guarantees it, since a frame that does not shrink is stored. A
+   reader may accept a compressed `size == width * height` too: it is never written. So one buffer of
+   `width * height` bytes per open file holds any payload, and one more holds the decoded frame;
 8. after decompression: exactly `width * height` bytes came out.
 
 ## Versions
