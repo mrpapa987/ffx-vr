@@ -67,11 +67,16 @@ foreach ($d in (Join-Path $game 'fahrenheit\logs'), (Join-Path $game 'fahrenheit
     if (Test-Path -LiteralPath $d) { $found += @(Get-ChildItem -LiteralPath $d -File -Recurse -ErrorAction SilentlyContinue) }
 }
 # Never fmvdepth\ (FMV depth and its previews, made from the game's videos: private; convert.log is not a game log).
-$depthPfx = [IO.Path]::Combine($game, 'fahrenheit', 'mods', 'ffxvr', $FfxvrFmvDepthDir) + [IO.Path]::DirectorySeparatorChar
+# The prefix comes from the normalised game path (Get-Item's FullName, like the FullName of the files found above; a
+# FFXVR_GAME_DIR with forward slashes or '..' would not match otherwise), compared case-insensitively and ending in '\'
+# so fmvdepth2\ is not caught. A path component named fmvdepth (an 8.3 short game path, say) is excluded as well.
+$gameFull = (Get-Item -LiteralPath $game).FullName.TrimEnd('\')
+$depthPfx = $gameFull + '\fahrenheit\mods\ffxvr\' + $FfxvrFmvDepthDir + '\'
 $found = @($found | Where-Object { $ext -contains $_.Extension.ToLower() -and $_.LastWriteTime -ge $startTime -and
-                                   -not $_.FullName.StartsWith($depthPfx, [StringComparison]::OrdinalIgnoreCase) })
+                                   -not $_.FullName.StartsWith($depthPfx, [StringComparison]::OrdinalIgnoreCase) -and
+                                   -not (@($_.FullName -split '\\') -contains $FfxvrFmvDepthDir) })
 
-$gameLen = (Get-Item -LiteralPath $game).FullName.TrimEnd('\').Length     # normalised, like FullName below
+$gameLen = $gameFull.Length     # normalised, like FullName below
 foreach ($f in $found) {
     $rel = $f.FullName.Substring($gameLen).TrimStart('\')       # e.g. fahrenheit\mods\ffxvr\img_final_game.bmp
     $to  = Join-Path $collected $rel

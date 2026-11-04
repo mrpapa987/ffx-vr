@@ -75,7 +75,10 @@ function Find-ReparsePoint([string]$Dir) {
 }
 
 # FMV depth (tools\paths.ps1 $FfxvrFmvDepthDir): made on this PC from the game's videos, private. Never deleted here.
-$depthDir = Join-Path $dest $FfxvrFmvDepthDir
+# The path is normalised (Get-Item's FullName, as the FullName of the files Get-ChildItem lists) so Test-InDepth matches
+# with any spelling of the game path (FFXVR_GAME_DIR with forward slashes, '..').
+$destFull = if (Test-Path -LiteralPath $dest) { (Get-Item -LiteralPath $dest -Force).FullName.TrimEnd('\') } else { $dest }
+$depthDir = $destFull + '\' + $FfxvrFmvDepthDir
 function Get-DepthNote {
     if (-not (Test-Path -LiteralPath $depthDir)) { return $null }
     $f = @(Get-ChildItem -LiteralPath $depthDir -Recurse -File -Force -ErrorAction SilentlyContinue)
@@ -87,7 +90,15 @@ function Test-InDepth([string]$Path) { $Path.StartsWith($depthDir + [IO.Path]::D
 if ($Uninstall) {
     Assert-FfxvrWritable $mods
     if ($Purge -and (Test-Path -LiteralPath $dest)) {
-        # fmvdepth\ is kept, so it is not walked (it may well be a junction to another drive)
+        # The mod folder itself first: Windows PowerShell 5.1's Remove-Item -Recurse on a junction deletes its target's
+        # contents (review B1: this check had been lost when fmvdepth\ was exempted).
+        if ((Get-Item -LiteralPath $dest -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Write-Host "  $dest is a junction or link: -Purge does not delete through it. Nothing was changed."
+            Write-Host '  Remove the link yourself, or uninstall without -Purge.'
+            exit 1
+        }
+        # Then everything in it except fmvdepth\, which is kept, so it is not walked (it may well be a junction to
+        # another drive)
         foreach ($c in @(Get-ChildItem -LiteralPath $dest -Force | Where-Object { $_.Name -ne $FfxvrFmvDepthDir })) {
             $rp = Find-ReparsePoint $c.FullName
             if ($rp) {
