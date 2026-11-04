@@ -6,11 +6,18 @@ namespace FFXVR;
 // in Stopwatch sections, sent once a frame to native (ffxvr_cpu_report, ABI 38), which prints the window's average and maximum
 // on the cpu: line with every perf: line. Stopwatch.GetTimestamp only (QPC); no allocation, nothing logged here. Always on.
 // The order of the values is native's cpu_line::M_*.
+// grid-timer: two settings ride after the timings (native reads v[M_N], v[M_N + 1]; same export, ABI 38):
+//   timer_fix (ini, default 1): the process opts out of Windows' timer-resolution and execution-speed throttling and holds
+//     timeBeginPeriod(1) for the session (FFX-60fps' PERF-001 asks for the same; this keeps it with PERF-001 off or absent).
+//     1 -> 0 at run time releases our 1 ms request only; the opt-out stays until the game restarts.
+//   limiter_probe (ini, default 1): the main loop's frame call and the limiter's Sleep are timed for the cpu: line (two
+//     redirects in FFX.exe, checked against its bytes; installed once, never removed; 0 later stops the recording).
 public sealed unsafe partial class FFXVRModule {
 
     private delegate* unmanaged[Cdecl]<float*, int, void> _fn_cpu_report;   // ABI 38
 
-    private const int k_cpu_n = 15;
+    private const int k_cpu_n = 15, k_cpu_settings = 2;   // the timings, then timer_fix and limiter_probe
+    private bool _timer_fix = true, _limiter_probe = true;   // ini timer_fix, limiter_probe (grid-timer)
     // the frame's stamps (render thread)
     private long _cpu_t_top, _cpu_t_bf0, _cpu_t_bf1, _cpu_t_win0, _cpu_t_win1, _cpu_t_push0, _cpu_t_push1, _cpu_t_end;
     // accumulated inside push_all (a section can run more than once a frame: body_hide_push has three call sites)
@@ -36,7 +43,7 @@ public sealed unsafe partial class FFXVRModule {
         long end = cpu_now();
         int g0 = GC.CollectionCount(0), g1 = GC.CollectionCount(1), g2 = GC.CollectionCount(2);
         if (_cpu_gc0 < 0) { _cpu_gc0 = g0; _cpu_gc1 = g1; _cpu_gc2 = g2; }
-        float* v = stackalloc float[k_cpu_n];
+        float* v = stackalloc float[k_cpu_n + k_cpu_settings];
         v[0] = cpu_ms(_cpu_t_top, _cpu_t_bf0);                                       // before begin_frame
         v[1] = cpu_ms(_cpu_t_bf0, _cpu_t_bf1);                                       // the begin_frame call (native's own sections are on the line too)
         v[2] = cpu_ms(_cpu_t_bf1, _cpu_t_win0 != 0 ? _cpu_t_win0 : _cpu_t_push0 != 0 ? _cpu_t_push0 : _cpu_t_end);   // hotkeys, hover, pick poll, gestures
@@ -51,6 +58,14 @@ public sealed unsafe partial class FFXVRModule {
         v[11] = cpu_ms(_cpu_t_top, end);                                             // all of render_imgui
         v[12] = g0 - _cpu_gc0; v[13] = g1 - _cpu_gc1; v[14] = g2 - _cpu_gc2;
         _cpu_gc0 = g0; _cpu_gc1 = g1; _cpu_gc2 = g2;
-        _fn_cpu_report(v, k_cpu_n);
+        v[15] = _timer_fix ? 1f : 0f; v[16] = _limiter_probe ? 1f : 0f;   // grid-timer: native acts on a change only
+        _fn_cpu_report(v, k_cpu_n + k_cpu_settings);
+    }
+
+    /// <summary>Debug (F8): the two grid-timer settings; their numbers are on the cpu: line.</summary>
+    private void timer_debug_ui() {
+        ImGui.Checkbox("1 ms timer, no Windows timer throttling (timer_fix)##tfix", ref _timer_fix); ImGui.SameLine();
+        ImGui.Checkbox("time the game's frame limiter (limiter_probe)##lprobe", ref _limiter_probe);
+        ImGui.SameLine(); ImGui.TextDisabled("(cpu: line in ffxvr_diag.log)");
     }
 }

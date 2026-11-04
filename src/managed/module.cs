@@ -985,6 +985,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "haptics_gain":      pf(k, v, ref _haptics_gain, 0f, 1f); break;
                 case "slow_guard":        pb(k, v, ref _slow_guard); break;               // the slow-GPU guard (default 1; slow_guard.cs)
                 case "slow_guard_restart": pb(k, v, ref _slow_guard_restart); break;      // ... its last step, the VR session restart (default 1)
+                case "timer_fix":         pb(k, v, ref _timer_fix); break;                // grid-timer: 1 ms timer + no timer throttling (default 1; cpu_report.cs)
+                case "limiter_probe":     pb(k, v, ref _limiter_probe); break;            // grid-timer: time the game's frame limiter for the cpu: line (default 1)
                 case "imgui_layer":       pb(k, v, ref _imgui_layer); break;
                 case "fh_menu_on_screen": pb(k, v, ref _fh_menu_on_screen); break;            // Fahrenheit's save screen on the virtual screen (default 1; applies at once)
                 case "fh_dpi_fix":        pb(k, v, ref _fh_dpi_fix); break;                   // FH-1: Fahrenheit's ImGui text ignores the Windows display scale, as Fahrenheit #376 (default 1; applies at once)
@@ -1342,6 +1344,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"haptics_gain={_haptics_gain.ToString("0.##", ci)}\n" +
             $"slow_guard={(_slow_guard ? 1 : 0)}\n" +
             $"slow_guard_restart={(_slow_guard_restart ? 1 : 0)}\n" +
+            $"timer_fix={(_timer_fix ? 1 : 0)}\n" +
+            $"limiter_probe={(_limiter_probe ? 1 : 0)}\n" +
             $"imgui_layer={(_imgui_layer ? 1 : 0)}\n" +
             $"fh_menu_on_screen={(_fh_menu_on_screen ? 1 : 0)}\n" +
             $"fh_dpi_fix={(_fh_dpi_fix ? 1 : 0)}\n" +
@@ -1646,6 +1650,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_counter != null)
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
         slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
+        timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
 
         if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
             float* c = stackalloc float[48];
