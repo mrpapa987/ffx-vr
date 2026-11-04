@@ -10157,13 +10157,23 @@ static bool sg_call_patch(uintptr_t site_gva, const uint8_t* expect, const void*
     return true;
 }
 static bool sg_bytes(uintptr_t gva, const uint8_t* expect, size_t n) { const uint8_t* at = gva_to_rt(gva); return at && memcmp(at, expect, n) == 0; }
+/// The pool scan's prologue (0x6CC980) is `push ebp; mov ebp,esp; push esi; mov esi,[0xCDEC24]`: bytes 6..9 are an absolute
+/// address, which the loader rebases with the image. Compared as is, it never matched on a relocated FFX.exe, so the guard was
+/// never installed (the owner's logs since the shadow round: "guard NOT installed (the bytes were not as expected)"; the
+/// gate's bytes hold only relative calls, so it was). Compare the six opcode bytes, then the operand rebased like gva_to_rt.
+static bool sg_get_entry_ok() {
+    const uint8_t* at = gva_to_rt(sg::k_get); const uint8_t* base = reinterpret_cast<const uint8_t*>(GetModuleHandleA(nullptr));
+    if (!at || !base || memcmp(at, sg::k_get_entry, 6) != 0) return false;
+    uint32_t want_gva = 0, got = 0; memcpy(&want_gva, sg::k_get_entry + 6, 4); memcpy(&got, at + 6, 4);
+    return got == static_cast<uint32_t>(reinterpret_cast<uintptr_t>(base) + (want_gva - k_exe_gva_base));
+}
 /// Installs the guard and the budget gate once. Call it on the game's main thread only (managed: the job-join hook, after
 /// its main-thread filter): the main thread runs these sites every frame, so a write from another thread could be fetched
 /// torn (the gate's rel32 at 0x82F4BF straddles a cache line). Returns g_sg_state.
 extern "C" __declspec(dllexport) int ffxvr_shadow_guard_install() {
     if (g_sg_state & 0x100) return g_sg_state;
     g_sg_state |= 0x100;
-    const bool get_ok = sg_bytes(sg::k_get, sg::k_get_entry, sizeof(sg::k_get_entry));
+    const bool get_ok = sg_get_entry_ok();
     const bool a_ok = get_ok && sg_bytes(sg::k_site_a, sg::k_call_a, 5) && sg_bytes(sg::k_tail_a_va, sg::k_tail_a, sizeof(sg::k_tail_a)) && sg_bytes(sg::k_def_a_va, sg::k_def_a, sizeof(sg::k_def_a));
     const bool b_ok = get_ok && sg_bytes(sg::k_site_b, sg::k_call_b, 5) && sg_bytes(sg::k_tail_b_va, sg::k_tail_b, sizeof(sg::k_tail_b)) && sg_bytes(sg::k_def_b_va, sg::k_def_b, sizeof(sg::k_def_b))
                       && sg_bytes(sg::k_def_b2_va, sg::k_def_b2, sizeof(sg::k_def_b2));
