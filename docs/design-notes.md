@@ -4450,7 +4450,10 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     to 256 bytes go through a bounce buffer so a failed one leaves the destination untouched (some managed callers ignore
     the result); the larger ones all check it. `range_readable` (whose callers read with plain loads) and the other
     threads' reads are unchanged, and `fast_reads=0` is the old path exactly. The setting rides on ffxvr_cpu_report as a
-    third value after timer_fix and limiter_probe (same export, ABI 40).
+    third value after timer_fix and limiter_probe (same export, ABI 40). Review SF1: native starts with it off and managed
+    sends the three settings alone (`ffxvr_cpu_report(v, -3)`; natives before vq-lean ignore n <= 0) right after the native
+    loads in init, before any frame reads, and on any frame whose report is not sent, so `fast_reads=0` holds from the
+    first read and does not depend on render_imgui finishing. An older ffxvr.dll never sends it: the old path.
   - **Why not SEH.** Under alpha12's stage 0 an access violation is fatal even inside `__try` (section 2 of
     exe-analysis.md); upstream's #388 passes first-chance exceptions on but writes a minidump and two stack walks for each
     one above 0xC0000000 first. A vectored handler comes after the debugger too. Faulting on purpose stays out.
@@ -4458,7 +4461,7 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     zone changes and battle starts and ends), so a block can be freed in the middle of our frame; a kept run copied with
     memcpy would then fault. The kernel's copy is what makes a stale entry harmless. It is also stronger than the old path
     on a miss: VirtualQuery then memcpy had a (microsecond) window of its own, which the kernel copy closes.
-  - **The one residual.** The kernel's copy consumes a guard page as a user-mode read would (the guard bit is cleared; the
+  - **The one residual (review N1: left as documented).** The kernel's copy consumes a guard page as a user-mode read would (the guard bit is cleared; the
     copy fails, no exception). A kept run was not a guard page when queried; it can become one within the frame only by
     VirtualProtect(PAGE_GUARD) on committed memory (a debugger's memory breakpoint) or by a free and a new thread stack
     reserved at the same address in the same frame. FFX.exe imports no VirtualProtect, and its seven VirtualAlloc calls ask
@@ -4466,8 +4469,14 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     VirtualProtect scope is for code patches); the CLR uses guard pages for thread stacks only. Drivers were not checked. A stack's own growth never turns committed pages into guard pages. This build cannot notice new threads
     (DllMain disables thread notifications), hence the 50 ms bound as well as the Present.
   - **The cpu: line.** `VirtualQuery` and `cache hits` keep their meaning (all queries, base probes included; reads with no
-    query); `range_readable` is the walk's time without the copies; new: `fast_reads on: kernel copies N/M a frame x/y ms,
-    F failed, base probes N/M` (or `fast_reads off`). Failed copies above zero outside loads would be worth a look.
+    query); `range_readable` is the walk's time alone, without either copy (review N8); new: `fast_reads on: kernel copies
+    N/M a frame x/y ms (over 4 KB n/m, x/y ms), F failed, base probes N/M` (or `fast_reads off`). Failed copies above zero
+    outside loads would be worth a look.
+  - **The actor table snapshot (review N7).** body_hide's one 104 KB read a frame (Globals.actors, likely heap) is a kernel
+    copy above the kernel's small-copy size, so it goes through its locked-page path and may cost more than the small
+    ones; the `over 4 KB` figures show it alone. Routing it to a fresh query plus memcpy instead was not done: that query
+    is the expensive kind in a large block (100+ us measured) and brings back the old path's window for the largest read.
+    If the figure turns out large, the choice can be made from the owner's numbers.
   - **Expected.** A scratch model of the battle shape (three 112 MB blocks, 70 heap and 25 exe reads a frame in random
     order): 73.6 -> 9.5 queries a frame and 87% fewer pages scanned. The kernel copy costs a system call (a few us under
     WoW64) for each heap read, about 0.1-0.3 ms a frame at 70 reads: measured on the line. Option (c), fewer reads (bulk
