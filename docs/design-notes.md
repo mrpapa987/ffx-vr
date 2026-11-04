@@ -3951,7 +3951,7 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
 ## Slow-GPU guard and overdrive freeze diagnostics (3 Nov 2026)
 
 Branch `od-guard` (ABI 36). Research: overdrive-freeze.md (scratchpad). Revised after review (od-guard-review.md: B1-B3,
-SF1-SF3, N1-N4, N6-N8).
+SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
 
 - **What happened.** At Tidus's Slice & Dice (the timing gauge) the headset view fell to about 15 fps and never came
   back until the game was quit: the GPU span (the game's first clear to our Present hook, GPU timestamps) went from ~12
@@ -3965,10 +3965,16 @@ SF1-SF3, N1-N4, N6-N8).
   our span that our counters do not see. The cause is undetermined; this round adds a guard and the data to tell.
 - **The guard** (ffxvr_slow.h, the decisions, pure and unit-tested; ffxvr_native.cpp "slow-GPU guard", at every Present
   on the render thread). Slow = span > max(3 x the view's baseline, 33 ms) and xrEndFrame > 20 ms. Baselines, one for 3D
-  (and the stereo screen) and one for the mono screen: the median of the measured spans outside episodes, from a
-  0.5 ms-bin histogram that halves at 8192 frames (the last 1-2 min at 120 Hz); learnt after 600 frames; no 25 ms cap
-  (review B2), so a setup that always runs at 36 ms learns 36 and is never "slow" against itself. Each span is judged
-  against the view of the frame it timed (5 frames earlier). Trigger: 120 slow frames (about 8 s at 15 fps), 6 normal
+  (and the stereo screen) and one for the mono screen: the median of the measured spans while watching, from a
+  0.5 ms-bin histogram that halves at 8192 frames, so it holds the last 4096-8191 measured frames (34-68 s at 120 Hz,
+  45-90 s at 90 Hz, 4.5-9 min at 15 fps); learnt after 600 frames; no 25 ms cap (review B2), so a setup that always
+  runs at 36 ms learns 36 and is never "slow" against itself. Review 2 SF2: nothing is learnt during an episode or the
+  cool-down after it (a 5-min cool-down at 15 fps would otherwise learn the stuck state and silence the guard), and once
+  learnt, spans over 2 x the baseline go to a shadow histogram instead; it replaces the baseline's only when such spans
+  make up 75 % of every 10 s of watching for 10 min (a heavier map, new settings: a `slow: the 3D baseline is now ...`
+  line). The exception is the cool-down after a restart that did not help: that state is learnt as it is, so the guard
+  stops there. Each span is judged against the view of the frame it timed (5 frames earlier), and a span whose frame was
+  excluded (review 2 N2: tracked per query slot) is neither measured nor learnt. Trigger: 120 slow frames (about 8 s at 15 fps), 6 normal
   frames tolerated inside the run. Without a learnt baseline for that view the run is only logged (one line, 10 min
   apart) and nothing is switched off. Not counted (the run restarts): a battle transition window, a load phase, the pick
   tool's slow motion, a session that is not FOCUSED (the Quest / VD menu throttles by design), and a Present gap over
@@ -3986,12 +3992,13 @@ SF1-SF3, N1-N4, N6-N8).
      at once. One that helped stays off 10 s, comes back on and the frames are checked 2.5 s: still fast = the cause had
      passed; slow again = it stays off for 5 min (F8 shows it). A re-check without 8 measured frames is repeated once and
      then ends the episode with the item on: latching needs a measured result (review B3);
-  3. nothing helped: everything is back on and the slow state is measured once more (1.5 s). The session restarts only
-     if at least 2 steps were measured, that check is 75 % slow (fast instead = "recovered ... by itself"), and from a
-     FOCUSED frame outside a transition window or load phase (waited for up to 5 s). The restart is the stuck-swapchain
+  3. nothing helped: everything is back on and the slow state is measured in 3 s windows until it is 60 s old (review 2
+     SF1: longer than a heavy summon or overdrive effect; a fast window on the way = "recovered ... by itself"). The
+     session restarts only if at least 2 steps were measured, the last window is 75 % slow, and from a FOCUSED frame
+     outside a transition window or load phase (waited for up to 5 s). The restart is the stuck-swapchain
      recovery's (xr_stop under InEye2, the flat state; managed's ffxvr_xr_set starts it again after 1 s, not counted as a
      failed start). At most one per 5 min and 3 a session (slow_guard_restart=0: never). Fast 1.5 s after the session is
-     back = "recovered ... (by the session restart)"; else it gives up. Every refusal is one `slow: gave up ...` line.
+     back = "recovered after the session restart (the cause may have ended by itself ...)"; else it gives up. Every refusal is one `slow: gave up ...` line.
   Every episode ends in a cool-down (30 s; 5 min after giving up); 6 episodes a session, then it only logs (one line a
   minute). The headset going off (or unticked while a restart is pending) or slow_guard=0 ends an episode with everything
   back on, latched items included. The effective settings are the user's values with the guard's items off (the setters
@@ -4007,7 +4014,8 @@ SF1-SF3, N1-N4, N6-N8).
   baseline gives its place to the first shatter or a slow onset. (e) the GPU canary: two timestamps back to back at the
   Present hook's start, read with the span (perf: `canary avg max, over 2 ms N`; the slow: line has it over the run).
   Weak evidence (review SF3): with no flush between them another process shows up only if the scheduler switches exactly
-  there. Over 2 ms means the GPU was shared at that moment; a low canary proves nothing. (f) with a diagnostic key on,
+  there. Over 2 ms suggests the GPU was busy with other work at that moment (another process, or this one's own paging
+  if the driver split the buffer there); a low canary proves nothing. (f) with a diagnostic key on,
   `rt:` lines for render-target / depth textures (any sample count) the game creates in a battle or an episode: the first
   40 a session, then new size / format / samples / bind kinds (64); ours are left out by the caller's return address.
   (g) during an episode only, at its start and every 5 s, a PDH line with the top 5 processes by 3D and by VideoEncode
@@ -4018,8 +4026,12 @@ SF1-SF3, N1-N4, N6-N8).
 - **F8** (Debug): the two settings and one line: the state, the baselines ("learning" until learnt), any item kept off,
   and the last trigger (time, view, span and baseline, xrEndFrame) with what fixed it.
 - **Reading the next log.** The PDH line names the processes using the 3D and VideoEncode engines during the episode
-  (another process taking the GPU = H1). An item fixed it (slow again with it back on) = our work (H2, that item). A
-  restart fixed it = the runtime's state. A canary over 2 ms in many frames supports H1; a low one is no evidence. The
+  (another process taking the GPU = H1). An item fixed it (slow again with it back on) = our work (H2, that item). Fast
+  after a restart suggests the runtime's state, but the cause may have ended by itself at the same time (the restart
+  comes 60 s or more after the onset). A canary over 2 ms in many frames suggests H1; a low one is no evidence.
+- **Known limit** (review 2 Q3): a map that is legitimately 3x heavier than the previous minute and over 33 ms for
+  minutes still gets a restart 60 s in (at most 3 a session, one per 5 min); the restart that did not help then lets the
+  guard learn that map, and the light map after it is learnt back. The
   `dll:` and `rt:` lines around the onset show what the game loaded and created.
 - **Not verified here** (container only): MSVC build, the PDH counter names on the owner's driver, the restart under
   VDXR mid-battle, whether the census frame's hitch is noticeable.
