@@ -3757,6 +3757,18 @@ the count was always 0. **Fix: a caster budget from the marks**, counted in the 
   with a shadow".
 - If more than 8 near characters ask, the guard catches the rest.
 
+**Re-review fixes.**
+- The 0x644B30 job-join hook is now always installed (MF-1). `h7_join` calls `sg_join_install` on every join, past the
+  main-thread check of `ffxvr_main_note`, so the guard is present even with `smooth_anchor=0` and `diag_build7=0`. Its
+  snapshot work still runs only when those settings ask for it.
+- The install line and the "not installed yet" warning have separate flags (SF-1), so a late first join still logs the
+  install.
+- The budget applies only while "keep characters drawn" is on. Without that patch the game's own visibility keeps the
+  demand to a handful, so vanilla shadows stay untouched.
+- A second shadow requester bypasses the gate: 0x830180, called from Sg_MainLoop at 0x821465 only when [0x12FBBB1],
+  [0x12FBBB9] and 0x843210() say so. It requests for mode-1 actors with +0x198 & 0x10 without a visibility test. It is not
+  budgeted or counted in the readout; the guard covers it.
+
 **Install (S1, S2, S3).** Only on the main thread: in the job-join hook, past its main-thread filter, at Sg_MainLoop's
 post-join, so never while the main thread runs these sites. The render-thread fallback is gone: the gate's rel32 at
 0x82F4BF straddles a cache line, so writing it from another thread could be fetched torn. Without the hook, one warning

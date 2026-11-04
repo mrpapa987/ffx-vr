@@ -82,7 +82,9 @@ public sealed unsafe partial class FFXVRModule {
     private void diag7_init() {
         if (!_native_ok || _fn_safe_read == null || _fn_diag7_set == null) { _d7_status = "off (the native helper did not load)"; _logger.Info("build 7 diagnostics: " + _d7_status); return; }
         // Loads build: each hook under the feature that needs it (and all of them with diag_build7=1), decided at launch
-        bool want_cur = _diag7 || _cursor_game_cfg, want_join = _diag7 || _smooth_anchor;
+        // The job join is always hooked (chocobo re-review MF-1): the shadow pool guard installs from it, on the main thread
+        // (shadow_cam.cs, sg_join_install). Its snapshot work (d7_join_record) still runs only with diag_build7 or smooth_anchor.
+        bool want_cur = _diag7 || _cursor_game_cfg, want_join = true;
         if (_diag7) { _fn_diag7_set(1); _d7_native_on = 1; }
         _h7_rsz = h7_rsz; new FhCallLocation("FFX.exe", k7_rsz).try_resolve(out _a7_rsz);
         if (want_cur) { _h7_tgt = h7_tgt; _h7_turn = h7_turn; new FhCallLocation("FFX.exe", k7_tgt).try_resolve(out _a7_tgt); new FhCallLocation("FFX.exe", k7_turn).try_resolve(out _a7_turn); }
@@ -97,7 +99,7 @@ public sealed unsafe partial class FFXVRModule {
         // in commit(); since the loads build the resize hook is queued whatever diag_build7 says, ahead of the join and the load
         // hooks: a commit failure there would drop those too, which leaves the lock release unarmed, the safe direction. The
         // status text and core.log show it.)
-        string a = "target pointer off (cursor_source=legacy and diag_build7=0 at launch)", b = "turn pointer off (the same)", c = "job join off (smooth_anchor=0 and diag_build7=0 at launch)";
+        string a = "target pointer off (cursor_source=legacy and diag_build7=0 at launch)", b = "turn pointer off (the same)", c = "job join not hooked";
         if (want_cur) {
             _d7_last_ok = false; a = one("target pointer 0x49C870", _a7_tgt, () => new FhCallHandle<d7_void>(new FhCallLocation((void*)_a7_tgt)).hook(this, _h7_tgt!)); _h7_tgt_ok = _d7_last_ok;
             _d7_last_ok = false; b = one("turn pointer 0x492590", _a7_turn, () => new FhCallHandle<d7_turn>(new FhCallLocation((void*)_a7_turn)).hook(this, _h7_turn!)); _h7_turn_ok = _d7_last_ok;
@@ -168,6 +170,7 @@ public sealed unsafe partial class FFXVRModule {
         d7_void o = System.Threading.Volatile.Read(ref _o7_join) ?? d7_resolve_main(ref _o7_join, _a7_join, _h7_join!);
         o();
         if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Debug: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
+        sg_join_install();   // the shadow pool guard, once, on the main thread between frames (shadow_cam.cs)
         if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
     }
     private void h7_rsz(nint self, int w, int h) {
@@ -254,9 +257,6 @@ public sealed unsafe partial class FFXVRModule {
         uint stamp = FhUtil.get_at<uint>(0x1FCBBF0);
         if (stamp == _d7_join_last_stamp) return;   // the first join after the counter moved (0x821617) is Sg_MainLoop's post-join call (0x821656)
         _d7_join_last_stamp = stamp; _d7_join_post_total++;
-        // The shadow pool guard (shadow_cam.cs): written here only, on the main thread (past the filter above) at Sg_MainLoop's
-        // post-join, between frames, so the main thread is never running the code being rewritten (review 2, S1 / S2).
-        if (!_sg_done && _native_ready && _fn_sg_install != null) { _sg_state = _fn_sg_install(); System.Threading.Volatile.Write(ref _sg_done, true); }
         int s = (_d7j_seq + 1) & 1;
         ref D7Join j = ref _d7j[s];
         j.stamp = stamp; j.exec = FhUtil.get_at<byte>(0x8496D4); j.valid = 0; j.head_ok = 0; j.flags = 0;   // exec byte: VA 0xC496D4 (FFX-60fps sigs.cpp; read at 0x82D7F4)

@@ -9504,6 +9504,9 @@ extern "C" __declspec(dllexport) int ffxvr_cull_scene_get() { return (g_patches[
 //   "nothing to do" path does (the default instance, manager+0x8B8, into the slot, as at 0x6D1355 / 0x6D15A9, so the draw
 //   loop's read at 0x6CAD03 takes its default branch), replays the loop end and continues: that shadow is missing for one
 //   render instead of a crash.
+// Not gated: the second requester 0x830180 (from Sg_MainLoop at 0x821465, only when [0x12FBBB1], [0x12FBBB9] and
+// 0x843210() say so, for mode-1 actors with +0x198 & 0x10, without a visibility test); the guard covers its casters.
+// The budget applies only while "keep characters drawn" is on.
 // Installed once, from the game's main thread only (the job-join hook, between frames), and each site only over the bytes
 // it expects: the call, the loop end it replays, its default path, its continue point, the pool scan's prologue, the gate.
 namespace sg {
@@ -9588,7 +9591,10 @@ static int sg_marks(const uint8_t* m) { int n = 0; const int32_t* a = reinterpre
 /// Replaces Ch_DrawMain's `call 0x830240(actor)` (cdecl, main thread, loop 3): the budget, then the game's shadow request.
 static void __cdecl sg_gate(void* actor) {
     const uint8_t* m = sg_mgr();   // created once (0x6C952C) and never freed
-    if (!actor || !m || g_sg_near <= 0.f || !g_fp_have_pos) { InterlockedIncrement(&g_sg_reqs); g_sg_req(actor); return; }
+    // The budget only while "keep characters drawn" is on (the character cull patches): without them the game's own
+    // visibility keeps the demand to a handful, and vanilla shadows stay as they were.
+    const bool kept = g_patches[k_patch_dist_a].on || g_patches[k_patch_chr_frustum].on;
+    if (!actor || !m || !kept || g_sg_near <= 0.f || !g_fp_have_pos) { InterlockedIncrement(&g_sg_reqs); g_sg_req(actor); return; }
     const float* t = reinterpret_cast<const float*>(static_cast<uint8_t*>(actor) + 0x200);   // the drawn root (game space; riders too)
     const float dx = -t[0] - g_fp_pos[0], dy = -t[1] - g_fp_pos[1], dz = t[2] - g_fp_pos[2];  // render space negates X and Y
     const bool is_near = dx*dx + dy*dy + dz*dz <= g_sg_near * g_sg_near;

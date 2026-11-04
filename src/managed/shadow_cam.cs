@@ -38,8 +38,12 @@ public sealed unsafe partial class FFXVRModule {
     //   from the player once this pass's far casters fill shadow_budget minus the near ones (they stay drawn, shadowless);
     // - the guard: a null from GetASpareGradMeshInstance puts the default instance in the slot, as the game's own path for
     //   an empty tile does: that shadow is missing for one render instead of a crash.
-    // Install: only from the job-join hook on the main thread (diag7.cs), between frames; never from the render thread (the
-    // gate's rel32 straddles a cache line). Without that hook (smooth_anchor=0 and diag_build7=0) it is not installed.
+    // Install: only from the job-join hook on the main thread (sg_join_install, from h7_join), between frames; never from the
+    // render thread (the gate's rel32 straddles a cache line). The hook is always installed now (re-review MF-1).
+    // The budget applies only while "keep characters drawn" is on (native checks the patch): without it the game's own
+    // visibility keeps the demand to a handful. A second requester, 0x830180 (from Sg_MainLoop at 0x821465, only when
+    // [0x12FBBB1], [0x12FBBB9] and 0x843210() say so, for mode-1 actors with +0x198 & 0x10, no visibility test), bypasses the
+    // gate and is not counted; the guard covers it.
     // Watch: every 60 frames the native status; a "shadow pool:" line when the counts change (one every 2 s, 200 a session).
     private float _shadow_near = 300f;          // ini shadow_near: game units (11.4 a metre: 300 is about 26 m); 0 = no budget
     private int   _shadow_budget = 8;           // ini shadow_budget: shadowed characters a pass (2..8; each takes up to 2 of the 16 instances)
@@ -47,17 +51,24 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<float, int, void> _fn_sg_budget;        // ABI 34
     private delegate* unmanaged[Cdecl]<int*, int, int> _fn_sg_status;          // ABI 35: 7 values
     private bool _sg_done; private int _sg_state;   // written by the main thread (the install), read here after _sg_done
-    private int  _sp_frame, _sp_hits = -1, _sp_skips = -1, _sp_last = -1, _sp_peak = -1, _sp_lines, _sp_frames_up; private long _sp_log_t; private bool _sp_warned, _sp_inst_logged;
+    private int  _sp_frame, _sp_hits = -1, _sp_skips = -1, _sp_last = -1, _sp_peak = -1, _sp_lines, _sp_frames_up; private long _sp_log_t; private bool _sp_warned, _sp_inst_logged, _sp_nohook_warned;
     private string _sp_status = "";
+    /// <summary>From h7_join (diag7.cs) on every join: the install, once, on the game's main thread (ffxvr_main_note names it
+    /// at the first join and refuses other threads), between frames.</summary>
+    private void sg_join_install() {
+        if (System.Threading.Volatile.Read(ref _sg_done) || !_native_ready || _fn_sg_install == null || _fn_main_note == null || _fn_main_note() == 0) return;
+        try { _sg_state = _fn_sg_install(); } catch { _d7_main_faults++; }
+        System.Threading.Volatile.Write(ref _sg_done, true);
+    }
     private void shadow_pool_watch() {
         if (_fn_sg_budget != null) _fn_sg_budget(_shadow_near, _shadow_budget);
         if (!_sp_inst_logged && System.Threading.Volatile.Read(ref _sg_done)) {
             _sp_inst_logged = true; int st = _sg_state;
             _logger.Info($"shadow pool: guard {((st & 3) == 3 ? "on (both tile lists)" : (st & 3) != 0 ? "on for one tile list only" : (st & 0x200) != 0 ? "NOT installed (no executable page)" : "NOT installed (the bytes were not as expected)")}, distance budget {((st & 4) != 0 ? "on" : "NOT installed")} (the main thread) | shadow_near {_shadow_near:F0} units, budget {_shadow_budget} characters a pass");
         }
-        if (!_sp_inst_logged && _native_ready && ++_sp_frames_up == 1200) {   // no main-thread hook ran: say so once (never install from here)
-            _sp_inst_logged = true;
-            _logger.Warning("shadow pool: guard and distance budget NOT installed: no main-thread hook (smooth_anchor=0 and diag_build7=0, or the job-join hook failed). Busy maps with 'keep characters drawn' can crash the game's shadow pass.");
+        if (!_sp_inst_logged && !_sp_nohook_warned && _native_ready && ++_sp_frames_up == 1200) {   // no main-thread join yet: say so once (never install from here); SF-1: the install line still follows when it comes
+            _sp_nohook_warned = true;
+            _logger.Warning("shadow pool: guard and distance budget not installed yet: the job-join hook has not run on the main thread (core.log shows a hook failure). Busy maps with 'keep characters drawn' can crash the game's shadow pass.");
         }
         if (_fn_sg_status == null || ++_sp_frame % 60 != 0) return;
         int* v = stackalloc int[7]; for (int i = 0; i < 7; i++) v[i] = 0;
