@@ -274,6 +274,7 @@ public sealed unsafe partial class FFXVRModule {
         long t_tap = cpu_now();
         int plan = TapPlan.Of(_vr_hands, on, _h2_can_draw, _fp_mode); _tap_plan = plan;
         int game = plan == TapPlan.k_full ? hands2_tap_game() : plan == TapPlan.k_battle ? hands2_view_bits() | 0x400 : plan == TapPlan.k_none ? 0x200 : 0;
+        _qc_tap_game = game; _qc_tap_frame = _frames;   // Quest-only controls: the walk gate takes the choice box from a full read (quest_ctl.cs)
         _cpu_tap += cpu_now() - t_tap;
         int btn = _vr_hands_tap_button switch { "b" => 0x2000, "x" => 0x4000, "y" => 0x8000, _ => 0x1000 };
         var t = new VrTapCfg { bytes = sizeof(VrTapCfg), flags = (on ? 1 : 0) | (_vr_hands_tap_dialogue ? 2 : 0) | (_vr_hands_tap_haptic ? 4 : 0) | (_vr_hands_tap_point ? 8 : 0) | (_vr_hands_tap_hold_grip ? 16 : 0),
