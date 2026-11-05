@@ -119,6 +119,8 @@ internal static class FmvSync {
 
     /// <summary>"OPN_us.webm" -> "opn_us.fvd" (FORMAT.md; the converter's filter [A-Za-z0-9_]+.webm, no device name), else null.</summary>
     public static string? FileName(string game) {
+        int slash = Math.Max(game.LastIndexOf('/'), game.LastIndexOf('\\'));   // the game stores the full archive path
+        if (slash >= 0) game = game.Substring(slash + 1);
         if (game.Length <= 5 || !game.EndsWith(".webm", StringComparison.OrdinalIgnoreCase)) return null;
         string stem = game.Substring(0, game.Length - 5);
         foreach (char ch in stem) if (!(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_')) return null;
@@ -151,7 +153,7 @@ internal static class FmvSync {
         }
         int len = 0; while (len < 47 && b[80 + len] != 0) len++;
         string src = System.Text.Encoding.ASCII.GetString(b.Slice(80, len));
-        return new Fvd { status = k_ok, frames = frames, name_match = game != null && string.Equals(src, game, StringComparison.OrdinalIgnoreCase) };
+        return new Fvd { status = k_ok, frames = frames, name_match = game != null && string.Equals(src, game.Substring(Math.Max(game.LastIndexOf('/'), game.LastIndexOf('\\')) + 1), StringComparison.OrdinalIgnoreCase) };
     }
 
     static string FvdText(in Fvd f) => f.status switch {

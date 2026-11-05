@@ -121,8 +121,17 @@ struct FvdInfo {
 };
 /// "OPN_us.webm" -> "opn_us.fvd": the converter's rule (FORMAT.md: the name without .webm, lower-cased) and its filter
 /// ([A-Za-z0-9_]+.webm, no Windows device name); false for any other name (no file is looked for).
+/// The file part of the game's movie name: the game stores the full archive path ("/FFX_Data/GameData/PS3Data/Video/
+/// OPN_us.webm", seen on the owner's PC); the depth file and the .fvd's src_name use the file name alone.
+inline const char* base_name(const char* p) {
+    if (p == nullptr) return nullptr;
+    const char* b = p;
+    for (const char* q = p; *q; ++q) if (*q == '/' || *q == '\\') b = q + 1;
+    return b;
+}
 inline bool fvd_file_name(const char* game, char* out, size_t cap) {
     if (cap) out[0] = 0;
+    game = base_name(game);
     if (game == nullptr || cap < 8) return false;
     const size_t n = strnlen(game, k_name_len);
     if (n <= 5 || n - 5 + 5 > cap) return false;   // stem + ".fvd" + NUL
@@ -164,7 +173,7 @@ inline int fvd_parse(const uint8_t* b, size_t n, uint64_t file_size, const char*
     o.w = rd16(b + 8); o.h = rd16(b + 10); o.frames = rd32(b + 12); o.fps_num = rd32(b + 16); o.fps_den = rd32(b + 20);
     o.codec = b[24]; o.predictor = b[25]; o.model = b[26];
     memcpy(o.src, b + 80, 47); o.src[47] = 0;
-    o.name_match = game != nullptr && name_ieq(o.src, game);
+    o.name_match = game != nullptr && name_ieq(o.src, base_name(game));
     if (hs < 128 || o.w == 0 || o.h == 0) return o.status = FVD_HEADER;
     if (o.codec > 2 || o.predictor > 1) return o.status = FVD_CODEC;
     const uint64_t io = rd64(b + 40), n_idx = 32ull * o.frames;
