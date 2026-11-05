@@ -4101,8 +4101,8 @@ fixes/fmv-relief-impl.md.
   P Presents: relief R (depth ok a, one frame late b, flat (decode lag) c, ...), flat screen F (<reason> k, ...) | depth
   uploads, ramps | decoded n frames, avg / max ms, errors; ring fill avg | opened in ms | video WxH in the backbuffer WxH:
   crop u, v | strength, flatten the bottom, offset`. Also `fmv3d: relief pass ready / FAILED` once.
-- **Cost.** fmv_depth 0: one branch. On, no movie: two guarded reads a Present. A movie: three more guarded reads, one
-  lock a Present (two when the frame changes), the 57.6 KB upload 30 times a second, two passes of 86,400 / 64,800 vertices
+- **Cost.** fmv_depth 0: one branch. On, no movie: two guarded reads a Present. A movie: three more guarded reads, two
+  short locks a Present (three when the frame changes), the 57.6 KB upload 30 times a second, two passes of 86,400 / 64,800 vertices
   and the eye images' fill; the shaders compile once at the first Present with fmv_depth on and the headset on.
 - **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 740 checks, 0 failed; 26 / 26
   mutations caught): the reader on 25 cases written by tools/fmvdepth/fvd.py with the zlib and stored codecs (16:9 / 4:3,
