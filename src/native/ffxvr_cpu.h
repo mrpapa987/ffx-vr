@@ -170,11 +170,16 @@ inline bool ws_readable(uint32_t f) {
     return mbi_readable(m);
 }
 
+/// What one ws_check did (review N5, SF1): answered = a working-set query was made and answered; any_valid = it reported at
+/// least one page Valid.
+struct WsInfo { bool answered = false, any_valid = false; };
+
 /// [a, a + len): every page resident and readable now, by one working-set query ws(va, attrs, n) (QueryWorkingSetEx; true when
 /// it answered, attrs[i] the i-th page's attributes). false = unknown: the caller asks VirtualQuery. The argument checks are
 /// range_check's.
 template <class Ws>
-bool ws_check(uintptr_t a, size_t len, Ws&& ws) {
+bool ws_check(uintptr_t a, size_t len, Ws&& ws, WsInfo* info = nullptr) {
+    if (info) *info = WsInfo{};
     if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return false;
     const uintptr_t p0 = a & ~(k_page - 1), pl = (a + len - 1) & ~(k_page - 1);
     const uintptr_t n = (pl - p0) / k_page + 1;
@@ -182,9 +187,39 @@ bool ws_check(uintptr_t a, size_t len, Ws&& ws) {
     uintptr_t va[k_ws_max_pages]; uint32_t at[k_ws_max_pages];
     for (uintptr_t i = 0; i < n; ++i) { va[i] = p0 + i * k_page; at[i] = 0; }
     if (!ws(static_cast<const uintptr_t*>(va), static_cast<uint32_t*>(at), static_cast<int>(n))) return false;
-    for (uintptr_t i = 0; i < n; ++i) if (!ws_readable(at[i])) return false;
-    return true;
+    bool all = true, any = false;
+    for (uintptr_t i = 0; i < n; ++i) { if (at[i] & 1u) any = true; if (!ws_readable(at[i])) all = false; }
+    if (info) { info->answered = true; info->any_valid = any; }
+    return all;
 }
+
+/// lean2 review SF1: the start-up self-test's verdict. Before any read relies on it, QueryWorkingSetEx is asked about a page
+/// of our own: (1) committed PAGE_READWRITE and written (resident): it must answer Valid with PAGE_READWRITE; (2) the same
+/// page made PAGE_READWRITE | PAGE_GUARD (never read): it must answer Valid = 0 or carry the guard bit. ok1 / ok2: the
+/// calls answered; f1 / f2 the page's attributes. k_wst_pass, or why the check stays off for the session.
+enum : int { k_wst_pass = 0, k_wst_call1, k_wst_not_resident, k_wst_prot, k_wst_call2, k_wst_guard_valid };
+inline int ws_selftest_verdict(bool ok1, uint32_t f1, bool ok2, uint32_t f2) {
+    if (!ok1) return k_wst_call1;
+    if ((f1 & 1u) == 0) return k_wst_not_resident;
+    if (((f1 >> 4) & 0x7FFu) != k_page_readwrite || !ws_readable(f1)) return k_wst_prot;
+    if (!ok2) return k_wst_call2;
+    if ((f2 & 1u) != 0 && ((f2 >> 4) & k_page_guard) == 0) return k_wst_guard_valid;
+    return k_wst_pass;
+}
+inline const char* ws_selftest_why(int v) {
+    switch (v) {
+    case k_wst_pass: return "passed";
+    case k_wst_call1: return "the call failed on a resident page";
+    case k_wst_not_resident: return "a written page reported not Valid";
+    case k_wst_prot: return "a written PAGE_READWRITE page reported another protection";
+    case k_wst_call2: return "the call failed on a guard page";
+    case k_wst_guard_valid: return "a guard page reported Valid without the guard bit";
+    default: return "?";
+    }
+}
+/// lean2 review SF1 (the Wine case: TRUE with Valid = 0 for every page): this many answers in a row with no page Valid, each
+/// for a range VirtualQuery then found readable, and the reader reports the check as useless (FastReader::ws_tripped).
+constexpr uint32_t k_ws_zero_max = 64;
 
 /// The ranges [lo, hi) where VirtualQuery answered with a long run (a cost hint, not a claim about the memory).
 template <int H>
@@ -298,15 +333,19 @@ struct FastReader {
     RunCache<N> runs; AllocSeen<P> seen; FastStats st; BigHints<H> hints;
     int64_t t0 = 0; bool armed = false;   // when the kept runs were started (the first read after a clear)
     uint32_t copies = 0, fails = 0;       // kernel copies, of them failed (this frame; the caller rolls them)
+    uint32_t ws_zero_run = 0; bool ws_tripped = false;   // review SF1: answers in a row with no page Valid where VirtualQuery found the range readable
     void clear() { runs.clear(); seen.clear(); armed = false; }   // (not the hints: they are no claim about the memory)
     /// 1: copied; 0: not readable or the copy failed. now / max_age in the caller's clock (QPC ticks). ws: the working-set
     /// query (ws_check's); one that always returns false is the vq-lean reader exactly.
     template <class Query, class Ws, class Plain, class Kernel>
     int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, uintptr_t image_end, Query&& query, Ws&& ws, Plain&& plain, Kernel&& kernel) {
         if (!armed || now - t0 > max_age || now < t0) { clear(); armed = true; t0 = now; }
+        WsInfo wi;
         if (hints.has(a) && !(a < image_end && a + len > image_base) && !runs.covers(a, len)) {
-            st.ws++;
-            if (ws_check(a, len, ws)) {
+            const bool yes = ws_check(a, len, ws, &wi);
+            if (wi.answered) st.ws++;   // review N5: answered calls only
+            if (yes) {
+                ws_zero_run = 0;
                 st.ws_yes++;
                 runs.add(a & ~(k_page - 1), ((a + len - 1) & ~(k_page - 1)) + k_page, false);
                 copies++;
@@ -317,6 +356,10 @@ struct FastReader {
             }
         }
         const int k = range_check_fast(a, len, query, runs, seen, image_base, &st, &hints);
+        if (wi.answered) {   // review SF1: an answer with no page Valid for a range VirtualQuery finds readable counts towards ws_tripped
+            if (wi.any_valid) ws_zero_run = 0;
+            else if (k != k_fast_no && ++ws_zero_run >= k_ws_zero_max) ws_tripped = true;
+        }
         if (k == k_fast_no) return 0;
         if (k == k_fast_image) return plain() ? 1 : 0;
         copies++;

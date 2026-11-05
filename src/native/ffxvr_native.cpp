@@ -2517,7 +2517,8 @@ static cpu::Mbi cpu_vq(uintptr_t q) {
 // top four with their counts, time, length and the allocation the last query landed in. Diagnostic only (render thread).
 static cpu::SiteTable<16> g_rs;
 static cpu::Mbi g_rs_last;                 // the current call's last VirtualQuery answer (render thread)
-static uintptr_t g_cpu_exe_end = 0;        // the end of FFX.exe's image (SizeOfImage; ~0 if unknown: the hinted path stays off)
+static uintptr_t g_cpu_exe_end = 0;        // the end of FFX.exe's image (SizeOfImage; ~0 if unknown: safe_read_fast then makes no
+                                           // working-set check, and no caller is labelled ffx+ on the cpu: line; review N4)
 static cpu::Mbi cpu_vq_rt(uintptr_t q) { const cpu::Mbi m = cpu_vq(q); g_rs_last = m; return m; }   // render thread only
 static void cpu_exe_init() {
     if (g_cpu_exe_base != 0) return;
@@ -2528,20 +2529,51 @@ static void cpu_exe_init() {
 }
 
 // lean2: QueryWorkingSetEx on our own process (the pseudo-handle has PROCESS_QUERY_INFORMATION; K32QueryWorkingSetEx, kernel32),
-// for cpu::ws_check: one look-up a page, not VirtualQuery's scan to the end of the run. g_ws_state: 0 untried, 1 it answered,
-// -1 off for the session (8 failures before any answer: VirtualQuery alone, as before). Any thread.
+// for cpu::ws_check: one look-up a page, not VirtualQuery's scan to the end of the run. Any thread.
+// g_ws_state (review SF1): 0 not tested yet (no thread uses it), 1 on (the self-test passed), -1 off for the session (the
+// self-test failed, or the render thread saw it answer "not resident" for 64 ranges in a row that VirtualQuery then found
+// readable: the Wine case). g_ws_why: the reason, on the cpu: line. A failed call is only counted (that read falls back).
 static volatile LONG g_ws_state = 0, g_ws_fails = 0;
-static bool ws_query(const uintptr_t* va, uint32_t* at, int n) {
-    if (g_ws_state < 0 || n <= 0 || n > cpu::k_ws_max_pages) return false;
+static char g_ws_why[128] = "not tested yet";
+static bool ws_query_raw(const uintptr_t* va, uint32_t* at, int n) {
+    if (n <= 0 || n > cpu::k_ws_max_pages) return false;
     PSAPI_WORKING_SET_EX_INFORMATION w[cpu::k_ws_max_pages];
     for (int i = 0; i < n; ++i) { w[i].VirtualAddress = reinterpret_cast<PVOID>(va[i]); w[i].VirtualAttributes.Flags = 0; }
-    if (!QueryWorkingSetEx(GetCurrentProcess(), w, static_cast<DWORD>(n * sizeof(w[0])))) {
-        if (InterlockedIncrement(&g_ws_fails) >= 8) InterlockedCompareExchange(&g_ws_state, -1, 0);
-        return false;
-    }
-    if (g_ws_state == 0) InterlockedCompareExchange(&g_ws_state, 1, 0);
+    if (!QueryWorkingSetEx(GetCurrentProcess(), w, static_cast<DWORD>(n * sizeof(w[0])))) return false;
     for (int i = 0; i < n; ++i) at[i] = static_cast<uint32_t>(w[i].VirtualAttributes.Flags);   // Valid .. Bad: the low 32 bits
     return true;
+}
+static bool ws_query(const uintptr_t* va, uint32_t* at, int n) {
+    if (g_ws_state != 1) return false;
+    if (ws_query_raw(va, at, n)) return true;
+    InterlockedIncrement(&g_ws_fails);
+    return false;
+}
+/// Review SF1: the start-up self-test (render thread, once, at the first frame roll with fast_reads on; until then no thread
+/// uses the check). A page of our own, committed PAGE_READWRITE and written, must report Valid with PAGE_READWRITE; made
+/// PAGE_READWRITE | PAGE_GUARD it must report Valid = 0 or the guard bit. The guard page is never read (nobody else has its
+/// address) and is released at once. Either expectation failing turns the check off for the session; the verdict is logged.
+static void ws_selftest() {
+    int v = cpu::k_wst_pass; const char* step = nullptr;
+    uint32_t f1 = 0, f2 = 0; bool ok1 = false, ok2 = false;
+    void* p = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (p == nullptr) step = "VirtualAlloc failed";
+    else {
+        const uintptr_t va = reinterpret_cast<uintptr_t>(p);
+        *static_cast<volatile uint8_t*>(p) = 1;   // resident
+        ok1 = ws_query_raw(&va, &f1, 1);
+        if (ok1 && (f1 & 1u) == 0) { *static_cast<volatile uint8_t*>(p) = 2; ok1 = ws_query_raw(&va, &f1, 1); }   // trimmed in between: once more
+        DWORD old = 0;
+        if (!VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) step = "VirtualProtect(PAGE_GUARD) failed";
+        else ok2 = ws_query_raw(&va, &f2, 1);
+        VirtualFree(p, 0, MEM_RELEASE);
+        if (step == nullptr) v = cpu::ws_selftest_verdict(ok1, f1, ok2, f2);
+    }
+    const bool pass = step == nullptr && v == cpu::k_wst_pass;
+    snprintf(g_ws_why, sizeof(g_ws_why), "self-test %s%s (resident page 0x%X, guard page 0x%X)", pass ? "passed" : "failed: ",
+             pass ? "" : (step ? step : cpu::ws_selftest_why(v)), f1, f2);
+    InterlockedExchange(&g_ws_state, pass ? 1 : -1);
+    diag("fast reads: QueryWorkingSetEx %s: %s", pass ? "on" : "off for the session", g_ws_why);
 }
 
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
@@ -2577,6 +2609,9 @@ static __declspec(noinline) bool range_readable(const void* p, size_t len) { ret
 // The setting comes from managed through ffxvr_cpu_report: alone (n = -3, right after the native loads, before any frame,
 // and on a frame that does not finish) and with every report (v[M_N + 2]). Off until it comes (review SF1): an older
 // ffxvr.dll that never sends it runs the old path.
+// lean2 (review SF1): nothing uses QueryWorkingSetEx until its self-test passed (ws_selftest, the first frame roll with
+// fast_reads on), and the render thread turns it off for good after 64 answers in a row that said "not resident" for ranges
+// VirtualQuery found readable.
 // lean2: the kept runs still end with the frame, so a read into one of the game's big blocks cost one long scan a frame
 // (~225 us in the virtual screen). Where VirtualQuery answered a long run (>= 1 MB), the range is noted as a hint (kept across
 // frames, a cost guess only), and a read there that the kept runs do not cover gets QueryWorkingSetEx first: one look-up a
@@ -2624,7 +2659,9 @@ static int safe_read_fast(const void* src, void* dst, unsigned len, const void* 
     const cpu::FastStats before = g_fr.st;
     g_rs_last = cpu::Mbi{};
     const int ok = g_fr.read(a, len, t0, g_fr_qpf / 20, g_cpu_exe_base, g_cpu_exe_end, cpu_vq_rt,
-        [&](const uintptr_t* va, uint32_t* at, int n) { const LONGLONG c0 = cpu_q(); const bool r = ws_query(va, at, n); ws_q += cpu_q() - c0; return r; },
+        [&](const uintptr_t* va, uint32_t* at, int n) {
+            if (g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return false;   // review N4: the exe's end unknown: no check
+            const LONGLONG c0 = cpu_q(); const bool r = ws_query(va, at, n); ws_q += cpu_q() - c0; return r; },
         [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_plain_copy(dst, src, len); plain_q = cpu_q() - c0; return done; },
         [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_kernel_copy(dst, src, len); copy_q = cpu_q() - c0; return done; });
     const uint32_t dq = g_fr.st.queries - before.queries, dw = g_fr.st.ws - before.ws;
@@ -2668,7 +2705,7 @@ static bool ot_readable(const void* p, size_t len, DWORD tid) {
 /// inside __try, so faulting on purpose is not an option. (vq-lean: on the
 /// render thread with fast_reads on, safe_read_fast. lean2: the other threads
 /// check with ot_readable, the working-set check first with fast_reads on.)
-extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
+extern "C" __declspec(dllexport) __declspec(noinline) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {   // (noinline: _ReturnAddress names the caller, review N6)
     if (src == nullptr || dst == nullptr || len == 0) return 0;
     const DWORD tid = GetCurrentThreadId();
     if (g_render_tid != 0 && tid == g_render_tid) {
@@ -5433,6 +5470,12 @@ static void cpu_frame_roll() {
     g_cpu_cpyn.add(g_fr.copies); g_cpu_cpyms.add(cpu_ms(g_fr_copy_q)); g_cpu_prbn.add(g_fr.st.probes); g_cpu_cpy_fail += g_fr.fails;
     g_cpu_bign.add(g_fr_big_n); g_cpu_bigms.add(cpu_ms(g_fr_big_q));
     g_cpu_wsn.add(g_fr.st.ws); g_cpu_wsy.add(g_fr.st.ws_yes); g_cpu_wsms.add(cpu_ms(g_fr_ws_q)); g_fr_ws_q = 0;   // lean2
+    if (g_ws_state == 0 && g_fast_reads != 0) ws_selftest();   // review SF1: once, before any thread uses the check
+    if (g_fr.ws_tripped && g_ws_state == 1) {                   // review SF1: the Wine case
+        snprintf(g_ws_why, sizeof(g_ws_why), "%u answers in a row with no page resident where VirtualQuery found the range readable", cpu::k_ws_zero_max);
+        InterlockedExchange(&g_ws_state, -1);
+        diag("fast reads: QueryWorkingSetEx off for the session: %s", g_ws_why);
+    }
     if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
     g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
@@ -5499,7 +5542,7 @@ static void cpu_sites_part(char* out, size_t n, uint32_t frames) {
         const cpu::SiteStat& e = g_rs.s[idx[i]];
         char who[48];
         if (e.ret >= self_lo && e.ret < self_hi) snprintf(who, sizeof(who), "ffxvr_native+0x%X", static_cast<unsigned>(e.ret - self_lo));
-        else if (g_cpu_exe_base != 0 && e.ret >= g_cpu_exe_base && e.ret < g_cpu_exe_end) snprintf(who, sizeof(who), "ffx+0x%X", static_cast<unsigned>(e.ret - g_cpu_exe_base));
+        else if (g_cpu_exe_base != 0 && g_cpu_exe_end != ~static_cast<uintptr_t>(0) && e.ret >= g_cpu_exe_base && e.ret < g_cpu_exe_end) snprintf(who, sizeof(who), "ffx+0x%X", static_cast<unsigned>(e.ret - g_cpu_exe_base));
         else snprintf(who, sizeof(who), "JIT 0x%08X", static_cast<unsigned>(e.ret));
         len += snprintf(out + len, n - len, "%s %s %.1f/frame (VirtualQuery %.1f, working-set %.1f) %.3f ms/frame, len %u at 0x%08X",
                         i ? ";" : "", who, e.calls / f, e.queries / f, e.ws / f, cpu_ms(e.ticks) / f, e.len, static_cast<unsigned>(e.addr));
@@ -5541,9 +5584,9 @@ static void cpu_log_line() {
     char fr[512];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
     if (g_fr_frames == 0) snprintf(fr, sizeof(fr), ", fast_reads off");
     else {
-        char ws[96];   // lean2: QueryWorkingSetEx's state
-        if (g_ws_state < 0) snprintf(ws, sizeof(ws), "; QueryWorkingSetEx off (failed %ld times, never answered)", static_cast<long>(g_ws_fails));
-        else snprintf(ws, sizeof(ws), "%s", g_ws_fails != 0 ? "; QueryWorkingSetEx failed sometimes" : "");
+        char ws[200];   // lean2: QueryWorkingSetEx's state (review SF1: the self-test's verdict, or why it is off)
+        snprintf(ws, sizeof(ws), "; QueryWorkingSetEx %s: %s%s", g_ws_state == 1 ? "on" : g_ws_state < 0 ? "off" : "not tested", g_ws_why,
+                 g_ws_fails != 0 ? ", some calls failed" : "");
         snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)",
                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx,
