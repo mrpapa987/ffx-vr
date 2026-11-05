@@ -3960,11 +3960,15 @@ fields, the tracker, the lines, the .fvd header check) and `fmv_frame` in ffxvr_
 (F8's line). Notes and test results: scratchpad fixes/fmv-sync-impl.md.
 
 - **The fields** (re-verified in our exe's disassembly, VA with the image at 0x400000; ffxvr_fmv.h lists every writer):
-  manager `[0xCDED3C]` (0x750 bytes, `push 0x750` at 0x6D715C); **playing = byte +0x6D0** (1 at the end of start
-  0x6D9159; 0 at the natural end 0x6D7884, at a skip 0x6D9559, in stop 0x6D71C7, at load 0x6D9D83; the update 0x6D7680
-  uploads only while it is set, 0x6D77A2), +0x6D2 = open (the update and draw run only with it; 0 in close 0x6D91A3);
+  manager `[0xCDED3C]` (0x750 bytes, `push 0x750` at 0x6D715C; made once at init, freed only at shutdown); **playing =
+  byte +0x6D0** (1 at the end of start 0x6D9159, and at 0x6DAB51 in 0x6DA9B0, an open-by-path with no name or id and no
+  reference found: probably dead; 0 in the constructor 0x6D6A89, at the natural end 0x6D7884, at a skip 0x6D9559, in stop
+  0x6D71C7, at load 0x6D9D83, and at 0x6DAC40 from the event command 0x76EA60, which clears playing alone: "stopped before
+  its end"; the update 0x6D7680 uploads only while it is set, 0x6D77A2), +0x6D2 = open (the update and draw run only with it; 0 in close 0x6D91A3);
   name `char[0x80]` +0x4F0 (emptied at load, filled by `snprintf(.., 0x80, "%s", ..)` at 0x6D943E; not cleared at stop),
-  id +0x6DC, frame number +0x6D8 (0xFFFE = ended), paused +0x6FC (the toggle 0x6DA4B0), render-thread upload +0x570,
+  id +0x6DC, frame number +0x6D8 (0xFFFE = ended), paused +0x6FC (the toggle 0x6DA4B0, and the update itself at 0x6D785D
+  when +0x6FD is set and the skippable flag is 0, so "paused on P" may count frames the player did not pause),
+  render-thread upload +0x570,
   skip prompt +0x74C, skip allowed +0x74D (0 for the 16 ids of the table 0xB49B08: 2 4 6 18 24 32 38 42 44 46 50 60 62
   70 72 84). The player is embedded at +0x38: its duration in ms at player+0xF8 (from the WebM's ns, 0xA28148), the
   uploaded count at player+0x100 (0 at open 0xA27F4B, `inc` after the Y/U/V upload 0xA28826, no other writer), ms per frame
@@ -3973,15 +3977,21 @@ fields, the tracker, the lines, the .fvd header check) and `fmv_frame` in ffxvr_
   equals the count for every count 0..30,000 at 30000/1001 fps (checked by emulating the exact arithmetic), so the frame on
   screen is index count - 1 = frame number - 1. 0x76EFC0 returns 1 for event movie ids 0x20/0x2E/0x46/0x48 (= 32, 46, 70,
   72, the hybrid candidates; ten callers).
-- **Cost.** Every Present: the manager pointer (exe image) and its playing word (one 4-byte guarded read of the heap).
-  Only while the playing byte or the skippable flag 0x112A008 is set (or an FMV is being tracked): three guarded reads of
-  the manager (0x80 + 0x5C + 0x84 bytes) and three small exe reads. At a logged start, the depth file's 128-byte header
-  (`CreateFileW` with `FILE_SHARE_READ | FILE_SHARE_DELETE`, one `ReadFile`, closed at once).
+- **Cost.** Nothing in the Release logging profile (`diag_profile_on()` false: no read, no line; F8's line still works,
+  it is managed's own). Otherwise every Present: the manager pointer (exe image) and its playing word (one 4-byte guarded
+  read of the heap). Only while the playing byte is set or an FMV is being tracked (not on the skippable flag 0x112A008
+  alone: it lingers after a movie): three guarded reads of the manager (0x80 + 0x5C + 0x84 bytes) and three small exe
+  reads. No file I/O on the render thread: at a logged start a worker thread (one request / one result slot, the PDH
+  thread's pattern, stopped at shutdown) checks the depth file: `GetFileAttributesW` first (an offline / recall-on-open /
+  recall-on-data-access file is not opened: "not checked (cloud-only)"), then `CreateFileW` with `FILE_SHARE_READ |
+  FILE_SHARE_DELETE`, one 128-byte `ReadFile`, closed at once. The lines are kept and written with `diag_try` (retried on
+  later Presents when the log is busy).
 - **The lines** (ffxvr_diag.log; at most 240 a session, a start keeps room for its end; a restart of the same video within
   1 s is not logged and is counted on the next start line):
   `fmv: start '<name>' id N (event movie id, skippable flag, skip allowed, render-thread / inline upload), view <v> | video
-  WxH, ms a frame (fps), duration ms (frames at 29.97) | count at start | depth file: present (fmvdepth\<file>: N frames
-  WxH, model) / absent / invalid (why)`.
+  WxH, ms a frame (fps), duration ms (frames at 29.97) | count at start | depth file: checking... (fmvdepth\<file>)`, then
+  `fmv: depth file for '<name>' id N: present (fmvdepth\<file>: N frames WxH, model) / absent / not checked (cloud-only) /
+  invalid (why) (checked off the render thread in ms)`.
   `fmv: end '<name>' id N: ended / SKIPPED by the user / stopped before its end / replaced / the movie player went away |
   s, Presents (per view), a 3D camera on K, paused on P, skip prompt on Q | uploaded a..b (changes seen, largest step,
   frames never presented), first upload after ms, longest gap ms | s from the first to the last upload vs s at 29.97
@@ -3990,7 +4000,9 @@ fields, the tracker, the lines, the .fvd header check) and `fmv_frame` in ffxvr_
   the final count against the game's duration).
 - **F8** (Debug header): `FMV: <name> id N frame F/total uploaded U, mode screen/3D, depth file: present (N frames) /
   absent`; total is the file's frame count, or `~` the game's duration at 29.97. Idle: `FMV: none playing (last ...)`.
-  Managed's own guarded reads, only while the Debug header is drawn; the depth file checked at most every 5 s per name.
+  Managed's own guarded reads, only while the Debug header is drawn; the depth file only while a movie plays, on a pool
+  thread (the same cloud-only rule), at most every 5 s per name, "checking..." until the first answer; the text is rebuilt
+  only when something in it changed.
 - **Exit criteria (S2)**: for OPN_us and END_us the end line says "final count EQUALS the file's frame count" (with the
   .fvd present; without it, the count against the game's duration, `+0` expected); a skipped FMV ends "SKIPPED by the
   user" with a count short of the file; for the hybrid ids the end line's views and "a 3D camera on K" say whether the
@@ -4003,7 +4015,8 @@ fields, the tracker, the lines, the .fvd header check) and `fmv_frame` in ffxvr_
   paused, the limits, truncation; mutations caught); FmvSync's C# test (the same files and verdicts, the F8 text); the
   native syntax check and the managed compile check unchanged. **Not verified**: anything in game.
 
-Owner test steps (ffxvr_diag.log, lines starting `fmv:`; F8 > Debug shows the FMV line live):
+Owner test steps (ffxvr_diag.log, lines starting `fmv:`, with the Dev or Verbose logging profile: Release writes none; F8 >
+Debug shows the FMV line live in any profile):
 1. The opening FMV (start a new game): watch it to the end without skipping. Expect a `fmv: start
    'OPN_us.webm' ...` line and an `fmv: end ... ended ...` line; note "final count ..." and the uploads/s (about 29.97).
    With F8 open during it, the FMV line's frame should run up to the total.
