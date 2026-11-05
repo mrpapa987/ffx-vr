@@ -38,6 +38,7 @@ struct Io { void* ctx; ReadAtFn read_at; uint64_t size; };
 struct Codecs { void* ctx; DecompressFn fn[3]; };
 
 enum : uint8_t { EF_CUT = 1, EF_STORED = 2, EF_FLAT = 4 };
+constexpr uint8_t k_hf_segment_range = 0x04;   // header byte 27 bit 2 (converter v2): lo / hi are already one range per segment (see shot_norm)
 /// The index as kept (the checks are made at open). a, b (round 7, per-shot normalisation): n' = a n + b maps the frame's
 /// 8-bit n (normalised to the frame's own lo / hi) to the shot's fixed L / H; during the read they hold lo / hi.
 struct Entry { uint32_t off; uint16_t size; uint8_t flags; uint8_t pad; float a, b; };
@@ -60,6 +61,7 @@ struct File {
     fmv::FvdInfo info;                       // the header (ffxvr_fmv.h fvd_parse: FORMAT.md checks 1-5)
     uint32_t w = 0, h = 0, n = 0, header_size = 0, cuts = 0, flats = 0, bad_entry = 0, game_frames = 0, shots = 0;
     uint8_t codec = 0, predictor = 0;
+    bool seg_range = false;   // header flag HF_SEGMENT_RANGE: the converter wrote one fixed lo / hi per segment (no re-normalisation)
     uint64_t index_offset = 0;
     std::vector<Entry> idx;
     int status = OP_NONE;
@@ -130,7 +132,9 @@ inline int open_file(File& f, const Io& io, const char* game, uint32_t game_fram
             if (range_flat(rdf(e + 24), rdf(e + 28))) { x.flags |= EF_FLAT; f.flats++; if (bits) set_bit(bits->flat, i); }
         }
     }
-    f.shots = shot_norm(f);
+    f.seg_range = (f.info.flags & k_hf_segment_range) != 0;
+    if (f.seg_range) { for (Entry& x : f.idx) { x.a = 1.f; x.b = 0.f; } f.shots = 0; }   // converter v2: its ranges are final
+    else f.shots = shot_norm(f);
     return f.status = OP_OK;
 }
 
@@ -143,6 +147,11 @@ inline int open_file(File& f, const Io& io, const char* game, uint32_t game_fram
 // A "shot" shorter than k_min_shot frames (a flash that tripped the converter's cut detector twice) is folded into the one
 // before it, so it does not get a range of its own. n' is clamped to 0..1.
 constexpr uint32_t k_min_shot = 6;
+// Converter v2 (branch fmv-conv2, review fmv-conv2-review.md B-1) writes one fixed lo / hi per segment itself: it restarts
+// the model at every cut (so a 1-5 frame shot has its own scale, not a flash) and splits shots at dissolves without a cut
+// flag. On such a file the fold and the per-shot percentiles would map a short shot through another shot's range and
+// squash or clip the segments of a dissolve, so with the header flag bit 2 (HF_SEGMENT_RANGE, 0x04 in byte 27) every
+// frame keeps its own range (a = 1, b = 0; k_hf_segment_range). Files without it (v1) are re-normalised as above.
 inline float pct(std::vector<float>& v, float p) {   // nearest rank (v is reordered)
     const size_t k = static_cast<size_t>(p * static_cast<float>(v.size() - 1) + 0.5f);
     std::nth_element(v.begin(), v.begin() + static_cast<ptrdiff_t>(k), v.end());
