@@ -4121,8 +4121,11 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   `1/Z = 1/Ds + k D'` with `D = 1/Z(n) - 1/Ds` and `D' = D x (D > 0 ? w_edge : 1) x w_sub` (k = 0: the flat screen; the
   weights: the window rule below). Ds is the viewer's distance to
   the screen (`screen_distance`, 2.5 m by default: the screen is placed that far ahead of the reference). A pixel is moved
-  along the ray from the nominal eye E = Ds in front of the screen's centre through its own position on the screen: in the
-  screen's frame (E = (0, 0, Ds)), t = Z / Ds, `P = (x t, y t, Ds (1 - t))`. Seen from E the picture is exactly the flat
+  along the ray from the nominal eye E through its own position on the screen. E is the midpoint between the eyes at the
+  recentre (review3 N-1): the screen is placed Ds ahead of the left eye (the reference), so in the screen's frame E =
+  (ipd / 2, 0, Ds), ipd the located eye separation (63 mm when out of 45..85 mm); the parallax is then split evenly between
+  the two eyes (with E at the left eye the right eye carried all of it, twice as wide). t = Z / Ds,
+  `P = E + t (S - E) = (ex + t (x - ex), t y, Ds (1 - t))`. Seen from E the picture is exactly the flat
   screen's (no pixel moves, no hole opens); far content is drawn larger in proportion to its distance (at 5.5 m, 2.2 x),
   so it keeps its angular size, as in a cinema. The two eyes' parallax gives the depth; looking from off E (head motion)
   shows the parallax a real scene would. Defaults (fmv_depth_amount 1, fmv_depth_range 3 m, fmv_depth_pop 0.15 m), a
@@ -4137,7 +4140,15 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
 
   So the default spans 0.88 deg of disparity (3.15 m of depth) against the old maximum's 0.26 deg (0.47 m), and it does so
   without scaling the noise along with it: the noise filters below act on the map first. Comfort: the usual cinema rule keeps crossed (pop-out) disparity within about 1 deg; here it is 0.09
-  deg (0.36 deg at the slider's end), and the pop-out distance is capped so the nearest stays at least 0.5 m away. Behind the
+  deg (0.36 deg at the slider's end) at 2.5 m. **At every screen distance** (review3 SF-2: at screen_distance 1 m the
+  sliders reached +3.6 deg crossed and the defaults -2.7 deg uncrossed) make_map caps the pop-out so the nearest content's
+  crossed disparity is at most 1.0 deg (and the nearest at least 0.5 m away), and the range so the farthest's uncrossed
+  disparity is at most 1.5 deg (63 mm): Zn >= 1 / (1/Ds + 0.277), Zf <= 1 / (1/Ds - 0.416) when 1/Ds > 0.416. At Ds >= 2.41 m
+  even infinity is within 1.5 deg, so at the default 2.5 m neither cap binds for any slider value; at 1 m the defaults' range
+  is capped to 0.71 m and the pop-out to at most 0.22 m (the default 0.15 m stays). The uncrossed figure is looser than the crossed one because behind the screen
+  nothing diverges in a headset (below) and 1-1.5 deg of uncrossed disparity is within the usual 3D-film budgets; it bounds
+  the depth spread (nearest to farthest at most 2.5 deg) at close screens. F8's row and the Debug line say when either
+  is limited ("pop-out limited to 0.22 m: 1 deg at this screen distance", "(limited: 1.5 deg)"), as does the fmv3d: line. Behind the
   screen there is no divergence in a headset: the content is real geometry at 2.5 .. 12.5 m, so the eyes converge on it as
   on any scene (unlike a cinema, where screen parallax beyond the eye separation diverges); the headset's fixed focus
   (about 1.3-2 m on a Quest 3) is the same for the flat screen. Per shot the nearest content always lands at the pop-out
@@ -4165,11 +4176,15 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   the gap per video frame (fmv_depth_smooth, default 0.6: 40 %), but a change of more than 24 of 255 is taken at once
   (motion, not noise: no ghost behind a moving edge); reset at every cut and after a flat stretch. 115 KB with the upload
   copy. (c) The rubber sheet: a triangle across a depth edge stretches from the near to the far side; seen from E it is
-  edge-on (invisible), from an eye a few centimetres off it shows a smear. The pixel shader takes its triangle's depth
-  slope from ddx / ddy of the depth behind the screen and of the uv (constant over a triangle: SM4, no geometry shader):
-  slope = |d depth / d screen| in metres per metre, and blends its colour toward the video two cells further to the far
-  side (the background the edge would uncover), from slope 8 (none: a floor receding 3 m over 0.4 m of screen is ~8) to 25
-  (full) (fmv_depth_edges, default 1). That sample uses SampleLevel (no gradient in a varying branch). (d) Debug, session-
+  edge-on (invisible), from an eye a few centimetres off it shows a smear. The pixel shader takes its triangle's
+  disparity slope from ddx / ddy of 1/Z and of the uv (constant over a triangle: SM4, no geometry shader): slope =
+  |d(1/Z) / d screen| in 1/m per m (review3 SF-1: the first build used metres of depth per metre, which grows with Z^2, so
+  at a 10 m range one or two 8-bit levels of the far background filled and blotched; in disparity a step fills the same
+  near and far, and the width an eye b off E sees is b x the step, which is what makes a sheet visible), and blends its
+  colour toward the video two cells further to the far side (the background the edge would uncover), from 0.738 (none) to
+  2.305 (full), the first build's 8 / 25 m/m at the default map's middle depth (3.29 m): at range 3 m a step of 12 levels
+  between neighbouring vertices starts the fill (13 before, at n = 0.5), at 10 m about 9 levels; one level never does
+  (fmv_depth_edges, default 1). That sample uses SampleLevel (no gradient in a varying branch). (d) Debug, session-
   only: `depth as colour` (red near, green middle, blue far) to judge the depth itself in the headset.
 - **Would converter changes help?** (not done; estimates)
   - Per-shot constant lo / hi (a second pass over each shot, ~35 MB of float16 maps for a 300-frame shot): with the depth
@@ -4208,7 +4223,7 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   amount 1.00, 3.0 m behind / 0.15 m in front, 1.80 rows a video row (tight fov) | decode avg 0.31 / max 2.10 ms (1241 decoded, 0 errors),
   ring 8/8 | in 3D on 2900 of 2950 Presents` (or `, flat screen (<reason>)`; `FMV 3D: off (fmv_depth 0)`; `FMV 3D: no movie
   playing (last movie ...)`), the checkboxes `FMV 3D: depth as colour (red near, blue far)` (session-only), `edge fill`
-  and `3x3 median` (ini fmv_depth_edges / fmv_depth_median), `edge band (pop-out only)` (ini fmv_depth_edge_band, 0..0.15,
+  and `3x3 median` (ini fmv_depth_edges / fmv_depth_median), `edge band (pop-out only)` (ini fmv_depth_edge_band, 0.01..0.15 (review3 N-5: never 0),
   default 0.04), `FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)` (ini
   `fmv_depth_tight_fov`) and `depth frame offset (sync test, not saved)` (-3..3: session-only, 0 at every start, not in the
   ini; review N6).
@@ -4225,8 +4240,8 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   short locks a Present (three when the frame changes), the 57.6 KB upload 30 times a second, two passes of 86,400 / 64,800 vertices
   and the eye images' fill; the shaders compile once at the first Present with fmv_depth on and the headset on, the GPU
   objects at the first relief frame (then kept).
-- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 800 checks, 0 failed; 51 / 51
-  mutations caught): the reader on 25 cases written by tools/fmvdepth/fvd.py with the zlib and stored codecs (16:9 / 4:3,
+- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 1025 checks, 0 failed; round 5's
+  set of 22 mutants, one at a time: 22 / 22 caught): the reader on 25 cases written by tools/fmvdepth/fvd.py with the zlib and stored codecs (16:9 / 4:3,
   stored frames inside a zlib file, the left predictor in both codecs; every frame equal to fvd.py's FvdReader and its
   median; damaged headers, entries and payloads; stale, other video, fake model, sizes, codec 2 with no decoder, the frame
   cap), the predictor, the selection, the hold / lag / cut / flat / error / strength-rate logic at 72 Hz, the shape and
@@ -4241,6 +4256,13 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   same 11 pre-existing errors; a mutation in fmv_relief.cs is reported). **Not verified**: anything at run time (XPRESS
   through cabinet.dll, the worker's file and ring protocol, the D3D objects, the look, the comfort, the sync, the crop, the
   cost, Virtual Desktop with a narrowed projection view), and the shaders under fxc's SM4 rules.
+- **Review 3** (fixes/fmv-relief-review3.md). B-1: the pixel shader's constants (edge fill, depth as colour, the screen
+  size) were never bound: rel_draw now binds the relief's buffer to the PS too (uid_save / uid_restore keep the game's PS
+  b0); a static check (scratchpad relief_chk/test/static_check.py: every stage that reads the cbuffer has it bound in
+  rel_draw) fails on 35fad09 and passes now. SF-1, SF-2, N-1, N-5: above. N-3: the range / pop-out followers snap to the
+  settings when a movie starts. Left as notes: N-2 (the fill's two-cell offset is 2.67 cells for 4:3 movies), N-4 (the
+  median costs ~2 ms a frame on the worker), N-6 (the subtitle band's ramp is a steep step at large ranges, which the fill
+  treats as an edge). The shaders compile as vs_4_0 / ps_4_0 with vkd3d-compiler 1.12 (built by the reviewer; not fxc).
 - **Headset check (review N8): world-lock under head motion.** The relief goes out as a projection layer with the pose it
   was drawn with and no depth layer (no XrCompositionLayerDepthInfoKHR); between fresh frames VDXR can only reproject it by
   rotation, while the quad was recomposited exactly every display frame. At the game's Present rate during FMVs expect a
