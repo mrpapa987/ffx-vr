@@ -12,14 +12,18 @@ namespace FFXVR;
 //                        10 cm into the screen at most, 5 cm out of it); followed smoothly, so the slider never pops;
 //   fmv_depth_flat_subs  0 / 1 (default 0): the bottom 15 % of the video stays flat (the subtitles are in the same image and
 //                        would otherwise lie on the relief);
-//   fmv_depth_offset     -3..3 (default 0; Debug): the depth frame shown is the video frame + this (a sync test knob).
+//   fmv_depth_tight_fov  0 / 1 (default 1; Debug): each eye's projection is narrowed to the screen (review SF-1), so the eye
+//                        image's rows go to the video; 0 = the eye's whole field of view (an A/B against Virtual Desktop);
+//   depth frame offset   -3..3 (Debug, session-only: not saved, 0 at every start; review N6): the depth frame shown is the
+//                        video frame + this (a sync test knob).
 // ABI 41: ffxvr_fmv3d_set (every frame from push_all) and ffxvr_fmv3d_text (the text, only while it is drawn).
 public sealed unsafe partial class FFXVRModule {
 
     private bool  _fmv_depth = false;              // ini fmv_depth
     private float _fmv_depth_strength = 0.08f;     // ini fmv_depth_strength
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
-    private int   _fmv_depth_offset = 0;           // ini fmv_depth_offset (Debug)
+    private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Debug)
+    private int   _fmv_depth_offset = 0;           // Debug, session-only (not in the ini)
     private delegate* unmanaged[Cdecl]<int, float, int, int, void> _fn_fmv3d_set;    // ABI 41
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_fmv3d_text;         // ABI 41: (which, buf, cap) -> length
     private readonly byte[][] _fmv3d_raw = { new byte[600], new byte[600] };         // the bytes last turned into _fmv3d_str (per which)
@@ -28,7 +32,7 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>From push_all, every frame (applies at the next Present).</summary>
     private void fmv3d_push() {
-        if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_strength, _fmv_depth_flat_subs ? 1 : 0, _fmv_depth_offset);
+        if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_strength, (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0), _fmv_depth_offset);
     }
 
     /// <summary>Native's text (0 the Debug line, 1 the main window's note); a new string only when its bytes changed.</summary>
@@ -53,13 +57,14 @@ public sealed unsafe partial class FFXVRModule {
         if (note.Length > 0) ImGui.TextDisabled("  " + esc(note));
     }
 
-    /// <summary>The Debug header's line (after the FMV sync line) and the sync test knob.</summary>
+    /// <summary>The Debug header's line (after the FMV sync line), the tight field of view and the sync test knob.</summary>
     private void fmv3d_debug_ui() {
         if (_fn_fmv3d_text == null) return;
         ImGui.TextDisabled(esc(fmv3d_text(0)));
         if (_fmv_depth) {
+            ImGui.Checkbox("FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)##fmv3d", ref _fmv_depth_tight_fov);
             ImGui.SameLine(); ImGui.SetNextItemWidth(100);
-            ImGui.SliderInt("depth frame offset (sync test)##fmv3d", ref _fmv_depth_offset, -3, 3);
+            ImGui.SliderInt("depth frame offset (sync test, not saved)##fmv3d", ref _fmv_depth_offset, -3, 3);
         }
     }
 }

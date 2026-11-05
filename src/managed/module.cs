@@ -1065,7 +1065,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "fmv_depth":         pb(k, v, ref _fmv_depth); break;              // FMVs in 3D with a converted depth file (fmv_relief.cs; default 0)
                 case "fmv_depth_strength": pf(k, v, ref _fmv_depth_strength, 0f, 0.25f); break;   // the relief's depth, a share of the screen width (default 0.08)
                 case "fmv_depth_flat_subs": pb(k, v, ref _fmv_depth_flat_subs); break;  // the bottom 15 % flat (subtitles; default 0)
-                case "fmv_depth_offset":  pi(k, v, ref _fmv_depth_offset, -3, 3); break;   // Debug: the depth frame shown = the video frame + this (default 0)
+                case "fmv_depth_tight_fov": pb(k, v, ref _fmv_depth_tight_fov); break;  // Debug: the relief's projection narrowed to the screen (default 1; review SF-1)
+                case "fmv_depth_offset":  break;                                         // session-only since review N6: an old line is ignored (the offset starts at 0)
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
                 case "follow_rate":       pf(k, v, ref _follow_rate, 1f, 360f); break;
@@ -1418,7 +1419,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"fmv_depth={(_fmv_depth ? 1 : 0)}\n" +
             $"fmv_depth_strength={_fmv_depth_strength.ToString("F3", ci)}\n" +
             $"fmv_depth_flat_subs={(_fmv_depth_flat_subs ? 1 : 0)}\n" +
-            $"fmv_depth_offset={_fmv_depth_offset.ToString(ci)}\n" +
+            $"fmv_depth_tight_fov={(_fmv_depth_tight_fov ? 1 : 0)}\n" +
             $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
@@ -1666,7 +1667,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
         timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
         fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
-        fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; fmv_depth_offset (fmv_relief.cs)
+        fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; fmv_depth_tight_fov, the session-only depth offset (fmv_relief.cs)
 
         if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
             float* c = stackalloc float[48];
