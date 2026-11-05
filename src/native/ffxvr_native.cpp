@@ -34,6 +34,7 @@
 #include "ffxvr_cpu.h"     // cpu-lean: the cpu: line's accumulators and range_readable's page rule / region cache (pure logic)
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
 #include "ffxvr_gates.h"   // gates: the tap gate's reasons from the game bits, the hands' game hide rule, the overdrive minigame tracker (pure logic)
+#include "ffxvr_fmv.h"     // fmv-sync (S2): the movie player's fields, the per-FMV tracker and lines, the .fvd header check (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -5786,6 +5787,79 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
     InterlockedExchange(&g_od_active, od::active(r) ? 1 : 0);
 }
 
+// FMV sync probe (S2 of the FMV depth plan, 4 Nov 2026; ffxvr_fmv.h has the addresses with their evidence): read-only. Every
+// Present: the manager pointer (exe image) and its playing word (one guarded 4-byte read of the heap). Only while a movie may
+// be up (the playing byte or the skippable flag set, or an FMV being tracked) the rest: the state, the player's fields and the
+// name (three guarded reads, 0x80 + 0x5C + 0x84 bytes), the skip byte, the flag and the event's movie id (exe image). One
+// fmv: line at each start and end (ffxvr_fmv.h's Log limit); the .fvd header is read once at a start (CreateFileW, ReadFile of
+// 128 bytes, closed at once; FILE_SHARE_READ | FILE_SHARE_DELETE as FORMAT.md asks). No rendering change. F8's FMV line is
+// managed's own read (fmv_sync.cs).
+static fmv::Fmv g_fmv;
+static fmv::Log g_fmv_log;
+static fmv::FvdInfo g_fmv_fvd;                 // the current FMV's depth file (its end line compares with it)
+static uint32_t g_fmv_cam3d_prev = 0;          // g_cam3d_total at the last Present: a real 3D camera came during this frame
+static uint32_t g_fmv_read_fail = 0;           // the playing word was not readable (that Present is skipped)
+static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
+    v = fmv::FvdInfo{};
+    if (!fmv::fvd_file_name(name, v.file, sizeof(v.file))) { v.status = fmv::FVD_NO_NAME; return; }
+    wchar_t wf[sizeof(v.file)] = {};
+    for (size_t i = 0; i + 1 < sizeof(wf) && v.file[i]; ++i) wf[i] = static_cast<wchar_t>(v.file[i]);   // [a-z0-9_.] only (fvd_file_name)
+    wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\fmvdepth\\%s", g_dir, wf);
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD e = GetLastError();
+        v.status = (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? fmv::FVD_ABSENT : fmv::FVD_READ;
+        return;
+    }
+    LARGE_INTEGER sz = {}; uint8_t b[128] = {}; DWORD got = 0;
+    const bool ok = GetFileSizeEx(h, &sz) != 0 && ReadFile(h, b, sizeof(b), &got, nullptr) != 0;
+    CloseHandle(h);
+    if (!ok || sz.QuadPart < 0) { v.status = fmv::FVD_READ; return; }
+    fmv::fvd_parse(b, got, static_cast<uint64_t>(sz.QuadPart), name, v);
+}
+static void fmv_frame() {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    auto at = [](uint32_t va) { return reinterpret_cast<const void*>(base + (va - 0x400000u)); };
+    const uint32_t cam = g_cam3d_total; const bool cam3d = cam != g_fmv_cam3d_prev; g_fmv_cam3d_prev = cam;
+    uint32_t mgr = 0, flag = 0;
+    if (!ffxvr_safe_read(at(fmv::k_mgr_va), &mgr, 4)) mgr = 0;
+    fmv::Snap s;
+    if (mgr != 0) {
+        uint8_t pw[4] = {};
+        if (!ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(mgr) + fmv::k_playing), pw, 4)) { g_fmv_read_fail++; return; }
+        s.mgr = true; s.playing = pw[0]; s.open = pw[2];
+    }
+    if (!ffxvr_safe_read(at(fmv::k_skippable_va), &flag, 4)) flag = 0;
+    if (!g_fmv.on && s.playing == 0 && flag == 0) return;   // no movie can be up: nothing more is read
+    s.skippable = flag;
+    if (mgr != 0) {
+        const uintptr_t m = static_cast<uintptr_t>(mgr);
+        uint8_t sb[fmv::k_s_len], pb[fmv::k_p_len], nb[fmv::k_n_len];
+        if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_s_lo), sb, fmv::k_s_len)) fmv::parse_state(s, sb);
+        if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_p_lo), pb, fmv::k_p_len)) fmv::parse_player(s, pb);
+        if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_n_lo), nb, fmv::k_n_len)) fmv::parse_name(s, nb);
+    }
+    if (!ffxvr_safe_read(at(fmv::k_skipped_va), &s.skipped, 1)) s.skipped = 0;
+    if (!ffxvr_safe_read(at(fmv::k_movie_id_va), &s.movie_id, 4)) s.movie_id = -1;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
+    const int mode = !g_xr_want ? fmv::M_MONITOR : g_xr_screen_now ? fmv::M_SCREEN : g_screen3d_now ? fmv::M_STEREO : fmv::M_3D;
+    fmv::Fmv done;
+    const int ev = fmv::step(g_fmv, s, now, mode, cam3d, done);
+    if ((ev & fmv::EV_END) && g_fmv_log.want_end(now)) {
+        char b[1600]; fmv::end_line(b, sizeof(b), done, g_fmv_fvd);
+        diag("%s%s", b, g_fmv_read_fail ? " | the playing word was unreadable on some Presents this session" : "");
+    }
+    if (ev & fmv::EV_START) {
+        if (g_fmv_log.want_start(g_fmv.name, g_fmv.id, now)) {
+            fmv_fvd_check(g_fmv.name, g_fmv_fvd);   // file I/O only for a logged start (a flapping byte reads nothing)
+            char b[1024]; fmv::start_line(b, sizeof(b), g_fmv, g_fmv_fvd, g_fmv_log.reported);
+            diag("%s", b);
+        }
+        else if (g_fmv_log.cap_line()) diag("fmv: %u lines this session: no more fmv: lines", g_fmv_log.lines);
+    }
+}
+
 // (b) DLL loads and unloads after init (LdrRegisterDllNotification). The callback runs under the loader lock on the loading
 // thread: it copies the name into a fixed ring slot (no allocation, no CRT, no loader call) and the render thread logs it
 // (slow_frame), at most k_dll_log_max lines a session plus magic_*.dll (the battle effect programs) up to k_dll_magic_max.
@@ -6312,6 +6386,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         InterlockedExchange(&g_c2_skip, skip ? 1 : 0); if (skip) g_c2_skip_frames++;
     }
     ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
+    fmv_frame();                    // fmv-sync (S2): which video plays and which frame is on screen (read-only; after xr_tick decided the view)
     g_cpu_slow_acc = 0;
     perf_tick();
     const LONGLONG cq4 = cpu_q(), cslow = g_cpu_slow_acc;
