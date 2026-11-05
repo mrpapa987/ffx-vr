@@ -4337,6 +4337,11 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
     over the new shot: a flat frame now fades only within its shot and is flat at once after a cut (the reviewer's repro is
     a test). N-1: the Debug causal filter starts over when it is switched on. N-5: past the file's end the worker no longer
     refills from frame 0. Left as notes: N-2 (the timestamp queries live for the process, like the shaders), N-3, N-4.
+  - Converter v2 (fmv-conv2, review fmv-conv2-review.md B-1): a v2 file sets header flag bit 2 (HF_SEGMENT_RANGE, 0x04
+    in byte 27): its lo / hi are already one fixed range per segment (the model restarted at every cut, dissolves split
+    into segments). Then the runtime uses them as they are (a = 1, b = 0: no short-shot fold, no per-shot percentiles,
+    which would map a 1-5 frame shot through another shot's range and squash or clip a dissolve's segments); the fmv3d:
+    open line says "ranges per segment from the converter". Unflagged (v1) files are re-normalised as above.
   - Owner A/B (F8 > Debug, the FMV 3D line's checkboxes; all session-only): `each frame to its own range` on and off in a
     shot where something enters or leaves (a hand, a sword, a creature): with it off the rest should stay put; `old cut
     ramp`: watch shot changes for the "inflate" pulse; `old causal filter`: depth trailing moving edges, shimmer on still

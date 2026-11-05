@@ -6128,7 +6128,10 @@ static void relw_open(uint32_t gen, const char* name, uint32_t game_frames) {
     for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
     g_relw_h = h;
     r.state = 1; r.n = F.n; r.w = F.w; r.cuts = F.cuts; r.flats = F.flats;
-    snprintf(r.why, sizeof(r.why), "fmvdepth\\%s: %u frames %ux%u, %u cuts (%u shots normalised), %u flat frames, %s", file, F.n, F.w, F.h, F.cuts, F.shots, F.flats, F.codec == 2 ? "XPRESS" : "stored");
+    char shots[64];   // fmv-conv2 B-1: a v2 file's ranges are used as they are
+    if (F.seg_range) snprintf(shots, sizeof(shots), "ranges per segment from the converter");
+    else snprintf(shots, sizeof(shots), "%u shots normalised", F.shots);
+    snprintf(r.why, sizeof(r.why), "fmvdepth\\%s: %u frames %ux%u, %u cuts (%s), %u flat frames, %s", file, F.n, F.w, F.h, F.cuts, shots, F.flats, F.codec == 2 ? "XPRESS" : "stored");
     done();
 }
 /// Worker: decodes frame i into its decoded-ring slot (the 3x3 median when cfg bit 0), counting the time.
