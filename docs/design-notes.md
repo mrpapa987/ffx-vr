@@ -4508,10 +4508,18 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     for the frame as non-image (copied by the kernel only) and the kernel copies it. The other threads (the main thread's
     post-join and battle-cursor snapshots in diag7.cs, once per game frame, never counted before; the loader) use the same
     check before range_readable's walk and keep the plain copy; the window between check and copy is the old path's.
-    `fast_reads=0` turns all of it off. QueryWorkingSetEx failing 8 times before any answer turns it off for the session.
+    `fast_reads=0` turns all of it off. Review SF1: the "Valid = 1 is never a guard page" rule is the memory manager's
+    (the WRK removes a page from the working set when VirtualProtect sets PAGE_GUARD or PAGE_NOACCESS), not a documented
+    sentence, so it is checked on the machine itself before use: at the first frame roll with fast_reads on, a page of our
+    own, written, must report Valid with PAGE_READWRITE, and the same page made PAGE_READWRITE | PAGE_GUARD (never read,
+    released at once) must report Valid = 0 or the guard bit. Until it passes no thread uses the check; if it fails, the
+    check is off for the session (`fast reads: QueryWorkingSetEx ...` line, and the verdict on every cpu: line). The render
+    thread also turns it off after 64 answers in a row with no page Valid for ranges VirtualQuery then found readable (Wine
+    and CrossOver answer TRUE with Valid = 0 for every page: cost only, but every such read would pay two calls).
   - **The cpu: line.** `working-set checks N/M a frame (answered N/M, x/y ms; big-run hints H)`; `reads that queried or
     checked, by caller (render thread, top 4 by time)`: return address (`ffxvr_native+RVA` from the pdb, `ffx+RVA`, or
-    `JIT 0x...` for a managed call site; read<T> is one site per T), calls / queries / checks a frame, ms a frame, the last
+    `JIT 0x...` for a managed call site; read<T> is one site per T; ffxvr_safe_read is noinline so its native callers are
+    named, review N6), calls / queries / checks a frame, ms a frame, the last
     read's length and address, and the allocation and answer length of its last query; `other threads' reads`: main and
     others, with checks, queries and time. safe_read = hits + queried + checked reads.
   - **Expected (scratch model, c_page calibrated to the 0.9 ms):** virtual screen 900 -> 9 us a frame (1 query, 3 checks);
