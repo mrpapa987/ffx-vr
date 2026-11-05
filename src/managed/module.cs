@@ -1654,6 +1654,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
         slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
         timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
+        fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
 
         if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
             float* c = stackalloc float[48];
