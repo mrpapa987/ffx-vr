@@ -278,13 +278,25 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
 // to distance Z: from E the picture is exactly the flat screen's (no pixel moves, nothing is uncovered); the depth comes
 // from the two eyes' parallax. In the screen's frame (x right, y up, +z toward the viewer, E = (0, 0, Ds)), with t = Z / Ds:
 // P = (x t, y t, Ds (1 - t)).
-struct Map { float Ds, inv_n, inv_f, k; };
+/// ex: the nominal eye's x in the screen's frame (review3 N-1: the midpoint between the eyes; the screen is placed from the
+/// left eye at the recentre, so ex = ipd / 2). pop / range: what was applied (after the comfort limits); *_limited: capped.
+struct Map { float Ds, inv_n, inv_f, k, ex, pop, range; bool pop_limited, range_limited; };
 constexpr float k_min_near = 0.5f;   // the near distance is at least this (m): a pop-out setting larger than Ds - 0.5 is capped
+constexpr float k_ipd = 0.063f;      // the eye separation the comfort limits are reckoned with (m)
+constexpr float k_max_crossed_deg = 1.0f, k_max_uncrossed_deg = 1.5f;   // review3 SF-2: at any screen distance (see the design note)
 /// Ds: the screen's distance (m), range: how far behind it the farthest content goes (m), pop: how far in front the nearest
-/// goes (m), k: the amount (0..1).
-inline Map make_map(float Ds, float range, float pop, float k) {
+/// goes (m), k: the amount (0..1), ex: the nominal eye's x (m). The pop-out is capped so the nearest content's crossed
+/// disparity against the screen plane is at most k_max_crossed_deg (and the nearest at least k_min_near away), the range so
+/// the farthest's uncrossed disparity is at most k_max_uncrossed_deg (at Ds >= 2.41 m even infinity is within it).
+inline Map make_map(float Ds, float range, float pop, float k, float ex = 0.f) {
     Ds = fmaxf(Ds, 0.6f); range = clampf(range, 0.f, 50.f); pop = clampf(pop, 0.f, Ds - k_min_near);
-    return { Ds, 1.f / (Ds - pop), 1.f / (Ds + range), clampf(k, 0.f, 1.f) };
+    Map m = {}; m.Ds = Ds; m.k = clampf(k, 0.f, 1.f); m.ex = ex;
+    const float c = k_max_crossed_deg / 57.29578f / k_ipd, u = k_max_uncrossed_deg / 57.29578f / k_ipd;   // in 1/m
+    const float zn_min = 1.f / (1.f / Ds + c);
+    if (Ds - pop < zn_min) { pop = Ds - zn_min; m.pop_limited = true; }
+    if (1.f / Ds - u > 0.f) { const float zf_max = 1.f / (1.f / Ds - u); if (Ds + range > zf_max) { range = zf_max - Ds; m.range_limited = true; } }
+    m.pop = pop; m.range = range; m.inv_n = 1.f / (Ds - pop); m.inv_f = 1.f / (Ds + range);
+    return m;
 }
 /// The distance from E (m) of disparity n (0..1); w_pop (0..1) scales only the part in front of the screen (the edge band),
 /// w_all (0..1) all of it (the subtitle band). Continuous in n, w_pop and w_all (D * w_pop and D agree at D = 0).
@@ -294,16 +306,17 @@ inline float map_z(const Map& m, float n, float w_pop, float w_all = 1.f) {
     d *= (d > 0.f ? w_pop : 1.f) * w_all;
     return 1.f / (inv0 + m.k * d);
 }
-/// The point in the screen's frame for screen position (x, y) (m) at disparity n and the weights.
+/// The point in the screen's frame for screen position (x, y) (m) at disparity n and the weights: on the ray from the
+/// nominal eye E = (ex, 0, Ds) through (x, y, 0), at depth Z behind E: P = E + t (S - E), t = Z / Ds.
 inline void map_point(const Map& m, float x, float y, float n, float w_pop, float P[3], float w_all = 1.f) {
     const float t = map_z(m, n, w_pop, w_all) / m.Ds;
-    P[0] = x * t; P[1] = y * t; P[2] = m.Ds * (1.f - t);
+    P[0] = m.ex + (x - m.ex) * t; P[1] = y * t; P[2] = m.Ds * (1.f - t);
 }
 /// The angular disparity (degrees) of a point at distance Z against the screen plane at Ds, for an eye separation ipd:
 /// + crossed (in front of the screen), - uncrossed (behind). The comfort figure of the design note.
 inline float disparity_deg(float Z, float Ds, float ipd = 0.063f) { return ipd * (1.f / Z - 1.f / Ds) * 57.29578f; }
 
-constexpr float k_feather = 0.04f, k_feather_max = 0.15f, k_band = 0.15f, k_band_ramp = 0.05f;   // k_feather: the edge band's default
+constexpr float k_feather = 0.04f, k_feather_min = 0.01f, k_feather_max = 0.15f, k_band = 0.15f, k_band_ramp = 0.05f;   // k_feather: the edge band's default
 struct Weights { float pop, all; };
 /// The weights at grid point (a, b) (0..1 across the video rect, b down). pop (for content in front of the screen only):
 /// 0 at the border, 1 from `band` in (smoothstep; band 0: 1 everywhere). all (everything; flat_bottom only): 0 in the bottom
@@ -314,11 +327,19 @@ inline Weights weights(float a, float b, float band, bool flat_bottom) {
     if (flat_bottom) w.all = 1.f - smooth01((b - (1.f - k_band - k_band_ramp)) / k_band_ramp);
     return w;
 }
-/// The rubber sheet (the triangles stretched across a depth edge): the pixel shader measures its triangle's depth slope
-/// (metres of depth per metre of screen, from ddx / ddy of the depth and the uv) and blends its colour toward the colour two
-/// cells further toward the far side (the background, roughly what the edge uncovers), fully at k_edge_hi.
-constexpr float k_edge_lo = 8.f, k_edge_hi = 25.f, k_edge_cells = 2.f;   // a floor receding 3 m over 0.4 m of screen is ~8: below the fill
+/// The rubber sheet (the triangles stretched across a depth edge): the pixel shader measures its triangle's disparity slope
+/// (from ddx / ddy of 1/Z and the uv) and blends its colour toward the colour two cells further toward the far side (the
+/// background, roughly what the edge uncovers), fully at k_edge_hi.
+/// Review3 SF-1: the slope is in disparity, |d(1/Z) / d(screen)| in 1/m per m, so it means the same at any range: the
+/// parallax a step shows (an eye b off E sees it b d(1/Z) wide) is what makes a rubber sheet visible. The thresholds are the
+/// first build's 8 / 25 m of depth per metre of screen at Z(0.5) of the default map (3.29 m): / 3.29^2.
+constexpr float k_edge_lo = 0.738f, k_edge_hi = 2.305f, k_edge_cells = 2.f;
 inline float edge_fill(float slope) { return smooth01((slope - k_edge_lo) / (k_edge_hi - k_edge_lo)); }
+/// The edge fill between two neighbouring vertices (n0, n1 at weight 1) a cell of `cell_m` metres apart (the CPU copy of
+/// the pixel shader's slope).
+inline float edge_fill_between(const Map& m, float n0, float n1, float cell_m) {
+    return edge_fill(fabsf(1.f / map_z(m, n0, 1.f) - 1.f / map_z(m, n1, 1.f)) / cell_m);
+}
 
 // -- noise ------------------------------------------------------------------------------------------------------------
 /// A 3 x 3 median (edges: the nearest pixel repeated), src -> dst (w x h, not in place). The worker runs it after the decode:
@@ -402,18 +423,18 @@ inline void proj_mat(float l, float r, float u, float d, float n, float f, float
 }
 struct Fov { float l, r, u, d; };   // tangents of the half angles (l, d negative), as XrFovTan
 /// Review SF-1: the field of view that just covers the screen's video rect seen from an eye at (eq, ep): the frustum from the
-/// nominal eye (0, 0, Ds) through the rect's four corners, cut at t = t_near and t_far (map_point's t: the relief lies inside
+/// nominal eye (ex, 0, Ds) through the rect's four corners, cut at t = t_near and t_far (map_point's t: the relief lies inside
 /// it, and a projection of a convex body is bounded by its corners'), widened by `margin` of the span on each side plus
 /// 0.004, clamped to `full`. The same eye image then covers less of the view, so the video gets more of its pixels. False
 /// (out = full): a corner is not in front of the eye, or the rect is (nearly) out of view.
 inline bool tight_fov(const float eq[4], const float ep[3], const Fov& full, const float sq[4], const float sp[3], float W, float H,
-                      const Rect& rc, float Ds, float t_near, float t_far, float margin, Fov* out) {
+                      const Rect& rc, float Ds, float t_near, float t_far, float margin, Fov* out, float ex = 0.f) {
     *out = full;
     float V[16], M[16], VM[16]; view_mat(eq, ep, V); pose_mat(sq, sp, M); mat4_mul(V, M, VM);
     float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
     for (int k = 0; k < 8; ++k) {
         const float u = rc.u0 + ((k & 1) ? rc.du : 0.f), v = rc.v0 + ((k & 2) ? rc.dv : 0.f), t = (k & 4) ? t_near : t_far;
-        const float lx = (u - 0.5f) * W * t, ly = (0.5f - v) * H * t, z = Ds * (1.f - t);
+        const float lx = ex + ((u - 0.5f) * W - ex) * t, ly = (0.5f - v) * H * t, z = Ds * (1.f - t);
         const float px = VM[0] * lx + VM[1] * ly + VM[2] * z + VM[3], py = VM[4] * lx + VM[5] * ly + VM[6] * z + VM[7], pz = VM[8] * lx + VM[9] * ly + VM[10] * z + VM[11];
         if (!(pz < -0.05f)) return false;
         const float tx = px / -pz, ty = py / -pz;
