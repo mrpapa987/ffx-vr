@@ -5029,8 +5029,10 @@ Roadmap 4.1 (scratchpad research/roadmap-design.md), review fixes from eye-blink
   0x793530), Chr+0x10 set (0x79F380's per-Chr gate), actor live, stat_visible, not stat_hide, HP > 0, not at (0, 0, 0),
   within 400 units of the followed character. Native applies it at the next first-person frame (aged in such frames).
 - **The field heading** is kept over a battle (battle_face on only) with the game camera's yaw, and restored at the first
-  first-person frame after the battle in the same view and under the same field camera (30 deg); with another camera
-  (a battle ending into a cutscene), or after 600 frames, the heading re-latches from the game camera instead.
+  first-person frame after the battle in the same view and under the same field camera (30 deg). Another camera waits
+  (the battle's end can still be drawn with the battle camera for a few frames); the heading re-latches from the game
+  camera after 20 such frames in a row, at once after a first-person gap of 3+ Presents (a load passed: a battle ending
+  into a cutscene), or after 600 frames.
 - Not done (review notes): the manual yaw offset (`g_ovr_yaw`) is not folded into the facing (N4, default 0); the ini
   ranges differ (managed 0-15 / 4-40, native clamps 0-30 / 2-100, N8); third person with anchor smoothing above 0 glides
   past the blink (N9, default 0); a run of over-threshold frames (a battle dash, if one exceeds 8 units a frame) is not
