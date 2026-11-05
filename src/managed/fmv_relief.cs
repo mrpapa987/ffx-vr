@@ -15,8 +15,9 @@ namespace FFXVR;
 //                        (0..0.25, the old linear relief): an ini with only the old key gets amount = strength / 0.08, at most 1;
 //   fmv_depth_range      0.5..10 m (default 3): how far behind the screen the farthest content goes;
 //   fmv_depth_pop        0..0.5 m (default 0.15): how far in front of it the nearest content comes;
-//   fmv_depth_smooth     0..0.95 (default 0.6): the per-pixel temporal filter within a shot (changes over 24 of 255 pass
-//                        at once: motion, not noise); reset at every cut;
+//   fmv_depth_smooth     0..0.95 (default 0.6): the per-pixel temporal filter within a shot. Since round 7.4 the worker's
+//                        centred one (frames -3 .. +3, edge-aware, never across a cut, no lag; its time sigma is 3 x this);
+//                        with "old causal filter" (Debug, session-only) the EMA as before (changes over 24 of 255 pass at once);
 //   fmv_depth_median     0 / 1 (default 1; Debug): a 3x3 median on each decoded depth frame (speckle);
 //   fmv_depth_edge_fill  0 / 1 (default 0; Debug; was fmv_depth_edges, default 1, ignored since round 6): the edge fill: a triangle stretched across a depth edge shows the colour of
 //                        the far side instead of a smear;
@@ -49,6 +50,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
     private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Debug; default 0 since round 6: the fill made blocks along silhouettes)
     private bool  _fmv_depth_colour = false;       // Debug, session-only
+    private bool  _fmv_depth_causal = false;       // Debug, session-only (round 7.4): the old causal filter (EMA) instead of the centred one (A/B)
     private bool  _fmv_depth_old_cuts = false;     // Debug, session-only (round 7.3): every cut starts flat and ramps in over 150 ms, as before (A/B)
     private bool  _fmv_depth_per_frame = false;    // Debug, session-only (round 7): each frame normalised to its own range, as before (A/B)
     private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
@@ -63,7 +65,7 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>From push_all, every frame (applies at the next Present).</summary>
     private void fmv3d_push() {
-        int flags = (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0) | (_fmv_depth_edges ? 4 : 0) | (_fmv_depth_median ? 8 : 0) | (_fmv_depth_colour ? 16 : 0) | (_fmv_depth_per_frame ? 32 : 0) | 64 | (_fmv_depth_old_cuts ? 128 : 0);   // 64: the causal filter (until the centred one, round 7.4)
+        int flags = (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0) | (_fmv_depth_edges ? 4 : 0) | (_fmv_depth_median ? 8 : 0) | (_fmv_depth_colour ? 16 : 0) | (_fmv_depth_per_frame ? 32 : 0) | (_fmv_depth_causal ? 64 : 0) | (_fmv_depth_old_cuts ? 128 : 0);
         if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_amount, flags, _fmv_depth_offset, _fmv_depth_range, _fmv_depth_pop, _fmv_depth_smooth, _fmv_depth_edge_band);
     }
 
@@ -125,7 +127,8 @@ public sealed unsafe partial class FFXVRModule {
         if (_fmv_depth) {
             ImGui.Checkbox("FMV 3D: depth as colour (red near, blue far)##fmv3d", ref _fmv_depth_colour); ImGui.SameLine();
             ImGui.Checkbox("each frame to its own range (old; A/B)##fmv3d", ref _fmv_depth_per_frame); ImGui.SameLine();
-            ImGui.Checkbox("old cut ramp (flat at every cut; A/B)##fmv3d", ref _fmv_depth_old_cuts);
+            ImGui.Checkbox("old cut ramp (flat at every cut; A/B)##fmv3d", ref _fmv_depth_old_cuts); ImGui.SameLine();
+            ImGui.Checkbox("old causal filter (EMA, lags; A/B)##fmv3d", ref _fmv_depth_causal);
             ImGui.Checkbox("edge fill (experimental)##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
             ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");

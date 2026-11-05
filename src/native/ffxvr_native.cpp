@@ -5867,7 +5867,7 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; int cfg; };
 struct RelSlot { int32_t idx; uint8_t median; uint8_t err; int cfg; };   // the output ring (shared)
 struct RelRaw { int32_t idx; uint8_t err; uint8_t med; };                  // the decoded ring (worker-only)
-struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; };   // state 0 pending, 1 open, -1 failed
+struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; uint32_t made; double make_sum, make_max; };   // state 0 pending, 1 open, -1 failed
 static RelReq  g_relw_req = {};               // render thread -> worker (g_fmvw_mx)
 static RelRes  g_relw_res = {};               // worker -> render thread (g_fmvw_mx)
 static RelSlot g_relw_slot[relief::k_ring];   // (g_fmvw_mx) idx -1 empty, -2 being written
@@ -5995,14 +5995,32 @@ static void relw_output(int32_t i, int cfg) {
     const uint8_t* raw = mem + static_cast<size_t>(i % relief::k_raw) * px;
     uint16_t* out = reinterpret_cast<uint16_t*>(mem + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(sl) * px;
     uint8_t med = 0;
+    LARGE_INTEGER f, ta, tb; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&ta);
     if (!rr.err) {
-        const relief::Entry& e = F.idx[static_cast<uint32_t>(i)];
         const bool per_frame = (cfg & 2) != 0;   // Debug: each frame to its own range (the converter's), for an A/B
-        relief::norm16(raw, px, per_frame ? 1.f : e.a, per_frame ? 0.f : e.b, out);
+        static uint16_t luts[2 * relief::k_trad + 1][256];   // worker-only
+        const uint8_t* fr[2 * relief::k_trad + 1] = {}; const uint16_t* lp[2 * relief::k_trad + 1] = {};
+        bool use[2 * relief::k_trad + 1];
+        if (relief::filter_radius(cfg) > 0) relief::tneighbours(F, i, use); else { for (bool& u : use) u = false; use[relief::k_trad] = true; }
+        for (int k = 0; k < 2 * relief::k_trad + 1; ++k) {
+            const int32_t j = i + k - relief::k_trad;
+            if (!use[k] || j < 0 || static_cast<uint32_t>(j) >= F.n) continue;
+            const RelRaw& rj = g_relw_raw[j % relief::k_raw];
+            if (rj.idx != j || rj.err) continue;   // not decoded (or failed): not averaged
+            const relief::Entry& e = F.idx[static_cast<uint32_t>(j)];
+            relief::norm_lut(per_frame ? 1.f : e.a, per_frame ? 0.f : e.b, luts[k]);
+            fr[k] = mem + static_cast<size_t>(j % relief::k_raw) * px; lp[k] = luts[k];
+        }
+        static relief::TFilter tf; static int tf_cfg = -1;
+        if (tf_cfg != cfg) { relief::tfilter_make(tf, (cfg & 4) ? ((cfg >> 8) & 0xFF) / 100.f : 0.f); tf_cfg = cfg; }
+        relief::tfilter(tf, fr, lp, px, out);   // the centred filter (or, off, the frame's own n')
         med = relief::median_u8(raw, px);
     }
+    QueryPerformanceCounter(&tb);
+    const double ms = f.QuadPart ? (tb.QuadPart - ta.QuadPart) * 1000.0 / f.QuadPart : 0.0;
     std::lock_guard<std::mutex> lk(g_fmvw_mx);
     g_relw_slot[sl] = RelSlot{ i, med, rr.err, cfg };
+    if (g_relw_res.gen == g_relw_gen && !rr.err) { g_relw_res.made++; g_relw_res.make_sum += ms; if (ms > g_relw_res.make_max) g_relw_res.make_max = ms; }
 }
 /// Worker, every loop: follows the request (a new generation opens / closes; new settings make the rings again), then does
 /// one unit of work for the window [want, want + k_ring): a decode the next output frame lacks, or that output frame.
@@ -6022,16 +6040,13 @@ static bool relw_step() {
         if (g_relw_cfg < 0 || ((q.cfg ^ g_relw_cfg) & 1)) for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
         g_relw_cfg = q.cfg;
     }
-    const int32_t n = static_cast<int32_t>(F.n);
-    const int32_t w0 = q.want < 0 ? 0 : q.want;   // no frame wanted yet (the movie's start): the first ones
-    const int rad = relief::filter_radius(q.cfg);
-    for (int32_t i = w0; i < w0 + relief::k_ring && i < n; ++i) {
-        { std::lock_guard<std::mutex> lk(g_fmvw_mx); const RelSlot& sl = g_relw_slot[i % relief::k_ring]; if (sl.idx == i && sl.cfg == q.cfg) continue; }
-        for (int32_t s2 = std::max(0, i - rad); s2 <= std::min(n - 1, i + rad); ++s2)
-            if (g_relw_raw[s2 % relief::k_raw].idx != s2) { relw_decode(s2, q.cfg); return true; }
-        relw_output(i, q.cfg);
-        return true;
-    }
+    int32_t raw_idx[relief::k_raw], out_idx[relief::k_ring]; bool out_ok[relief::k_ring];
+    for (int k = 0; k < relief::k_raw; ++k) raw_idx[k] = g_relw_raw[k].idx;
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); for (int k = 0; k < relief::k_ring; ++k) { out_idx[k] = g_relw_slot[k].idx; out_ok[k] = g_relw_slot[k].cfg == q.cfg; } }
+    int32_t which = 0;
+    const int u = relief::next_unit(q.want, static_cast<int32_t>(F.n), relief::filter_radius(q.cfg), raw_idx, out_idx, out_ok, &which);   // the schedule (tested)
+    if (u == 1) { relw_decode(which, q.cfg); return true; }
+    if (u == 2) { relw_output(which, q.cfg); return true; }
     return false;
 }
 static DWORD WINAPI fmvw_thread(LPVOID) {
@@ -12343,7 +12358,7 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // ffxvr_fmv3d_set (ABI 42). flags: 1 flatten the bottom 15 %, 2 the tight field of view (review SF-1), 4 the edge fill, 8 the
 // 3x3 median, 16 the depth as colour. amount 0..1, range / pop in metres (the "3D movie" mapping), smooth 0..0.95.
 struct RelCfg { int on; float amount; int flags; int offset; float range, pop, smooth, edge; };   // edge: the band (share of the rect) where pop-out ramps to 0 (ABI 43)
-static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8 | 64, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // edge fill (4) off by default (round 6: blocks along silhouettes)
+static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // round 7.4: the centred filter (no 64) by default   // edge fill (4) off by default (round 6: blocks along silhouettes)
 static float g_rel_range_now = -1.f, g_rel_pop_now = -1.f; static double g_rel_t_prev = 0.0;   // the range / pop drawn, following the settings at 2 m/s and 0.5 m/s (a slider never jumps)
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
@@ -12357,7 +12372,7 @@ struct RelFmv {
     int32_t want = -1, want_posted = -2; int sel = 0;
     int now_why = -1, now_fb = FB_PENDING;               // this Present: the relief's reason (now_fb FB_NONE), or the fallback's
     uint32_t presents = 0, rel_presents = 0, by_why[relief::W_N] = {}, by_fb[FB_N] = {}, uploads = 0, ramps = 0;
-    uint32_t decoded = 0, errors = 0; double dec_sum = 0, dec_max = 0, open_ms = 0;
+    uint32_t decoded = 0, errors = 0; double dec_sum = 0, dec_max = 0, open_ms = 0; uint32_t made = 0; double make_sum = 0, make_max = 0;   // made: output frames (the filter)
     int ring = 0; double ring_sum = 0; uint32_t ring_n = 0;
     float s_now = 0, pivot_now = 0;
     relief::Rect rect = { 0.f, 0.f, 1.f, 1.f }; uint32_t bb_w = 0, bb_h = 0, vw = 0, vh = 0;   // the last relief frame's crop
@@ -12618,8 +12633,8 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
-                                      r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
+                                      r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.made, r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
                                       g_rel_gpu_n, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max, relief::grid_cells(r.w), relief::grid_cells(relief::k_h));
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
@@ -12698,7 +12713,8 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     }
     else if (r.file == 1) {
         std::lock_guard<std::mutex> lk(g_fmvw_mx);
-        if (g_relw_res.gen == r.gen) { r.decoded = g_relw_res.decoded; r.errors = g_relw_res.errors; r.dec_sum = g_relw_res.dec_sum; r.dec_max = g_relw_res.dec_max; }
+        if (g_relw_res.gen == r.gen) { r.decoded = g_relw_res.decoded; r.errors = g_relw_res.errors; r.dec_sum = g_relw_res.dec_sum; r.dec_max = g_relw_res.dec_max;
+                                       r.made = g_relw_res.made; r.make_sum = g_relw_res.make_sum; r.make_max = g_relw_res.make_max; }
     }
     // review N3: the file only for a movie that can show a relief now: not a hybrid id, the mono virtual screen (a battle
     // transition window is passing: asked for there too). Checked every Present until asked (the view settles a few frames in).
@@ -12861,8 +12877,8 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
                                                        r.s_now, r.range_used, r.range_limited ? " (limited: 1.5 deg)" : "", r.pop_used, r.pop_limited ? " (limited: 1 deg)" : "",
                                                        r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
-    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; both eyes)", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring,
-                                    g_rel_gpu_last, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max);
+    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), filter avg %.2f / max %.2f ms, ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; both eyes)", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors,
+                                    r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring, relief::k_ring, g_rel_gpu_last, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
     return static_cast<int>(n);
 }

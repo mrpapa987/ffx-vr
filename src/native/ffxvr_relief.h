@@ -193,6 +193,71 @@ inline void norm16(const uint8_t* v, uint32_t px, float a, float b, uint16_t* ou
     }
 }
 
+// -- round 7.4 (audit plan 4): the centred temporal filter on the worker ---------------------------------------------------
+// The causal EMA trades lag for smoothing (1.6 video frames at 0.6) and ghosts below its gate. The worker decodes ahead
+// anyway, so each output frame i is a depth-only temporal bilateral of the decoded frames i-3 .. i+3 (zero phase, no lag):
+// per pixel, weights exp(-dt^2 / 2 sigma_t^2) x exp(-dv^2 / 2 sigma_d^2), dv = the n' difference to frame i in 8-bit levels;
+// a neighbour across a cut (or a flat or undecodable frame, or past the ends) has weight 0. sigma_t = 3 x smooth (the
+// "smoothing" slider; 0.6 -> 1.8 frames; below 0.05: no filter), sigma_d = 7 levels (the audit's e4: flicker 0.88 vs the
+// EMA's 1.23, lag 0.13 vs 1.62 frames, half the error at moving edges). Each neighbour's n' comes from a 256-entry table
+// (raw byte -> 16-bit n' with that frame's own a / b), so the filter sees the per-shot n' of every frame.
+constexpr float k_tsig_d = 7.f;
+struct TFilter { float wt[2 * k_trad + 1]; float wd[1024]; bool on; };   // wd: by |dv| in 1/4 levels (256 levels)
+inline void tfilter_make(TFilter& f, float smooth) {
+    const float st = 3.f * clampf(smooth, 0.f, 0.95f);
+    f.on = st >= 0.15f;
+    for (int k = -k_trad; k <= k_trad; ++k) f.wt[k + k_trad] = f.on ? expf(-0.5f * (k / st) * (k / st)) : (k == 0 ? 1.f : 0.f);
+    for (int j = 0; j < 1024; ++j) { const float d = j * 0.25f / k_tsig_d; f.wd[j] = expf(-0.5f * d * d); }
+}
+/// Which neighbours of frame i may be averaged into it (use[k] for i + k - k_trad): inside the file, not flat, and no cut
+/// between them (a cut at frame c starts a shot: c and later are not averaged with c - 1 and earlier).
+inline void tneighbours(const File& f, int32_t i, bool use[2 * k_trad + 1]) {
+    const int32_t n = static_cast<int32_t>(f.idx.size());
+    for (int k = 0; k < 2 * k_trad + 1; ++k) use[k] = false;
+    use[k_trad] = true;
+    for (int dir = -1; dir <= 1; dir += 2)
+        for (int d = 1; d <= k_trad; ++d) {
+            const int32_t j = i + dir * d;
+            if (j < 0 || j >= n) break;
+            if ((f.idx[static_cast<uint32_t>(dir > 0 ? j : j + 1)].flags & EF_CUT)) break;   // a cut between them
+            if (f.idx[static_cast<uint32_t>(j)].flags & EF_FLAT) continue;
+            use[k_trad + dir * d] = true;
+        }
+}
+/// raw byte -> 16-bit n' for a frame's (a, b): norm16's mapping as a table.
+inline void norm_lut(float a, float b, uint16_t lut[256]) { uint8_t v[256]; for (int k = 0; k < 256; ++k) v[k] = static_cast<uint8_t>(k); norm16(v, 256, a, b, lut); }
+/// The filter: fr[k] the raw frames i + k - k_trad (null: not used), lut[k] their tables; out the 16-bit n' of frame i.
+inline void tfilter(const TFilter& f, const uint8_t* const fr[2 * k_trad + 1], const uint16_t* const lut[2 * k_trad + 1], uint32_t px, uint16_t* out) {
+    const uint8_t* c = fr[k_trad]; const uint16_t* lc = lut[k_trad];
+    if (!f.on) { for (uint32_t p = 0; p < px; ++p) out[p] = lc[c[p]]; return; }
+    for (uint32_t p = 0; p < px; ++p) {
+        const int v0 = lc[c[p]];
+        float acc = static_cast<float>(v0) * f.wt[k_trad], ws = f.wt[k_trad];
+        for (int k = 0; k < 2 * k_trad + 1; ++k) {
+            if (k == k_trad || fr[k] == nullptr) continue;
+            const int v = lut[k][fr[k][p]];
+            int j = (v > v0 ? v - v0 : v0 - v) >> 6;   // 1/4 level (65535 / 255 / 4 = 64.25)
+            if (j > 1023) continue;                      // over 256 levels: weight ~0
+            const float w = f.wt[k] * f.wd[j];
+            acc += w * static_cast<float>(v); ws += w;
+        }
+        out[p] = static_cast<uint16_t>(acc / ws + 0.5f);
+    }
+}
+// The worker's schedule (relw_step), pure so the test can run a playback: for the output window [want, want + k_ring),
+// the first output frame that is missing (or made with other settings), and the first of its decoded neighbours (+-rad)
+// that is missing. Returns 0 nothing to do, 1 decode *which, 2 make output *which.
+inline int next_unit(int32_t want, int32_t n, int rad, const int32_t raw_idx[k_raw], const int32_t out_idx[k_ring], const bool out_ok[k_ring], int32_t* which) {
+    const int32_t w0 = want < 0 ? 0 : want;
+    for (int32_t i = w0; i < w0 + k_ring && i < n; ++i) {
+        if (out_idx[i % k_ring] == i && out_ok[i % k_ring]) continue;
+        for (int32_t s = (i - rad < 0 ? 0 : i - rad); s <= (i + rad < n - 1 ? i + rad : n - 1); ++s)
+            if (raw_idx[s % k_raw] != s) { *which = s; return 1; }
+        *which = i; return 2;
+    }
+    return 0;
+}
+
 /// The left predictor's inverse (FORMAT.md), in place.
 inline void unpredict(uint8_t* p, uint32_t w, uint32_t h) {
     for (uint32_t y = 0; y < h; ++y) {
