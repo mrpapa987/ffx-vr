@@ -2510,7 +2510,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_player_set == null) return;
         Actor* actors = Globals.actors;
         _ride_att = false; _ride_mount_ok = false;   // ride_probe sets them again for an attached followed actor
-        _btg_fed = false;   // battle tag: set again when the hold is sent this frame
+        _btg_fed = false; _btg_carry = false;   // battle tag: set again when the hold is sent / ends this frame
         if (actors == null) { btg_end("no actor table"); System.Threading.Volatile.Write(ref _d7_follow_actor, 0); _fn_player_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _fp_actor_idx = -1; _btl_cycle_req = 0; push_view_rules(false); return; }
         // Before the field is up the table is uninitialised memory (0xCDCDCDCD
         // fill): only a plain 1 counts as enabled, and a name pointer must look
@@ -2594,19 +2594,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     if (_btl_pending_id != want) {
                         _btl_pending_id = want; _btl_pending_why = why ?? ""; _btl_pending_frames = 0; _btl_pending_still = 0; _logger.Info($"battle follow: {why} -> chr {want}{(swap_in ? ", waiting for him to arrive" : "")}");
                         if (swap_in) btg_begin(plys, why, want, wi, on_field(_btl_follow_id));   // battle tag: the outgoing character's spot, the watch
+                        else btg_interrupt(why);   // battle tag: a summon or a manual pick ends a watched swap (its line, with this reason)
                     }
                     bool ready = !swap_in || wi < 0;
                     string ready_why = wi < 0 ? "he has no entity" : "";
                     if (!ready && read(plys + wi, out Chr wc) && wc.actor != null && read(wc.actor, out Actor wa) && live(wa)) {
-                        float dx = wa.chr_pos_vec.X - _btl_pending_pos.X, dz = wa.chr_pos_vec.Z - _btl_pending_pos.Z;
-                        _btl_pending_still = dx * dx + dz * dz < 0.3f * 0.3f ? _btl_pending_still + 1 : 0;
+                        _btl_pending_still = btl_still_next(_btl_pending_still, wa.chr_pos_vec.X - _btl_pending_pos.X, wa.chr_pos_vec.Z - _btl_pending_pos.Z);
                         _btl_pending_pos = wa.chr_pos_vec;
-                        // 15 render frames is about a quarter second at 60 fps. At 60 fps render / 30 Hz logic every other frame shows no
-                        // movement, so the still count only grows once the actor stops on logic steps too: that is why 0.3 per sample
-                        // works at 30 and at 60 fps. Frames, not time, on purpose: FFX logic is frame-locked (R33, won't fix).
-                        if (_btl_pending_frames > 30 && _btl_pending_still > 15) { ready = true; ready_why = "he arrived and stood still"; }   // ran in, then stood still a quarter second
+                        // the arrival rule (bt_tag.cs, shared with the hold): ran in, then stood still a quarter second
+                        if (btl_arrived(_btl_pending_frames, _btl_pending_still)) { ready = true; ready_why = "he arrived and stood still"; }
                     }
-                    if (++_btl_pending_frames > 300 && !ready) { ready = true; ready_why = "the 300-frame limit"; }
+                    if (++_btl_pending_frames > k_btl_swap_max && !ready) { ready = true; ready_why = I($"the {k_btl_swap_max}-frame limit"); }
                     // battle tag (bt_tag.cs): the two cross -> switch now (bt_tag 1 / 2; bt_tag 0 only measures it)
                     bool tagged = !ready && swap_in && btg_watch(plys, want, wi, _btl_pending_frames);
                     if (tagged) ready = true;

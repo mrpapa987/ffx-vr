@@ -5260,21 +5260,28 @@ about 2 s. Logic in `ffxvr_tag.h` (pure, unit-tested), managed in `bt_tag.cs`, A
   else), when either cannot be read or the outgoing one is already gone, or when they have not crossed by the arrival.
 - **`bt_tag`** (F8 > First person / follow, "a swap hands the eyes on:"): 0 "wait until he arrives" (as before; the
   crossing is still measured for the log), 1 "tag and wait on the spot" (default), 2 "tag and ride in with him".
-- **Tag and wait on the spot.** At the tag the follow goes to the incoming character, so the body hide is his and the
-  outgoing one shows again. In first person the eye stays on the outgoing character's spot (his position when the swap
-  began: the slot the incoming one runs to) at the incoming one's eye height, until he arrives and stands still (the
-  same still rule) or 300 frames from the swap's start; then it follows him. The hold is native: in battle the body hide
-  is centred on `ffxvr_player_set`'s position (no other roots are sent outside the field), so that position stays his
-  and only the eye base is moved, by spot - his position (his head by the shared rule, his smoothing). Refreshed every
-  frame; it lapses after 2 frames without one. In third person a tag just switches the follow.
+- **Tag and wait on the spot.** At the tag the follow goes to the incoming character and the outgoing one shows again.
+  In first person the eye stays on the outgoing character's spot (his position when the swap began: the slot the incoming
+  one runs to; a swap that begins during a hold keeps that spot) at the incoming one's eye height, until he arrives and
+  stands still (the same arrival rule, one set of constants in bt_tag.cs) or 300 frames from the swap's start; then it
+  follows him. The hold is native: `ffxvr_player_set` stays his position and only the eye base is moved, by spot - his
+  position (his head by the shared rule, his smoothing). Refreshed every frame; it lapses after 2 frames without one. In
+  third person a tag just switches the follow.
+- **You see him run in** (review of 1442290, SF). The battle body hide is the radius test around `ffxvr_player_set`'s
+  position alone (no other roots are sent outside the field), which hid him all the way in. While the eye is held its
+  centre is the spot (nothing stands there: the outgoing one has left), and his own position again once he is within the
+  usual hide radius + step margin + 2 units of the spot, horizontally (`tag::hide_centre`). The 2 units cover where he
+  stops against the recorded spot and his body's width, so his head is never drawn through the held eye.
 - **A tag blinks** through the eye-jump blink (`eye_jump_blink` frames; 0 = none) and snaps the head offset, whatever
   the distance (the jump at a tag can be under `eye_jump_units`). The enemies are faced through the usual battle follow
   change (`battle_face`), measured from the spot.
 - **Log:** one `battle tag:` line per swap (100 a session): the mode, the frames until the tag, why (distance or passed)
   and the distance then, the closest distance, and how it ended (held N frames until he stood still, the 300-frame
-  limit, ...). Native: `tag:` lines (40 a session) at each tag.
+  limit, interrupted by a summon or a manual pick, ...). Native: `tag:` lines (40 a session) at each tag.
+- With `eye_jump_blink=0` a tag does not blink (the eye snaps from the crossing to the spot), as for every eye jump.
 - Not done: the held eye bobs with his running head height (smoothed); the release, when he stands a unit or two off
-  the recorded spot, is a small step without a glide.
+  the recorded spot, is a small step without a glide; while he is away from the spot the body hide's bone capture (the
+  VR hands' bones) finds none of his.
 
 ## The first-person head rule in one place (5 Nov 2026, review of 9b406b9)
 

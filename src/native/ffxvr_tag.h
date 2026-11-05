@@ -99,4 +99,18 @@ inline void apply(const Hold& h, const float pos[3], float P[3]) {
     for (int k = 0; k < 3; ++k) P[k] += h.base[k] - pos[k];
 }
 
+/// While the eye is held, the incoming character is hidden only near the spot (review of 1442290, SF: he was hidden all the
+/// way in, so nobody seemed to arrive). k_near_extra: units beyond the usual hide radius + step margin, for where he stops
+/// against the recorded spot (it is the outgoing one's position on the swap's first frame) and his body's width, so his head is
+/// never drawn through the held eye on the last steps or where he stands.
+const float k_near_extra = 2.f;
+/// The battle body hide's centre (render space). Not live: pos (the followed actor's position, as always). Live: the spot,
+/// where nothing stands (the outgoing one has left), so the runner shows; and pos again once he is within r_near of the spot
+/// horizontally (r_near = the usual hide radius + step margin + k_near_extra), so the usual hide takes him in full.
+inline const float* hide_centre(const Hold& h, bool live, const float pos[3], float r_near) {
+    if (!live) return pos;
+    const float dx = pos[0] - h.base[0], dz = pos[2] - h.base[2];
+    return dx * dx + dz * dz < r_near * r_near ? pos : h.base;
+}
+
 }  // namespace tag

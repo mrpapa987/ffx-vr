@@ -803,6 +803,10 @@ static void ride_d2(const float* w, float* dr, float* dm) {
     *dr = ax*ax + ay*ay + az*az; *dm = 1e30f;
     if (g_ride_flags & 2) { const float bx = w[0] - g_ride_mount[0], by = w[1] - g_ride_mount[1], bz = w[2] - g_ride_mount[2]; *dm = bx*bx + by*by + bz*bz; }
 }
+// Battle tag (ffxvr_tag.h, ABI 46): managed's swap watch (ffxvr_bt_tag_step) and the eye held on the outgoing character's spot
+// while the incoming one runs in (ffxvr_bt_tag_hold). Render thread only. Here, before the body hide (fp_part_of): the hold moves its centre.
+tag::State g_tag; tag::Cfg g_tag_cfg; tag::Hold g_tag_hold; uint32_t g_tag_lines = 0;
+static bool tag_hold_live() { return g_fp_mode == 1 && tag::live(g_tag_hold, g_frames); }
 /// The body hide's test for one draw's world translation: 0 not the player's, 1 one of the player's own parts (the rider's
 /// while riding), 2 one of the mount's (riding only). The rules are in ffxvr_fpown.h.
 /// On foot: within hide_radius + min(1.5 * step, 4) of g_fp_pos (the margin was unbounded until 4 Nov 2026: scripted moves under
@@ -815,7 +819,9 @@ static void ride_d2(const float* w, float* dr, float* dm) {
 /// Nothing else is at the seat's height within 6 units: an NPC's root is on the ground, a seat height (15 units) below.
 static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
     if ((g_ride_flags & 1) == 0) {
-        fpown::Foot f; f.centre = g_fp_pos; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        fpown::Foot f; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        // g_fp_pos; battle tag: while the eye is held on the spot, the spot, so the incoming runner shows until he is near it (ffxvr_tag.h)
+        f.centre = tag::hide_centre(g_tag_hold, tag_hold_live(), g_fp_pos, g_fp_hide_radius + fpown::margin(g_fp_step_hide) + tag::k_near_extra);
         if (fp_others_live()) {   // nearest-root ownership; none sent this frame = the radius test alone, as before
             f.others = g_fp_others; f.n = g_fp_others_n;
             if (g_fp_self_ok && g_frames - g_fp_self_frame <= 1u) { f.self = g_fp_self_root; f.self_exact = g_fp_self_exact; }
@@ -2016,10 +2022,6 @@ ej::Limit g_cut_lim;                              // S4: cut_blink's one start p
 const uint32_t k_ej_hold_age = 600;               // frames after a battle's end the field heading may still be restored
 const float    k_ej_cam_tol = 30.f * 0.0174533f;  // S2: the same field camera = within 30 deg of the saved yaw
 static void ej_blink() { if (g_ej_cfg.blink > g_blink_frames) g_blink_frames = g_ej_cfg.blink; }
-// Battle tag (ffxvr_tag.h, ABI 46): managed's swap watch (ffxvr_bt_tag_step) and the eye held on the outgoing character's spot
-// while the incoming one runs in (ffxvr_bt_tag_hold). Render thread only.
-tag::State g_tag; tag::Cfg g_tag_cfg; tag::Hold g_tag_hold; uint32_t g_tag_lines = 0;
-static bool tag_hold_live() { return g_fp_mode == 1 && tag::live(g_tag_hold, g_frames); }
 /// The heading changes managed asked for, at the primary advance call right after the latch (so a mode switch's re-latch from
 /// the game's camera is overridden): the field heading after a battle, or the battle heading toward the enemies.
 static void ej_heading() {
@@ -11645,7 +11647,8 @@ extern "C" __declspec(dllexport) int ffxvr_bt_tag_step(int op, float ox, float o
 }
 /// Battle tag (ABI 46): on 1: hold the first-person eye on the spot (x, y, z) (render space: the outgoing character's position
 /// when the swap began) this frame. The eye is the followed (incoming) character's moved by spot - his position, so his own eye
-/// height (the shared head rule) and head offset stay, and the body hide stays on him. Refreshed every frame; lapses after 2
+/// height (the shared head rule) and head offset stay; the body hide is centred on the spot, so he shows running in and hides
+/// once he is near it (tag::hide_centre). Refreshed every frame; lapses after 2
 /// frames without a call; fp_mode 1 only (the face toward the enemies is measured from the spot too). on 2: a tag without a
 /// hold ("tag and ride in with him", or another view). on 0: release. The first frame of a hold, and every on 2, is a tag: the
 /// eye-jump blink (eye_jump_blink frames; 0 = none, as for every eye jump) and a head-offset snap, in fp_mode 1 or 3.

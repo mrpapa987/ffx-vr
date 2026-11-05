@@ -7,10 +7,12 @@ namespace FFXVR;
 // him run off. Now push_player watches the two while the swap is pending and hands the eyes on where they cross (tag::step:
 // closer than bt_tag_dist, or past their closest; the first frames and any frame before both move are ignored):
 //   bt_tag 0 "wait until he arrives": as before (the crossing is still measured, for the log);
-//          1 "tag and wait on the spot" (default): at the tag the follow (and so the body hide) goes to the incoming character;
-//            in first person the eye stays on the outgoing one's standing spot (his position when the swap began: the slot the
-//            incoming one runs to), at the incoming one's eye height (his head by the shared rule, FphWalk.HeadPick), until he
-//            arrives and stands still (the still rule) or the 300 frames since the swap began are up; then it follows him;
+//          1 "tag and wait on the spot" (default): at the tag the follow goes to the incoming character; in first person the
+//            eye stays on the outgoing one's standing spot (his position when the swap began: the slot the incoming one runs
+//            to; a swap during a hold keeps that spot), at the incoming one's eye height (his head by the shared rule,
+//            FphWalk.HeadPick), until he arrives and stands still (the arrival rule below) or the 300 frames since the swap
+//            began are up; then it follows him. While the eye is held native centres the body hide on the spot: he shows
+//            running in and hides once he is near it (tag::hide_centre);
 //          2 "tag and ride in with him": at the tag the eyes go to the incoming character.
 //   A tag blinks (the eye-jump blink: eye_jump_blink frames) and faces the enemies (ej_follow: battle_face, from the spot).
 //   No tag (the wait as before) when the followed character stays on the field (Tidus joining for someone else), when either
@@ -37,6 +39,18 @@ public sealed unsafe partial class FFXVRModule {
     private Vector3 _btg_prev;          // his position last frame (the still rule while held)
     private int     _btg_lines;         // battle tag: lines this session
     private static readonly string[] k_btg_label = { "wait until he arrives", "tag and wait on the spot", "tag and ride in with him" };
+    private bool    _btg_carry;         // a hold ended this frame: a swap beginning now takes its spot (the slot), not a runner's position
+    private bool    _btg_carried;       // this swap's spot is the one of the swap before (review N1)
+
+    // The arrival ("still") rule, one set for the pending swap (push_player) and the hold (btg_hold_tick) (review N3): he has
+    // arrived when more than k_btl_arrive_min frames have passed since the swap began and he has moved under k_btl_still_d units
+    // (horizontal, per sample) for more than k_btl_still_n frames in a row; k_btl_swap_max frames end a swap whatever happens.
+    // 15 render frames is about a quarter second at 60 fps; at 60 fps render / 30 Hz logic every other frame shows no movement,
+    // so the count only grows once he stops on logic steps too: 0.3 per sample works at 30 and at 60 fps. Frames, not time, on
+    // purpose: FFX logic is frame-locked (R33, won't fix).
+    private const int k_btl_arrive_min = 30, k_btl_still_n = 15, k_btl_swap_max = 300; private const float k_btl_still_d = 0.3f;
+    private static int btl_still_next(int still, float dx, float dz) => dx * dx + dz * dz < k_btl_still_d * k_btl_still_d ? still + 1 : 0;
+    private static bool btl_arrived(int frames, int still) => frames > k_btl_arrive_min && still > k_btl_still_n;
 
     private bool btg_parse(string k, string v) {
         switch (k) {
@@ -65,15 +79,27 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>push_player: a swap-in begins (a new pending switch to `want`, entity wi), before _btl_chr / _btl_follow_id
     /// change: they are the outgoing character. out_on_field: he is still on the roster (not his swap).</summary>
     private void btg_begin(Chr* plys, string why, int want, int wi, bool out_on_field) {
+        // review N1: a swap that begins during a hold (the first incoming one swapped out again mid-run; the hold was ended a
+        // moment ago by the follow change) keeps the held spot: the new incoming one runs to the same slot, not to where the
+        // first one is now
+        bool carry = _btg_state == 2 || _btg_carry;
         btg_end("another swap began");
         btg_log("another swap began");
-        _btg_open = true; _btg_state = 0; _btg_begun = false; _btg_mode = _bt_tag; _btg_why = why ?? ""; _btg_note = "";
+        _btg_open = true; _btg_state = 0; _btg_begun = false; _btg_mode = _bt_tag; _btg_why = why ?? ""; _btg_note = ""; _btg_carried = false;
         _btg_frames = 0; _btg_tag_at = -1; _btg_verdict = 0; _btg_min = -1f; _btg_d = 0f;
         _btg_out_ply = _btl_chr; _btg_out_id = _btl_follow_id;
         if (_fn_bt_tag_step == null || _fn_bt_tag_hold == null) { _btg_note = "no native tag"; return; }
         if (out_on_field) { _btg_note = "the followed character stays on the field"; return; }
         if (!btg_pos(plys, _btg_out_ply, _btg_out_id, out Vector3 o)) { _btg_note = "the outgoing character is already off the field (not readable)"; return; }
-        _btg_spot = o; _btg_state = 1;
+        if (carry) _btg_carried = true; else _btg_spot = o;
+        _btg_state = 1;
+    }
+    /// <summary>push_player: the pending switch changed to one that is not a swap-in (a summon, a manual pick) while a swap was
+    /// watched: its line is written now, with that reason (review N2).</summary>
+    private void btg_interrupt(string why) {
+        if (!_btg_open) return;
+        _btg_state = 0;
+        btg_log(I($"interrupted before the switch: {why}"));
     }
     private void btg_drop(string why) { _btg_state = 0; if (_btg_note.Length == 0) _btg_note = why; }
 
@@ -121,11 +147,10 @@ public sealed unsafe partial class FFXVRModule {
         _btg_frames++;
         if (_fp_mode != 1) { btg_end($"the view changed (view {_fp_mode})"); return; }
         if (!btg_pos(plys, _btl_chr, _btl_follow_id, out Vector3 p)) { btg_end("he could not be read"); return; }
-        float dx = p.X - _btg_prev.X, dz = p.Z - _btg_prev.Z;
-        _btg_still = dx * dx + dz * dz < 0.3f * 0.3f ? _btg_still + 1 : 0;
+        _btg_still = btl_still_next(_btg_still, p.X - _btg_prev.X, p.Z - _btg_prev.Z);
         _btg_prev = p;
-        if (_btg_frames > 30 && _btg_still > 15) { btg_end("he arrived and stood still"); return; }
-        if (_btg_frames > 300) { btg_end("the 300-frame limit"); return; }
+        if (btl_arrived(_btg_frames, _btg_still)) { btg_end("he arrived and stood still"); return; }
+        if (_btg_frames > k_btl_swap_max) { btg_end(I($"the {k_btl_swap_max}-frame limit")); return; }
         btg_feed();
     }
     private int _btg_miss;   // consecutive frames the follow logic did not run during a hold
@@ -141,7 +166,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Ends a hold (no-op without one): native releases the eye, and the swap's line is written.</summary>
     private void btg_end(string why) {
         if (_btg_state != 2) return;
-        _btg_state = 0;
+        _btg_state = 0; _btg_carry = true;   // (cleared at the next push_player)
         if (_fn_bt_tag_hold != null) _fn_bt_tag_hold(0, 0f, 0f, 0f);
         btg_log(I($"the eye held {_btg_hold_n} frames on the spot, until {why} ({_btg_frames} frames after the swap began)"));
     }
@@ -154,6 +179,7 @@ public sealed unsafe partial class FFXVRModule {
         string tag = _btg_tag_at < 0 ? "no tag" + (_btg_note.Length > 0 ? $" ({_btg_note})" : " (they did not cross before that)")
                    : I($"{(_btg_mode == 0 ? "they crossed (no tag in this mode)" : "tagged")} after {_btg_tag_at} frames, why: {(_btg_verdict == 1 ? "distance" : "passed")} ({_btg_d:F1} units apart)");
         string closest = _btg_min >= 0f ? I($", closest {_btg_min:F1} units") : "";
-        _logger.Info(I($"battle tag: {_btg_why}: bt_tag {_btg_mode} ({k_btg_label[_btg_mode]}), bt_tag_dist {_bt_tag_dist:F1}: {tag}{closest}; {end}") + (_btg_lines == 100 ? " (no more of these lines this session)" : ""));
+        string spot = _btg_carried ? " (the spot of the swap before)" : "";
+        _logger.Info(I($"battle tag: {_btg_why}: bt_tag {_btg_mode} ({k_btg_label[_btg_mode]}), bt_tag_dist {_bt_tag_dist:F1}{spot}: {tag}{closest}; {end}") + (_btg_lines == 100 ? " (no more of these lines this session)" : ""));
     }
 }
