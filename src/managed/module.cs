@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 43;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule)
+    private const int k_abi = 44;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -404,6 +404,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_ui_draws");
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_xr_pitch_follow");
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
+            _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
@@ -566,6 +567,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_get_camera = null; _fn_camera_reads = null; _fn_slot0_count = null; _fn_camera_changes = null; _fn_counter = null; _fn_on_draw = null;
         _fn_draw_ctx = null; _fn_draw_args = null; _fn_eye2_begin = null; _fn_eye2_end = null; _fn_stereo_set = null; _fn_xr_set = null;
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
+        _fn_eye_jump_set = null; _fn_eye_event = null;   // ABI 44 (eye jumps)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_fp_ib_set = null; _fn_cpu_report = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
@@ -1035,6 +1037,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "seat_forward":      pf(k, v, ref _ovr_forward, -5000f, 5000f); break;
                 case "cut_recentre":      pb(k, v, ref _cut_recentre); break;
                 case "cut_blink":         pb(k, v, ref _cut_blink); break;
+                case "eye_jump_blink": case "eye_jump_units": case "battle_face": ej_parse(k, v); break;   // eye jumps (eye_jump.cs)
                 case "turn_stick":        pb(k, v, ref _turn_stick); break;
                 case "turn_mode":         pi(k, v, ref _turn_mode, 0, 1); break;
                 case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
@@ -1404,6 +1407,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"seat_forward={_ovr_forward.ToString("F0", ci)}\n" +
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
+            ej_ini_text() +   // eye jumps (eye_jump.cs)
             $"turn_stick={(_turn_stick ? 1 : 0)}\n" +
             $"turn_mode={_turn_mode.ToString(ci)}\n" +
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
@@ -1563,6 +1567,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.Checkbox("follow pans", ref _follow_pans);
         if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 360f);
         if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
+        ej_ui();   // eye jumps: eye_jump_blink, eye_jump_units, battle_face (eye_jump.cs)
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
         ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
@@ -2176,6 +2181,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         }
         if (_fn_xr_pitch_follow != null) _fn_xr_pitch_follow(_xr_pitch_follow);
         if (_fn_cuts_set != null) _fn_cuts_set(_cut_recentre ? 1 : 0, _cut_blink ? 1 : 0, _follow_pans ? 1 : 0, _follow_rate, ImGui.GetIO().DeltaTime);   // dt: a fallback only; native measures its own
+        ej_push();   // eye jumps (eye_jump.cs)
         if (_fn_backdrop_set != null) _fn_backdrop_set(_backdrop_mode);
         if (_fn_hist_set != null) _fn_hist_set(_hist_mode);
         if (_fn_ui_set != null) _fn_ui_set(_ui_on ? 1 : 0, _ui_dist, _ui_width);
@@ -2477,6 +2483,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (in_battle != _btl_was) {
             _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
             for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
+            ej_battle_edge(in_battle);   // eye jumps: keep the field heading at the start, restore it after the end (native, before fp_set changes the view)
             if (in_battle) { if (_battle_view >= 0 && _battle_view != _fp_mode) { _btl_mode_before = _fp_mode; apply_mode_scale(_fp_mode, _battle_view); _fp_mode = _battle_view; } }
             else if (_btl_mode_before >= 0) { if (_btl_mode_before != _fp_mode) { apply_mode_scale(_fp_mode, _btl_mode_before); _fp_mode = _btl_mode_before; } _btl_mode_before = -1; }
         }
@@ -2558,6 +2565,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                         _btl_follow_id = want; _btl_pending_id = -1; _btl_pending_frames = 0;
                         _btl_chr = ply_of(want); _btl_who = _btl_chr >= 0 && read(plys + _btl_chr, out Chr fc) && fc.actor != null && read(fc.actor, out Actor fa) ? actor_name(fa.chr_name) : $"chr {want}";
                         _logger.Info($"battle follow: {why} -> following {_btl_who} (chr {want}, ply {_btl_chr})");
+                        ej_follow(why);   // eye jumps: face the enemies (battle_face)
                     }
                 }
                 if (_btl_follow_id >= 0) {
@@ -2569,6 +2577,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
             }
         }
+        if (in_battle) ej_face_tick();   // eye jumps: the pending face request (the monsters can appear a few frames after the start)
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
         if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; }
         else {

@@ -36,6 +36,7 @@
 #include "ffxvr_gates.h"   // gates: the tap gate's reasons from the game bits, the hands' game hide rule, the overdrive minigame tracker (pure logic)
 #include "ffxvr_fmv.h"     // fmv-sync (S2): the movie player's fields, the per-FMV tracker and lines, the .fvd header check (pure logic)
 #include "ffxvr_relief.h"  // fmv-relief (S3): the .fvd reader, the frame selection, the hold / cut ramp, the relief's shape (pure logic)
+#include "ffxvr_eyejump.h" // eye jumps (4.1): the blink on a one-step eye move, the battle heading toward the enemies (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -1899,6 +1900,59 @@ static void turn_advance(int64_t T, bool extra) {
     if (deg != 0.f) turn_by(deg);
 }
 
+// Eye jumps (roadmap 4.1, ffxvr_eyejump.h). Render thread only: build_override_view's primary advance call, the Present path,
+// and managed's render_imgui (ffxvr_eye_jump_set, ffxvr_eye_event).
+ej::Cfg   g_ej_cfg; int g_ej_face = 1;            // ini eye_jump_blink / eye_jump_units; battle_face: 0 off, 1 body forward, 2 where you look
+ej::State g_ej; uint32_t g_ej_latch_seq = 0;      // the detector; bumped at every fp heading latch (a latch frame is not a jump)
+bool      g_ej_head_snap = false;                 // a jump: the next ffxvr_player_head_set snaps the head offset (no glide from the old body)
+uint32_t  g_ej_lines = 0, g_ej_face_lines = 0, g_ej_10s[4] = {};   // log budgets; the view: line's counts (jumps, blinks, extended, held back)
+uint32_t  g_ej_turns = 0, g_ej_kept = 0;          // face: heading changes / requests under the dead band (session)
+bool      g_ej_face_req = false; float g_ej_face_t[3] = {}; uint32_t g_ej_face_frame = 0;   // ffxvr_eye_event 1: face this point at the next fp frame
+ej::Hold  g_ej_hold;                              // the field heading kept over a battle (ffxvr_eye_event 2 / 3)
+static void ej_blink() { if (g_ej_cfg.blink > g_blink_frames) g_blink_frames = g_ej_cfg.blink; }
+/// The heading changes managed asked for, at the primary advance call right after the latch (so a mode switch's re-latch from
+/// the game's camera is overridden): the field heading after a battle, or the battle heading toward the enemies.
+static void ej_heading() {
+    float y = 0.f;
+    if (ej::hold_take(g_ej_hold, g_fp_mode, g_frames, 600, &y)) {
+        const float from = g_fp_yaw; g_fp_yaw = y; g_sr_epoch++; ej_blink();
+        diag("face: frame %u: field heading restored (%.0f deg; the battle's was %.0f)", g_frames, ej::wrap_pi(y) * 57.29578f, ej::wrap_pi(from) * 57.29578f);
+    }
+    if (!g_ej_face_req) return;
+    if (g_frames - g_ej_face_frame > 30 || g_ej_face == 0) { g_ej_face_req = false; return; }   // no first-person frame soon enough: dropped
+    if (g_fp_mode != 1 && g_fp_mode != 3) return;
+    g_ej_face_req = false;
+    float head = 0.f;   // the head's yaw against the recentre reference (the gaze is g_fp_yaw + head)
+    if (g_xr_rotate) { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d); head = atan2f(-d[0], -d[2]); }
+    const float from = g_fp_yaw;
+    const ej::Face f = ej::face_yaw(g_fp_pos, g_ej_face_t, head, g_ej_face, g_fp_yaw);
+    if (f.turn) { g_fp_yaw = f.yaw; g_sr_epoch++; ej_blink(); g_ej_turns++; } else g_ej_kept++;
+    if (g_ej_face_lines < 60) {
+        g_ej_face_lines++;
+        diag("face: frame %u: battle follow -> heading %.0f -> %.0f deg (%s, fp_mode %d; the enemies at %.0f deg, head %.0f deg)%s%s", g_frames, ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_fp_yaw) * 57.29578f,
+             g_ej_face == 2 ? "where you look" : "body forward", g_fp_mode, f.target * 57.29578f, head * 57.29578f, f.turn ? "" : ": under 15 deg or no target, kept",
+             g_ej_face_lines == 60 ? " (no more face: lines this session)" : "");
+    }
+}
+/// The detector, after fp_eye_base on the primary advance call. latched = the heading was latched before this call.
+static void ej_tick(const float P[3], bool latched) {
+    ej::Ctx c; c.frame = g_frames; c.mode = g_fp_mode; c.dragging = g_gest_active; c.latched = latched; c.latch_seq = g_ej_latch_seq; c.blink_left = g_blink_frames;
+    const ej::Result r = ej::step(g_ej, P, c, g_ej_cfg);
+    if (!r.jump()) return;
+    g_ej_head_snap = true; g_sr_epoch++;   // stickrep: a held image of the old place is not a stick turn
+    if (r.frames > g_blink_frames) g_blink_frames = r.frames;
+    g_ej_10s[0]++; if (r.kind == ej::K_START) g_ej_10s[1]++; else if (r.kind == ej::K_EXTEND) g_ej_10s[2]++; else if (r.kind == ej::K_HELD) g_ej_10s[3]++;
+    if (g_ej_lines < 40) {
+        g_ej_lines++;
+        char k[64];
+        if (r.kind == ej::K_START) snprintf(k, sizeof(k), "blink %d frames", r.frames);
+        else if (r.kind == ej::K_EXTEND) snprintf(k, sizeof(k), "blink extended to %d frames", r.frames);
+        else snprintf(k, sizeof(k), "%s", ej::k_kind[r.kind]);
+        diag("eye: frame %u: jump of %.1f units (fp_mode %d) -> %s%s", g_frames, r.dist, g_fp_mode, k,
+             g_ej_lines == 40 ? " (no more eye: lines this session; counts on the view: line, diag_verbose=1)" : "");
+    }
+}
+
 /// The first-person eye's base from the player's position and head (fy = the view heading's forward, render space).
 /// fp_head_anchor 1: the head's height over the actor's horizontal position; 2: the full head offset plus a head-length along
 /// the lean; 0: a fixed eye height. Round 3: with the body drawn away from its root (g_fp_head_disp) modes 1 and 0 take the
@@ -1954,12 +2008,15 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     const bool primary = (g_eye_shift == 0.f);
     if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
+        const bool ej_latched = g_fp_yaw_latched;      // eye jumps: the latch frame is not a jump
         if (!g_fp_yaw_latched) {                        // heading: where the authored camera looked when toggled
             const float f[3] = { -R[6], 0.f, -R[8] };
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
             g_sr_epoch++;                               // stickrep: a new heading, not a stick turn
+            g_ej_latch_seq++;
         }
+        if (primary && advance) ej_heading();          // eye jumps: face the enemies (battle follow), or the field heading back after a battle
         if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
             // travel. Proportional with a rate cap, and weighted by how far
@@ -1977,6 +2034,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
         fp_eye_base(fy, P);
+        if (primary && advance) ej_tick(P, ej_latched);   // eye jumps: a one-step move of the eye base blinks
         if (g_fp_mode >= 2) {
             // Diorama / third person: anchored to the player (smoothed), the offset
             // lives in the heading frame as g_gest_move (right, up, forward; behind =
@@ -4894,7 +4952,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 43;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered)
+constexpr int FFXVR_ABI = 44;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6752,8 +6810,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (now >= next) {
             next = now + 10000; const uint32_t nf = g_frames - f0; f0 = g_frames;
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
-                diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early);
-            g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0;
+                diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u; eye jumps %u (blinks %u, extended %u, held back %u)", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early,
+                      g_ej_10s[0], g_ej_10s[1], g_ej_10s[2], g_ej_10s[3]);
+            g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0; g_ej_10s[0] = g_ej_10s[1] = g_ej_10s[2] = g_ej_10s[3] = 0;
         }
     }
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
@@ -11420,6 +11479,29 @@ extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, in
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
 }
+/// Eye jumps (ABI 44, roadmap 4.1): ini eye_jump_blink (frames, 0 = off), eye_jump_units, battle_face (0 off, 1 body forward,
+/// 2 where you look). Managed, every frame (render thread). out (may be null): [0] jumps this session, [1] blinks started,
+/// [2] blinks extended, [3] jumps held back by the 30-frame window, [4] battle headings turned, [5] kept (under 15 deg).
+/// Returns how many values exist (6).
+extern "C" __declspec(dllexport) int ffxvr_eye_jump_set(int blink, float units, int face, int* out, int n) {
+    g_ej_cfg.blink = blink < 0 ? 0 : blink > 30 ? 30 : blink;
+    g_ej_cfg.units = !(units >= 2.f) ? (units == units ? 2.f : 8.f) : units > 100.f ? 100.f : units;   // NaN -> the default
+    g_ej_face = face < 0 || face > 2 ? 1 : face;
+    const int v[6] = { static_cast<int>(g_ej.n_jumps), static_cast<int>(g_ej.n_start), static_cast<int>(g_ej.n_ext), static_cast<int>(g_ej.n_held), static_cast<int>(g_ej_turns), static_cast<int>(g_ej_kept) };
+    if (out != nullptr) for (int i = 0; i < n && i < 6; ++i) out[i] = v[i];
+    return 6;
+}
+/// Eye jumps (ABI 44): managed's battle events (render thread, push_player). kind 1: face the point (x, y, z) (render space: the
+/// centre of the live, visible monsters) at the next first-person frame, after a battle follow change; 2: the battle starts:
+/// keep the field heading; 3: the battle ended: restore it at the first frame in the same view mode (within 600 frames).
+extern "C" __declspec(dllexport) void ffxvr_eye_event(int kind, float x, float y, float z) {
+    if (kind == 1) {
+        if (!(std::isfinite(x) && std::isfinite(y) && std::isfinite(z))) return;
+        g_ej_face_t[0] = x; g_ej_face_t[1] = y; g_ej_face_t[2] = z; g_ej_face_req = true; g_ej_face_frame = g_frames;
+    }
+    else if (kind == 2) { ej::hold_save(g_ej_hold, g_fp_yaw_latched, g_fp_mode, g_fp_yaw); g_ej_face_req = false; }
+    else if (kind == 3) { ej::hold_arm(g_ej_hold, g_frames); g_ej_face_req = false; }
+}
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
 }
@@ -11569,6 +11651,7 @@ extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, fl
         g_fp_head_disp = disp; g_fp_head_hold = 0;
         if (g_blink_frames < 4) g_blink_frames = 4;   // eye review N2: the switch is a cut of at least 6 units: blinked like a camera cut
     }
+    if (g_ej_head_snap) { g_ej_head_snap = false; g_fp_head_s_valid = false; }   // eye jumps (4.1): after a jump the head offset snaps to the new body (no glide, no spike hold)
     if (!g_fp_have_head) { g_fp_head_s_valid = false; return; }
     // Stored and smoothed as the offset from the actor origin (player_set is called first).
     const float nh[3] = { x - g_fp_pos[0], y - g_fp_pos[1], z - g_fp_pos[2] };
@@ -12996,6 +13079,9 @@ static void xr_tick() {
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
+        // eye jumps (4.1): a frame with a UI pass (all of battle, a field frame with a text box) blinks too. ui.tex is left
+        // alone, so the UI panel stays through the blink; the markers drawn into the finals go black with the world.
+        else if (g_eye1_final_rtv && e1 == g_eye1_final) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_eye1_final_rtv, black); e2 = g_eye1_final; }
     }
     if (menu_black && e1 != nullptr) {              // SU-1: latched without a menu image (see above): eye 1 black, as the blink does
         ID3D11RenderTargetView* const brtv = e1 == g_bb_copy ? g_bb_copy_rtv : e1 == g_eye1_final ? g_eye1_final_rtv : nullptr;   // our own copies only
