@@ -1924,8 +1924,8 @@ static void ej_heading() {
         g_fp_yaw = g_yaw_cam; g_seat_latched = false; g_sr_epoch++; g_ej_latch_seq++; ej_blink();
     }
     if (tk != ej::H_NONE)
-        diag("face: frame %u: field heading %s (%.0f deg; the battle's was %.0f; game camera %.0f deg, at the start %.0f)", g_frames, ej::k_take[tk], ej::wrap_pi(g_fp_yaw) * 57.29578f,
-             ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_yaw_cam) * 57.29578f, ej::wrap_pi(g_ej_hold.cam) * 57.29578f);
+        diag("face: frame %u: field heading %s (%.0f deg; the battle's was %.0f; game camera %.0f deg, at the start %.0f; %u frames after the battle, %d under another camera)", g_frames, ej::k_take[tk],
+             ej::wrap_pi(g_fp_yaw) * 57.29578f, ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_yaw_cam) * 57.29578f, ej::wrap_pi(g_ej_hold.cam) * 57.29578f, g_frames - g_ej_hold.frame, g_ej_hold.miss);
     const int fs = ej::face_req_tick(g_ej_face_rq, g_frames, g_fp_mode, g_ej_face);
     if (fs == ej::F_DROP && g_ej_face_lines < 60) { g_ej_face_lines++; diag("face: frame %u: request from frame %u dropped (fp_mode %d, battle_face %d)", g_frames, g_ej_face_rq.frame, g_fp_mode, g_ej_face); }
     if (fs != ej::F_APPLY) return;

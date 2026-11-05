@@ -139,6 +139,9 @@ struct Hold {
     float    cam = 0.f;        // the game camera's yaw (g_yaw_cam) at the start
     int      mode = 0;
     uint32_t frame = 0;        // the battle's end
+    int      miss = 0;         // R2-SF1: consecutive same-mode first-person frames under another camera since the arm
+    bool     fp_seen = false;  // last_fp is meaningful
+    uint32_t last_fp = 0;      // the last first-person frame hold_take saw (every call, armed or not)
 };
 /// The battle starts (battle_face on; off clears the Hold). N1: an armed restore not yet taken (battle B right after A with no first-person
 /// field frame between) keeps A's field heading: B's start heading is A's faced one, not the field's.
@@ -147,20 +150,28 @@ inline void hold_save(Hold& h, bool latched, int mode, float yaw, float cam, uin
     h.valid = latched && mode != 0 && std::isfinite(yaw) && std::isfinite(cam);
     h.pending = false; h.yaw = yaw; h.cam = cam; h.mode = mode;
 }
-inline void hold_arm(Hold& h, uint32_t frame) { if (h.valid) { h.pending = true; h.frame = frame; } }
+inline void hold_arm(Hold& h, uint32_t frame) { if (h.valid) { h.pending = true; h.frame = frame; h.miss = 0; } }
 enum Take : int { H_NONE = 0, H_RESTORE, H_RELATCH, H_DROP };
 static const char* const k_take[] = { "none", "restored", "re-latched from the game camera", "dropped" };
-/// At a first-person advance frame (cam = the game camera's yaw now). H_RESTORE (*yaw = the saved heading): same mode and the
-/// same field camera (within tol rad of the saved yaw). H_RELATCH: same mode but another camera (a battle that ends into a
-/// cutscene), or given up after max_age frames in the saved mode (the battle's faced heading must not stay): the caller
-/// latches from the game camera. H_DROP: given up in another mode (its own switch re-latched already). H_NONE: nothing armed,
-/// or another mode within max_age (wait).
-inline int hold_take(Hold& h, int mode, uint32_t frame, float cam, uint32_t max_age, float tol, float* yaw) {
+/// At EVERY first-person advance frame (cam = the game camera's yaw now). H_RESTORE (*yaw = the saved heading): same mode and
+/// the same field camera (within tol rad of the saved yaw). Another camera in the same mode waits (R2-SF1: the battle's end
+/// can still be drawn with the battle camera for a few frames after battle_state 0) and gives H_RELATCH (the caller latches
+/// from the game camera) only after miss_max such frames in a row, or at once after a first-person gap of 3+ Presents (a load
+/// has passed: this is the new scene, e.g. a battle that ends into a cutscene). Given up after max_age frames: H_RELATCH in
+/// the saved mode (the battle's faced heading must not stay), H_DROP in another (its own switch re-latched already).
+/// H_NONE: nothing armed, another mode within max_age, or a mismatch still waiting.
+inline int hold_take(Hold& h, int mode, uint32_t frame, float cam, uint32_t max_age, float tol, float* yaw, int miss_max = 20) {
+    const bool gap = !h.fp_seen || frame - h.last_fp >= 3;
+    h.fp_seen = true; h.last_fp = frame;
     if (!h.pending) return H_NONE;
     if (frame - h.frame > max_age) { h.pending = false; h.valid = false; return mode == h.mode ? H_RELATCH : H_DROP; }
     if (mode != h.mode) return H_NONE;
+    if (!std::isfinite(cam) || std::fabs(wrap_pi(cam - h.cam)) > tol) {
+        if (!gap && ++h.miss < miss_max) return H_NONE;
+        h.pending = false; h.valid = false;
+        return H_RELATCH;
+    }
     h.pending = false; h.valid = false;
-    if (!std::isfinite(cam) || std::fabs(wrap_pi(cam - h.cam)) > tol) return H_RELATCH;
     *yaw = h.yaw;
     return H_RESTORE;
 }
