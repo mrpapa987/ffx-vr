@@ -235,3 +235,7 @@ Options: `-Only A,B`, `-All` (all 95 files), `-Region us|jp|asia`, `-InputSize 5
 of one frame with `-Preview`), `-Gray`, `-List`, `-SetupOnly`, `-OutDir`. Out of GPU memory at 518: it says so; run
 again with `-InputSize 392`. Tests (no torch, no GPU, no game data): `python -m unittest discover -s tools/fmvdepth/tests`
 (the end-to-end test needs ffmpeg on PATH).
+
+Depth quality figures (read-only, prints numbers; noise, pumping, the model's window stride, clipping, per-shot raw range):
+`& "$env:LOCALAPPDATA\ffxvr\fmvdepth-venv\Scripts\python.exe" tools\fmvdepth\fvd_stats.py <game>\fahrenheit\mods\ffxvr\fmvdepth\opn_us.fvd
+<...>\sin_us.fvd <...>\end_us.fvd --shots` (the converter's venv: XPRESS needs Windows' cabinet.dll). Send the output.
