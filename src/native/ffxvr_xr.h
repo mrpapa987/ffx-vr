@@ -110,6 +110,9 @@ bool        xr_take_space_change();                        // true once after th
 /// views. A runtime space change or a stop drops the pin (xr_pinned then says false).
 bool        xr_pin(bool on, const XrFovTan used[2]);
 bool        xr_pinned();
+/// FMV relief (S3): the poses and field of view the next xr_frame submits a projection layer with (the views located at the
+/// last wait, an extra frame's included), so a frame drawn with them is world-locked. False without an open frame to render.
+bool        xr_render_views(XrPoseOut v[2], XrFovTan f[2]);
 void        xr_hold_uncapped(bool on);                     // the held base layer may be re-sent past the 30-frame cap (the transition window only)
 
 /// Per frame, from the Present hook. `eye1`/`eye2` are the finished images

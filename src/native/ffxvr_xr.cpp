@@ -1066,6 +1066,16 @@ bool xr_pin(bool on, const XrFovTan used[2]) {
     return true;
 }
 bool xr_pinned() { return g_pin; }
+bool xr_render_views(XrPoseOut v[2], XrFovTan f[2]) {
+    if (!xr_active() || !g_running || !g_frame_open || !g_should_render || !g_render_views_valid) return false;
+    for (int i = 0; i < 2; ++i) {
+        const XrPosef& p = g_render_views[i].pose; const XrFovf& a = g_render_views[i].fov;
+        v[i].q[0] = p.orientation.x; v[i].q[1] = p.orientation.y; v[i].q[2] = p.orientation.z; v[i].q[3] = p.orientation.w;
+        v[i].p[0] = p.position.x; v[i].p[1] = p.position.y; v[i].p[2] = p.position.z;
+        f[i].l = tanf(a.angleLeft); f[i].r = tanf(a.angleRight); f[i].u = tanf(a.angleUp); f[i].d = tanf(a.angleDown);
+    }
+    return true;
+}
 void xr_hold_uncapped(bool on) { g_hold_uncapped = on; }
 
 // ---------------------------------------------------------------- stickrep: the extra frames
