@@ -4047,7 +4047,8 @@ Branch `fmv-relief` (on `fmv-sync` f3baec5). Stage S3 of the FMV depth plan: an 
 the virtual screen as real geometry in the headset. Off by default (`fmv_depth=0`) until tested in a headset. Native:
 src/native/ffxvr_relief.h (pure: the .fvd reader, the frame selection, the hold / cut ramp, the shape, the matrices),
 `relief_present` and the relief worker in ffxvr_native.cpp, `xr_render_views` in ffxvr_xr.cpp; managed: src/managed/fmv_relief.cs
-(the settings and F8's text). ABI 41 (+ `ffxvr_fmv3d_set`, `ffxvr_fmv3d_text`). Notes and test results: scratchpad
+(the settings and F8's text). ABI 41 (+ `ffxvr_fmv3d_set`, `ffxvr_fmv3d_text`); 42: the 3D movie mapping's settings; 43:
+the edge band. Notes and test results: scratchpad
 fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: done, below).
 
 - **When.** Every Present with the headset on, in xr_tick right before xr_frame, with `fmv_depth=1`: the movie player is read
@@ -4093,8 +4094,7 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   player's own size into the backbuffer; a 4:3 video is pillarboxed, the bars stay black). The vertex shader samples the
   depth (bilinear: a 2x2 box at the 2-texel cell spacing) and places the vertex by the "3D movie" mapping (below; it
   replaced the first build's linear relief, z = s W (d - p) along the normal with s at most 0.25, which the owner found
-  very subtle and noisy at its maximum); w = smoothstep over the outer 4 % (the frame's border stays on the screen plane)
-  times, with `fmv_depth_flat_subs`, 0 in the bottom 15 % ramping from 1 at 80 %. The pixel shader samples eye 1's
+  very subtle and noisy at its maximum), with the window rule at the edges (below). The pixel shader samples eye 1's
   backbuffer copy (subtitles and the skip prompt are in it and bend with the relief: the overlay
   split is S4). **The tight field of view** (review SF-1; `fmv_depth_tight_fov`, default 1): the eye images are 16:9 (the
   eye swapchains) while an eye's field of view is nearly square, so drawn over the whole view the video got only about 0.56
@@ -4117,8 +4117,9 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   0.70 / 4.56). Choosing the affine map is the stereographer's job, as in a 3D film: n = 1 (the shot's nearest) goes to
   Zn = Ds - pop, n = 0 (its farthest) to Zf = Ds + range, linear in disparity in between, so depth is proportional to
   1 / disparity:
-  `1/Z(n) = 1/Zf + n (1/Zn - 1/Zf)`, then the amount k (0..1 x the ramp level x the border / bottom weight w) blends in
-  disparity toward the screen: `1/Z = 1/Ds + k w (1/Z(n) - 1/Ds)` (k = 0: the flat screen). Ds is the viewer's distance to
+  `1/Z(n) = 1/Zf + n (1/Zn - 1/Zf)`, then the amount k (0..1 x the ramp level) blends in disparity toward the screen:
+  `1/Z = 1/Ds + k D'` with `D = 1/Z(n) - 1/Ds` and `D' = D x (D > 0 ? w_edge : 1) x w_sub` (k = 0: the flat screen; the
+  weights: the window rule below). Ds is the viewer's distance to
   the screen (`screen_distance`, 2.5 m by default: the screen is placed that far ahead of the reference). A pixel is moved
   along the ray from the nominal eye E = Ds in front of the screen's centre through its own position on the screen: in the
   screen's frame (E = (0, 0, Ds)), t = Z / Ds, `P = (x t, y t, Ds (1 - t))`. Seen from E the picture is exactly the flat
@@ -4142,6 +4143,22 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   (about 1.3-2 m on a Quest 3) is the same for the flat screen. Per shot the nearest content always lands at the pop-out
   plane (the floating window of 3D films). The range and pop-out follow their sliders at 2 m/s and 0.5 m/s, the amount at
   0.5 a second.
+- **The window rule at the edges** (owner test round 3: "the top edge makes a 'shelf' the whole time"). The first mapping
+  build feathered the whole offset to the screen plane over the outer 4 %; at the top of most shots the content is far
+  (sky, a stadium roof: 3 m behind), so the feather stood a steep wall from 3 m back up to the screen plane along the top
+  edge, in every shot; at the bottom the content is usually near the screen, so nothing showed there. Content behind the
+  screen needs no feather: on its ray from the nominal eye it stays inside the pyramid through the screen's outline, as
+  when looking through a window, and the black around the frame is the window's frame. Only content in front of the
+  screen at the border breaks the window (the floating-window problem of 3D films). So the edge weight w_edge
+  (smoothstep from 0 at the border to 1 at `fmv_depth_edge_band` in, default 0.04 of the rect, Debug slider 0..0.15) scales
+  only a positive D (in front); behind the screen nothing is feathered, up to the border. D' is continuous (D x w and D
+  agree at D = 0). With `fmv_depth_flat_subs` the subtitle weight w_sub (0 in the bottom 15 %, ramping from 1 at 80 %)
+  scales all of D: the bottom band lies on the screen plane, readable; at its ramp the far content comes forward over 5 %
+  of the height, which is that option's price. Tested: every vertex (a 41 x 41 grid, 9 disparities, pop-out 0 / 0.15 /
+  0.5 m, range 0.5 / 3 / 10 m, the band on and off) stays inside the pyramid from E through the rect and never nearer than
+  the pop-out plane; at the border nothing is in front of the screen and the far content keeps its full depth; the band
+  puts everything on the screen plane; no step larger than 1 cm along the outer 10 % in steps of 0.005 %, none through
+  the screen plane; and the tight field of view still bounds every vertex from an eye 3.2 cm off.
 - **Noise.** (a) The worker runs a 3x3 median on every decoded frame (fmv_depth_median, default 1): it removes the
   model's speckle and keeps depth edges (a 19-exchange network, ~57,600 pixels, about 1 ms on the worker). (b) At each
   upload, in display order, a per-pixel temporal filter (relief::ema, 8.8 fixed point): the depth follows (1 - smooth) of
@@ -4191,7 +4208,8 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   amount 1.00, 3.0 m behind / 0.15 m in front, 1.80 rows a video row (tight fov) | decode avg 0.31 / max 2.10 ms (1241 decoded, 0 errors),
   ring 8/8 | in 3D on 2900 of 2950 Presents` (or `, flat screen (<reason>)`; `FMV 3D: off (fmv_depth 0)`; `FMV 3D: no movie
   playing (last movie ...)`), the checkboxes `FMV 3D: depth as colour (red near, blue far)` (session-only), `edge fill`
-  and `3x3 median` (ini fmv_depth_edges / fmv_depth_median), `FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)` (ini
+  and `3x3 median` (ini fmv_depth_edges / fmv_depth_median), `edge band (pop-out only)` (ini fmv_depth_edge_band, 0..0.15,
+  default 0.04), `FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)` (ini
   `fmv_depth_tight_fov`) and `depth frame offset (sync test, not saved)` (-3..3: session-only, 0 at every start, not in the
   ini; review N6).
 - **Log** (`fmv3d:`, diagnostic profiles only, 200 a session, through the S2 pending buffer): one line per movie at its end:
@@ -4207,7 +4225,7 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   short locks a Present (three when the frame changes), the 57.6 KB upload 30 times a second, two passes of 86,400 / 64,800 vertices
   and the eye images' fill; the shaders compile once at the first Present with fmv_depth on and the headset on, the GPU
   objects at the first relief frame (then kept).
-- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 746 checks, 0 failed; 48 / 48
+- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 800 checks, 0 failed; 51 / 51
   mutations caught): the reader on 25 cases written by tools/fmvdepth/fvd.py with the zlib and stored codecs (16:9 / 4:3,
   stored frames inside a zlib file, the left predictor in both codecs; every frame equal to fvd.py's FvdReader and its
   median; damaged headers, entries and payloads; stale, other video, fake model, sizes, codec 2 with no decoder, the frame
@@ -4217,7 +4235,7 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   inside, the clamps both sides, the fallbacks, the rows figure), the fades (lag, flat frame, error, past the end, the end
   cap, recovery mid-fade, instant across a cut), the 3D movie mapping (the defaults' distances, linear in disparity, the
   amount, the ray from E, the pop-out cap, the comfort figures), every point of the mapped relief inside an eye's tight
-  field of view, the 3x3 median against a sort, the temporal filter (reset, the gate, rounding, convergence) and the
+  field of view, the window rule (above), the 3x3 median against a sort, the temporal filter (reset, the gate, rounding, convergence) and the
   shader's grid on the CPU; the HLSL compiled with dxc (vs_6_0 / ps_6_0; the game compiles vs_4_0 / ps_4_0
   with D3DCompile at run time); the native syntax check (warnings identical to the base) and the managed compile check (the
   same 11 pre-existing errors; a mutation in fmv_relief.cs is reported). **Not verified**: anything at run time (XPRESS
@@ -4241,7 +4259,9 @@ or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
    screen). Try range 1.5 and 6 m, pop-out 0 and 0.3 m, and say what is comfortable over a whole movie. F8 > Debug `depth as
    colour` shows the depth itself (red near, blue far): say whether it follows the objects, and whether it shimmers;
    compare `smoothing` 0, 0.6 and 0.9, and `3x3 median` / `edge fill` off and on (edge fill: look at silhouettes from a
-   little to the side). With subtitles on, try `flatten the bottom 15% (subtitles)`.
+   little to the side). With subtitles on, try `flatten the bottom 15% (subtitles)` (the bottom 15 % lies flat).
+   The top edge (round 3's "shelf"): far content should now go back right up to the frame's edge, like a window; say
+   whether anything near the edges looks cut or doubled, and try `edge band (pop-out only)` 0 and 0.1 in F8 > Debug.
 5. Sharpness and world-lock: compare the relief at amount 0 with the flat screen (untick) for sharpness, subtitles
    included; then F8 > Debug `FMV 3D: tight field of view` off and on (expect the tight one sharper; say if Virtual Desktop
    shows black edges, a shimmer or a jump with it on). Move your head sideways and forward / back: say whether the relief
