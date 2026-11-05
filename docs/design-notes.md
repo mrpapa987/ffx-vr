@@ -4193,7 +4193,10 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   review3 N-2). Both are vertex outputs, interpolated: the weight is continuous across every triangle edge by construction,
   and the pixel shader only lerps. Same test: 104 vertices over half, 0 face vertices over 0.25, 0 at the face's own depth.
   It still alters the picture seen from E in the cell beside a silhouette (the background there is drawn from up to two
-  cells further out), which is why it stays an experiment for an A/B in the headset. (d) Debug, session-
+  cells further out), which is why it stays an experiment for an A/B in the headset (review5 SF-1 measured it eroding the
+  near object's outer ~1.5 cells by up to 0.64). **Planned replacement (not built):** a per-pixel gate on the stretch as
+  this eye sees it (from the uv's ddx / ddy in that eye, so exactly 1 from E: the picture from E is never touched) with a
+  far-side sample from a blurred mip (research fmv3d-projects.md T4). (d) Debug, session-
   only: `depth as colour` (red near, green middle, blue far) to judge the depth itself in the headset.
 - **Would converter changes help?** (not done; estimates)
   - Per-shot constant lo / hi (a second pass over each shot, ~35 MB of float16 maps for a 300-frame shot): with the depth

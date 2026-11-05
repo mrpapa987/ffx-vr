@@ -463,7 +463,9 @@ inline Weights weights(float a, float b, float band, bool flat_bottom) {
 /// softly, and gated by how far the vertex lies toward the far side of its neighbourhood (0 on the near side of a depth
 /// edge, so the near object is never recoloured; 1 on the far side); the fill sample is offset from the vertex toward
 /// the far side by up to two cells, the offset shrinking with the slope below the ramp. It still changes the picture seen
-/// from the nominal eye in the cell next to a silhouette, so it stays an experiment.
+/// from the nominal eye in the cell next to a silhouette, so it stays an experiment (review5 SF-1: it still recolours the
+/// near object's outer ~1.5 cells by up to 0.64). Planned replacement, not built: a per-pixel gate on the stretch this eye
+/// sees (from ddx / ddy of the uv in that eye: 1 everywhere from the nominal eye) with a far-side sample from a blurred mip.
 /// Thresholds in 1/m per m of |grad(1/Z)|: a central difference sees a sharp step over two cells, so these are half the
 /// one-cell 0.738 / 2.305 (round 5): a step of about 12 levels between neighbours starts the fill at range 3 m.
 constexpr float k_edge_lo = 0.369f, k_edge_hi = 1.153f, k_edge_cells = 2.f;
