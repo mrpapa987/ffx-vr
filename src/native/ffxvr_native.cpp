@@ -5857,6 +5857,9 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 #ifndef COMPRESS_ALGORITHM_XPRESS_HUFF
 #define COMPRESS_ALGORITHM_XPRESS_HUFF 4
 #endif
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
+#endif
 struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; };
 struct RelSlot { int32_t idx; uint8_t median; uint8_t err; };
 struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; };   // state 0 pending, 1 open, -1 failed
@@ -5888,7 +5891,7 @@ static bool relw_xpress(void*, const uint8_t* in, uint32_t n, uint8_t* out, uint
 static void relw_cabinet() {
     if (g_relw_cab_tried) return;
     g_relw_cab_tried = true;
-    HMODULE m = LoadLibraryW(L"cabinet.dll");
+    HMODULE m = LoadLibraryExW(L"cabinet.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);   // review N5: System32 only (not a KnownDLL)
     PFN_CreateDecompressor cd = m ? reinterpret_cast<PFN_CreateDecompressor>(GetProcAddress(m, "CreateDecompressor")) : nullptr;
     g_relw_decompress = m ? reinterpret_cast<PFN_Decompress>(GetProcAddress(m, "Decompress")) : nullptr;
     if (cd == nullptr || g_relw_decompress == nullptr || !cd(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &g_relw_dec)) { g_relw_dec = nullptr; g_relw_decompress = nullptr; }
@@ -12296,8 +12299,8 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // shaders) leaves today's flat screen exactly as it was, with a reason for F8; the depth itself never waits: a frame not
 // decoded in time is drawn flat (once one frame late at most, never across a cut), a cut ramps the strength from 0.
 // Cost with fmv_depth 0: one branch. On but no movie: the manager pointer and the playing word (two guarded reads).
-struct RelCfg { int on; float strength; int flags; int offset; };   // ffxvr_fmv3d_set; flags bit 0: flatten the bottom 15 %
-static RelCfg g_rel_cfg = { 0, 0.08f, 0, 0 };
+struct RelCfg { int on; float strength; int flags; int offset; };   // ffxvr_fmv3d_set; flags bit 0: flatten the bottom 15 %, bit 1: the tight field of view (SF-1)
+static RelCfg g_rel_cfg = { 0, 0.08f, 2, 0 };
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
     "the save screen is open", "checking the depth file", "the depth file", "no eye-1 image (the backbuffer copy)", "the relief pass", "the movie player is not readable" };
@@ -12314,6 +12317,9 @@ struct RelFmv {
     int ring = 0; double ring_sum = 0; uint32_t ring_n = 0;
     float s_now = 0, pivot_now = 0;
     relief::Rect rect = { 0.f, 0.f, 1.f, 1.f }; uint32_t bb_w = 0, bb_h = 0, vw = 0, vh = 0;   // the last relief frame's crop
+    bool req = false;                                    // review N3: the file asked for (only once the movie can show a relief)
+    bool fading = false; uint32_t fades = 0, loops = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
+    float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
 };
 static RelFmv g_rel;
 static uint32_t g_rel_gen = 0, g_rel_lines = 0;
@@ -12483,7 +12489,8 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
 /// The worker's request: this movie (gen 0 = none) and the frame wanted now.
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
-      g_relw_req.gen = g_rel.on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = g_rel.on ? g_rel.n : 0; g_relw_req.want = g_rel.on ? g_rel.want : -1; }
+      const bool on = g_rel.on && g_rel.req;
+      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; }
     if (g_fmvw_kick) SetEvent(g_fmvw_kick);
     g_rel.want_posted = g_rel.want;
 }
@@ -12507,17 +12514,20 @@ static void rel_end(const char* how) {
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
         if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (cuts and returns from flat) %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms",
                                       r.uploads, r.ramps, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms);
-        if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f", r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv);
-        n = fmv::add(b, sizeof(b), n, " | strength %.3f, flatten the bottom %d, offset %d", g_rel_cfg.strength, g_rel_cfg.flags & 1, g_rel_cfg.offset);
+        if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
+                                         r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
+        if (r.fades || r.loops) n = fmv::add(b, sizeof(b), n, " | fade-outs %u, loops (the count went back) %u", r.fades, r.loops);
+        n = fmv::add(b, sizeof(b), n, " | strength %.3f, flatten the bottom %d, tight field of view %d, offset %d", g_rel_cfg.strength, g_rel_cfg.flags & 1, (g_rel_cfg.flags >> 1) & 1, g_rel_cfg.offset);
         if (r.by_fb[FB_GPU] && g_rel_gpu_why[0]) n = fmv::add(b, sizeof(b), n, " | relief pass: %s", g_rel_gpu_why);
         if (g_rel_lines == k_rel_lines_max) fmv::add(b, sizeof(b), n, " | %u fmv3d: lines this session: no more", k_rel_lines_max);
         fmv_put(b);
     }
     r.on = false;
-    rel_post();          // gen 0: the worker closes the file and frees the ring
-    rel_gpu_release();
+    rel_post();          // gen 0: the worker closes the file and frees the ring (the GPU objects stay for the next movie: review N4)
 }
-static void relief_headset_off() { if (g_rel.on) rel_end("the headset went off"); }
+/// Review N4: the GPU objects live from their first use until the headset goes off (a session restart included) or fmv_depth
+/// is turned off.
+static void relief_headset_off() { if (g_rel.on) rel_end("the headset went off"); rel_gpu_release(); }
 /// The movie player's state, as the S2 probe reads it. false: no manager, or its playing word not readable (*unreadable).
 static bool rel_read(fmv::Snap& s, bool* unreadable) {
     static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -12539,24 +12549,27 @@ static bool rel_read(fmv::Snap& s, bool* unreadable) {
 /// xr_tick, before xr_frame. True: the relief was drawn; *xe1 / *xe2 / xused are what xr_frame submits (a projection layer:
 /// the caller turns the screen quad off). False: nothing changed (today's flat screen, or the 3D view).
 static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const XrScreen& sc, ID3D11Texture2D** xe1, ID3D11Texture2D** xe2, XrFovTan xused[2]) {
-    if (!g_rel_cfg.on) { if (g_rel.on) rel_end("turned off (fmv_depth 0)"); return false; }
+    if (!g_rel_cfg.on) {
+        if (g_rel.on) rel_end("turned off (fmv_depth 0)");
+        if (g_rel_dtex || g_rel_eye[0] || g_rel_z) rel_gpu_release();   // review N4: freed when turned off
+        return false;
+    }
     rel_gpu_init();   // once: the shaders compile at the first Present with fmv_depth on and the headset on, not at a movie's first frame
     fmv::Snap s; bool unreadable = false;
     const bool have = rel_read(s, &unreadable);
     if (!have || !s.playing) {
-        if (unreadable && g_rel.on) { g_rel.presents++; g_rel.by_fb[FB_STATE]++; g_rel.now_fb = FB_STATE; return false; }   // an unknown state: flat, the movie kept
+        if (unreadable && g_rel.on) { g_rel.presents++; g_rel.by_fb[FB_STATE]++; g_rel.now_fb = FB_STATE; relief::to_flat(g_rel.t); return false; }   // an unknown state: flat (the next relief frame ramps in: review N2), the movie kept
         if (g_rel.on) rel_end(have ? "ended (the playing byte cleared)" : "the movie player went away");
         return false;
     }
-    if (g_rel.on && ((s.s_ok && s.id != g_rel.id) || (s.n_ok && strcmp(s.name, g_rel.name) != 0) || (s.p_ok && s.count < g_rel.last_count))) rel_end("replaced by another video");
+    if (g_rel.on && ((s.s_ok && s.id != g_rel.id) || (s.n_ok && strcmp(s.name, g_rel.name) != 0))) rel_end("replaced by another video");
+    else if (g_rel.on && s.p_ok && s.count < g_rel.last_count) g_rel.loops++;   // review N7: the same video, playing all along (a loop): the file stays open, the step sees a jump back (a cut)
     if (!g_rel.on) {
         if (!s.s_ok || !s.p_ok || !s.n_ok || s.name[0] == 0) return false;   // nothing known yet: next Present
         g_rel = RelFmv{};
         g_rel.on = true; memcpy(g_rel.name, s.name, sizeof(g_rel.name)); g_rel.id = s.id; g_rel.n = fmv::frames_from_ms(s.dur_ms);
         if (++g_rel_gen == 0) g_rel_gen = 1;
-        g_rel.gen = g_rel_gen;
-        if (fmvw_start()) rel_post();
-        else { g_rel.file = -1; snprintf(g_rel.why, sizeof(g_rel.why), "the file worker could not start"); }
+        g_rel.gen = g_rel_gen;   // the file is asked for below, once nothing static rules the relief out (review N3)
     }
     RelFmv& r = g_rel;
     r.presents++;
@@ -12572,20 +12585,27 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         std::lock_guard<std::mutex> lk(g_fmvw_mx);
         if (g_relw_res.gen == r.gen) { r.decoded = g_relw_res.decoded; r.errors = g_relw_res.errors; r.dec_sum = g_relw_res.dec_sum; r.dec_max = g_relw_res.dec_max; }
     }
+    // review N3: the file only for a movie that can show a relief now: not a hybrid id, the mono virtual screen (a battle
+    // transition window is passing: asked for there too). Checked every Present until asked (the view settles a few frames in).
+    bool hybrid = false; for (uint32_t h : k_rel_hybrid) if (s.id == h) hybrid = true;
+    if (!r.req && !hybrid && sc.on && !sc.stereo && s.s_ok && s.p_ok) {
+        r.req = true;
+        if (fmvw_start()) rel_post();
+        else { r.file = -1; snprintf(r.why, sizeof(r.why), "the file worker could not start"); }
+    }
     // the depth frame on screen, posted to the worker as it changes (also while the flat screen is shown: the ring is ready)
     if (r.file == 1) {
         r.want = relief::frame_for(s.p_ok ? s.count : 0, g_rel_cfg.offset, r.n, &r.sel);
         if (r.want != r.want_posted) rel_post();
     }
     int fb = FB_NONE;
-    bool hybrid = false; for (uint32_t h : k_rel_hybrid) if (s.id == h) hybrid = true;
     XrPoseOut views[2]; XrFovTan fov[2]; unsigned ew = 0, eh = 0;
     if (!s.s_ok || !s.p_ok) fb = FB_STATE;
     else if (hybrid) fb = FB_HYBRID;
     else if (!sc.on || sc.stereo || bt_no_split()) fb = FB_VIEW;
     else if (!frame2d) fb = FB_CAM3D;
     else if (menu) fb = FB_MENU;
-    else if (r.file == 0) fb = FB_PENDING;
+    else if (r.file == 0 || !r.req) fb = FB_PENDING;
     else if (r.file < 0) fb = FB_FILE;
     else if (e1 == nullptr || e1 != g_bb_copy) fb = FB_IMAGE;
     else {
@@ -12597,9 +12617,9 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         else if (!xr_render_views(views, fov) || !relief::fov_ok(fov[0].l, fov[0].r, fov[0].u, fov[0].d) || !relief::fov_ok(fov[1].l, fov[1].r, fov[1].u, fov[1].d)) { fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no located views to draw with"); }
         else if (!rel_gpu_frame(r.w, ew, eh, bd.Format)) fb = FB_GPU;
     }
-    if (fb != FB_NONE) { r.by_fb[fb]++; r.now_fb = fb; r.t.flat_prev = true; r.t.ramping = false; return false; }   // the next relief frame ramps in
+    if (fb != FB_NONE) { r.by_fb[fb]++; r.now_fb = fb; relief::to_flat(r.t); return false; }   // the source of this frame is not the relief's: the next relief frame ramps in
     ID3D11ShaderResourceView* color = rel_color_srv(e1);
-    if (color == nullptr) { r.by_fb[FB_GPU]++; r.now_fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no view of the backbuffer copy"); r.t.flat_prev = true; return false; }
+    if (color == nullptr) { r.by_fb[FB_GPU]++; r.now_fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no view of the backbuffer copy"); relief::to_flat(r.t); return false; }
     // the ring's answer for the wanted frame (its pixels copied out under the lock only when they would be uploaded)
     relief::Avail a = { false, false, 0 }; int fill = 0;
     {
@@ -12618,25 +12638,56 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
     const relief::Tcfg tc;
-    const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.strength, 0.f, 0.25f));
+    const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.strength, 0.f, 0.25f), r.n);
     if (o.upload) { InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w, 0); r.uploads++; }
-    if (r.t.ramping && r.t.ramp_t0 == now) r.ramps++;   // a ramp started this Present (a cut, or the first depth after flat)
+    if (o.ramp_start) r.ramps++;   // a ramp in started this Present (a cut, or the first depth after flat)
+    if (o.fading && !r.fading) r.fades++;
+    r.fading = o.fading;
     r.rel_presents++; r.by_why[o.why]++; r.now_why = o.why; r.now_fb = FB_NONE; r.s_now = o.s; r.pivot_now = o.pivot;
     const relief::Shape sh = relief::shape(o.s, sc.width, o.pivot);
     D3D11_TEXTURE2D_DESC bd; e1->GetDesc(&bd);
-    const relief::Rect rc = relief::video_rect(s.vw ? s.vw : (r.w == relief::k_w43 ? 640u : 1280u), s.vh ? s.vh : (r.w == relief::k_w43 ? 480u : 720u), bd.Width, bd.Height);
+    const uint32_t vh = s.vh ? s.vh : (r.w == relief::k_w43 ? 480u : 720u);
+    const relief::Rect rc = relief::video_rect(s.vw ? s.vw : (r.w == relief::k_w43 ? 640u : 1280u), vh, bd.Width, bd.Height);
     r.rect = rc; r.bb_w = bd.Width; r.bb_h = bd.Height; r.vw = s.vw; r.vh = s.vh;
-    rel_draw(color, views, fov, sc, rc, r.w / 2, relief::k_h / 2, sh, (g_rel_cfg.flags & 1) != 0);
-    *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = fov[0]; xused[1] = fov[1];
+    // review SF-1: each eye's projection narrowed to the screen's video rect (plus the relief's depth both ways and a 3 % margin),
+    // clamped to the eye's located field of view; drawn and submitted with that field of view, so the eye image's pixels go to the
+    // video. A view that cannot be narrowed (a corner behind the eye, the screen out of view) keeps the eye's whole field of view.
+    const float W = sc.width, H = sc.width * 9.f / 16.f;
+    const float pop = sh.k_pop * (1.f - sh.pivot), push = sh.k_push * sh.pivot;
+    relief::Fov use[2]; bool tight = false;
+    for (int e = 0; e < 2; ++e) {
+        const relief::Fov full = { fov[e].l, fov[e].r, fov[e].u, fov[e].d };
+        use[e] = full;
+        if ((g_rel_cfg.flags & 2) && relief::tight_fov(views[e].q, views[e].p, full, sc.q, sc.p, W, H, rc, pop, push, 0.03f, &use[e])) tight = true;
+    }
+    r.tight_now = tight;
+    {
+        const relief::Fov full0 = { fov[0].l, fov[0].r, fov[0].u, fov[0].d };
+        r.rows_tight = relief::rows_per_line(views[0].q, views[0].p, use[0], sc.q, sc.p, W, H, rc, eh, vh);
+        r.rows_full = relief::rows_per_line(views[0].q, views[0].p, full0, sc.q, sc.p, W, H, rc, eh, vh);
+        if (!r.rows_logged && diag_profile_on() && g_rel_lines < k_rel_lines_max) {   // once a movie (SF-1)
+            r.rows_logged = true; g_rel_lines++;
+            char b[400];
+            snprintf(b, sizeof(b), "fmv3d: '%s' id %u: first relief frame: eye image %ux%u, video %ux%u in the backbuffer %ux%u | eye 0: %.2f eye-image rows per video row with %s field of view (l %.3f r %.3f u %.3f d %.3f), %.2f with the eye's whole (l %.3f r %.3f u %.3f d %.3f)",
+                     r.name, r.id, ew, eh, s.vw, vh, bd.Width, bd.Height, r.rows_tight, tight ? "the tight" : (g_rel_cfg.flags & 2) ? "the whole (not narrowed)" : "the whole (fmv_depth_tight_fov 0)",
+                     use[0].l, use[0].r, use[0].u, use[0].d, r.rows_full, full0.l, full0.r, full0.u, full0.d);
+            fmv_put(b);
+        }
+    }
+    XrFovTan draw_fov[2];
+    for (int e = 0; e < 2; ++e) draw_fov[e] = XrFovTan{ use[e].l, use[e].r, use[e].u, use[e].d };
+    rel_draw(color, views, draw_fov, sc, rc, r.w / 2, relief::k_h / 2, sh, (g_rel_cfg.flags & 1) != 0);
+    *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
 
 /// FMV relief (ABI 41): the settings, from managed every frame. on: ini fmv_depth; strength: 0..0.25 (default 0.08); flags bit
-/// 0: flatten the bottom 15 % (subtitles); offset: ini fmv_depth_offset, depth frames (-3..3; + shows a later one).
+/// 0: flatten the bottom 15 % (subtitles), bit 1: the tight field of view (ini fmv_depth_tight_fov, default 1; review SF-1);
+/// offset: the Debug sync knob, depth frames (-3..3; + shows a later one; session-only, review N6).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float strength, int flags, int offset) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.strength = std::isfinite(strength) ? relief::clampf(strength, 0.f, 0.25f) : 0.08f;
-    g_rel_cfg.flags = flags & 1;
+    g_rel_cfg.flags = flags & 3;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
 }
 /// FMV relief (ABI 41): F8's text (render thread, from the overlay). which 0: the Debug line "FMV 3D: ..."; 1: the main
@@ -12654,7 +12705,7 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
     if (which == 1) {
         if (!g_rel_cfg.on) return 0;
         if (!r.on) return static_cast<int>(fmv::add(buf, c, 0, "%s", g_rel_last));
-        if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, 0, "%s in 3D (%s)", r.name, relief::why_text(r.now_why));
+        if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, 0, "%s in 3D (%s%s)", r.name, r.fading ? "fading to " : "", relief::why_text(r.now_why));
         else { reason(why, sizeof(why)); n = fmv::add(buf, c, 0, "%s on the flat screen: %s", r.name, why); }
         return static_cast<int>(n);
     }
@@ -12662,7 +12713,8 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
     if (!r.on) { n = fmv::add(buf, c, 0, "FMV 3D: no movie playing%s%s%s", g_rel_last[0] ? " (" : "", g_rel_last, g_rel_last[0] ? ")" : ""); return static_cast<int>(n); }
     n = fmv::add(buf, c, 0, "FMV 3D: %s frame %d", r.name, r.want);
     if (r.n) n = fmv::add(buf, c, n, "/%u", r.n);
-    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s, strength %.3f, pivot %.2f", relief::why_text(r.now_why), r.s_now, r.pivot_now);
+    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s%s, strength %.3f, pivot %.2f, %.2f rows a video row (%s fov)", r.fading ? "fading to " : "", relief::why_text(r.now_why),
+                                                       r.s_now, r.pivot_now, r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
     if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
