@@ -30,6 +30,7 @@
 #include <Xinput.h>
 #include "ffxvr_xr.h"
 #include "ffxvr_hands.h"   // VR hands v2: the CPU half (box mesh, placement, calibration)
+#include "ffxvr_pad.h"     // Quest-only controls: the VR pad's mapping and merge, the ImGui feed, the walk gate, quick-squeeze grips (pure logic)
 #include "ffxvr_slow.h"    // od-guard: the slow-GPU guard's decisions (pure logic)
 #include "ffxvr_cpu.h"     // cpu-lean: the cpu: line's accumulators and range_readable's page rule / region cache (pure logic)
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
@@ -1451,44 +1452,88 @@ static void view_reset() {
     view_defaults(g_fp_mode);
     if (g_fp_mode == 3 && g_fp_yaw_latched && g_fp_move_dir_valid) g_fp_yaw = atan2f(-g_fp_move_dir[0], -g_fp_move_dir[2]);
 }
-static SHORT stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return (SHORT)(v * 32767.f); }
+// -- Quest-only controls (design-notes "Quest controllers only"; the pure parts in ffxvr_pad.h, unit-tested) -------------
+// The walk gate (ini move_remap_walk_only): the first-person stick remap below rotates the left stick only while the player
+// can walk; battle, menus, choice boxes, the save screen and the sphere grid get the raw stick, as a gamepad. Managed pushes
+// the tap gate's game bits every frame (ffxvr_move_gate_set, render thread); the hook reads them on the game's input
+// thread (aligned 32-bit stores; a torn pair of bits and stamp is harmless: stale means raw).
+volatile LONG g_mg_on = 1, g_mg_bits = 0, g_mg_tick = 0, g_mg_have = 0;   // walk_only; the bits; GetTickCount at the push; a push arrived
+volatile LONG g_mg_why = pad::W_STALE;                                       // the hook's last reason (F8)
+// Quick-squeeze grips (ini grip_lbrb, grip_tap_ms): gesture_tick (render thread) decides per squeeze; the hook passes the grips
+// in g_grip_pass at once and presses a quick squeeze's LB / RB through g_sh_press (hv_tap_hook's rules, as the tap's press).
+// ini vd_overlay_mask: both stick clicks (Virtual Desktop's overlay) send neither Back nor R3.
+int      g_grip_mode = pad::G_BATTLE_GRAB; uint32_t g_grip_tap_ms = 300; bool g_vd_mask = true;
+volatile LONG g_grip_press_ms = 0;                                       // grip_tap_press_ms: the press's least length (0: just 2 new packets, ffxvr_pad.h press_hook)
+pad::GripTap g_grip[2]; pad::ShQueue g_sh_queue;
+float    g_grip_snap[2][3] = {}; int g_grip_snap_mode[2] = { -1, -1 };   // the grab offset at each squeeze (restored after a quick one)
+uint32_t g_grip_lines = 0;
+volatile LONG g_grip_pass = 3;                                           // 1 left, 2 right: the grips the hook passes to the game as LB / RB now
+volatile LONG g_sh_press = 0, g_sh_press_t0 = 0, g_sh_press_polls = 0;   // the shoulder held now (0 none), GetTickCount at the press, new packets with it
+pad::PressHook g_sh_hook;                                                // input thread only
+pad::VdGate g_vd_gate;                                                   // vd_overlay_mask: the stick clicks 80 ms late, none while both are down (input thread only)
+thread_local bool t_in_game_xi = false;   // the game's own XInputGetState is running on this thread (the ImGui feed's re-entry guard)
+static bool vrpad_live() { return g_vrpad_enabled && g_xr_active && g_vrpad.ready; }
+static pad::In vrpad_in() {
+    pad::In in;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& s = g_vrpad.hand[h]; pad::Hand& d = in.h[h];
+        d.primary = s.primary; d.secondary = s.secondary; d.menu = s.menu; d.stick_click = s.stick_click;
+        d.trigger = s.trigger; d.squeeze = s.squeeze; d.stick[0] = s.stick[0]; d.stick[1] = s.stick[1];
+    }
+    return in;
+}
+/// A quick squeeze's LB / RB (input thread): held for 2 new packets and at least grip_tap_press_ms, then one clear packet
+/// (ffxvr_pad.h press_hook: one CTB row per squeeze). touched: this poll carries the press or its release (its packet
+/// must reach the game).
+static_assert(HV_HOOK_HOLD == 1 && HV_HOOK_RELEASE == 2 && HV_HOOK_COUNT == 4, "pad::press_hook returns the HV_HOOK_* values");
+static WORD vrpad_sh_bits(bool* touched) {
+    const LONG sb = g_sh_press;
+    const LONG el = sb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_sh_press_t0)) : 0;
+    const int hk = pad::press_hook(g_sh_hook, sb != 0, g_vrpad_packet, el, g_grip_press_ms, g_sh_press_polls, pad::k_sh_min_polls);
+    if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_sh_press_polls);
+    *touched = (hk & (HV_HOOK_HOLD | HV_HOOK_RELEASE)) != 0;
+    if (hk & HV_HOOK_HOLD) return static_cast<WORD>(sb);
+    if (hk & HV_HOOK_RELEASE) InterlockedCompareExchange(&g_sh_press, 0, sb);
+    return 0;
+}
 static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
     if (!had_pad) memset(st, 0, sizeof(*st));
     XINPUT_GAMEPAD& g = st->Gamepad;
-    if (g_vrpad_suppress) { if (!had_pad) st->dwPacketNumber = g_vrpad_packet; return; }
-    WORD b = 0;
-    if (R.primary) b |= XINPUT_GAMEPAD_A;  if (R.secondary) b |= XINPUT_GAMEPAD_B;
-    if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
+    bool sh_touched = false;
+    const WORD sh = vrpad_sh_bits(&sh_touched);   // a quick squeeze is a game input of ours: it goes in even while a gesture holds the rest back
+    if (g_vrpad_suppress) { g.wButtons |= sh; if (!had_pad || sh_touched) st->dwPacketNumber = g_vrpad_packet; return; }
+    int pass;
     {   // tap build, "don't pass the grip to the game while a tap can fire" (opt-in): a grip squeezed while that holds is held back until
-        // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits
+        // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits.
+        // Quick-squeeze grips: only the grips gesture_tick passes at once (a deferred squeeze reaches the game only as g_sh_press)
         const bool gd[2] = { L.squeeze > 0.5f, R.squeeze > 0.5f };
         const bool hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
-        const int pass = hv_grip_strip(s_tap_grip_back, gd, hold);
-        if (pass & 1) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (pass & 2) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        pass = hv_grip_strip(s_tap_grip_back, gd, hold) & static_cast<int>(g_grip_pass);
     }
-    if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
+    pad::In in = vrpad_in();
+    if (g_vd_mask) {   // Virtual Desktop's overlay chord (both stick clicks): neither Back nor R3 reaches the game (ffxvr_pad.h VdGate)
+        const int ck = g_vd_gate.step(L.stick_click, R.stick_click, GetTickCount());
+        in.h[0].stick_click = (ck & 1) != 0; in.h[1].stick_click = (ck & 2) != 0;
+    }
+    pad::Out o = pad::compose(in, pass, g_vd_mask ? pad::C_VD_MASK : 0);   // the mapping (ffxvr_pad.h): faces, Start / Back / R3, triggers, sticks
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
         const LONG tb = g_tap_press;
         const LONG el = tb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_tap_press_t0)) : 0;
         const int hk = hv_tap_hook(&g_tap_hook, tb != 0, g_vrpad_packet, el, g_tap_press_ms, g_tap_press_polls);
         if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_tap_press_polls);
-        if (hk & HV_HOOK_HOLD) b |= static_cast<WORD>(tb);
+        if (hk & HV_HOOK_HOLD) o.buttons = static_cast<uint16_t>(o.buttons | static_cast<WORD>(tb));
         else if ((hk & HV_HOOK_RELEASE) && InterlockedCompareExchange(&g_tap_press, 0, tb) == tb) { g_tap_released_ms = el; g_tap_released_polls = g_tap_press_polls; InterlockedIncrement(&g_tap_released_n); }
     }
-    g.wButtons |= b;
-    const BYTE lt = (BYTE)(L.trigger * 255.f), rt = (BYTE)(R.trigger * 255.f);
-    if (lt > g.bLeftTrigger) g.bLeftTrigger = lt; if (rt > g.bRightTrigger) g.bRightTrigger = rt;
-    auto merge = [](SHORT& x, SHORT& y, const float* v) {
-        const float m_pad = (float)x * (float)x + (float)y * (float)y, m_vr = (v[0]*v[0] + v[1]*v[1]) * 32767.f * 32767.f;
-        if (m_vr > m_pad) { x = stick_s(v[0]); y = stick_s(v[1]); }
-    };
-    merge(g.sThumbLX, g.sThumbLY, L.stick); merge(g.sThumbRX, g.sThumbRY, R.stick);
+    o.buttons = static_cast<uint16_t>(o.buttons | sh);
+    pad::merge(o, g);   // buttons OR, triggers max, the stick with more deflection wins
     st->dwPacketNumber = g_vrpad_packet;
 }
 static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
+    t_in_game_xi = true;   // if the game's XInput DLL forwards into the one ImGui detoured, the ImGui feed passes this call through
     DWORD r = g_xi_orig(idx, st);
+    t_in_game_xi = false;
     g_xi_hook_calls_all++;
     if (idx < 4 && st != nullptr) { g_xi_seen[idx].res = r; g_xi_seen[idx].rx = st->Gamepad.sThumbRX; g_xi_seen[idx].tick = GetTickCount(); }
     const bool vr = g_vrpad_enabled && g_xr_active && g_vrpad.ready && idx == 0 && st != nullptr;
@@ -1509,6 +1554,11 @@ static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
             if (pushed) delta = g_move_delta_hold;
         }
         else g_move_held = false;
+        if (g_mg_on && g_move_remap && g_fp_mode != 0) {   // the walk gate: rotated only while the player can walk (ffxvr_pad.h walk_why)
+            const int why = pad::walk_why(static_cast<int>(g_mg_bits), GetTickCount() - static_cast<DWORD>(g_mg_tick), g_mg_have != 0);
+            if (g_mg_why != why) g_mg_why = why;
+            if (why != pad::W_OPEN) { delta = 0.f; g_move_held = false; }   // the third-person latch starts again when the gate opens
+        }
         if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && delta != 0.f) {
             const float d = g_move_sign * delta;
             const float c = cosf(d), sn = sinf(d);
@@ -1534,9 +1584,59 @@ static float grip_pitch(const float* q) {
     const float fwd[3] = { 0.f, 0.f, -1.f }; float d[3]; quat_rotate(qr, fwd, d);
     return asinf(fmaxf(-1.f, fminf(1.f, d[1])));
 }
+/// Quick-squeeze grips: no controllers (no sync, the VR pad off, the session gone): a squeeze in progress ends without a press,
+/// nothing queued is sent later, the grips pass as before (nothing is merged without the VR pad anyway).
+static void grip_idle() {
+    for (int h = 0; h < 2; ++h) pad::grip_reset(g_grip[h]);
+    g_sh_queue.clear();
+    if (g_grip_pass != 3) InterlockedExchange(&g_grip_pass, 3);
+}
+/// Quick-squeeze grips, once a frame after the grabs (render thread). seat: this frame's grab view (the seat or the diorama).
+/// A squeeze that defers (ffxvr_pad.h grip_defers: battle, or a grab view, in grip_lbrb=1) is never passed as LB / RB; at its
+/// release grip_step says whether it was a quick one: then the shoulder is queued for the hook's press slot, and the grab's
+/// nudge since the squeeze is undone (a one-hand grab moves only g_gest_move; two hands never make a quick squeeze).
+static void grip_tick(const float hp[2][3], bool seat) {
+    const DWORD now = GetTickCount();
+    const LONG bits = g_mg_bits;
+    const bool battle = g_mg_have != 0 && now - static_cast<DWORD>(g_mg_tick) < 1000u && (bits & gates::GB_BATTLE) != 0;
+    const bool grab_view = seat && g_gest_enabled;
+    pad::GripCfg c; c.mode = g_grip_mode; c.tap_ms = g_grip_tap_ms;
+    LONG pass = 0;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& hd = g_vrpad.hand[h];
+        pad::GripSample s;
+        s.down = hd.squeeze > 0.5f; s.pose_ok = hd.grip_valid;
+        for (int i = 0; i < 3; ++i) s.p[i] = hp[h][i];
+        for (int i = 0; i < 4; ++i) s.q[i] = hd.grip_q[i];
+        s.any_click = g_vrpad.hand[0].stick_click || g_vrpad.hand[1].stick_click;
+        s.other_down = g_vrpad.hand[h ^ 1].squeeze > 0.5f;
+        s.battle = battle; s.grab_view = grab_view;
+        const int r = pad::grip_step(g_grip[h], c, s, now);
+        if (r & pad::GT_BEGIN) { memcpy(g_grip_snap[h], g_gest_move, sizeof(g_gest_move)); g_grip_snap_mode[h] = g_fp_mode; }
+        if (r & pad::GT_FIRE) {
+            g_sh_queue.push(h);
+            if ((r & pad::GT_RESTORE) && g_grip_snap_mode[h] == g_fp_mode) memcpy(g_gest_move, g_grip_snap[h], sizeof(g_gest_move));
+        }
+        if ((r & pad::GT_END) && g_grip[h].defer && g_grip_lines < 300) {
+            const pad::GripTap& t = g_grip[h];
+            g_grip_lines++;
+            diag("grips: %s grip %u ms, %.1f cm, %.0f deg (%s%s): %s%s%s", h ? "right" : "left", t.last_ms, t.last_d * 100.f, t.last_deg,
+                 battle ? "battle" : "", grab_view ? (battle ? ", grab view" : "grab view") : (battle ? "" : "everywhere"),
+                 t.last == pad::GV_SENT ? (h ? "RB" : "LB") : "", t.last == pad::GV_SENT ? " sent" : pad::k_grip_verdict[t.last],
+                 (t.last == pad::GV_SENT && t.grab0) ? ", the grab undone" : "");
+            if (g_grip_lines == 300) diag("grips: no more grip lines this session");
+        }
+        if (r & pad::GT_PASS) pass |= 1 << h;
+    }
+    if (g_grip_pass != pass) InterlockedExchange(&g_grip_pass, pass);
+    if (g_sh_press == 0) {   // the hook let the last press go: the next quick squeeze
+        const uint16_t b = g_sh_queue.pop();
+        if (b) { g_sh_press_t0 = static_cast<LONG>(now); g_sh_press_polls = 0; InterlockedExchange(&g_sh_press, static_cast<LONG>(b)); }
+    }
+}
 static void gesture_tick() {
     g_vrpad_suppress = false; g_gest_active = false;
-    if (!g_vrpad.ready || !g_vrpad_enabled || !g_xr_active) { g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = false; return; }
+    if (!g_vrpad.ready || !g_vrpad_enabled || !g_xr_active) { g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = false; grip_idle(); return; }
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
     // Chord: right grip + right stick click -> toggle first person (on the press edge).
     // (Both stick clicks is Virtual Desktop's own performance overlay.)
@@ -1636,6 +1736,7 @@ static void gesture_tick() {
     }
     memcpy(g_gest_last_p, hp, sizeof(hp));
     g_gest_grab[0] = grab[0]; g_gest_grab[1] = grab[1];
+    grip_tick(hp, seat);   // quick-squeeze grips (after the grab: a quick squeeze's nudge is undone at its release)
 }
 
 /// Replace the game's XInputGetState import with ours (import address table).
@@ -4960,7 +5061,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 44;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies)
+constexpr int FFXVR_ABI = 45;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -11598,6 +11699,177 @@ extern "C" __declspec(dllexport) int ffxvr_haptics_set(int on, float gain) {
 extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, float* yaw_cam_deg, float* delta_deg, uint32_t* hook_calls, int* hooked) {
     if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
     if (delta_deg) *delta_deg = g_move_delta * 57.29578f; if (hook_calls) *hook_calls = g_xi_hook_calls; if (hooked) *hooked = g_xi_hooked ? 1 : 0;
+}
+// -- Quest-only controls: settings, the ImGui feed, F8 text (ABI 44) ------------------------------------------------------
+/// The walk gate (ini move_remap_walk_only) and managed's game bits for it (the tap gate's gates::GB_*: battle, the sphere
+/// grid, the save screen, a field menu, no player control, a choice box, blitzball, not readable), every frame.
+extern "C" __declspec(dllexport) void ffxvr_move_gate_set(int walk_only, int bits) {
+    g_mg_on = walk_only != 0 ? 1 : 0; g_mg_bits = bits;
+    const DWORD t = GetTickCount(); g_mg_tick = static_cast<LONG>(t); g_mg_have = 1;
+}
+/// Quick-squeeze grips (ini grip_lbrb 0 / 1 / 2, grip_tap_ms 150..500, grip_tap_press_ms 0..150) and vd_overlay_mask.
+extern "C" __declspec(dllexport) void ffxvr_grip_set(int mode, int tap_ms, int press_ms, int vd_mask) {
+    g_grip_mode = mode < pad::G_OFF ? pad::G_OFF : mode > pad::G_ALWAYS ? pad::G_ALWAYS : mode;
+    g_grip_tap_ms = pad::clamp_tap_ms(tap_ms); g_vd_mask = vd_mask != 0;
+    const LONG pm = pad::clamp_press_ms(press_ms); if (g_grip_press_ms != pm) g_grip_press_ms = pm;
+}
+// The ImGui feed (ini imgui_vrpad, design-notes "Quest controllers only" 1): Fahrenheit's save screen is ImGui, and ImGui's
+// Win32 backend reads pad 0 through its own XInput DLL (xinput1_4 first), not the game's import. Managed (imgui_pad.cs)
+// detours that DLL's XInputGetState / XInputGetCapabilities with Fahrenheit's hooking and calls the two functions below
+// after the originals. All on the render thread (the backend's NewFrame inside Present), as g_vrpad's sync: no race.
+int      g_im_mode = pad::IM_SAVE; uint32_t g_im_save = 0;
+pad::ImguiFeed g_im_feed;
+bool     g_im_installed = false, g_im_avail_posted = false, g_im_posted_once = false, g_im_was_on = false;
+ULONGLONG g_im_post_at = 0; uint32_t g_im_posts = 0, g_im_caps_faked = 0, g_im_calls0 = 0, g_im_merged0 = 0, g_im_reentry = 0;
+HWND     g_im_hwnd = nullptr;
+bool     g_im_shared = false;   // ImGui's XInput DLL is the one the game's import resolves into (detoured anyway: the re-entry guard)
+volatile LONG g_im_tid = 0;    // the render thread (ffxvr_imgui_pad_set's caller, ImGui's NewFrame's thread): only its calls get the VR pad
+uint32_t g_im_other = 0;       // calls from any other thread, passed through (the game's polls through a shared DLL, with or without our import hook)
+char     g_im_text[320] = "imgui pad: not installed (imgui_vrpad=0 at the first frame, or not tried yet)";
+/// ImGui's chosen DLL, the way its backend chose it (the first of its list that is loaded; its LoadLibraryA keeps it loaded).
+/// 0: found (the two addresses out, their first bytes logged); 1 none loaded; 2 refused: it is the game's own XInput DLL
+/// with the game's import hook not in (no re-entry guard for its calls), or, with strict (ini imgui_vrpad_strict=1), whenever
+/// the game's XInputGetState import resolves into it; 3 an export is missing. Without strict a shared DLL (xinput9_1_0
+/// forwarding into xinput1_4) is detoured anyway: the game's calls pass through untouched (t_in_game_xi, the re-entry guard).
+extern "C" __declspec(dllexport) int ffxvr_imgui_pad_find(void** get_state, void** get_caps, int strict) {
+    static const wchar_t* const k_dll[5] = { L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinput1_2.dll", L"xinput1_1.dll" };
+    static const char* const k_name[5] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll" };
+    if (get_state) *get_state = nullptr;
+    if (get_caps) *get_caps = nullptr;
+    HMODULE m = nullptr; int k = 0;
+    for (; k < 5; ++k) if ((m = GetModuleHandleW(k_dll[k])) != nullptr) break;
+    if (m == nullptr) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: not installed: no XInput DLL is loaded (ImGui's backend has no gamepad)");
+        diag("%s", g_im_text); return 1;
+    }
+    HMODULE game = nullptr;
+    if (g_xi_orig) GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(g_xi_orig), &game);
+    const bool shared = game != nullptr && m == game;
+    if ((shared && strict) || (g_xi_orig == nullptr && k == 2)) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: REFUSED: ImGui reads the pad through %s, %s; the save screen keeps ignoring the Quest controllers",
+                 k_name[k], g_xi_orig ? "the DLL the game's own XInputGetState import resolves into (imgui_vrpad_strict=1)" : "the game's own XInput DLL (its import hook is not in)");
+        diag("%s", g_im_text); return 2;
+    }
+    g_im_shared = shared;
+    if (shared) diag("imgui pad: the game's XInputGetState import resolves into %s too (a forwarded export): detoured anyway, the game's calls pass through untouched (the re-entry guard; imgui_vrpad_strict=1 refuses instead)", k_name[k]);
+    void* gs = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetState"));
+    void* gc = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetCapabilities"));
+    if (gs == nullptr || gc == nullptr) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: not installed: %s has no %s", k_name[k], gs == nullptr ? "XInputGetState" : "XInputGetCapabilities");
+        diag("%s", g_im_text); return 3;
+    }
+    uint8_t b1[8] = {}, b2[8] = {};
+    const bool r1 = ffxvr_safe_read(gs, b1, 8) != 0, r2 = ffxvr_safe_read(gc, b2, 8) != 0;
+    auto hooked = [](const uint8_t* b) { return b[0] == 0xE9 || b[0] == 0xEB || (b[0] == 0xFF && b[1] == 0x25) || b[0] == 0x68; };   // jmp rel32 / rel8, jmp [m], push-ret
+    char h1[32] = "?", h2[32] = "?";
+    if (r1) snprintf(h1, sizeof(h1), "%02X %02X %02X %02X %02X %02X %02X %02X", b1[0], b1[1], b1[2], b1[3], b1[4], b1[5], b1[6], b1[7]);
+    if (r2) snprintf(h2, sizeof(h2), "%02X %02X %02X %02X %02X %02X %02X %02X", b2[0], b2[1], b2[2], b2[3], b2[4], b2[5], b2[6], b2[7]);
+    const bool other = (r1 && hooked(b1)) || (r2 && hooked(b2));
+    snprintf(g_im_text, sizeof(g_im_text), "imgui pad: detouring %s (XInputGetState %p: %s, XInputGetCapabilities %p: %s)%s", k_name[k], gs, h1, gc, h2,
+             other ? "; a jump at the start: another program hooks it too (Fahrenheit's detour chains over it)" : "");
+    diag("%s", g_im_text);
+    if (get_state) *get_state = gs;
+    if (get_caps) *get_caps = gc;
+    return 0;
+}
+/// The process's largest visible unowned top-level window (the game's), when ImGui's main viewport gave no handle.
+static BOOL CALLBACK im_find_window_cb(HWND h, LPARAM lp) {
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || GetWindow(h, GW_OWNER) != nullptr) return TRUE;
+    RECT r = {}; if (!GetClientRect(h, &r)) return TRUE;
+    auto* best = reinterpret_cast<std::pair<HWND, LONG>*>(lp);
+    const LONG area = (r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) { best->first = h; best->second = area; }
+    return TRUE;
+}
+/// Every frame (render thread, push_all): the mode, Fahrenheit's save-screen state (0x8CB994, 0 = closed), ImGui's window and
+/// whether managed's detours are in. ImGui asks XInputGetCapabilities only after a WM_DEVICECHANGE (DBT_DEVNODES_CHANGED):
+/// one is posted once the detours are in and again at every edge of "the VR pad is there for ImGui" (at most once a second),
+/// so the backend re-asks and finds our pad (without an Xbox pad it said "no gamepad" at its first frame and never asks again).
+extern "C" __declspec(dllexport) void ffxvr_imgui_pad_set(int mode, uint32_t save_state, void* hwnd, int installed) {
+    g_im_mode = mode < pad::IM_OFF ? pad::IM_OFF : mode > pad::IM_ALWAYS ? pad::IM_ALWAYS : mode;
+    g_im_save = save_state; g_im_installed = installed != 0;
+    const LONG tid = static_cast<LONG>(GetCurrentThreadId()); if (g_im_tid != tid) g_im_tid = tid;
+    if (hwnd != nullptr) g_im_hwnd = static_cast<HWND>(hwnd);
+    const bool on = g_im_installed && vrpad_live() && pad::imgui_feed_on(g_im_mode, g_im_save);
+    if (on != g_im_was_on) {
+        if (on) { g_im_calls0 = g_im_feed.calls; g_im_merged0 = g_im_feed.merged; diag("imgui pad: feed on (%s)", g_im_mode == pad::IM_ALWAYS ? "imgui_vrpad=2: always" : "the save / load screen opened"); }
+        else diag("imgui pad: feed off: %u ImGui pad reads, %u with the Quest controllers merged, last packet %u; held when it opened (masked until released): 0x%04X%s",
+                  g_im_feed.calls - g_im_calls0, g_im_feed.merged - g_im_merged0, g_im_feed.last_packet, g_im_feed.masked_at_open,
+                  g_im_feed.merged == g_im_merged0 ? " (NO merged reads: ImGui did not read the pad, or not through the detour)" : "");
+        g_im_was_on = on;
+    }
+    if (!g_im_installed) return;
+    const bool avail = g_im_mode != pad::IM_OFF && vrpad_live();
+    if (g_im_posted_once && avail == g_im_avail_posted) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_im_post_at) return;
+    g_im_post_at = now + 1000;
+    HWND w = g_im_hwnd;
+    if (w == nullptr || !IsWindow(w)) { std::pair<HWND, LONG> best(nullptr, 0); EnumWindows(im_find_window_cb, reinterpret_cast<LPARAM>(&best)); w = best.first; }
+    if (w == nullptr) { if (g_im_posts++ < 50) diag("imgui pad: no game window found for the device-change message (retrying each second)"); return; }
+    const BOOL ok = PostMessageW(w, WM_DEVICECHANGE, 0x0007 /* DBT_DEVNODES_CHANGED */, 0);
+    g_im_posted_once = true; g_im_avail_posted = avail;
+    if (g_im_posts++ < 50) diag("imgui pad: device change %s to window 0x%p (the Quest controllers %s for ImGui)", ok ? "posted" : "NOT posted", static_cast<void*>(w), avail ? "available" : "gone");
+}
+/// After the real XInputGetState(idx, st) of ImGui's DLL returned real: the VR pad merged in while the feed is on (pad 0
+/// only; ffxvr_pad.h imgui_apply: no Start / Back unless mode 2, buttons held at the open masked, no remap / tap / quick
+/// squeeze). Returns what the call returns.
+extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_xstate(uint32_t idx, XINPUT_STATE* st, uint32_t real) {
+    if (idx != 0 || st == nullptr) return real;
+    if (t_in_game_xi) { g_im_reentry++; return real; }   // the game's own poll, forwarded into this DLL: untouched
+    if (static_cast<LONG>(GetCurrentThreadId()) != g_im_tid) { g_im_other++; return real; }   // not ImGui's thread (R2-N2: holds without our import hook too)
+    const bool real_ok = real == ERROR_SUCCESS;
+    XINPUT_STATE s = {};
+    if (real_ok) s = *st;
+    uint32_t pk = s.dwPacketNumber;
+    if (!pad::imgui_apply(g_im_feed, g_im_mode, g_im_save, vrpad_live(), g_vrpad_suppress, vrpad_in(), g_vrpad_packet, real_ok, s.Gamepad, pk)) return real;
+    s.dwPacketNumber = pk; *st = s;
+    return ERROR_SUCCESS;
+}
+/// After the real XInputGetCapabilities(idx, flags, caps): pad 0 is a gamepad while the VR pad is there for ImGui (ImGui
+/// only asks at a device change; the state call above decides what it reads).
+extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_xcaps(uint32_t idx, XINPUT_CAPABILITIES* caps, uint32_t real) {
+    if (real == ERROR_SUCCESS || idx != 0 || caps == nullptr || t_in_game_xi || g_im_mode == pad::IM_OFF || !vrpad_live()) return real;
+    if (static_cast<LONG>(GetCurrentThreadId()) != g_im_tid) { g_im_other++; return real; }
+    memset(caps, 0, sizeof(*caps));
+    caps->Type = XINPUT_DEVTYPE_GAMEPAD; caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->Gamepad.wButtons = 0xF3FF; caps->Gamepad.bLeftTrigger = caps->Gamepad.bRightTrigger = 0xFF;
+    caps->Gamepad.sThumbLX = caps->Gamepad.sThumbLY = caps->Gamepad.sThumbRX = caps->Gamepad.sThumbRY = static_cast<SHORT>(0xFFC0);
+    g_im_caps_faked++;
+    return ERROR_SUCCESS;
+}
+/// F8 text: 0 the walk gate, 1 the grips, 2 the ImGui feed. Returns the length.
+extern "C" __declspec(dllexport) int ffxvr_ctl_text(int which, char* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    int k = 0;
+    if (which == 0) {
+        const LONG bits = g_mg_bits; const DWORD age = GetTickCount() - static_cast<DWORD>(g_mg_tick);
+        const int why = pad::walk_why(static_cast<int>(bits), age, g_mg_have != 0);
+        if (!g_move_remap) k = snprintf(out, n, "left stick: never rotated (the remap is off)");
+        else if (!g_mg_on) k = snprintf(out, n, "left stick: rotated in every first-person view (walk gate off: the old behaviour)");
+        else if (g_fp_mode == 0) k = snprintf(out, n, "left stick: raw (the seat view)");
+        else k = snprintf(out, n, "left stick: %s%s (game bits 0x%04lX, %lu ms old)", why == pad::W_OPEN ? "" : "raw: ", pad::k_walk_why[why],
+                          static_cast<unsigned long>(bits), static_cast<unsigned long>(age > 99999u ? 99999u : age));
+    }
+    else if (which == 1) {
+        const char* m = g_grip_mode == pad::G_OFF ? "LB / RB at once everywhere (grip_lbrb=0: the old behaviour)"
+                      : g_grip_mode == pad::G_ALWAYS ? "a quick squeeze = LB / RB everywhere" : "a quick squeeze = LB / RB in battle and the seat / diorama";
+        k = snprintf(out, n, "grips: %s (within %u ms; the press: 2 polls, at least %ld ms: grip_tap_press_ms, 0..150)", m, g_grip_tap_ms, static_cast<long>(g_grip_press_ms));
+        for (int h = 0; h < 2 && k >= 0 && k < n; ++h) {
+            const pad::GripTap& t = g_grip[h];
+            const int j = snprintf(out + k, n - k, " | %s: %u sent of %u squeezes, last %s (%u ms, %.1f cm, %.0f deg)%s", h ? "R" : "L", t.fired, t.squeezes,
+                                   pad::k_grip_verdict[t.last], t.last_ms, t.last_d * 100.f, t.last_deg, t.down ? (t.defer ? ", HELD (deferred)" : ", HELD (to the game)") : "");
+            if (j > 0) k += j;
+        }
+    }
+    else if (which == 2) {
+        k = snprintf(out, n, "%s | feed %s, %u reads, %u merged, capabilities answered %u, device changes posted %u%s%s", g_im_text,
+                     g_im_was_on ? "ON" : "off", g_im_feed.calls, g_im_feed.merged, g_im_caps_faked, g_im_posts, g_im_shared ? " | shared with the game's import" : "",
+                     (g_im_reentry || g_im_other) ? " | other threads' reads came through here: passed through" : "");
+    }
+    if (k < 0) { out[0] = 0; return 0; }
+    return k < n ? k : n - 1;
 }
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
