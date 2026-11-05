@@ -35,6 +35,7 @@
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
 #include "ffxvr_gates.h"   // gates: the tap gate's reasons from the game bits, the hands' game hide rule, the overdrive minigame tracker (pure logic)
 #include "ffxvr_fmv.h"     // fmv-sync (S2): the movie player's fields, the per-FMV tracker and lines, the .fvd header check (pure logic)
+#include "ffxvr_relief.h"  // fmv-relief (S3): the .fvd reader, the frame selection, the hold / cut ramp, the relief's shape (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -4893,7 +4894,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 40;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset)
+constexpr int FFXVR_ABI = 41;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5842,21 +5843,178 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
     if (!ok || sz.QuadPart < 0) { v.status = fmv::FVD_READ; return; }
     fmv::fvd_parse(b, got, static_cast<uint64_t>(sz.QuadPart), name, v);
 }
+// -- FMV relief (S3): the worker's half (design-notes "FMV relief screen (S3, 4 Nov 2026)") ------------------------------------
+// The same thread as the header check above. The render thread posts one request (g_relw_req, under g_fmvw_mx): the movie
+// (a generation number, 0 = none, the game's name, its frame count by the game's duration) and the depth frame it wants now.
+// The worker opens the .fvd once per movie (the cloud-only rule; share read + delete), reads and checks the whole index
+// (ffxvr_relief.h open_file), keeps the handle, and decodes the wanted frame and the k_ring - 1 after it into the ring, one
+// frame per loop so a new request is seen at once; a new generation closes the file and frees everything. The ring's pixels
+// (k_ring + 1 frames: the slots and the payload buffer) are allocated at open and freed at close: with the index (16 B a
+// frame) under 1.6 MB of address space for the longest video. A slot is written only with its idx at -2 (set under the
+// lock), so the render thread, which copies a slot under the lock, never sees a half-written frame. The cut / flat bits
+// (g_rel_bits) are written at open before the result is published; the render thread reads them only for an open result
+// of its current generation, and a new generation is only ever posted by the render thread after it stopped reading them.
+#ifndef COMPRESS_ALGORITHM_XPRESS_HUFF
+#define COMPRESS_ALGORITHM_XPRESS_HUFF 4
+#endif
+struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; };
+struct RelSlot { int32_t idx; uint8_t median; uint8_t err; };
+struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; };   // state 0 pending, 1 open, -1 failed
+static RelReq  g_relw_req = {};               // render thread -> worker (g_fmvw_mx)
+static RelRes  g_relw_res = {};               // worker -> render thread (g_fmvw_mx)
+static RelSlot g_relw_slot[relief::k_ring];   // (g_fmvw_mx) idx -1 empty, -2 being written
+static uint8_t* g_relw_px = nullptr;          // (g_fmvw_mx for the pointer) k_ring slots of w * 180 bytes, then the payload buffer
+static relief::Bits g_rel_bits;               // see above
+// worker-only
+static relief::File g_relw_file; static HANDLE g_relw_h = INVALID_HANDLE_VALUE; static uint32_t g_relw_gen = 0;
+typedef BOOL (WINAPI* PFN_CreateDecompressor)(DWORD, void*, void**);
+typedef BOOL (WINAPI* PFN_Decompress)(void*, LPCVOID, SIZE_T, PVOID, SIZE_T, SIZE_T*);
+static PFN_Decompress g_relw_decompress = nullptr; static void* g_relw_dec = nullptr; static bool g_relw_cab_tried = false;
+static bool relw_read_at(void* ctx, uint64_t off, void* buf, uint32_t n) {
+    HANDLE h = static_cast<HANDLE>(ctx);
+    LARGE_INTEGER o; o.QuadPart = static_cast<LONGLONG>(off);
+    if (off > 0x7FFFFFFFFFFFFFFFull || !SetFilePointerEx(h, o, nullptr, FILE_BEGIN)) return false;
+    uint8_t* p = static_cast<uint8_t*>(buf);
+    while (n > 0) { DWORD got = 0; if (!ReadFile(h, p, n, &got, nullptr) || got == 0) return false; p += got; n -= got; }
+    return true;
+}
+/// XPRESS_HUFF in buffer mode (FORMAT.md): cabinet.dll, looked up at the first open (Windows 8 and later).
+static bool relw_xpress(void*, const uint8_t* in, uint32_t n, uint8_t* out, uint32_t cap, uint32_t* got) {
+    SIZE_T g = 0;
+    if (g_relw_decompress == nullptr || g_relw_dec == nullptr || !g_relw_decompress(g_relw_dec, in, n, out, cap, &g)) return false;
+    *got = static_cast<uint32_t>(g);
+    return true;
+}
+static void relw_cabinet() {
+    if (g_relw_cab_tried) return;
+    g_relw_cab_tried = true;
+    HMODULE m = LoadLibraryW(L"cabinet.dll");
+    PFN_CreateDecompressor cd = m ? reinterpret_cast<PFN_CreateDecompressor>(GetProcAddress(m, "CreateDecompressor")) : nullptr;
+    g_relw_decompress = m ? reinterpret_cast<PFN_Decompress>(GetProcAddress(m, "Decompress")) : nullptr;
+    if (cd == nullptr || g_relw_decompress == nullptr || !cd(COMPRESS_ALGORITHM_XPRESS_HUFF, nullptr, &g_relw_dec)) { g_relw_dec = nullptr; g_relw_decompress = nullptr; }
+}
+/// Worker: closes the open file and frees the ring and the index.
+static void relw_close() {
+    if (g_relw_h != INVALID_HANDLE_VALUE) { CloseHandle(g_relw_h); g_relw_h = INVALID_HANDLE_VALUE; }
+    g_relw_file.reset();
+    uint8_t* px;
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); px = g_relw_px; g_relw_px = nullptr; for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0 }; }
+    delete[] px;
+}
+/// Worker: opens `name`'s depth file for generation gen; the result (and why not) into g_relw_res.
+static void relw_open(uint32_t gen, const char* name, uint32_t game_frames) {
+    RelRes r = {}; r.gen = gen; r.state = -1;
+    LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+    char file[48] = {};
+    auto done = [&]() {
+        QueryPerformanceCounter(&b); r.open_ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
+        std::lock_guard<std::mutex> lk(g_fmvw_mx);
+        if (r.state == 1) for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0 };
+        g_relw_res = r;
+    };
+    if (!fmv::fvd_file_name(name, file, sizeof(file))) { snprintf(r.why, sizeof(r.why), "no depth file (the name has no depth file form)"); done(); return; }
+    wchar_t wf[sizeof(file)] = {};
+    for (size_t i = 0; i + 1 < sizeof(wf) && file[i]; ++i) wf[i] = static_cast<wchar_t>(file[i]);   // [a-z0-9_.] only (fvd_file_name)
+    wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\fmvdepth\\%s", g_dir, wf);
+    const DWORD at = GetFileAttributesW(path);
+    if (at == INVALID_FILE_ATTRIBUTES) {
+        const DWORD e = GetLastError();
+        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) snprintf(r.why, sizeof(r.why), "no depth file (fmvdepth\\%s)", file);
+        else snprintf(r.why, sizeof(r.why), "the depth file could not be read (fmvdepth\\%s, error %lu)", file, static_cast<unsigned long>(e));
+        done(); return;
+    }
+    if (at & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) { snprintf(r.why, sizeof(r.why), "the depth file is cloud-only, not opened (fmvdepth\\%s)", file); done(); return; }
+    if (at & FILE_ATTRIBUTE_DIRECTORY) { snprintf(r.why, sizeof(r.why), "the depth file is a folder (fmvdepth\\%s)", file); done(); return; }
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
+    LARGE_INTEGER sz = {};
+    if (h == INVALID_HANDLE_VALUE || !GetFileSizeEx(h, &sz) || sz.QuadPart < 0) {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        snprintf(r.why, sizeof(r.why), "the depth file could not be opened (fmvdepth\\%s)", file); done(); return;
+    }
+    relw_cabinet();
+    relief::Codecs c = { nullptr, { nullptr, nullptr, g_relw_dec ? relw_xpress : nullptr } };   // codec 1 (zlib) is for tests only: refused here
+    relief::Io io = { h, relw_read_at, static_cast<uint64_t>(sz.QuadPart) };
+    const int st = relief::open_file(g_relw_file, io, name, game_frames, c, &g_rel_bits);
+    const relief::File& F = g_relw_file;
+    if (st != relief::OP_OK) {
+        if (st == relief::OP_HEADER) snprintf(r.why, sizeof(r.why), "the depth file is %s (fmvdepth\\%s)", fmv::fvd_text(F.info.status), file);
+        else if (st == relief::OP_STALE) snprintf(r.why, sizeof(r.why), "the depth file is stale: %u frames, the video %u (fmvdepth\\%s; convert it again)", F.n, F.game_frames, file);
+        else if (st == relief::OP_ENTRY) snprintf(r.why, sizeof(r.why), "the depth file has a bad index entry (frame %u; fmvdepth\\%s)", F.bad_entry, file);
+        else if (st == relief::OP_CODEC && F.codec == 2) snprintf(r.why, sizeof(r.why), "the depth file needs cabinet.dll's XPRESS decoder, which is not available (fmvdepth\\%s)", file);
+        else snprintf(r.why, sizeof(r.why), "the depth file is %s (fmvdepth\\%s)", relief::open_text(st), file);
+        CloseHandle(h); g_relw_file.reset(); done(); return;
+    }
+    uint8_t* px = new (std::nothrow) uint8_t[static_cast<size_t>(relief::k_ring + 1) * F.w * F.h];
+    if (px == nullptr) { snprintf(r.why, sizeof(r.why), "out of memory for the depth frames (fmvdepth\\%s)", file); CloseHandle(h); g_relw_file.reset(); done(); return; }
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_relw_px = px; }
+    g_relw_h = h;
+    r.state = 1; r.n = F.n; r.w = F.w; r.cuts = F.cuts; r.flats = F.flats;
+    snprintf(r.why, sizeof(r.why), "fmvdepth\\%s: %u frames %ux%u, %u cuts, %u flat frames, %s", file, F.n, F.w, F.h, F.cuts, F.flats, F.codec == 2 ? "XPRESS" : "stored");
+    done();
+}
+/// Worker, every loop: follows the request (a new generation opens / closes), then decodes at most one frame of the window
+/// [want, want + k_ring) that the ring lacks (from frame 0 while none is wanted yet). True: more to decode (no wait).
+static bool relw_step() {
+    RelReq q;
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); q = g_relw_req; }
+    if (q.gen != g_relw_gen) {
+        relw_close();
+        g_relw_gen = q.gen;
+        if (q.gen != 0 && q.name[0] != 0) relw_open(q.gen, q.name, q.game_frames);
+    }
+    const relief::File& F = g_relw_file;
+    if (g_relw_h == INVALID_HANDLE_VALUE || F.status != relief::OP_OK) return false;
+    const uint32_t px = F.w * F.h;
+    const int32_t w0 = q.want < 0 ? 0 : q.want;   // no frame wanted yet (the movie's start): the first ones
+    for (int32_t i = w0; i < w0 + relief::k_ring && static_cast<uint32_t>(i) < F.n; ++i) {
+        const int sl = i % relief::k_ring;
+        uint8_t* mem;
+        {
+            std::lock_guard<std::mutex> lk(g_fmvw_mx);
+            if (g_relw_slot[sl].idx == i || g_relw_px == nullptr) continue;
+            g_relw_slot[sl].idx = -2; mem = g_relw_px;
+        }
+        LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+        relief::Io io = { g_relw_h, relw_read_at, 0 };
+        relief::Codecs c = { nullptr, { nullptr, nullptr, g_relw_dec ? relw_xpress : nullptr } };
+        uint8_t* out = mem + static_cast<size_t>(sl) * px;
+        const int d = relief::decode(F, static_cast<uint32_t>(i), io, c, mem + static_cast<size_t>(relief::k_ring) * px, out);
+        const uint8_t med = d == relief::D_OK ? relief::median_u8(out, px) : 0;
+        QueryPerformanceCounter(&b);
+        const double ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
+        std::lock_guard<std::mutex> lk(g_fmvw_mx);
+        g_relw_slot[sl] = RelSlot{ i, med, static_cast<uint8_t>(d == relief::D_OK ? 0 : 1) };
+        if (g_relw_res.gen == g_relw_gen) {
+            if (d == relief::D_OK) { g_relw_res.decoded++; g_relw_res.dec_sum += ms; if (ms > g_relw_res.dec_max) g_relw_res.dec_max = ms; }
+            else g_relw_res.errors++;
+        }
+        return true;
+    }
+    return false;
+}
 static DWORD WINAPI fmvw_thread(LPVOID) {
     HANDLE ev[2] = { g_fmvw_stop, g_fmvw_kick };
+    uint32_t s2_done = 0; bool busy = false;   // s2_done: the last header check answered; busy: the relief has frames to decode (no wait)
     for (;;) {
-        if (WaitForMultipleObjects(2, ev, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) return 0;   // the stop event (or a failure)
+        const DWORD w = WaitForMultipleObjects(2, ev, FALSE, busy ? 0 : INFINITE);
+        if (w != WAIT_OBJECT_0 + 1 && w != WAIT_TIMEOUT) break;   // the stop event (or a failure)
         char name[fmv::k_name_len + 1]; uint32_t gen;
         { std::lock_guard<std::mutex> lk(g_fmvw_mx); memcpy(name, g_fmvw_req, sizeof(name)); gen = g_fmvw_req_gen; }
-        LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
-        fmv::FvdInfo v; fmv_fvd_check(name, v);
-        QueryPerformanceCounter(&b);
-        { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_fmvw_res = v; g_fmvw_res_gen = gen; g_fmvw_res_ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0; }
-        g_fmvw_done.store(gen);   // a newer request kicked meanwhile is taken at the next wait (the kick event stays set)
+        if (gen != s2_done) {   // fmv-relief: the kick also carries relief requests, so a header check runs once per request number
+            s2_done = gen;
+            LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+            fmv::FvdInfo v; fmv_fvd_check(name, v);
+            QueryPerformanceCounter(&b);
+            { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_fmvw_res = v; g_fmvw_res_gen = gen; g_fmvw_res_ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0; }
+            g_fmvw_done.store(gen);   // a newer request kicked meanwhile is taken at the next wait (the kick event stays set)
+        }
+        busy = relw_step();       // fmv-relief (S3): open / close, then one frame decoded ahead
     }
+    relw_close();
+    return 0;
 }
-/// Render thread: asks for the check of `name`; false when the worker could not start (then the result is FVD_READ).
-static bool fmvw_request(const char* name, uint32_t gen) {
+/// Render thread: starts the worker once (the header check and the relief share it); false when it could not start.
+static bool fmvw_start() {
     if (g_fmvw_failed) return false;
     if (!g_fmvw_thread) {
         g_fmvw_kick = CreateEventA(nullptr, FALSE, FALSE, nullptr); g_fmvw_stop = CreateEventA(nullptr, TRUE, FALSE, nullptr);
@@ -5868,6 +6026,11 @@ static bool fmvw_request(const char* name, uint32_t gen) {
             return false;
         }
     }
+    return true;
+}
+/// Render thread: asks for the check of `name`; false when the worker could not start (then the result is FVD_READ).
+static bool fmvw_request(const char* name, uint32_t gen) {
+    if (!fmvw_start()) return false;
     { std::lock_guard<std::mutex> lk(g_fmvw_mx); memcpy(g_fmvw_req, name, sizeof(g_fmvw_req)); g_fmvw_req_gen = gen; }
     SetEvent(g_fmvw_kick);
     return true;
@@ -12121,8 +12284,393 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
     if (out != nullptr) for (int i = 0; i < n && i < 9; ++i) out[i] = v[i];
     return 9;
 }
+// -- FMV relief (S3): the render thread's half (design-notes "FMV relief screen (S3, 4 Nov 2026)") ----------------------------
+// xr_tick, every Present with the headset on, right before xr_frame: with fmv_depth on and a movie playing, it reads the
+// movie player (as the S2 probe: the manager pointer and the playing word; the three blocks only while playing), asks the
+// worker for the movie's depth file once (and for the depth frame on screen, the uploaded count - 1, as it changes), and
+// when every condition holds draws the frame as a relief: our own two eye images, cleared black (the room), the grid drawn
+// with each eye's located pose and field of view (xr_render_views: what the projection layer goes out with), the colour
+// from eye 1's backbuffer copy (the flat screen's own source) cropped to the video rect, the depth from an R8 texture
+// updated when the video frame changes (held in between). xr_frame then gets those images as a projection layer and no
+// screen quad. Anything else (fmv_depth 0, no file, a bad file, the hybrid ids, a 3D camera, the save screen, no image, the
+// shaders) leaves today's flat screen exactly as it was, with a reason for F8; the depth itself never waits: a frame not
+// decoded in time is drawn flat (once one frame late at most, never across a cut), a cut ramps the strength from 0.
+// Cost with fmv_depth 0: one branch. On but no movie: the manager pointer and the playing word (two guarded reads).
+struct RelCfg { int on; float strength; int flags; int offset; };   // ffxvr_fmv3d_set; flags bit 0: flatten the bottom 15 %
+static RelCfg g_rel_cfg = { 0, 0.08f, 0, 0 };
+enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
+static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
+    "the save screen is open", "checking the depth file", "the depth file", "no eye-1 image (the backbuffer copy)", "the relief pass", "the movie player is not readable" };
+static const uint32_t k_rel_hybrid[4] = { 32, 46, 70, 72 };
+struct RelFmv {
+    bool on = false; char name[fmv::k_name_len + 1] = {}; uint32_t id = 0, gen = 0, last_count = 0;
+    int file = 0; char why[200] = {};                    // the worker's answer: 0 pending, 1 open, -1 failed; its text
+    uint32_t n = 0, w = 0, cuts = 0;
+    relief::Tstate t;
+    int32_t want = -1, want_posted = -2; int sel = 0;
+    int now_why = -1, now_fb = FB_PENDING;               // this Present: the relief's reason (now_fb FB_NONE), or the fallback's
+    uint32_t presents = 0, rel_presents = 0, by_why[relief::W_N] = {}, by_fb[FB_N] = {}, uploads = 0, ramps = 0;
+    uint32_t decoded = 0, errors = 0; double dec_sum = 0, dec_max = 0, open_ms = 0;
+    int ring = 0; double ring_sum = 0; uint32_t ring_n = 0;
+    float s_now = 0, pivot_now = 0;
+    relief::Rect rect = { 0.f, 0.f, 1.f, 1.f }; uint32_t bb_w = 0, bb_h = 0, vw = 0, vh = 0;   // the last relief frame's crop
+};
+static RelFmv g_rel;
+static uint32_t g_rel_gen = 0, g_rel_lines = 0;
+static const uint32_t k_rel_lines_max = 200;            // fmv3d: lines a session
+static char g_rel_last[300] = "";                        // the last movie, for F8 when none plays
+static char g_rel_gpu_why[160] = "";
+static ID3D11VertexShader* g_rel_vs = nullptr; static ID3D11PixelShader* g_rel_ps = nullptr; static ID3D11Buffer* g_rel_cb[2] = { nullptr, nullptr };
+static ID3D11SamplerState* g_rel_smp = nullptr; static ID3D11DepthStencilState* g_rel_dss = nullptr; static ID3D11RasterizerState* g_rel_rs = nullptr;
+static bool g_rel_tried = false, g_rel_ok = false;
+static ID3D11Texture2D* g_rel_dtex = nullptr; static ID3D11ShaderResourceView* g_rel_dsrv = nullptr; static uint32_t g_rel_dw = 0;   // the depth map
+static ID3D11Texture2D* g_rel_eye[2] = { nullptr, nullptr }; static ID3D11RenderTargetView* g_rel_rtv[2] = { nullptr, nullptr };
+static ID3D11Texture2D* g_rel_z = nullptr; static ID3D11DepthStencilView* g_rel_dsv = nullptr;
+static uint8_t* g_rel_up = nullptr;                      // the frame to upload, copied out of the ring under the lock (w * 180 bytes)
+
+// The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer. The
+// weight and z are relief::weight / relief_z (ffxvr_relief.h); the local frame is the screen quad's (x right, y up, +z
+// toward the viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it). R: the video rect (uv), G: W, H,
+// cells x, y; Z: k_push, k_pop, pivot, flatten the bottom; F: feather, band, band ramp.
+static const char k_rel_hlsl[] =
+    "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; };\n"
+    "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
+    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; };\n"
+    "VO vs(uint id : SV_VertexID) {\n"
+    "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
+    "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
+    "    float cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0);\n"
+    "    float a = cx / G.z, b = cy / G.w;\n"
+    "    float d = D.SampleLevel(S, float2(a, b), 0);\n"
+    "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
+    "    float w = smoothstep(0, 1, e / F.x);\n"
+    "    if (Z.w > 0.5) w *= 1 - smoothstep(0, 1, (b - (1 - F.y - F.z)) / F.z);\n"
+    "    float t = d - Z.z; float z = w * (t < 0 ? Z.x * t : Z.y * t);\n"
+    "    float u = R.x + a * R.z, v = R.y + b * R.w;\n"
+    "    VO o; o.p = mul(MVP, float4((u - 0.5) * G.x, (0.5 - v) * G.y, z, 1)); o.t = float2(u, v); return o;\n"
+    "}\n"
+    "float4 ps(VO i) : SV_Target { return float4(T.Sample(S, i.t).rgb, 1); }\n";
+struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; };
+static_assert(sizeof(RelCb) == 128, "RelCb: 128 bytes");
+
+/// At Present, the first time a relief frame is wanted: the shaders and the fixed states.
+static void rel_gpu_init() {
+    if (g_rel_tried) return;
+    g_rel_tried = true;
+    if (g_device == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no device"); return; }
+    LARGE_INTEGER t0, t1, fq; QueryPerformanceCounter(&t0); QueryPerformanceFrequency(&fq);
+    HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+    PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
+    if (!compile) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no shader compiler (d3dcompiler_47.dll)"); diag("fmv3d: relief pass FAILED: %s", g_rel_gpu_why); return; }
+    ID3DBlob *vsb = nullptr, *psb = nullptr, *err = nullptr;
+    auto build = [&](const char* entry, const char* target, ID3DBlob** out) {
+        HRESULT hr = compile(k_rel_hlsl, sizeof(k_rel_hlsl) - 1, "fmv3d", nullptr, nullptr, entry, target, 0, 0, out, &err);
+        if (FAILED(hr)) diag("fmv3d: relief pass FAILED: %s: %s", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+        if (err) { err->Release(); err = nullptr; }
+        return SUCCEEDED(hr);
+    };
+    if (!build("vs", "vs_4_0", &vsb)) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "its vertex shader did not compile"); return; }
+    if (!build("ps", "ps_4_0", &psb)) { vsb->Release(); snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "its pixel shader did not compile"); return; }
+    g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_rel_vs);
+    g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_rel_ps);
+    vsb->Release(); psb->Release();
+    D3D11_BUFFER_DESC cd = {};
+    cd.ByteWidth = sizeof(RelCb); cd.Usage = D3D11_USAGE_DYNAMIC; cd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    g_device->CreateBuffer(&cd, nullptr, &g_rel_cb[0]); g_device->CreateBuffer(&cd, nullptr, &g_rel_cb[1]);   // one per eye
+    D3D11_SAMPLER_DESC sm = {}; sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sm.MaxLOD = D3D11_FLOAT32_MAX; sm.ComparisonFunc = D3D11_COMPARISON_NEVER; sm.MaxAnisotropy = 1;
+    g_device->CreateSamplerState(&sm, &g_rel_smp);
+    D3D11_DEPTH_STENCIL_DESC ds = {}; ds.DepthEnable = TRUE; ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; ds.DepthFunc = D3D11_COMPARISON_LESS; ds.StencilEnable = FALSE;
+    g_device->CreateDepthStencilState(&ds, &g_rel_dss);
+    D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+    g_device->CreateRasterizerState(&rd, &g_rel_rs);
+    g_rel_ok = g_rel_vs && g_rel_ps && g_rel_cb[0] && g_rel_cb[1] && g_rel_smp && g_rel_dss && g_rel_rs;
+    QueryPerformanceCounter(&t1);
+    const double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
+    if (g_rel_ok) { diag("fmv3d: relief pass ready (vs + ps compiled in %.1f ms at Present)", ms); return; }
+    snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "a D3D object could not be made");
+    diag("fmv3d: relief pass FAILED: a D3D object could not be made (vs %d ps %d cb %d/%d smp %d dss %d rs %d)", g_rel_vs != nullptr, g_rel_ps != nullptr,
+         g_rel_cb[0] != nullptr, g_rel_cb[1] != nullptr, g_rel_smp != nullptr, g_rel_dss != nullptr, g_rel_rs != nullptr);
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
+    drop(g_rel_vs); drop(g_rel_ps); drop(g_rel_cb[0]); drop(g_rel_cb[1]); drop(g_rel_smp); drop(g_rel_dss); drop(g_rel_rs);
+}
+/// The per-movie GPU objects (the depth map, the eye images, their depth buffer): freed at the movie's end and at headset off.
+static void rel_gpu_release() {
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
+    drop(g_rel_dsrv); drop(g_rel_dtex); g_rel_dw = 0;
+    for (int e = 0; e < 2; ++e) { if (g_rel_eye[e]) g_plain_srvs_forget(g_rel_eye[e]); drop(g_rel_rtv[e]); drop(g_rel_eye[e]); }
+    drop(g_rel_dsv); drop(g_rel_z);
+    delete[] g_rel_up; g_rel_up = nullptr;
+}
+/// The objects for this frame (made on first use, re-made when a size changes); false with g_rel_gpu_why.
+static bool rel_gpu_frame(uint32_t dw, UINT ew, UINT eh, DXGI_FORMAT fmt) {
+    if (g_rel_dtex == nullptr || g_rel_dw != dw) {
+        if (g_rel_dsrv) { g_rel_dsrv->Release(); g_rel_dsrv = nullptr; } if (g_rel_dtex) { g_rel_dtex->Release(); g_rel_dtex = nullptr; }
+        delete[] g_rel_up; g_rel_up = nullptr; g_rel_dw = 0;
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = dw; td.Height = relief::k_h; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_dtex)) || g_rel_dtex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_dtex, nullptr, &g_rel_dsrv))) {
+            snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the depth texture could not be made"); rel_gpu_release(); return false;
+        }
+        g_rel_up = new (std::nothrow) uint8_t[static_cast<size_t>(dw) * relief::k_h];
+        if (g_rel_up == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
+        g_rel_dw = dw;
+    }
+    D3D11_TEXTURE2D_DESC like = {}; like.Width = ew; like.Height = eh; like.Format = fmt;
+    for (int e = 0; e < 2; ++e) if (!ensure_copy(g_rel_eye[e], g_rel_rtv[e], like) || g_rel_rtv[e] == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the eye images could not be made"); return false; }
+    if (g_rel_z) { D3D11_TEXTURE2D_DESC zd; g_rel_z->GetDesc(&zd); if (zd.Width != ew || zd.Height != eh) { g_rel_dsv->Release(); g_rel_dsv = nullptr; g_rel_z->Release(); g_rel_z = nullptr; } }
+    if (g_rel_z == nullptr) {
+        D3D11_TEXTURE2D_DESC zd = {}; zd.Width = ew; zd.Height = eh; zd.MipLevels = zd.ArraySize = 1; zd.Format = DXGI_FORMAT_D32_FLOAT;
+        zd.SampleDesc.Count = 1; zd.Usage = D3D11_USAGE_DEFAULT; zd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        if (FAILED(g_device->CreateTexture2D(&zd, nullptr, &g_rel_z)) || g_rel_z == nullptr || FAILED(g_device->CreateDepthStencilView(g_rel_z, nullptr, &g_rel_dsv))) {
+            if (g_rel_z) { g_rel_z->Release(); g_rel_z = nullptr; } g_rel_dsv = nullptr;
+            snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the depth buffer could not be made"); return false;
+        }
+    }
+    return true;
+}
+/// The SRV of our backbuffer copy (the copy pass's cache: ensure_copy forgets it when the copy is re-made).
+static ID3D11ShaderResourceView* rel_color_srv(ID3D11Texture2D* t) {
+    auto it = g_plain_srvs.find(t);
+    if (it != g_plain_srvs.end()) return it->second;
+    ID3D11ShaderResourceView* v = nullptr;
+    if (FAILED(g_device->CreateShaderResourceView(t, nullptr, &v))) v = nullptr;
+    g_plain_srvs[t] = v;
+    return v;
+}
+/// Both eyes: clear black, the grid with that eye's view and projection. Saves and restores what it touches.
+static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
+                     uint32_t nx, uint32_t ny, const relief::Shape& sh, bool flat_bottom) {
+    InEye2 guard;
+    UidSaved s; uid_save(s);
+    ID3D11ShaderResourceView* o_vsrv = nullptr; ID3D11SamplerState* o_vsmp = nullptr; ID3D11Buffer* o_vcb = nullptr;
+    g_ctx->VSGetShaderResources(0, 1, &o_vsrv); g_ctx->VSGetSamplers(0, 1, &o_vsmp); g_ctx->VSGetConstantBuffers(0, 1, &o_vcb);
+    g_ctx->VSSetShader(g_rel_vs, nullptr, 0); g_ctx->PSSetShader(g_rel_ps, nullptr, 0);
+    g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->HSSetShader(nullptr, nullptr, 0); g_ctx->DSSetShader(nullptr, nullptr, 0);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(g_rel_dss, 0); g_ctx->RSSetState(g_rel_rs);
+    g_ctx->VSSetShaderResources(0, 1, &g_rel_dsrv); g_ctx->VSSetSamplers(0, 1, &g_rel_smp);
+    ID3D11ShaderResourceView* ps_srv[2] = { nullptr, color }; g_ctx->PSSetShaderResources(0, 2, ps_srv); g_ctx->PSSetSamplers(0, 1, &g_rel_smp);
+    float M[16]; relief::pose_mat(sc.q, sc.p, M);
+    const float W = sc.width, H = sc.width * 9.f / 16.f;
+    for (int e = 0; e < 2; ++e) {
+        float V[16], P[16], PV[16];
+        relief::view_mat(v[e].q, v[e].p, V); relief::proj_mat(f[e].l, f[e].r, f[e].u, f[e].d, 0.05f, 50.f, P);
+        relief::mat4_mul(P, V, PV);
+        RelCb cb = {};
+        relief::mat4_mul(PV, M, cb.MVP);
+        cb.R[0] = rc.u0; cb.R[1] = rc.v0; cb.R[2] = rc.du; cb.R[3] = rc.dv;
+        cb.G[0] = W; cb.G[1] = H; cb.G[2] = static_cast<float>(nx); cb.G[3] = static_cast<float>(ny);
+        cb.Z[0] = sh.k_push; cb.Z[1] = sh.k_pop; cb.Z[2] = sh.pivot; cb.Z[3] = flat_bottom ? 1.f : 0.f;
+        cb.F[0] = relief::k_feather; cb.F[1] = relief::k_band; cb.F[2] = relief::k_band_ramp;
+        D3D11_MAPPED_SUBRESOURCE ms = {};
+        if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
+        memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
+        g_orig_vssetcb(g_ctx, 0, 1, &g_rel_cb[e]);
+        ID3D11RenderTargetView* rts[1] = { g_rel_rtv[e] };
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, g_rel_dsv, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
+        D3D11_TEXTURE2D_DESC td; g_rel_eye[e]->GetDesc(&td);
+        D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(td.Width); vp.Height = static_cast<float>(td.Height); vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
+        const float black[4] = { 0.f, 0.f, 0.f, 1.f };
+        g_ctx->ClearRenderTargetView(g_rel_rtv[e], black); g_ctx->ClearDepthStencilView(g_rel_dsv, D3D11_CLEAR_DEPTH, 1.f, 0);
+        g_ctx->Draw(nx * ny * 6, 0);
+    }
+    ID3D11ShaderResourceView* none = nullptr; g_ctx->VSSetShaderResources(0, 1, &none);
+    g_ctx->VSSetShaderResources(0, 1, &o_vsrv); g_ctx->VSSetSamplers(0, 1, &o_vsmp); g_orig_vssetcb(g_ctx, 0, 1, &o_vcb);
+    if (o_vsrv) o_vsrv->Release(); if (o_vsmp) o_vsmp->Release(); if (o_vcb) o_vcb->Release();
+    uid_restore(s);
+}
+/// The worker's request: this movie (gen 0 = none) and the frame wanted now.
+static void rel_post() {
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx);
+      g_relw_req.gen = g_rel.on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = g_rel.on ? g_rel.n : 0; g_relw_req.want = g_rel.on ? g_rel.want : -1; }
+    if (g_fmvw_kick) SetEvent(g_fmvw_kick);
+    g_rel.want_posted = g_rel.want;
+}
+/// The fmv3d: line of a movie that ended (diagnostic profiles only, k_rel_lines_max a session; written as fmv: lines are).
+static void rel_end(const char* how) {
+    if (!g_rel.on) return;
+    RelFmv& r = g_rel;
+    {   // F8's note after the movie: in 3D on N of M Presents, or the commonest reason it stayed on the flat screen
+        int top = FB_NONE; for (int k = 1; k < FB_N; ++k) if (r.by_fb[k] > (top ? r.by_fb[top] : 0u)) top = k;
+        if (r.rel_presents > 0 || top == FB_NONE) snprintf(g_rel_last, sizeof(g_rel_last), "last movie %s: in 3D on %u of %u Presents", r.name, r.rel_presents, r.presents);
+        else snprintf(g_rel_last, sizeof(g_rel_last), "last movie %s: flat screen: %s", r.name, top == FB_FILE ? r.why : top == FB_GPU ? g_rel_gpu_why : k_rel_fb[top]);
+    }
+    if (diag_profile_on() && g_rel_lines < k_rel_lines_max) {
+        g_rel_lines++;
+        char b[1500]; size_t n = fmv::add(b, sizeof(b), 0, "fmv3d: '%s' id %u: %s | %s | %u Presents: relief %u (", r.name, r.id, how, r.file == 1 ? r.why : r.file < 0 ? r.why : "depth file not answered yet", r.presents, r.rel_presents);
+        bool first = true;
+        for (int w = 0; w < relief::W_N; ++w) if (r.by_why[w]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? "" : ", ", relief::why_text(w), r.by_why[w]); first = false; }
+        n = fmv::add(b, sizeof(b), n, "), flat screen %u", r.presents - r.rel_presents);
+        first = true;
+        for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
+        if (!first) n = fmv::add(b, sizeof(b), n, ")");
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (cuts and returns from flat) %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms",
+                                      r.uploads, r.ramps, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms);
+        if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f", r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv);
+        n = fmv::add(b, sizeof(b), n, " | strength %.3f, flatten the bottom %d, offset %d", g_rel_cfg.strength, g_rel_cfg.flags & 1, g_rel_cfg.offset);
+        if (r.by_fb[FB_GPU] && g_rel_gpu_why[0]) n = fmv::add(b, sizeof(b), n, " | relief pass: %s", g_rel_gpu_why);
+        if (g_rel_lines == k_rel_lines_max) fmv::add(b, sizeof(b), n, " | %u fmv3d: lines this session: no more", k_rel_lines_max);
+        fmv_put(b);
+    }
+    r.on = false;
+    rel_post();          // gen 0: the worker closes the file and frees the ring
+    rel_gpu_release();
+}
+static void relief_headset_off() { if (g_rel.on) rel_end("the headset went off"); }
+/// The movie player's state, as the S2 probe reads it. false: no manager, or its playing word not readable (*unreadable).
+static bool rel_read(fmv::Snap& s, bool* unreadable) {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    auto at = [](uint32_t va) { return reinterpret_cast<const void*>(base + (va - 0x400000u)); };
+    *unreadable = false;
+    uint32_t mgr = 0;
+    if (!ffxvr_safe_read(at(fmv::k_mgr_va), &mgr, 4) || mgr == 0) return false;
+    uint8_t pw[4] = {};
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(mgr) + fmv::k_playing), pw, 4)) { *unreadable = true; return false; }
+    s.mgr = true; s.playing = pw[0]; s.open = pw[2];
+    if (!s.playing) return true;
+    const uintptr_t m = static_cast<uintptr_t>(mgr);
+    uint8_t sb[fmv::k_s_len], pb[fmv::k_p_len], nb[fmv::k_n_len];
+    if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_s_lo), sb, fmv::k_s_len)) fmv::parse_state(s, sb);
+    if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_p_lo), pb, fmv::k_p_len)) fmv::parse_player(s, pb);
+    if (ffxvr_safe_read(reinterpret_cast<const void*>(m + fmv::k_n_lo), nb, fmv::k_n_len)) fmv::parse_name(s, nb);
+    return true;
+}
+/// xr_tick, before xr_frame. True: the relief was drawn; *xe1 / *xe2 / xused are what xr_frame submits (a projection layer:
+/// the caller turns the screen quad off). False: nothing changed (today's flat screen, or the 3D view).
+static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const XrScreen& sc, ID3D11Texture2D** xe1, ID3D11Texture2D** xe2, XrFovTan xused[2]) {
+    if (!g_rel_cfg.on) { if (g_rel.on) rel_end("turned off (fmv_depth 0)"); return false; }
+    rel_gpu_init();   // once: the shaders compile at the first Present with fmv_depth on and the headset on, not at a movie's first frame
+    fmv::Snap s; bool unreadable = false;
+    const bool have = rel_read(s, &unreadable);
+    if (!have || !s.playing) {
+        if (unreadable && g_rel.on) { g_rel.presents++; g_rel.by_fb[FB_STATE]++; g_rel.now_fb = FB_STATE; return false; }   // an unknown state: flat, the movie kept
+        if (g_rel.on) rel_end(have ? "ended (the playing byte cleared)" : "the movie player went away");
+        return false;
+    }
+    if (g_rel.on && ((s.s_ok && s.id != g_rel.id) || (s.n_ok && strcmp(s.name, g_rel.name) != 0) || (s.p_ok && s.count < g_rel.last_count))) rel_end("replaced by another video");
+    if (!g_rel.on) {
+        if (!s.s_ok || !s.p_ok || !s.n_ok || s.name[0] == 0) return false;   // nothing known yet: next Present
+        g_rel = RelFmv{};
+        g_rel.on = true; memcpy(g_rel.name, s.name, sizeof(g_rel.name)); g_rel.id = s.id; g_rel.n = fmv::frames_from_ms(s.dur_ms);
+        if (++g_rel_gen == 0) g_rel_gen = 1;
+        g_rel.gen = g_rel_gen;
+        if (fmvw_start()) rel_post();
+        else { g_rel.file = -1; snprintf(g_rel.why, sizeof(g_rel.why), "the file worker could not start"); }
+    }
+    RelFmv& r = g_rel;
+    r.presents++;
+    if (s.p_ok) r.last_count = s.count;
+    if (r.file == 0) {   // the worker's answer
+        std::lock_guard<std::mutex> lk(g_fmvw_mx);
+        if (g_relw_res.gen == r.gen && g_relw_res.state != 0) {
+            r.file = g_relw_res.state; memcpy(r.why, g_relw_res.why, sizeof(r.why)); r.open_ms = g_relw_res.open_ms;
+            if (r.file == 1) { r.n = g_relw_res.n; r.w = g_relw_res.w; r.cuts = g_relw_res.cuts; }
+        }
+    }
+    else if (r.file == 1) {
+        std::lock_guard<std::mutex> lk(g_fmvw_mx);
+        if (g_relw_res.gen == r.gen) { r.decoded = g_relw_res.decoded; r.errors = g_relw_res.errors; r.dec_sum = g_relw_res.dec_sum; r.dec_max = g_relw_res.dec_max; }
+    }
+    // the depth frame on screen, posted to the worker as it changes (also while the flat screen is shown: the ring is ready)
+    if (r.file == 1) {
+        r.want = relief::frame_for(s.p_ok ? s.count : 0, g_rel_cfg.offset, r.n, &r.sel);
+        if (r.want != r.want_posted) rel_post();
+    }
+    int fb = FB_NONE;
+    bool hybrid = false; for (uint32_t h : k_rel_hybrid) if (s.id == h) hybrid = true;
+    XrPoseOut views[2]; XrFovTan fov[2]; unsigned ew = 0, eh = 0;
+    if (!s.s_ok || !s.p_ok) fb = FB_STATE;
+    else if (hybrid) fb = FB_HYBRID;
+    else if (!sc.on || sc.stereo || bt_no_split()) fb = FB_VIEW;
+    else if (!frame2d) fb = FB_CAM3D;
+    else if (menu) fb = FB_MENU;
+    else if (r.file == 0) fb = FB_PENDING;
+    else if (r.file < 0) fb = FB_FILE;
+    else if (e1 == nullptr || e1 != g_bb_copy) fb = FB_IMAGE;
+    else {
+        xr_eye_size(&ew, &eh);
+        D3D11_TEXTURE2D_DESC bd; e1->GetDesc(&bd);
+        if (!g_rel_ok) fb = FB_GPU;
+        else if (ew == 0 || eh == 0) { fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no eye swapchain size"); }
+        else if (bd.SampleDesc.Count != 1) { fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the backbuffer copy is multisampled"); }
+        else if (!xr_render_views(views, fov) || !relief::fov_ok(fov[0].l, fov[0].r, fov[0].u, fov[0].d) || !relief::fov_ok(fov[1].l, fov[1].r, fov[1].u, fov[1].d)) { fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no located views to draw with"); }
+        else if (!rel_gpu_frame(r.w, ew, eh, bd.Format)) fb = FB_GPU;
+    }
+    if (fb != FB_NONE) { r.by_fb[fb]++; r.now_fb = fb; r.t.flat_prev = true; r.t.ramping = false; return false; }   // the next relief frame ramps in
+    ID3D11ShaderResourceView* color = rel_color_srv(e1);
+    if (color == nullptr) { r.by_fb[FB_GPU]++; r.now_fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no view of the backbuffer copy"); r.t.flat_prev = true; return false; }
+    // the ring's answer for the wanted frame (its pixels copied out under the lock only when they would be uploaded)
+    relief::Avail a = { false, false, 0 }; int fill = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_fmvw_mx);
+        if (r.want >= 0) {
+            const RelSlot& sl = g_relw_slot[r.want % relief::k_ring];
+            if (sl.idx == r.want) {
+                a.ready = true; a.error = sl.err != 0; a.median = sl.median;
+                if (!a.error && r.want != r.t.bound && g_relw_px != nullptr) memcpy(g_rel_up, g_relw_px + static_cast<size_t>(r.want % relief::k_ring) * r.w * relief::k_h, static_cast<size_t>(r.w) * relief::k_h);
+                if (!a.error && g_relw_px == nullptr) a.ready = false;
+            }
+            for (int i = 0; i < relief::k_ring; ++i) { const int32_t x = g_relw_slot[i].idx; if (x >= r.want && x < r.want + relief::k_ring && !g_relw_slot[i].err) fill++; }
+        }
+    }
+    r.ring = fill; r.ring_sum += fill; r.ring_n++;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
+    const relief::Tcfg tc;
+    const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.strength, 0.f, 0.25f));
+    if (o.upload) { InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w, 0); r.uploads++; }
+    if (r.t.ramping && r.t.ramp_t0 == now) r.ramps++;   // a ramp started this Present (a cut, or the first depth after flat)
+    r.rel_presents++; r.by_why[o.why]++; r.now_why = o.why; r.now_fb = FB_NONE; r.s_now = o.s; r.pivot_now = o.pivot;
+    const relief::Shape sh = relief::shape(o.s, sc.width, o.pivot);
+    D3D11_TEXTURE2D_DESC bd; e1->GetDesc(&bd);
+    const relief::Rect rc = relief::video_rect(s.vw ? s.vw : (r.w == relief::k_w43 ? 640u : 1280u), s.vh ? s.vh : (r.w == relief::k_w43 ? 480u : 720u), bd.Width, bd.Height);
+    r.rect = rc; r.bb_w = bd.Width; r.bb_h = bd.Height; r.vw = s.vw; r.vh = s.vh;
+    rel_draw(color, views, fov, sc, rc, r.w / 2, relief::k_h / 2, sh, (g_rel_cfg.flags & 1) != 0);
+    *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = fov[0]; xused[1] = fov[1];
+    return true;
+}
+
+/// FMV relief (ABI 41): the settings, from managed every frame. on: ini fmv_depth; strength: 0..0.25 (default 0.08); flags bit
+/// 0: flatten the bottom 15 % (subtitles); offset: ini fmv_depth_offset, depth frames (-3..3; + shows a later one).
+extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float strength, int flags, int offset) {
+    g_rel_cfg.on = on ? 1 : 0;
+    g_rel_cfg.strength = std::isfinite(strength) ? relief::clampf(strength, 0.f, 0.25f) : 0.08f;
+    g_rel_cfg.flags = flags & 1;
+    g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
+}
+/// FMV relief (ABI 41): F8's text (render thread, from the overlay). which 0: the Debug line "FMV 3D: ..."; 1: the main
+/// window's one-line note (empty when there is nothing to say). Returns the length written (NUL-terminated, cut to cap).
+extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int cap) {
+    if (buf == nullptr || cap <= 0) return 0;
+    const RelFmv& r = g_rel; const size_t c = static_cast<size_t>(cap);
+    size_t n = 0; buf[0] = 0;
+    auto reason = [&](char* b, size_t bc) {
+        if (r.now_fb == FB_FILE) snprintf(b, bc, "%s", r.why);
+        else if (r.now_fb == FB_GPU) snprintf(b, bc, "the relief pass: %s", g_rel_gpu_why[0] ? g_rel_gpu_why : "?");
+        else snprintf(b, bc, "%s", k_rel_fb[r.now_fb >= 0 && r.now_fb < FB_N ? r.now_fb : 0]);
+    };
+    char why[240];
+    if (which == 1) {
+        if (!g_rel_cfg.on) return 0;
+        if (!r.on) return static_cast<int>(fmv::add(buf, c, 0, "%s", g_rel_last));
+        if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, 0, "%s in 3D (%s)", r.name, relief::why_text(r.now_why));
+        else { reason(why, sizeof(why)); n = fmv::add(buf, c, 0, "%s on the flat screen: %s", r.name, why); }
+        return static_cast<int>(n);
+    }
+    if (!g_rel_cfg.on) { n = fmv::add(buf, c, 0, "FMV 3D: off (fmv_depth 0)"); return static_cast<int>(n); }
+    if (!r.on) { n = fmv::add(buf, c, 0, "FMV 3D: no movie playing%s%s%s", g_rel_last[0] ? " (" : "", g_rel_last, g_rel_last[0] ? ")" : ""); return static_cast<int>(n); }
+    n = fmv::add(buf, c, 0, "FMV 3D: %s frame %d", r.name, r.want);
+    if (r.n) n = fmv::add(buf, c, n, "/%u", r.n);
+    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s, strength %.3f, pivot %.2f", relief::why_text(r.now_why), r.s_now, r.pivot_now);
+    else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
+    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring);
+    n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
+    return static_cast<int>(n);
+}
+
 static void xr_tick() {
-    if (!g_xr_want) { dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
+    if (!g_xr_want) { relief_headset_off(); dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
     if (!g_uid_tried && (g_uid_on || g_uid_backing > 0.001f)) uid_init();   // UD-6: the shaders compile here at Present, at headset start, not inside the game's frame
     if (g_h2cfg.on && !g_h2_tried) hands_pass_init();   // VR hands v2: the same rule (lazily, the first time vr_hands=1 with the headset on)
     hands_pack_tick();                                    // VR hands v2 (S2): start a pack load, or upload a finished one (at Present, vr_hands=1 only)
@@ -12323,6 +12871,10 @@ static void xr_tick() {
     // uidepth: the panel's distance / width and its backing plate, for a frame that submits the 3D UI panel (xr_frame shows it
     // only with a base layer that is not a screen; a held base keeps the held quad).
     uid_present(ui.tex != nullptr && !screen.on && e1 != nullptr, ui);
+    // fmv-relief (S3): an FMV with its depth goes out as a projection layer of our own two eye images (the relief), not the
+    // screen quad; anything else leaves the inputs as they are (relief_present above)
+    ID3D11Texture2D* xe1 = e1; ID3D11Texture2D* xe2 = g_stereo ? e2 : nullptr; XrFovTan xused[2] = { used[0], used[1] };
+    if (relief_present(e1, frame2d, menu, screen, &xe1, &xe2, xused)) { screen.on = false; ui.tex = nullptr; }
     {
         // The runtime composites on the game's own device context inside
         // these calls (Virtual Desktop binds its 2496x2688 eye textures and
@@ -12339,7 +12891,7 @@ static void xr_tick() {
         }
         xr_hold_uncapped(g_bt_frozen);
         LARGE_INTEGER ta, tb; QueryPerformanceCounter(&ta);
-        xr_frame(e1, g_stereo ? e2 : nullptr, used, &screen, &ui, &out);
+        xr_frame(xe1, xe2, xused, &screen, &ui, &out);   // fmv-relief: e1 / e2 / used unless the relief was drawn
         g_uib_src_now = nullptr; g_uib_now = false;   // uidepth: the plate belongs to this frame's UI copy only
         QueryPerformanceCounter(&tb); if (g_qpf.QuadPart) g_xr_ms_this_frame = (tb.QuadPart - ta.QuadPart) * 1000.0 / g_qpf.QuadPart;
         if (g_bt_frozen && !g_bt_want_freeze) { xr_pin(false, nullptr); xr_hold_uncapped(false); g_bt_frozen = false; g_bt_hold = false; g_sr_epoch++; }
