@@ -402,6 +402,14 @@ inline void ema(uint16_t* acc, uint8_t* io, uint32_t n, float smooth, bool reset
     }
 }
 
+/// Round 7 (audit plan 1): the grid has a vertex at every depth texel's centre, plus one at each edge of the rect: in
+/// each axis `texels + 2` vertices, `texels + 1` cells (321 x 181 for 320 x 180; 241 x 181 for 4:3), the inner cells one
+/// texel, the border cells half a texel. So each vertex reads one texel of the depth (the 160 x 90 grid sat at texel
+/// boundaries: every vertex was the mean of 2 x 2 texels, a quarter of the stored resolution). c: the vertex column / row
+/// (0 .. texels + 1). The VS copy: saturate((c - 0.5) / texels).
+inline float grid_coord(uint32_t c, uint32_t texels) { return clampf((static_cast<float>(c) - 0.5f) / static_cast<float>(texels), 0.f, 1.f); }
+inline uint32_t grid_cells(uint32_t texels) { return texels + 1; }
+
 /// The video's rect in the backbuffer (uv, the game letterboxes / pillarboxes it centred): vw x vh into bw x bh.
 struct Rect { float u0, v0, du, dv; };
 inline Rect video_rect(uint32_t vw, uint32_t vh, uint32_t bw, uint32_t bh) {

@@ -12343,7 +12343,8 @@ static ID3D11Texture2D* g_rel_z = nullptr; static ID3D11DepthStencilView* g_rel_
 static uint8_t* g_rel_up = nullptr;                      // the frame to upload, copied out of the ring under the lock (w * 180 bytes)
 static uint16_t* g_rel_ema = nullptr;                    // the temporal filter's state (8.8 fixed point, w * 180), with g_rel_up
 
-// The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer. The
+// The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer; a
+// vertex at every depth texel's centre and at the rect's edges (round 7: relief::grid_coord, (texels + 1)^2 cells). The
 // vertex shader is relief::weight / map_point (ffxvr_relief.h): the screen quad's own frame (x right, y up, +z toward the
 // viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it), each vertex moved along the ray from the
 // nominal eye (X.x, 0, Ds) (the midpoint between the eyes, review3 N-1) through its pixel to distance Z = 1 / (1/Ds + k D'), D = 1/Zf + n (1/Zn - 1/Zf) - 1/Ds, D' = D x
@@ -12352,7 +12353,7 @@ static uint16_t* g_rel_ema = nullptr;                    // the temporal filter'
 // to the far side by a weight the VS computes per vertex from the neighbouring depths (relief::fill_vertex; round 6: the
 // first version's per-triangle ddx / ddy weight recoloured whole cells: blocks); E.w: the depth as colour.
 // R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: the edge band (pop-out only), band, band ramp, flatten the bottom;
-// E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m).
+// E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m), the depth map's texels across / down.
 static const char k_rel_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; float4 X; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
@@ -12362,7 +12363,7 @@ static const char k_rel_hlsl[] =
     "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
     "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
     "    float cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0);\n"
-    "    float a = cx / G.z, b = cy / G.w;\n"
+    "    float a = saturate((cx - 0.5) / X.y), b = saturate((cy - 0.5) / X.z);   // a vertex per depth texel centre (relief::grid_coord)\n"
     "    float n = saturate(D.SampleLevel(S, float2(a, b), 0));\n"
     "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
     "    float wp = F.x > 0 ? smoothstep(0, 1, e / F.x) : 1;\n"
@@ -12372,10 +12373,10 @@ static const char k_rel_hlsl[] =
     "    float u = R.x + a * R.z, v = R.y + b * R.w;\n"
     "    VO o; o.p = mul(MVP, float4(X.x + ((u - 0.5) * G.x - X.x) * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.n = n; o.fo = 0;\n"
     "    if (E.x > 0.5) {   // the edge fill, per vertex (relief::fill_vertex): interpolated, so continuous across every triangle edge\n"
-    "        float2 c1 = float2(1 / G.z, 1 / G.w);\n"
+    "        float2 c1 = float2(1 / X.y, 1 / X.z);   // one texel\n"
     "        float ql = qof(saturate(D.SampleLevel(S, float2(a - c1.x, b), 0)), wp, wa), qr = qof(saturate(D.SampleLevel(S, float2(a + c1.x, b), 0)), wp, wa);\n"
     "        float qu = qof(saturate(D.SampleLevel(S, float2(a, b - c1.y), 0)), wp, wa), qd = qof(saturate(D.SampleLevel(S, float2(a, b + c1.y), 0)), wp, wa);\n"
-    "        float2 cm = float2(G.x * R.z / G.z, G.y * R.w / G.w), tc = float2(R.z / G.z, R.w / G.w);\n"
+    "        float2 cm = float2(G.x * R.z / X.y, G.y * R.w / X.z), tc = float2(R.z / X.y, R.w / X.z);\n"
     "        float2 g = float2((qr - ql) / (2 * cm.x), (qd - qu) / (2 * cm.y)); float sl = length(g);\n"
     "        float qx = max(max(max(ql, qr), max(qu, qd)), inv), qn = min(min(min(ql, qr), min(qu, qd)), inv);\n"
     "        float fs = qx - qn > 1e-9 ? saturate((qx - inv) / (qx - qn)) : 0;\n"
@@ -12392,6 +12393,25 @@ static const char k_rel_hlsl[] =
     "}\n";
 struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; float E[4]; float X[4]; };
 static_assert(sizeof(RelCb) == 160, "RelCb: 160 bytes");
+
+// Round 7: the relief pass's GPU time (both eyes; D3D11 timestamps, read back without a flush a few frames later).
+struct RelGpuQ { ID3D11Query* dj = nullptr; ID3D11Query* t0 = nullptr; ID3D11Query* t1 = nullptr; bool busy = false; };
+static const int k_rel_gq = 4;
+static RelGpuQ g_rel_gq[k_rel_gq]; static int g_rel_gq_next = 0;
+static double g_rel_gpu_sum = 0.0, g_rel_gpu_max = 0.0, g_rel_gpu_last = 0.0; static uint32_t g_rel_gpu_n = 0;   // this movie's (reset at its start)
+/// Every relief Present: the finished timings.
+static void rel_gpu_poll() {
+    for (RelGpuQ& q : g_rel_gq) {
+        if (!q.busy) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {}; UINT64 t0 = 0, t1 = 0;
+        if (g_ctx->GetData(q.dj, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        q.busy = false;
+        if (dj.Disjoint || dj.Frequency == 0) continue;
+        if (g_ctx->GetData(q.t0, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || g_ctx->GetData(q.t1, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || t1 < t0) continue;
+        const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
+        g_rel_gpu_last = ms; g_rel_gpu_sum += ms; g_rel_gpu_n++; if (ms > g_rel_gpu_max) g_rel_gpu_max = ms;
+    }
+}
 
 /// At Present, the first time a relief frame is wanted: the shaders and the fixed states.
 static void rel_gpu_init() {
@@ -12425,6 +12445,10 @@ static void rel_gpu_init() {
     D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
     g_device->CreateRasterizerState(&rd, &g_rel_rs);
     g_rel_ok = g_rel_vs && g_rel_ps && g_rel_cb[0] && g_rel_cb[1] && g_rel_smp && g_rel_dss && g_rel_rs;
+    {   // optional: the pass's timing (none: no timing, the pass still runs)
+        const D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, ts = { D3D11_QUERY_TIMESTAMP, 0 };
+        for (RelGpuQ& q : g_rel_gq) { g_device->CreateQuery(&dj, &q.dj); g_device->CreateQuery(&ts, &q.t0); g_device->CreateQuery(&ts, &q.t1); }
+    }
     QueryPerformanceCounter(&t1);
     const double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
     if (g_rel_ok) { diag("fmv3d: relief pass ready (vs + ps compiled in %.1f ms at Present)", ms); return; }
@@ -12481,7 +12505,11 @@ static ID3D11ShaderResourceView* rel_color_srv(ID3D11Texture2D* t) {
 }
 /// Both eyes: clear black, the grid with that eye's view and projection. Saves and restores what it touches.
 static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
-                     uint32_t nx, uint32_t ny, const relief::Map& mp, int flags) {
+                     uint32_t tw, uint32_t th, const relief::Map& mp, int flags) {
+    const uint32_t nx = relief::grid_cells(tw), ny = relief::grid_cells(th);
+    RelGpuQ& gq = g_rel_gq[g_rel_gq_next];   // round 7: the pass's GPU time (both eyes), read back a few frames later
+    const bool timed = gq.dj && gq.t0 && gq.t1 && !gq.busy;
+    if (timed) { g_ctx->Begin(gq.dj); g_ctx->End(gq.t0); }
     InEye2 guard;
     UidSaved s; uid_save(s);
     ID3D11ShaderResourceView* o_vsrv = nullptr; ID3D11SamplerState* o_vsmp = nullptr; ID3D11Buffer* o_vcb = nullptr;
@@ -12505,7 +12533,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         cb.Z[0] = mp.Ds; cb.Z[1] = mp.inv_n; cb.Z[2] = mp.inv_f; cb.Z[3] = mp.k;
         cb.F[0] = g_rel_cfg.edge; cb.F[1] = relief::k_band; cb.F[2] = relief::k_band_ramp; cb.F[3] = (flags & 1) ? 1.f : 0.f;
         cb.E[0] = (flags & 4) ? 1.f : 0.f; cb.E[1] = relief::k_edge_lo; cb.E[2] = relief::k_edge_hi; cb.E[3] = (flags & 16) ? 1.f : 0.f;
-        cb.X[0] = mp.ex;
+        cb.X[0] = mp.ex; cb.X[1] = static_cast<float>(tw); cb.X[2] = static_cast<float>(th);
         D3D11_MAPPED_SUBRESOURCE ms = {};
         if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
         memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
@@ -12519,6 +12547,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         g_ctx->ClearRenderTargetView(g_rel_rtv[e], black); g_ctx->ClearDepthStencilView(g_rel_dsv, D3D11_CLEAR_DEPTH, 1.f, 0);
         g_ctx->Draw(nx * ny * 6, 0);
     }
+    if (timed) { g_ctx->End(gq.t1); g_ctx->End(gq.dj); gq.busy = true; g_rel_gq_next = (g_rel_gq_next + 1) % k_rel_gq; }
     ID3D11ShaderResourceView* none = nullptr; g_ctx->VSSetShaderResources(0, 1, &none);
     g_ctx->VSSetShaderResources(0, 1, &o_vsrv); g_ctx->VSSetSamplers(0, 1, &o_vsmp); g_orig_vssetcb(g_ctx, 0, 1, &o_vcb);
     if (o_vsrv) o_vsrv->Release(); if (o_vsmp) o_vsmp->Release(); if (o_vcb) o_vcb->Release();
@@ -12550,8 +12579,9 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (cuts and returns from flat) %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms",
-                                      r.uploads, r.ramps, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms);
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (cuts and returns from flat) %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
+                                      r.uploads, r.ramps, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
+                                      g_rel_gpu_n, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max, relief::grid_cells(r.w), relief::grid_cells(relief::k_h));
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
         if (r.fades || r.loops) n = fmv::add(b, sizeof(b), n, " | fade-outs %u, loops (the count went back) %u", r.fades, r.loops);
@@ -12611,7 +12641,8 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     if (!g_rel.on) {
         if (!s.s_ok || !s.p_ok || !s.n_ok || s.name[0] == 0) return false;   // nothing known yet: next Present
         g_rel = RelFmv{};
-        g_rel_range_now = g_rel_pop_now = -1.f;   // review3 N-3: the range / pop-out followers start at the settings (a change made between movies does not slide in)
+        g_rel_range_now = g_rel_pop_now = -1.f;
+        g_rel_gpu_sum = g_rel_gpu_max = g_rel_gpu_last = 0.0; g_rel_gpu_n = 0;   // round 7: this movie's GPU time   // review3 N-3: the range / pop-out followers start at the settings (a change made between movies does not slide in)
         g_rel.on = true; memcpy(g_rel.name, s.name, sizeof(g_rel.name)); g_rel.id = s.id; g_rel.n = fmv::frames_from_ms(s.dur_ms);
         if (++g_rel_gen == 0) g_rel_gen = 1;
         g_rel.gen = g_rel_gen;   // the file is asked for below, once nothing static rules the relief out (review N3)
@@ -12737,7 +12768,8 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     }
     XrFovTan draw_fov[2];
     for (int e = 0; e < 2; ++e) draw_fov[e] = XrFovTan{ use[e].l, use[e].r, use[e].u, use[e].d };
-    rel_draw(color, views, draw_fov, sc, rc, r.w / 2, relief::k_h / 2, mp, g_rel_cfg.flags);
+    rel_gpu_poll();
+    rel_draw(color, views, draw_fov, sc, rc, r.w, relief::k_h, mp, g_rel_cfg.flags);
     *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
@@ -12785,7 +12817,8 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
                                                        r.s_now, r.range_used, r.range_limited ? " (limited: 1.5 deg)" : "", r.pop_used, r.pop_limited ? " (limited: 1 deg)" : "",
                                                        r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
-    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring);
+    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; both eyes)", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring,
+                                    g_rel_gpu_last, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
     return static_cast<int>(n);
 }
