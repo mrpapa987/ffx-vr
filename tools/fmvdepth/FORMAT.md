@@ -44,7 +44,7 @@ so it should never be seen; treat it as missing).
 | 24 | u8 | codec | 0 stored, 1 zlib (tests only), **2 XPRESS_HUFF** (what the converter writes on Windows) |
 | 25 | u8 | predictor | 0 none, **1 left** (see below) |
 | 26 | u8 | model_id | 0 fake (pipeline test, not depth: ignore such a file), 1 Video-Depth-Anything-Small |
-| 27 | u8 | flags | bit 0 HF_COMPLETE, bit 1 HF_THUMBS; other bits: ignore |
+| 27 | u8 | flags | bit 0 HF_COMPLETE, bit 1 HF_THUMBS, bit 2 HF_SEGMENT_RANGE (converter 0.2: lo / hi are already one fixed range per shot segment, see "How lo / hi are chosen"); other bits: ignore |
 | 28 | u16 | input_w | the model's input size, e.g. 924 x 518 (information only) |
 | 30 | u16 | input_h | |
 | 32 | u64 | settings_hash | the converter's settings (the manifest's `settings_hash`, hex) |
@@ -68,12 +68,12 @@ them with the VBF's own entry, or simply with the frame count it sees.
 |---:|---|---|---|
 | 0 | u64 | offset | the payload's file offset (>= header_size; offset + size <= index_offset) |
 | 8 | u32 | size | the payload's size in bytes |
-| 12 | u16 | flags | bit 0 FF_CUT: the first frame of a shot (frame 0 always). bit 1 FF_STORED: the payload is not compressed (it did not get smaller). Other bits: ignore |
+| 12 | u16 | flags | bit 0 FF_CUT: the first frame of a shot (frame 0 always). bit 1 FF_STORED: the payload is not compressed (it did not get smaller). bit 2 FF_BLEND (converter 0.2): a transition frame inside a shot, part of a dissolve or a fade. bit 3 FF_FLASH (converter 0.2): a flash or a blank (near-uniform) frame, whose depth is not reliable. Other bits: ignore |
 | 14 | u16 | reserved | 0 |
 | 16 | f32 | p2 | 2nd percentile of this frame's model output (relative disparity, arbitrary units) |
 | 20 | f32 | p98 | 98th percentile |
 | 24 | f32 | lo | the values the 8-bit map was made with (see "The values" below) |
-| 28 | f32 | hi | (lo / hi are p2 / p98 smoothed within the shot, reset at a cut) |
+| 28 | f32 | hi | converter 0.2: one range per shot segment (below); 0.1: p2 / p98 smoothed within the shot |
 
 END_us (24,828 frames) has a 0.79 MB index: read it whole at open.
 
@@ -101,7 +101,7 @@ for (y = 0; y < h; y++) {
 ```
 
 **The values.** 0 = far ... 255 = near: the model's relative inverse depth (disparity), normalised per shot. With `d`
-the model's value for a pixel, `r = hi - lo`, and `eps = max(1e-6, |hi| * 1e-4)`:
+the model's value for a pixel (after the converter's own filtering), `r = hi - lo`, and `eps = max(1e-6, |hi| * 1e-4)`:
 
     if r < eps: r = eps                      (a flat frame: every pixel is about lo)
     q = floor(clamp(255 * (d - lo) / r + 0.5, 0, 255))      (rounded to nearest, half up)
@@ -110,6 +110,25 @@ So `d ~ lo + q / 255 * (hi - lo)` inside the range, to within half a step; value
 255. A frame with `hi - lo < eps` carries no depth worth showing: treat it as flat. The values are affine-invariant (no
 metric meaning): the runtime picks the relief's strength and pivot itself; `p2`/`p98`/`lo`/`hi` tell it how much the
 model's raw range moved (e.g. to damp a frame whose range collapsed).
+
+**How lo / hi are chosen** (information; a reader only needs the rule above). Converter 0.1 (ALGO 1): lo / hi = the
+frame's p2 / p98, EMA-smoothed within a shot (so 2 % of every frame clipped at each end, and the mapping moved whenever
+the content did). Converter 0.2 (ALGO 2): **one (lo, hi) for a whole shot segment**, the 0.1 / 99.9 percentiles of all
+its frames' pixels together (flash, blank and transition frames left out) widened by 2 % of the range at each end, so
+only true outliers clip and a value means the same depth for the whole segment. A segment is a shot (FF_CUT to FF_CUT)
+or, inside a shot, the part before / after a dissolve or a dip through black; across a dissolve's FF_BLEND frames lo /
+hi move linearly from one segment's range to the next. So within a run of frames without FF_BLEND, lo / hi only change
+at a segment start (a reader can find segments that way; HF_SEGMENT_RANGE below says it need not re-normalise). A
+segment whose frames are all blank is written flat (lo = hi, every value 0). p2 / p98 stay the raw per-frame
+percentiles.
+
+**HF_SEGMENT_RANGE** (header byte 27, bit 2, value 0x04) says the file was made this way. A reader that re-normalises
+per shot (a robust L / H over each FF_CUT-to-FF_CUT run, short runs folded into the one before) must skip that for such
+a file and use lo / hi as they are (n' = n): v2 restarts the model's windows at every cut, so a short shot's raw
+values have their own scale and folding it maps it through another shot's range, and a shot with a dissolve has two
+ranges that one shot-wide L / H would squash or clip. The flat test (hi - lo < eps) is the same either way. A file
+without the bit is converter 0.1 (per-frame EMA lo / hi on one continuous chain), where per-shot re-normalisation is
+right. Old readers ignore the bit (it is one of the "other bits").
 
 ## Thumbnails
 
@@ -166,4 +185,4 @@ counts uploaded frames (`player+0x100`); the frame on screen is that count minus
 
 ## Changes
 
-Version 1: 3 Nov 2026.
+Version 1: 3 Nov 2026. Converter 0.2 (5 Nov 2026, still version 1): index flag bits 2-3, per-segment lo / hi.

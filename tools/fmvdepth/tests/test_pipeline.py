@@ -16,7 +16,6 @@ import fvd
 import preview
 import vbf
 import vda_model
-from window import windowed_depth
 
 FF = shutil.which('ffmpeg')
 FP = shutil.which('ffprobe')
@@ -95,6 +94,7 @@ class PipelineTest(unittest.TestCase):
                 self.assertEqual((r.h.width, r.h.height), wh)
                 self.assertEqual((r.h.fps_num, r.h.fps_den), (30000, 1001))
                 self.assertEqual(r.h.codec, fvd.CODEC_ZLIB)
+                self.assertTrue(r.h.flags & fvd.HF_SEGMENT_RANGE)           # v2: lo/hi per shot segment
                 self.assertEqual(r.h.src_size, rec['source_size'])
                 # src_name: as the VBF stores it (lower case); compare with the game's names case-insensitively
                 self.assertEqual(r.h.src_name, rec['source'].lower())
@@ -113,9 +113,20 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(self.run_convert(), 0)
         self.assertEqual(os.path.getmtime(os.path.join(self.out, 'tst_us.fvd')), m0)
         # other settings: converted again
-        self.assertEqual(self.run_convert('--only', 'tst_US.webm', '--edge-filter', 'snap'), 0)
+        self.assertEqual(self.run_convert('--only', 'tst_US.webm', '--edge-filter', 'none'), 0)
         man = self.manifest()
-        self.assertEqual(man['files']['tst_us']['settings']['edge_filter'], 'snap')
+        self.assertEqual(man['files']['tst_us']['settings']['edge_filter'], 'none')
+        # flip averaging is a setting too: converted again, then skipped when run the same way
+        m1 = os.path.getmtime(os.path.join(self.out, 'tst_us.fvd'))
+        self.assertEqual(self.run_convert('--only', 'tst_us', '--flip', '--temporal', 'off'), 0)
+        rec = self.manifest()['files']['tst_us']
+        self.assertTrue(rec['settings']['flip'])
+        self.assertEqual(rec['settings']['temporal'], 'off')
+        self.assertEqual(rec['converter_version'], convert.CONVERTER_VERSION)
+        m2 = os.path.getmtime(os.path.join(self.out, 'tst_us.fvd'))
+        self.assertNotEqual(m1, m2)
+        self.assertEqual(self.run_convert('--only', 'tst_us', '--flip', '--temporal', 'off'), 0)
+        self.assertEqual(os.path.getmtime(os.path.join(self.out, 'tst_us.fvd')), m2)
         # --force with the same settings
         self.assertEqual(self.run_convert('--only', 'four_480', '--force'), 0)
         # a stale .part from a crash is not mistaken for anything and is removed on the next run of that video
@@ -157,10 +168,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(n, self.frames_a)
         frames = [np.frombuffer(raw, np.uint8, iw * ih * 3, i * iw * ih * 3).reshape(ih, iw, 3) for i in range(n)]
         m = vda_model.FakeModel()
-        m.prepare(iw, ih, 320, 180)
-        cuts, norm = depthproc.CutDetector(320, 180), depthproc.ShotNormalizer()
-        flags = [cuts(f)[0] for f in frames]
-        expect = [norm(d, flags[i])[0] for i, d in windowed_depth(frames, m)]
+        m.prepare(iw, ih, 320, 180, full=True)
+        cfg = convert.pipe_config(convert.parse_args(['--vbf', 'x', '--out', 'y']), 320, 180, 320, 180)
+        expect = [q for q, *_rest in convert.process_video(frames, m, cfg)]
         with fvd.FvdReader(os.path.join(self.out, 'tst_us.fvd')) as r:
             got = [r.frame(i).astype(int) for i in range(len(r))]
         self.assertEqual(len(got), len(expect))

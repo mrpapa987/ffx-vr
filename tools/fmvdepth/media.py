@@ -172,6 +172,16 @@ class FrameReader:
         if rc != 0:
             raise MediaError(f'ffmpeg failed (exit {rc}): {self.err.text()[-600:]}')
 
+    def kill(self):
+        """Stop ffmpeg now (it runs without a console, so Ctrl+C never reaches it): a read waiting in another thread
+        then ends. close() still has to be called."""
+        self.feed.stop = True
+        if self.p.poll() is None:
+            try:
+                self.p.kill()
+            except OSError:
+                pass
+
     def close(self):
         self.feed.stop = True
         if self.p.poll() is None:

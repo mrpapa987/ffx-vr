@@ -9,10 +9,12 @@ weights first. Directly:
     python convert.py --vbf <game>/data/FFX_Data.vbf --out <game>/fahrenheit/mods/ffxvr/fmvdepth
                       --vda-dir <VDA checkout> --weights video_depth_anything_vits.pth [options]
 
-Per video, streaming and in constant memory (nothing but the .fvd is written):
+Per video, streaming (memory: about two shots' worth, see process_video; long shots spill to a temp file):
     VBF reader -> ffmpeg (pipe, rgb24 at the model's input size) -> Video-Depth-Anything-Small in windows of 32 frames
-    (fp16, CUDA) -> each depth map shrunk to 320x180 (240x180 for 4:3) -> per-shot 8-bit normalisation (p2/p98, EMA,
-    reset at cuts) -> left predictor -> XPRESS_HUFF -> <name>.fvd.part, renamed to <name>.fvd when complete.
+    (fp16, CUDA; restarted at every cut; a flash is not a cut) -> depth edges sharpened at the model's resolution and
+    shrunk to 320x180 (240x180 for 4:3) without averaging across them -> one shot buffered -> one depth range per shot segment (robust percentiles of all its frames; dissolves and dips
+    through black split a shot, cross-faded) -> 8 bits -> left predictor -> XPRESS_HUFF -> <name>.fvd.part, renamed to
+    <name>.fvd when complete.
 manifest.json in the output folder records each video (status, source size and VBF offset, model, settings, frames,
 seconds); a video whose .fvd is complete and matches is skipped, so an interrupted run resumes per video.
 
@@ -20,12 +22,19 @@ Options:
     --region us|jp|asia   which game video list (default us: what an English game plays)
     --all                 every .webm in the archive instead (95 files)
     --only A,B            just these (e.g. --only SIN_us,BTS_us; case and '.webm' optional)
-    --input-size 518|392  the model's input height (default 518; 392 is faster and needs less VRAM)
+    --input-size 518|714|392  the model's input height (default 518, what the model was trained at; 714: finer
+                          detail, ~2x the model time and VRAM; 392: faster, less VRAM)
+    --flip                flip averaging: every window is also run on the mirrored frames, the two averaged (2x
+                          the model time; less noise and no left/right bias)
     --force               convert again even if done
     --preview             after converting, render a side-by-side check video of each --only video (preview.py)
     --frame N             with --preview: also a PNG of frame N (video | depth)
     --gray                previews in grey instead of a colour map
-    --edge-filter none|snap   the optional light edge filter (default none)
+    --edge-filter refine|none   depth edges at the model's resolution before the shrink (default refine: a forced
+                          foreground/background weighted median, the near side grown 2 px across and 1 px up and
+                          down, a shrink that never averages across a step); none: a plain area shrink
+    --threads N           CPU threads for the edge path (default up to 8; the output does not depend on it)
+    --temporal on|off     the centred, edge-preserving temporal filter within each shot (default on)
     --model vda-small|fake    fake: no torch / GPU, a pipeline check whose output is NOT depth
     --list                show what would be converted and stop
 """
@@ -49,10 +58,16 @@ import fvd  # noqa: E402
 import media  # noqa: E402
 import vbf  # noqa: E402
 import vda_model  # noqa: E402
-from window import windowed_depth  # noqa: E402
+from window import shot_windows  # noqa: E402
 
-CONVERTER_VERSION = '0.1.1'
-ALGO_VERSION = 1          # bump when the depth a given input produces changes (forces reconversion)
+CONVERTER_VERSION = '0.2.0'
+ALGO_VERSION = 2          # bump when the depth a given input produces changes (forces reconversion)
+FLASH_LEN = 4             # a raw cut whose picture comes back within this many frames is a flash, not a cut
+BLANK_STD = 2.5           # a frame whose 64x36 luma has a smaller standard deviation is blank (levels)
+NORM_PCTS = (0.1, 99.9)   # a shot segment's depth range: these percentiles of all its frames' pixels...
+NORM_HEADROOM = 0.02      # ... widened by this share of the range at each end
+TEMPORAL = {'radius': 3, 'passes': 2, 'sigma_t': 2.0, 'sigma_n': 8.0 / 255, 'sigma_y': 0.05}   # --temporal on
+EDGES = {'tau': 0.05, 'sigma': 0.2, 'grow': (2, 1)}      # --edge-filter refine (depthproc.refine_and_shrink)
 MANIFEST = 'manifest.json'
 EXIT_OOM = 3
 PREVIEW_DEFAULT = 'SIN_us,BTS_us'
@@ -119,6 +134,28 @@ def check_out_dir(out, vbf_path):
         raise ConvertError(f'--out {out} is inside the game\'s data folder: never write there.')
 
 
+def remove_stale_spills(folder, min_age_s=3 * 3600):
+    """Delete leftover shot spill files (depthproc.SPILL_PREFIX*) older than min_age_s: a spill file lives only while
+    one shot is being converted and is deleted when closed, also on Ctrl+C or a killed process, but not after a power
+    cut or a crash of Windows. (The age test leaves alone a file another converter run is using right now.)"""
+    now = time.time()
+    n = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    for f in names:
+        if f.startswith(depthproc.SPILL_PREFIX):
+            p = os.path.join(folder, f)
+            try:
+                if os.path.isfile(p) and now - os.path.getmtime(p) > min_age_s:
+                    os.remove(p)
+                    n += 1
+            except OSError:
+                pass
+    return n
+
+
 def write_private_note(folder):
     os.makedirs(folder, exist_ok=True)
     p = os.path.join(folder, 'PRIVATE-do-not-share.txt')
@@ -151,12 +188,18 @@ def settings_of(a, model, weights_sha):
         'model': model.model_name,
         'weights_sha256': weights_sha or '',
         'input_size': a.input_size,
+        'windows': 'per-shot',
         'out_h': depthproc.OUT_H,
+        'flip': bool(a.flip),
         'precision': 'fp32' if a.fp32 else 'fp16',
         'attention': a.attention,
-        'norm': {'alpha': a.ema, 'pcts': [2.0, 98.0]},
-        'cut': {'threshold': a.cut_threshold, 'ratio': a.cut_ratio},
+        'norm': {'mode': 'segment', 'pcts': list(NORM_PCTS), 'headroom': NORM_HEADROOM, 'transitions': 1},
+        'cut': {'threshold': a.cut_threshold, 'ratio': a.cut_ratio, 'flash_len': FLASH_LEN, 'blank_std': BLANK_STD,
+                'same_picture': [0.98, 0.1]},
         'edge_filter': a.edge_filter,
+        'edges': {'tau': EDGES['tau'], 'sigma': EDGES['sigma'], 'grow': list(EDGES['grow'])} if a.edge_filter == 'refine'
+        else 'area',
+        'temporal': dict(TEMPORAL, sigma_n=8.0) if a.temporal == 'on' else 'off',
         'codec': fvd.CODEC_NAMES[a.codec_id],
         'predictor': 'left',
     }
@@ -254,6 +297,262 @@ class Progress:
         self.log(msg, status=not final)
 
 
+class PipeConfig:
+    """The per-video depth settings process_video() needs (from the command line, see pipe_config)."""
+
+    def __init__(self, src_w, src_h, out_w, out_h, cut_threshold=28.0, cut_ratio=3.0, flash_len=4, blank_std=2.5,
+                 pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none', temporal=None, edges=None,
+                 threads=1, flip=False):
+        self.src_w, self.src_h, self.out_w, self.out_h = src_w, src_h, out_w, out_h
+        self.flip = bool(flip)            # flip averaging: each window also run mirrored (2x model time)
+        self.edge_filter = edge_filter    # 'refine' (refine_and_shrink at the model's resolution) or 'none' (area)
+        self.edges = dict(EDGES if edges is None else edges)
+        self.temporal = temporal          # None (off) or temporal_bilateral's keyword arguments
+        self.threads = max(1, int(threads))
+        self.cut_threshold, self.cut_ratio, self.flash_len, self.blank_std = cut_threshold, cut_ratio, flash_len, blank_std
+        self.pcts, self.headroom, self.spill_dir = tuple(pcts), headroom, spill_dir
+
+
+def pipe_config(a, src_w, src_h, out_w, out_h, spill_dir=None):
+    return PipeConfig(src_w, src_h, out_w, out_h, a.cut_threshold, a.cut_ratio, FLASH_LEN, BLANK_STD,
+                      NORM_PCTS, NORM_HEADROOM, spill_dir, a.edge_filter,
+                      dict(TEMPORAL) if a.temporal == 'on' else None, EDGES, a.threads, a.flip)
+
+
+class DepthAtOutput:
+    """window.windowed_depth's model: the depth model's maps (at its own resolution, or already at the output size),
+    then in numpy: with flip, the same window run again on the mirrored frames and averaged (depthproc.flip_merge);
+    per frame, the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size. Padding slots
+    (copies of a shot's last frame, never emitted) get the cheap area shrink.
+
+    Overlapped (submit, used by windowed_depth): the model runs on one thread ("gpu": torch releases the GIL while the
+    GPU works), each window's edge pass on another that spreads its frames over `threads` pool threads (numpy releases
+    the GIL in its array loops). windowed_depth submits window k+1 before it takes window k, so the GPU computes the
+    next window while the CPU sharpens this one: the time is max(model, edges), not their sum."""
+
+    def __init__(self, model, c):
+        from concurrent.futures import ThreadPoolExecutor
+        self.model, self.c = model, c
+        self.pool = ThreadPoolExecutor(max_workers=c.threads) if c.threads > 1 else None
+        self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fvd-model')
+        self.cpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fvd-edges')
+        self.maps_full = 0      # edge-path maps made (for the log)
+        self.maps_pad = 0       # padding slots given the area shrink
+
+    def one(self, d):
+        c = self.c
+        if d.shape == (c.out_h, c.out_w):
+            return d
+        if c.edge_filter == 'refine':
+            e = c.edges
+            return depthproc.refine_and_shrink(d, c.out_w, c.out_h, tau=e['tau'], sigma=e['sigma'], grow=e['grow'])
+        return depthproc.area_resize(d, c.out_w, c.out_h)
+
+    def _raw(self, frames):
+        d = np.asarray(self.model(frames), dtype=np.float32)
+        if self.c.flip:
+            m = np.asarray(self.model([np.ascontiguousarray(f[:, ::-1]) for f in frames]), dtype=np.float32)
+            d = depthproc.flip_merge(d, m[:, :, ::-1])
+        return d
+
+    def _finish(self, d, real):
+        real = [True] * len(d) if real is None else list(real)
+        idx = [i for i, r in enumerate(real) if r]
+        out = [None] * len(d)
+        maps = list(self.pool.map(self.one, [d[i] for i in idx])) if self.pool else [self.one(d[i]) for i in idx]
+        for i, m in zip(idx, maps):
+            out[i] = m
+        c = self.c
+        for i, r in enumerate(real):
+            if not r:
+                out[i] = d[i] if d[i].shape == (c.out_h, c.out_w) else depthproc.area_resize(d[i], c.out_w, c.out_h)
+        self.maps_full += len(idx)
+        self.maps_pad += len(d) - len(idx)
+        return np.stack(out)
+
+    def __call__(self, frames, real=None):
+        return self._finish(self._raw(frames), real)
+
+    def submit(self, frames, real):
+        raw = self.gpu.submit(self._raw, list(frames))
+        return self.cpu.submit(lambda: self._finish(raw.result(), real))
+
+    def close(self):
+        for ex in (self.gpu, self.cpu, self.pool):
+            if ex is not None:
+                ex.shutdown(wait=True, cancel_futures=True)
+        self.pool = None
+
+
+def _count(stats, k, n=1):
+    if stats is not None:
+        stats[k] = stats.get(k, 0) + n
+
+
+def process_video(frames, model, c, stats=None, on_stop=None):
+    """The depth pipeline of one video, without file or ffmpeg I/O (numpy only; `model` is the only GPU step).
+
+    frames: the video's RGB frames at the model's input size, in order. model: the depth model (its maps at its own
+    resolution, or at the output size): DepthAtOutput makes the stored-size maps from them.
+    Yields (q, flags, p2, p98, lo, hi, thumb) for every frame in order, one shot late (a shot's range needs all of it).
+
+    Producer thread: tag_frames (cuts with the flash and same-picture tests, blank frames) -> shot_windows (VDA
+    restarted at every cut; the model one window ahead of DepthAtOutput's edge pass: forced fg/bg weighted median,
+    near side grown 2 px across and 1 px up/down, shrink without averaging across a step) -> ShotBuffer, handed over
+    a shot at a time. This generator (the caller's thread) meanwhile finishes the shot before: find_transitions +
+    shot_ranges (one range per segment; dissolves cross-faded) -> normalised n -> temporal_bilateral (centred +-3
+    frames, 2 passes, never across a cut or a segment start; c.temporal None: off) -> 8 bits. So the next shot's
+    model work does not wait for this one's finish.
+
+    Stopping (Ctrl+C, an error, or the caller closing this generator): the caller's thread only ever waits with a
+    timeout (0.25 s), because on Windows a plain Queue.get() / Thread.join() is not interrupted by Ctrl+C before
+    Python 3.14 (cpython #74157, #139689); the producer checks the stop flag after every depth map of a shot, so it
+    leaves within one model window. on_stop(), if given, is called first: convert_one passes FrameReader.kill, since
+    ffmpeg runs without a console (CREATE_NO_WINDOW) and never sees the Ctrl+C itself.
+
+    Memory for the longest shot (it is all kept until the shot ends): its 320x180 float maps (230 KB a frame; past
+    2,400 frames spilled to a temporary file in c.spill_dir), each frame's Tag (a 57.6 KB luma guide, the 9 KB 64x36
+    luma, the thumbnail), and at the shot end the transition test's and the range's temporaries (~0.2 MB a frame): a
+    20,000-frame shot would need ~3-3.5 GB of RAM and ~4 GB of spill. Three shots can be alive at once (the caller
+    finishing one, one waiting in the hand-over queue, the producer holding the next finished one). The model-resolution maps never accumulate (a window or two: 61 MB at 518, 116 MB at 714, x2
+    with flip).
+    stats (a dict), if given, collects counts: frames, shots, flash_frames, blank_frames, dissolves, fades, dips,
+    segments, flat_frames, clipped (pixels at 0 or 255)."""
+    import queue
+    import threading
+    det = depthproc.CutDetector(c.src_w, c.src_h, c.cut_threshold, c.cut_ratio)
+    tags = {}
+    dm = DepthAtOutput(model, c)
+    shots = queue.Queue(maxsize=1)
+    stop = threading.Event()
+    END = object()
+
+    def put(x):
+        while not stop.is_set():
+            try:
+                shots.put(x, timeout=0.2)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def produce():
+        try:
+            for item in _make_shots(frames, dm, c, det, tags, stop):
+                if not put(item):
+                    item[1].close()
+                    return
+            put(END)
+        except BaseException as e:  # noqa: BLE001 - handed to the caller's thread
+            put(e)
+
+    th = threading.Thread(target=produce, name='fvd-shots', daemon=True)
+    th.start()
+    def wait(get):
+        while True:                     # a timed wait: Ctrl+C is raised between two of them
+            try:
+                return get(timeout=0.25)
+            except queue.Empty:
+                pass
+
+    def drain():                        # free what the producer handed over but nobody will finish
+        while True:
+            try:
+                x = shots.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(x, tuple):
+                x[1].close()
+
+    try:
+        while True:
+            x = wait(shots.get)
+            if x is END:
+                break
+            if isinstance(x, BaseException):
+                raise x
+            start, buf, st, pp = x
+            try:
+                yield from _finish_shot(c, stats, buf, st, pp)
+            finally:
+                buf.close()
+    finally:
+        stop.set()
+        if on_stop is not None:
+            try:
+                on_stop()
+            except Exception:  # noqa: BLE001 - stopping goes on
+                pass
+        drain()
+        while th.is_alive():
+            th.join(0.25)
+        drain()                         # a put() that was waiting when the first drain made room
+        dm.close()
+    if tags:
+        raise ConvertError(f'internal: {len(tags)} frames read but not written')
+
+
+def _make_shots(frames, model, c, det, tags, stop):
+    """The producer: yields (start, ShotBuffer, tags, p2/p98) per shot."""
+
+    def items():
+        guide = (c.out_w, c.out_h) if c.temporal and c.temporal.get('sigma_y', 0) > 0 else None
+        for i, (f, t) in enumerate(depthproc.tag_frames(frames, det, c.flash_len, c.blank_std, guide_size=guide)):
+            tags[i] = t
+            yield i, f
+    for start, shot in shot_windows(items(), model, is_start=lambda x: tags[x[0]].cut, frame_of=lambda x: x[1]):
+        buf = depthproc.ShotBuffer(spill_dir=c.spill_dir)
+        try:
+            pp = []
+            for i, d in shot:
+                if i != start + len(buf):
+                    raise ConvertError(f'internal: frame {i} came out as frame {start + len(buf)}')
+                buf.append(d)
+                pp.append(np.percentile(buf[len(buf) - 1], (2.0, 98.0)))
+                if stop.is_set():      # within one model window of a stop: read no further
+                    raise KeyboardInterrupt
+            st = [tags.pop(start + k) for k in range(len(buf))]
+        except BaseException:
+            buf.close()
+            raise
+        yield start, buf, st, pp
+
+
+def _finish_shot(c, stats, buf, st, pp):
+    """One shot's ranges, temporal filter and 8 bits: yields process_video's tuples for its frames."""
+    lo, hi, info = depthproc.shot_ranges(buf, st, c.pcts, c.headroom)
+    _count(stats, 'shots')
+    _count(stats, 'segments', len(info['starts']))
+    for tr in info['transitions']:
+        _count(stats, tr['kind'] + 's')
+    seg_of = np.searchsorted(np.asarray(info['starts']), np.arange(len(buf)), side='right') - 1
+
+    def normalised():
+        for k in range(len(buf)):
+            rng = max(hi[k] - lo[k], depthproc.range_eps(hi[k]))
+            yield ((buf[k] - np.float32(lo[k])) * np.float32(1.0 / rng), st[k].guide,
+                   not (st[k].blank or st[k].flash), seg_of[k])
+    ns = (depthproc.temporal_bilateral(normalised(), **c.temporal) if c.temporal else
+          (x[0] for x in normalised()))
+    for k, n in enumerate(ns):
+        t = st[k]
+        if info['flat'][k]:       # an all-blank segment: flat (lo = hi), written as a constant 0
+            q = np.zeros((c.out_h, c.out_w), np.uint8)
+        else:
+            q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
+        fl = fvd.FF_CUT if k == 0 else 0
+        if info['blend'][k]:
+            fl |= fvd.FF_BLEND
+        if t.blank or t.flash:
+            fl |= fvd.FF_FLASH
+            _count(stats, 'blank_frames' if t.blank else 'flash_frames')
+        if info['flat'][k]:
+            _count(stats, 'flat_frames')
+        _count(stats, 'frames')
+        _count(stats, 'clipped', int(np.count_nonzero((q == 0) | (q == 255))))
+        yield q, fl, float(pp[k][0]), float(pp[k][1]), float(lo[k]), float(hi[k]), t.thumb
+
+
 def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=None):
     """Convert one video into <out_dir>/<name>.fvd. Returns a stats dict. Leaves no .part behind on failure."""
     name = out_name(entry.name)
@@ -265,45 +564,31 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     sw, sh = info['width'], info['height']
     in_w, in_h = depthproc.model_input_size(sw, sh, a.input_size)
     out_w, out_h = depthproc.output_size(sw, sh)
+    tw, th = depthproc.thumb_size(sw, sh)
     est = int(round(info['duration'] * info['fps_num'] / info['fps_den'])) if info['duration'] else None
-    model.prepare(in_w, in_h, out_w, out_h)
+    model.prepare(in_w, in_h, out_w, out_h, full=a.edge_filter == 'refine')
     model.reset_peak()
-    cuts = depthproc.CutDetector(sw, sh, a.cut_threshold, a.cut_ratio)
-    norm = depthproc.ShotNormalizer(alpha=a.ema)
+    cfg = pipe_config(a, sw, sh, out_w, out_h, spill_dir=out_dir)
     log(f'{entry.name}: {sw}x{sh} {info["fps_num"]}/{info["fps_den"]} fps, ~{est or "?"} frames, '
         f'{entry.size / 2**20:.1f} MB -> model {in_w}x{in_h} -> {out_w}x{out_h}')
-    side = {}
     t0 = time.perf_counter()
     w = fvd.FvdWriter(part, out_w, out_h, info['fps_num'], info['fps_den'], codec=a.codec_id, predictor=fvd.PRED_LEFT,
                       model_id=fvd.MODEL_VDA_SMALL if model.model_name == 'vda-small' else fvd.MODEL_FAKE,
                       input_w=in_w, input_h=in_h, settings_hash=settings_hash, src_name=entry.name.split('/')[-1].lower(),
-                      src_size=entry.size, src_offset=entry.offset, thumb_w=cuts.tw, thumb_h=cuts.th)
+                      src_size=entry.size, src_offset=entry.offset, thumb_w=tw, thumb_h=th,
+                      segment_range=ALGO_VERSION >= 2)
     ok = False
     reader = None
+    vs = {}
     try:
         reader = media.FrameReader(arc, entry, ff['ffmpeg'], in_w, in_h, ff['passthrough'])
-
-        def frames():
-            for i, f in enumerate(reader):
-                side[i] = cuts(f)
-                yield f
-        n_cuts = 0
-        for idx, depth in windowed_depth(frames(), model):
-            if idx != w.count:
-                raise ConvertError(f'internal: frame {idx} came out as frame {w.count}')
-            cut, thumb = side.pop(idx)
-            if a.edge_filter == 'snap':
-                depth = depthproc.edge_snap(depth)
-            q, p2, p98, lo, hi = norm(depth, cut)
-            w.add_frame(q, fvd.FF_CUT if cut else 0, p2, p98, lo, hi, thumb)
-            n_cuts += bool(cut)
+        for q, flags, p2, p98, lo, hi, thumb in process_video(reader, model, cfg, vs, on_stop=reader.kill):
+            w.add_frame(q, flags, p2, p98, lo, hi, thumb)
             if progress:
                 el = time.perf_counter() - t0
                 frac = entry.size * min(reader.bytes_fed / max(entry.size, 1), 1.0)
                 progress.update(entry.name.split('/')[-1], w.count, est, w.count / el if el > 0 else 0.0, frac,
                                 model.peak_vram())
-        if side:
-            raise ConvertError(f'internal: {len(side)} frames read but not written')
         if w.count == 0:
             raise ConvertError(f'{entry.name}: ffmpeg decoded no frames')
         h = w.close()
@@ -313,6 +598,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
             reader.close()
         if not ok:
             w.abort()
+    n_shots = vs.get('shots', 0)
     # check the finished file before it counts
     try:
         with fvd.FvdReader(part) as r:
@@ -329,7 +615,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
         raise
     secs = time.perf_counter() - t0
     st = {'frames': h.frame_count, 'seconds': round(secs, 1), 'fvd_bytes': os.path.getsize(final),
-          'width': out_w, 'height': out_h, 'input': [in_w, in_h], 'cuts': n_cuts,
+          'width': out_w, 'height': out_h, 'input': [in_w, in_h], 'shots': n_shots,
           'src': [sw, sh], 'fps': [info['fps_num'], info['fps_den']], 'peak_vram_mb': model.peak_vram() // 2**20,
           'estimated_frames': est}
     if progress:
@@ -337,9 +623,15 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
                         entry.size, model.peak_vram(), final=True)
     if est and abs(est - h.frame_count) > 2:
         log(f'  note: {h.frame_count} frames decoded, the container\'s duration suggests {est}')
-    log(f'  done: {h.frame_count} frames, {n_cuts} cuts, {secs:.0f} s ({h.frame_count / max(secs, 1e-6):.1f} frames/s), '
+    for k in ('segments', 'dissolves', 'fades', 'dips', 'flash_frames', 'blank_frames', 'flat_frames'):
+        st[k] = vs.get(k, 0)
+    st['clipped_pct'] = round(100.0 * vs.get('clipped', 0) / max(h.frame_count * out_w * out_h, 1), 3)
+    log(f'  done: {h.frame_count} frames, {n_shots} shots ({max(n_shots - 1, 0)} cuts), {secs:.0f} s ({h.frame_count / max(secs, 1e-6):.1f} frames/s), '
         f'{st["fvd_bytes"] / 2**20:.1f} MB ({st["fvd_bytes"] / h.frame_count / 1024:.1f} KB a frame), '
         f'VRAM peak {model.peak_vram() / 2**30:.2f} GB')
+    log(f'    segments {st["segments"]} (dissolves {st["dissolves"]}, dips {st["dips"]}), fades '
+        f'{st["fades"]}, flash frames {st["flash_frames"]}, blank frames {st["blank_frames"]}, flat frames '
+        f'{st["flat_frames"]}, pixels clipped {st["clipped_pct"]:.3f} %')
     return st
 
 
@@ -404,7 +696,8 @@ def parse_args(argv):
     p.add_argument('--region', default='us', choices=['us', 'jp', 'asia'])
     p.add_argument('--all', action='store_true')
     p.add_argument('--only', default='')
-    p.add_argument('--input-size', type=int, default=518, choices=[518, 392])
+    p.add_argument('--input-size', type=int, default=518, choices=[518, 392, 714])
+    p.add_argument('--flip', action='store_true', help='flip averaging: every window also mirrored (2x model time)')
     p.add_argument('--force', action='store_true')
     p.add_argument('--preview', action='store_true')
     p.add_argument('--frame', type=int, default=-1)
@@ -416,11 +709,13 @@ def parse_args(argv):
     p.add_argument('--weights-sha256', default='', help='recorded by the launcher; computed here if not given')
     p.add_argument('--fp32', action='store_true', help='full precision (slower, more VRAM)')
     p.add_argument('--attention', default='sdpa', choices=['sdpa', 'plain'])
-    p.add_argument('--edge-filter', default='none', choices=['none', 'snap'])
+    p.add_argument('--edge-filter', default='refine', choices=['refine', 'none'])
+    p.add_argument('--threads', type=int, default=min(8, os.cpu_count() or 1),
+                   help='CPU threads for the edge path (default: up to 8; the output does not depend on it)')
+    p.add_argument('--temporal', default='on', choices=['on', 'off'], help='the centred temporal filter (default on)')
     p.add_argument('--codec', default='auto', choices=['auto', 'xpress', 'zlib'])
     p.add_argument('--cut-threshold', type=float, default=28.0)
     p.add_argument('--cut-ratio', type=float, default=3.0)
-    p.add_argument('--ema', type=float, default=0.9)
     p.add_argument('--ffmpeg', default='ffmpeg')
     p.add_argument('--ffprobe', default='')
     p.add_argument('--check-out', action='store_true', help='only check that --out is an allowed place, write nothing')
@@ -488,12 +783,14 @@ def main(argv=None):
     if not a.list:                      # --list writes nothing
         os.makedirs(out, exist_ok=True)
         write_private_note(out)
+        remove_stale_spills(out)
     log = Log(None if a.list else os.path.join(out, 'convert.log'))
     if a.preview_note:
         log(f'  note: {a.preview_note}')
     scope = f'--only {a.only}' if a.only else ('--all' if a.all else f'the {a.region} video list')
     total_mb = sum(e.size for _n, e in todo) / 2**20
-    log(f'FFX VR FMV depth converter {CONVERTER_VERSION}: {len(todo)} videos ({scope}), {total_mb:,.0f} MB of video')
+    log(f'FFX VR FMV depth converter {CONVERTER_VERSION} (algo {ALGO_VERSION}): {len(todo)} videos ({scope}), '
+        f'{total_mb:,.0f} MB of video')
     log(f'  output: {out}  (private: made from your game copy, never share it)')
     if a.list:
         for n, e in todo:
@@ -512,15 +809,24 @@ def main(argv=None):
         return 1
     ff = {'ffmpeg': a.ffmpeg, 'ffprobe': a.ffprobe, 'passthrough': passthrough}
     settings, shash = settings_of(a, model, wsha)
+    log(f'  settings fingerprint {shash:016x}: input {a.input_size}, edges {a.edge_filter}, temporal {a.temporal}, '
+        f'flip {"on" if a.flip else "off"}, cut-aware windows, one depth range per shot segment (a video converted '
+        f'with other settings or another algo is converted again)')
     man = load_manifest(out)
     work = []
+    changed = 0
     for n, e in todo:
-        if not a.force and is_done(out, man['files'].get(out_name(n)), e, shash):
+        rec = man['files'].get(out_name(n))
+        if not a.force and is_done(out, rec, e, shash):
             continue
+        if rec and rec.get('status') == 'done' and rec.get('settings_hash') != f'{shash:016x}':
+            changed += 1
         work.append((n, e))
     skipped = len(todo) - len(work)
     if skipped:
         log(f'  {skipped} already done with these settings (skipped; --force converts them again)')
+    if changed:
+        log(f'  {changed} converted before with other settings or an older converter: converting them again')
     prog = Progress(log, sum(e.size for _n, e in work))
     done = failed = 0
     frames_total, peak = 0, 0
@@ -547,7 +853,9 @@ def main(argv=None):
                 save_manifest(out, man)
                 log('')
                 log(f'ERROR: the GPU ran out of memory (VRAM) at --input-size {a.input_size} on {n}.')
-                if a.input_size > 392:
+                if a.input_size > 518:
+                    log('  Run again with --input-size 518 (convert-fmv-depth.ps1 -InputSize 518, the default).')
+                elif a.input_size > 392:
                     log('  Run again with --input-size 392 (convert-fmv-depth.ps1 -InputSize 392): faster, less VRAM.')
                 log('  Close other programs that use the GPU (the game, the VR streamer, browsers) first.')
                 return EXIT_OOM
@@ -559,8 +867,10 @@ def main(argv=None):
             prog.done_bytes += e.size
             continue
         rec.update(status='done', frames=st['frames'], seconds=st['seconds'], fvd_bytes=st['fvd_bytes'],
-                   width=st['width'], height=st['height'], input=st['input'], cuts=st['cuts'], src=st['src'],
+                   width=st['width'], height=st['height'], input=st['input'], shots=st['shots'], src=st['src'],
                    fps=st['fps'], peak_vram_mb=st['peak_vram_mb'],
+                   transitions={k: st[k] for k in ('segments', 'dissolves', 'fades', 'dips', 'flash_frames',
+                                                   'blank_frames', 'flat_frames', 'clipped_pct')},
                    finished=datetime.datetime.now().isoformat(timespec='seconds'))
         save_manifest(out, man)
         prog.done_bytes += e.size

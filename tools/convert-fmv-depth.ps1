@@ -14,7 +14,10 @@
 #
 # Needs: Windows 10/11, an NVIDIA GPU with a current driver (8 GB VRAM or more; tested design: RTX 3080 Ti, 12 GB),
 # Python 3.10 - 3.13 (py launcher), ffmpeg + ffprobe (winget install Gyan.FFmpeg), ~1.5 GB free for the depth (US list) and
-# ~5 GB for the environment. Time: about 1-2 hours for the US list on a 3080 Ti class GPU (an estimate until measured).
+# ~5 GB for the environment. Time: converter 0.1 took 22 min for the US list on the owner's 3080 Ti; 0.2 adds a CPU
+# edge pass (overlapped with the model) and per-shot windows: estimate ~35-45 min at the defaults (up to ~1 h on very
+# edge-dense depth), ~1.1-1.2 h with -Flip, ~1.3-1.6 h with -InputSize 714, ~2.3-2.9 h with both (overnight;
+# estimates, assuming ~1,000 shots in the list).
 #
 # Run with (from the repository):
 #   powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1 -Preview           (S0: SIN_us + BTS_us and previews)
@@ -23,12 +26,16 @@
 #   -Only SIN_us,BTS_us   just these videos (names as in the game's list; case and .webm optional)
 #   -All                  every .webm in the archive (95 files, ~2x the US list)
 #   -Region us|jp|asia    which game video list (default us)
-#   -InputSize 518|392    the model's input height (default 518; 392: faster, less VRAM)
+#   -InputSize 518|714|392  the model's input height (default 518, what the model was trained at; 714: finer detail,
+#                         ~2x the model time and VRAM; 392: faster, less VRAM)
+#   -Flip                 flip averaging: every window is also run mirrored and the two averaged (2x the model time;
+#                         less noise, no left/right bias)
 #   -Preview              afterwards, side-by-side check videos (video | depth) of the -Only videos (default SIN_us,BTS_us)
 #                         into fmvdepth\preview\. PRIVATE: they show the game's videos.
 #   -Frame 600            with -Preview: also a PNG of that frame
 #   -Gray                 previews in grey instead of a colour map
-#   -Force                convert again even if done (otherwise finished videos with the same settings are skipped)
+#   -Force                convert again even if done (otherwise finished videos with the same settings are skipped;
+#                         a video made with other settings or an older converter is converted again by itself)
 #   -List                 show what would be converted, and stop
 #   -SetupOnly            set up the environment, download code and weights, and stop
 #   -Ffmpeg <path>        ffmpeg.exe (or its folder) if it is not on PATH; ffprobe.exe must be next to it
@@ -40,7 +47,8 @@ param(
     [string[]]$Only = @(),
     [switch]$All,
     [ValidateSet('us', 'jp', 'asia')][string]$Region = 'us',
-    [ValidateSet(518, 392)][int]$InputSize = 518,
+    [ValidateSet(518, 392, 714)][int]$InputSize = 518,
+    [switch]$Flip,
     [switch]$Preview,
     [int]$Frame = -1,
     [switch]$Gray,
@@ -149,6 +157,7 @@ Write-Host ('  {0}, {1:N1} GB, driver {2}' -f $g[0].Trim(), $vramGB, $g[2].Trim(
 $drv = 0.0; [void][double]::TryParse($g[2].Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$drv)
 if ($drv -gt 0 -and $drv -lt 528) { Write-Host '  WARNING: this driver is older than the CUDA 12.4 build of PyTorch expects (528 or newer). Update it if torch reports no GPU.' }
 if ($vramGB -gt 0 -and $vramGB -lt 7.5 -and $InputSize -eq 518) { Write-Host '  NOTE: under 8 GB of VRAM: if it runs out of memory, use -InputSize 392.' }
+if ($vramGB -gt 0 -and $vramGB -lt 11 -and $InputSize -eq 714) { Write-Host '  NOTE: -InputSize 714 needs more VRAM (estimate 4-6 GB): if it runs out of memory, use 518.' }
 
 # ------------------------------------------------------------------ ffmpeg
 Step 'ffmpeg'
@@ -418,12 +427,14 @@ if ($List)    { $a += '--list' }
 if ($Preview) { $a += '--preview' }
 if ($Frame -ge 0) { $a += @('--frame', "$Frame") }
 if ($Gray)    { $a += '--gray' }
+if ($Flip)    { $a += '--flip' }
 $env:PYTHONUNBUFFERED = '1'
 & $vpy @a
 $rc = $LASTEXITCODE
 Write-Host ''
 if ($rc -eq 3) {
-    Write-Host 'Out of GPU memory. Run again with -InputSize 392 (finished videos are kept and skipped).'
+    if ($InputSize -eq 714) { Write-Host 'Out of GPU memory. Run again with -InputSize 518 (finished videos are kept and skipped).' }
+    else { Write-Host 'Out of GPU memory. Run again with -InputSize 392 (finished videos are kept and skipped).' }
 } elseif ($rc -eq 130) {
     Write-Host 'Stopped. Run the same command again to carry on (finished videos are skipped).'
 } elseif ($rc -ne 0) {
