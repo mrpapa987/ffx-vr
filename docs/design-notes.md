@@ -5243,3 +5243,46 @@ Roadmap 4.1 (scratchpad research/roadmap-design.md), review fixes from eye-blink
   ranges differ (managed 0-15 / 4-40, native clamps 0-30 / 2-100, N8); third person with anchor smoothing above 0 glides
   past the blink (N9, default 0); a run of over-threshold frames (a battle dash, if one exceeds 8 units a frame) is not
   yet treated as motion (S5: measure first from the `eye:` lines).
+
+## Battle swaps hand the eyes on where the two cross (5 Nov 2026)
+
+The owner: on a swap of the character who has the first-person view, "our character runs far off in the distance with me
+watching for a bit, then the view switches"; wanted: "the view switches when they kind of cross paths, almost like they
+are tagging in / out". The follow waited for the incoming character to run in and stand still (15 frames), or 300 frames:
+about 2 s. Logic in `ffxvr_tag.h` (pure, unit-tested), managed in `bt_tag.cs`, ABI 46 (`ffxvr_bt_tag_step`,
+`ffxvr_bt_tag_hold`).
+
+- **The tag.** While a swap-in is pending ("Tidus joined the field", "N left the field"), the horizontal distance between
+  the outgoing character (the one followed) and the incoming one is measured every frame. Tag when it is under
+  `bt_tag_dist` (6 units; party models are 15-22 tall), or when it has closed in by 2 and then grown 2 past its minimum
+  (they passed further apart). The first 4 frames, and any frame before both have moved 1 unit from where they stood,
+  are ignored. No tag (the wait as before) when the followed character stays on the field (Tidus joining for someone
+  else), when either cannot be read or the outgoing one is already gone, or when they have not crossed by the arrival.
+- **`bt_tag`** (F8 > First person / follow, "a swap hands the eyes on:"): 0 "wait until he arrives" (as before; the
+  crossing is still measured for the log), 1 "tag and wait on the spot" (default), 2 "tag and ride in with him".
+- **Tag and wait on the spot.** At the tag the follow goes to the incoming character, so the body hide is his and the
+  outgoing one shows again. In first person the eye stays on the outgoing character's spot (his position when the swap
+  began: the slot the incoming one runs to) at the incoming one's eye height, until he arrives and stands still (the
+  same still rule) or 300 frames from the swap's start; then it follows him. The hold is native: in battle the body hide
+  is centred on `ffxvr_player_set`'s position (no other roots are sent outside the field), so that position stays his
+  and only the eye base is moved, by spot - his position (his head by the shared rule, his smoothing). Refreshed every
+  frame; it lapses after 2 frames without one. In third person a tag just switches the follow.
+- **A tag blinks** through the eye-jump blink (`eye_jump_blink` frames; 0 = none) and snaps the head offset, whatever
+  the distance (the jump at a tag can be under `eye_jump_units`). The enemies are faced through the usual battle follow
+  change (`battle_face`), measured from the spot.
+- **Log:** one `battle tag:` line per swap (100 a session): the mode, the frames until the tag, why (distance or passed)
+  and the distance then, the closest distance, and how it ended (held N frames until he stood still, the 300-frame
+  limit, ...). Native: `tag:` lines (40 a session) at each tag.
+- Not done: the held eye bobs with his running head height (smoothed); the release, when he stands a unit or two off
+  the recorded spot, is a small step without a glide.
+
+## The first-person head rule in one place (5 Nov 2026, review of 9b406b9)
+
+9b406b9 left out sub-positions more than `fp_head_reach` (8) units sideways from sub-position 0 (Wakka's battle model
+carries the ball he holds up 14.5 units out, 8-12 units above his head). But the smooth anchor's post-join snapshot kept
+its own copy of the old rule and replaces push_player's head on almost every frame, so the view did not change. The rule
+is now one function, `FphWalk.HeadPick`, for push_player, the optpos log and the snapshot (the main thread reads the
+reach push_player published that frame). The reach applies in battle only: the field, riding, cutscenes and blitzball
+keep the old rule exactly; `FphWalk.HeadOf` (the npc-anchor ties, field only) uses it with reach 0. A `head: skipped
+index N, X units out, for model cNNN` line (a new model / index pair, 6 a battle) shows it live. The F8 slider ("head,
+in battle: ignore points further out than") shows in every eye-height mode.
