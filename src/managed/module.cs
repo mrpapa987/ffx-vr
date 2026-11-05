@@ -1861,9 +1861,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.RadioButton("fixed", ref _fp_head_anchor, 0); ImGui.SameLine();
             ImGui.RadioButton("head bone height (swimming, crouching)", ref _fp_head_anchor, 1); ImGui.SameLine();
             ImGui.RadioButton("full head bone (leans too)", ref _fp_head_anchor, 2);
+            ImGui.SliderFloat("head, in battle: ignore points further out than (units; 0 = off)", ref _fp_head_reach, 0f, 40f, "%.1f");   // every anchor mode: the pick also feeds the displaced-body eye in mode 0
             if (_fp_head_anchor != 0) {
                 ImGui.SliderFloat("eye offset above the head bone", ref _fp_head_up, -5f, 10f);
-                ImGui.SliderFloat("head: ignore points further out than (units; 0 = off)", ref _fp_head_reach, 0f, 40f, "%.1f");
                 ImGui.SliderFloat("head smoothing (1 = none, 0.1 = heavy)", ref _fp_head_smooth, 0.05f, 1f);
                 if (_fp_head_anchor == 2) ImGui.SliderFloat("eye offset forward of the head bone (the bone is the neck joint)", ref _fp_head_fwd, 0f, 6f);
             }
@@ -2395,26 +2395,28 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (sb != null) { optpos_log(actors, sb); _logger.Info(sb.ToString()); }
     }
 
-    /// <summary>The first-person head: the highest sub-position (actor space has Y down, so the lowest Y) that is not on the
-    /// axis, leaving out points more than fp_head_reach units sideways from sub-position 0 (the body's base). The other
-    /// sub-positions of every party model sit within about 6 units of it, but Wakka's battle model carries one 14 units out
-    /// and 8-12 units above his head (index 11: the ball he holds up), which put his eye about 2 ft high (owner, 4-5 Nov 2026
-    /// captures). Falls back to the old rule (no reach limit) when sub-position 0 is on the axis, nothing is within reach,
-    /// or fp_head_reach is 0. Returns the index, or -1.</summary>
-    private int fp_head_pick(ref Actor a, out bool limited) {
-        limited = false; Vector4 b = a.chr_optpos[0];
-        bool use = _fp_head_reach > 0f && MathF.Abs(b.X) + MathF.Abs(b.Z) > 0.01f; float r2 = _fp_head_reach * _fp_head_reach;
-        for (int pass = use ? 0 : 1; pass < 2; pass++) {
-            int pick = -1; float hy = float.MaxValue;
-            for (int k = 0; k < 26; k++) {
-                Vector4 sp = a.chr_optpos[k];
-                if (!(MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) || !(sp.Y < hy)) continue;
-                if (pass == 0) { float dx = sp.X - b.X, dz = sp.Z - b.Z; if (!(dx * dx + dz * dz <= r2)) continue; }
-                hy = sp.Y; pick = k;
-            }
-            if (pick >= 0) { limited = pass == 0; return pick; }
-        }
-        return -1;
+    /// <summary>The first-person head of an actor: FphWalk.HeadPick (the one rule; see there) on its 26 sub-positions. reach is
+    /// _fp_reach_live (fp_head_reach in battle, 0 elsewhere). old = the old-rule pick. Returns the index, or -1.</summary>
+    private static int fp_head_pick(ref Actor a, float reach, out int old) {
+        Span<Vector4> op = stackalloc Vector4[26];
+        for (int k = 0; k < 26; k++) op[k] = a.chr_optpos[k];
+        return FphWalk.HeadPick(op, reach, out old);
+    }
+    /// <summary>The reach the head rule uses this frame: fp_head_reach in battle, 0 (the old rule) in the field, riding, cutscenes and
+    /// blitzball. Written by push_player (render thread) with Volatile.Write before _d7_follow_actor; d7_join_record (the main
+    /// thread's snapshot) reads it with Volatile.Read, so the snapshot's head and push_player's agree.</summary>
+    private float _fp_reach_live;
+    private long _fph_skip_key = -1; private int _fph_skip_n;   // the "head: skipped" log: last line's key (chr_id, old, new), lines this battle (at most 6)
+    /// <summary>One log line when the reach changed the followed actor's head pick (rate-limited: a new model / index pair only, at
+    /// most 6 a battle), so the owner's log shows the rule is live. No allocation unless a line is written.</summary>
+    private void fph_skip_log(ref Actor a, int now, int old, float reach) {
+        if (now < 0 || old < 0 || now == old || _fph_skip_n >= 6) return;
+        long key = ((long)(uint)a.chr_id << 16) | ((long)old << 8) | (long)now; if (key == _fph_skip_key) return;
+        _fph_skip_key = key; _fph_skip_n++;
+        string name = actor_name(a.chr_name);
+        Vector4 b = a.chr_optpos[0], o = a.chr_optpos[old];
+        float d = MathF.Sqrt((o.X - b.X) * (o.X - b.X) + (o.Z - b.Z) * (o.Z - b.Z));
+        _logger.Info(System.FormattableString.Invariant($"head: skipped index {old}, {d:F1} units out, for model {name} (index {now} instead; reach {reach:F1}, map {map_name()})"));
     }
 
     /// <summary>"log this table" only (diagnostics: Wakka's first-person eye in battle sits ~7 units high): for the followed
@@ -2429,7 +2431,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             string name = actor_name(a.chr_name);
             bool party = name.Length == 4 && name[0] == 'c' && name[1] == '0';
             if (i != _fp_actor_idx && !party) continue;
-            int pick = fp_head_pick(ref a, out _);   // push_player's rule (shared)
+            int pick = fp_head_pick(ref a, _fp_reach_live, out _);   // push_player's rule (shared), with this frame's reach
             sb.Append(System.FormattableString.Invariant($"\n  optpos {i} {name}{(i == _fp_actor_idx ? " (followed)" : "")}: root ({a.chr_pos_vec.X:F2},{a.chr_pos_vec.Y:F2},{a.chr_pos_vec.Z:F2})"));
             for (int k = 0; k < 26; k++) {
                 Vector4 sp = a.chr_optpos[k];
@@ -2510,7 +2512,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         int pick = -1;
         // Battle: the eyes follow a chr id chosen from the game's field roster (see the state above).
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
+        System.Threading.Volatile.Write(ref _fp_reach_live, in_battle ? _fp_head_reach : 0f);   // the head rule's reach: battle only (review of 9b406b9, SF); before _d7_follow_actor below
         if (in_battle != _btl_was) {
+            _fph_skip_n = 0; _fph_skip_key = -1;
             _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
             for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
             ej_battle_edge(in_battle);   // eye jumps: keep the field heading at the start, restore it after the end (native, before fp_set changes the view)
@@ -2675,7 +2679,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // space has Y pointing down (render space negates it), so the head is
             // the one with the LOWEST actor-space Y.
             float hy = float.MaxValue; Vector4 head = default; bool have = false;
-            { int hk = fp_head_pick(ref p, out bool _); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } }
+            { int hk = fp_head_pick(ref p, _fp_reach_live, out int hold); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } fph_skip_log(ref p, hk, hold, _fp_reach_live); }
             // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
