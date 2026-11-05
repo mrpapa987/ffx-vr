@@ -6,10 +6,10 @@
 //
 // The relief: the video frame (the eye-1 backbuffer copy, cropped to the video rect) on a 160 x 90 cell grid (120 x 90 for
 // 4:3) at the virtual screen's pose and size; the vertex shader samples the frame's depth map (R8, 320 x 180 / 240 x 180)
-// and moves the vertex along the screen normal: z = w * k * (d - p), d the 0..1 disparity (0 far, 1 near), p the pivot
-// (the frame's median, smoothed), k = s * W below the pivot (into the screen) and s * W * g above it (out of the screen),
-// g = min(1, 0.5 p / (1 - p)) so the pop-out range is at most half the push-in range; w feathers the outer 4 % to flat and,
-// as an option, the bottom 15 % (the subtitles). relief_z() below is the CPU copy of the shader's maths (the test checks it).
+// and moves each vertex along the ray from the nominal eye through its pixel to a distance given by the "3D movie"
+// mapping (map_z below: the shot's nearest content slightly in front of the screen, its farthest a few metres behind,
+// linear in disparity); the weight feathers the outer 4 % to flat and, as an option, the bottom 15 % (the subtitles).
+// map_point / weight / edge_fill below are the CPU copy of the shader's maths (the test checks them).
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -262,14 +262,39 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     return o;
 }
 
-// -- the shape: what the vertex shader does, on the CPU ------------------------------------------------------------------
-struct Shape { float k_push, k_pop, pivot; };
-/// s: strength (0..0.25), W: the screen width (m), p: the pivot (0..1).
-inline Shape shape(float s, float W, float p) {
-    p = clampf(p, 0.02f, 0.98f);
-    const float g = fminf(1.f, 0.5f * p / (1.f - p));
-    return { s * W, s * W * g, p };
+// -- the mapping: what the vertex shader does, on the CPU (the "3D movie" mapping, owner test 4 Nov 2026) ------------------
+// VDA's output is relative inverse depth, known only up to an affine map (scale and shift). The 8-bit value n = q / 255 is
+// that disparity normalised per shot between lo and hi (FORMAT.md), so the stereographer's choice is the affine map itself:
+// n = 1 (the shot's nearest, hi) -> the near distance Zn = Ds - pop, n = 0 (the farthest, lo) -> Zf = Ds + range, linear in
+// disparity in between (depth = 1 / disparity): 1/Z(n) = 1/Zf + n (1/Zn - 1/Zf). Ds is the viewer's distance to the screen
+// (the screen sits Ds ahead of the reference: screen_distance). The amount k (strength x the ramp level x the edge / bottom
+// weight) blends toward the flat screen in disparity: 1/Z = 1/Ds + k (1/Z(n) - 1/Ds), so k = 0 is the flat screen.
+// A point goes along the ray from the nominal eye E (Ds in front of the screen's centre, on its normal) through its pixel,
+// to distance Z: from E the picture is exactly the flat screen's (no pixel moves, nothing is uncovered); the depth comes
+// from the two eyes' parallax. In the screen's frame (x right, y up, +z toward the viewer, E = (0, 0, Ds)), with t = Z / Ds:
+// P = (x t, y t, Ds (1 - t)).
+struct Map { float Ds, inv_n, inv_f, k; };
+constexpr float k_min_near = 0.5f;   // the near distance is at least this (m): a pop-out setting larger than Ds - 0.5 is capped
+/// Ds: the screen's distance (m), range: how far behind it the farthest content goes (m), pop: how far in front the nearest
+/// goes (m), k: the amount (0..1).
+inline Map make_map(float Ds, float range, float pop, float k) {
+    Ds = fmaxf(Ds, 0.6f); range = clampf(range, 0.f, 50.f); pop = clampf(pop, 0.f, Ds - k_min_near);
+    return { Ds, 1.f / (Ds - pop), 1.f / (Ds + range), clampf(k, 0.f, 1.f) };
 }
+/// The distance from E (m) of disparity n (0..1) at weight w (0..1).
+inline float map_z(const Map& m, float n, float w) {
+    const float inv0 = 1.f / m.Ds, inv = m.inv_f + clampf(n, 0.f, 1.f) * (m.inv_n - m.inv_f);
+    return 1.f / (inv0 + m.k * w * (inv - inv0));
+}
+/// The point in the screen's frame for screen position (x, y) (m) at disparity n and weight w.
+inline void map_point(const Map& m, float x, float y, float n, float w, float P[3]) {
+    const float t = map_z(m, n, w) / m.Ds;
+    P[0] = x * t; P[1] = y * t; P[2] = m.Ds * (1.f - t);
+}
+/// The angular disparity (degrees) of a point at distance Z against the screen plane at Ds, for an eye separation ipd:
+/// + crossed (in front of the screen), - uncrossed (behind). The comfort figure of the design note.
+inline float disparity_deg(float Z, float Ds, float ipd = 0.063f) { return ipd * (1.f / Z - 1.f / Ds) * 57.29578f; }
+
 constexpr float k_feather = 0.04f, k_band = 0.15f, k_band_ramp = 0.05f;
 /// The relief's weight at grid point (a, b) (0..1 across the video rect, b down): flat at the border, full 4 % in; with
 /// flat_bottom 0 in the bottom 15 % (b >= 0.85), ramping from 1 at b = 0.80.
@@ -279,8 +304,52 @@ inline float weight(float a, float b, bool flat_bottom) {
     if (flat_bottom) w *= 1.f - smooth01((b - (1.f - k_band - k_band_ramp)) / k_band_ramp);
     return w;
 }
-/// The offset along the screen normal (m, + toward the viewer) for disparity d (0..1).
-inline float relief_z(const Shape& sh, float d, float w) { const float t = d - sh.pivot; return w * (t < 0.f ? sh.k_push * t : sh.k_pop * t); }
+/// The rubber sheet (the triangles stretched across a depth edge): the pixel shader measures its triangle's depth slope
+/// (metres of depth per metre of screen, from ddx / ddy of the depth and the uv) and blends its colour toward the colour two
+/// cells further toward the far side (the background, roughly what the edge uncovers), fully at k_edge_hi.
+constexpr float k_edge_lo = 8.f, k_edge_hi = 25.f, k_edge_cells = 2.f;   // a floor receding 3 m over 0.4 m of screen is ~8: below the fill
+inline float edge_fill(float slope) { return smooth01((slope - k_edge_lo) / (k_edge_hi - k_edge_lo)); }
+
+// -- noise ------------------------------------------------------------------------------------------------------------
+/// A 3 x 3 median (edges: the nearest pixel repeated), src -> dst (w x h, not in place). The worker runs it after the decode:
+/// it removes the model's speckle and keeps the depth edges.
+inline void median3(const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {
+    auto srt = [](uint8_t& a, uint8_t& b) { if (a > b) { const uint8_t t = a; a = b; b = t; } };
+    for (uint32_t y = 0; y < h; ++y) {
+        const uint8_t* r0 = src + static_cast<size_t>(y > 0 ? y - 1 : 0) * w;
+        const uint8_t* r1 = src + static_cast<size_t>(y) * w;
+        const uint8_t* r2 = src + static_cast<size_t>(y + 1 < h ? y + 1 : y) * w;
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t xl = x > 0 ? x - 1 : 0, xr = x + 1 < w ? x + 1 : x;
+            uint8_t p[9] = { r0[xl], r0[x], r0[xr], r1[xl], r1[x], r1[xr], r2[xl], r2[x], r2[xr] };
+            // the 19-exchange median network (Paeth / Devillard)
+            srt(p[1], p[2]); srt(p[4], p[5]); srt(p[7], p[8]); srt(p[0], p[1]); srt(p[3], p[4]); srt(p[6], p[7]);
+            srt(p[1], p[2]); srt(p[4], p[5]); srt(p[7], p[8]); srt(p[0], p[3]); srt(p[5], p[8]); srt(p[4], p[7]);
+            srt(p[3], p[6]); srt(p[1], p[4]); srt(p[2], p[5]); srt(p[4], p[7]); srt(p[4], p[2]); srt(p[6], p[4]);
+            srt(p[4], p[2]);
+            dst[static_cast<size_t>(y) * w + x] = p[4];
+        }
+    }
+}
+constexpr int k_ema_gate = 24;   // a change larger than this (of 255) is motion, not noise: the pixel follows at once
+/// The temporal filter, per pixel, at each upload (render thread, display order): acc (8.8 fixed point) follows the new frame
+/// by (1 - smooth) of the gap when the gap is below k_ema_gate, else jumps to it (no ghost behind a moving edge); reset (a
+/// cut, or depth after flat): acc = the frame. io: the new frame in, the filtered frame out (in place). smooth 0..0.95.
+inline void ema(uint16_t* acc, uint8_t* io, uint32_t n, float smooth, bool reset) {
+    const int a = static_cast<int>(256.f * (1.f - clampf(smooth, 0.f, 0.95f)) + 0.5f);   // the share of the gap taken, /256
+    for (uint32_t i = 0; i < n; ++i) {
+        const int v = io[i] << 8;
+        int s = acc[i];
+        if (reset || a >= 256) s = v;
+        else {
+            const int d = v - s;
+            if (d > (k_ema_gate << 8) || d < -(k_ema_gate << 8)) s = v;
+            else s += (d * a + (d >= 0 ? 128 : -128)) / 256;
+        }
+        acc[i] = static_cast<uint16_t>(s < 0 ? 0 : s > 0xFF00 ? 0xFF00 : s);
+        io[i] = static_cast<uint8_t>((acc[i] + 128) >> 8 > 255 ? 255 : (acc[i] + 128) >> 8);
+    }
+}
 
 /// The video's rect in the backbuffer (uv, the game letterboxes / pillarboxes it centred): vw x vh into bw x bh.
 struct Rect { float u0, v0, du, dv; };
@@ -322,19 +391,19 @@ inline void proj_mat(float l, float r, float u, float d, float n, float f, float
     memcpy(P, m, sizeof(m));
 }
 struct Fov { float l, r, u, d; };   // tangents of the half angles (l, d negative), as XrFovTan
-/// Review SF-1: the field of view that just covers the screen's video rect seen from an eye at (eq, ep): the rect's four
-/// corners at z = +pop and -push along the screen normal (the box holds the whole relief, and a projection of a convex box is
-/// bounded by its corners'), widened by `margin` of the span on each side plus 0.004, clamped to `full`. The same eye image
-/// then covers less of the view, so the video gets more of its pixels. False (out = full): a corner is not in front of the
-/// eye, or the rect is (nearly) out of view.
+/// Review SF-1: the field of view that just covers the screen's video rect seen from an eye at (eq, ep): the frustum from the
+/// nominal eye (0, 0, Ds) through the rect's four corners, cut at t = t_near and t_far (map_point's t: the relief lies inside
+/// it, and a projection of a convex body is bounded by its corners'), widened by `margin` of the span on each side plus
+/// 0.004, clamped to `full`. The same eye image then covers less of the view, so the video gets more of its pixels. False
+/// (out = full): a corner is not in front of the eye, or the rect is (nearly) out of view.
 inline bool tight_fov(const float eq[4], const float ep[3], const Fov& full, const float sq[4], const float sp[3], float W, float H,
-                      const Rect& rc, float pop, float push, float margin, Fov* out) {
+                      const Rect& rc, float Ds, float t_near, float t_far, float margin, Fov* out) {
     *out = full;
     float V[16], M[16], VM[16]; view_mat(eq, ep, V); pose_mat(sq, sp, M); mat4_mul(V, M, VM);
     float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
     for (int k = 0; k < 8; ++k) {
-        const float u = rc.u0 + ((k & 1) ? rc.du : 0.f), v = rc.v0 + ((k & 2) ? rc.dv : 0.f), z = (k & 4) ? pop : -push;
-        const float lx = (u - 0.5f) * W, ly = (0.5f - v) * H;
+        const float u = rc.u0 + ((k & 1) ? rc.du : 0.f), v = rc.v0 + ((k & 2) ? rc.dv : 0.f), t = (k & 4) ? t_near : t_far;
+        const float lx = (u - 0.5f) * W * t, ly = (0.5f - v) * H * t, z = Ds * (1.f - t);
         const float px = VM[0] * lx + VM[1] * ly + VM[2] * z + VM[3], py = VM[4] * lx + VM[5] * ly + VM[6] * z + VM[7], pz = VM[8] * lx + VM[9] * ly + VM[10] * z + VM[11];
         if (!(pz < -0.05f)) return false;
         const float tx = px / -pz, ty = py / -pz;
@@ -352,7 +421,7 @@ inline float rows_per_line(const float eq[4], const float ep[3], const Fov& fov,
                            uint32_t image_h, uint32_t video_h) {
     const Fov wide = { -1e6f, 1e6f, 1e6f, -1e6f };
     Fov v;
-    if (video_h == 0 || !(fov.u - fov.d > 0.f) || !tight_fov(eq, ep, wide, sq, sp, W, H, rc, 0.f, 0.f, 0.f, &v)) return 0.f;
+    if (video_h == 0 || !(fov.u - fov.d > 0.f) || !tight_fov(eq, ep, wide, sq, sp, W, H, rc, 1.f, 1.f, 1.f, 0.f, &v)) return 0.f;
     return static_cast<float>(image_h) * ((v.u - 0.004f) - (v.d + 0.004f)) / (fov.u - fov.d) / static_cast<float>(video_h);
 }
 inline bool fov_ok(float l, float r, float u, float d) {
