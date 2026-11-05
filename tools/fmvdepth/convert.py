@@ -9,7 +9,7 @@ weights first. Directly:
     python convert.py --vbf <game>/data/FFX_Data.vbf --out <game>/fahrenheit/mods/ffxvr/fmvdepth
                       --vda-dir <VDA checkout> --weights video_depth_anything_vits.pth [options]
 
-Per video, streaming (memory: one shot of 320x180 maps, spilled to a temporary file past 2,400 frames):
+Per video, streaming (memory: about two shots' worth, see process_video; long shots spill to a temp file):
     VBF reader -> ffmpeg (pipe, rgb24 at the model's input size) -> Video-Depth-Anything-Small in windows of 32 frames
     (fp16, CUDA; restarted at every cut; a flash is not a cut) -> depth edges sharpened at the model's resolution and
     shrunk to 320x180 (240x180 for 4:3) without averaging across them -> one shot buffered -> one depth range per shot segment (robust percentiles of all its frames; dissolves and dips
@@ -322,15 +322,22 @@ def pipe_config(a, src_w, src_h, out_w, out_h, spill_dir=None):
 class DepthAtOutput:
     """window.windowed_depth's model: the depth model's maps (at its own resolution, or already at the output size),
     then in numpy: with flip, the same window run again on the mirrored frames and averaged (depthproc.flip_merge);
-    per frame, the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size.
-    Frames of one window are spread over `threads` threads (numpy releases the GIL in its array loops)."""
+    per frame, the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size. Padding slots
+    (copies of a shot's last frame, never emitted) get the cheap area shrink.
+
+    Overlapped (submit, used by windowed_depth): the model runs on one thread ("gpu": torch releases the GIL while the
+    GPU works), each window's edge pass on another that spreads its frames over `threads` pool threads (numpy releases
+    the GIL in its array loops). windowed_depth submits window k+1 before it takes window k, so the GPU computes the
+    next window while the CPU sharpens this one: the time is max(model, edges), not their sum."""
 
     def __init__(self, model, c):
+        from concurrent.futures import ThreadPoolExecutor
         self.model, self.c = model, c
-        self.pool = None
-        if c.threads > 1:
-            from concurrent.futures import ThreadPoolExecutor
-            self.pool = ThreadPoolExecutor(max_workers=c.threads)
+        self.pool = ThreadPoolExecutor(max_workers=c.threads) if c.threads > 1 else None
+        self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fvd-model')
+        self.cpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix='fvd-edges')
+        self.maps_full = 0      # edge-path maps made (for the log)
+        self.maps_pad = 0       # padding slots given the area shrink
 
     def one(self, d):
         c = self.c
@@ -341,18 +348,40 @@ class DepthAtOutput:
             return depthproc.refine_and_shrink(d, c.out_w, c.out_h, tau=e['tau'], sigma=e['sigma'], grow=e['grow'])
         return depthproc.area_resize(d, c.out_w, c.out_h)
 
-    def __call__(self, frames):
+    def _raw(self, frames):
         d = np.asarray(self.model(frames), dtype=np.float32)
         if self.c.flip:
             m = np.asarray(self.model([np.ascontiguousarray(f[:, ::-1]) for f in frames]), dtype=np.float32)
             d = depthproc.flip_merge(d, m[:, :, ::-1])
-        maps = list(self.pool.map(self.one, d)) if self.pool else [self.one(x) for x in d]
-        return np.stack(maps)
+        return d
+
+    def _finish(self, d, real):
+        real = [True] * len(d) if real is None else list(real)
+        idx = [i for i, r in enumerate(real) if r]
+        out = [None] * len(d)
+        maps = list(self.pool.map(self.one, [d[i] for i in idx])) if self.pool else [self.one(d[i]) for i in idx]
+        for i, m in zip(idx, maps):
+            out[i] = m
+        c = self.c
+        for i, r in enumerate(real):
+            if not r:
+                out[i] = d[i] if d[i].shape == (c.out_h, c.out_w) else depthproc.area_resize(d[i], c.out_w, c.out_h)
+        self.maps_full += len(idx)
+        self.maps_pad += len(d) - len(idx)
+        return np.stack(out)
+
+    def __call__(self, frames, real=None):
+        return self._finish(self._raw(frames), real)
+
+    def submit(self, frames, real):
+        raw = self.gpu.submit(self._raw, list(frames))
+        return self.cpu.submit(lambda: self._finish(raw.result(), real))
 
     def close(self):
-        if self.pool:
-            self.pool.shutdown()
-            self.pool = None
+        for ex in (self.gpu, self.cpu, self.pool):
+            if ex is not None:
+                ex.shutdown(wait=True, cancel_futures=True)
+        self.pool = None
 
 
 def _count(stats, k, n=1):
@@ -365,27 +394,89 @@ def process_video(frames, model, c, stats=None):
 
     frames: the video's RGB frames at the model's input size, in order. model: the depth model (its maps at its own
     resolution, or at the output size): DepthAtOutput makes the stored-size maps from them.
-    Yields (q, flags, p2, p98, lo, hi, thumb) for every frame in order, one shot late (a shot's range needs all of it):
-      DepthAtOutput (the edge path at the model's resolution: forced fg/bg weighted median, near side grown 2 px across
-      and 1 px up/down, shrink without averaging across a step) inside tag_frames (cuts with the flash test, blank frames) -> shot_windows (VDA restarted at every cut) -> ShotBuffer ->
-      find_transitions + shot_ranges (one range per segment; dissolves cross-faded) -> normalised n ->
-      temporal_bilateral (centred +-3 frames, 2 passes, inside the shot only; c.temporal None: off) -> 8 bits.
+    Yields (q, flags, p2, p98, lo, hi, thumb) for every frame in order, one shot late (a shot's range needs all of it).
+
+    Producer thread: tag_frames (cuts with the flash and same-picture tests, blank frames) -> shot_windows (VDA
+    restarted at every cut; the model one window ahead of DepthAtOutput's edge pass: forced fg/bg weighted median,
+    near side grown 2 px across and 1 px up/down, shrink without averaging across a step) -> ShotBuffer, handed over
+    a shot at a time. This generator (the caller's thread) meanwhile finishes the shot before: find_transitions +
+    shot_ranges (one range per segment; dissolves cross-faded) -> normalised n -> temporal_bilateral (centred +-3
+    frames, 2 passes, never across a cut or a segment start; c.temporal None: off) -> 8 bits. So the next shot's
+    model work does not wait for this one's finish.
+
+    Memory for the longest shot (it is all kept until the shot ends): its 320x180 float maps (230 KB a frame; past
+    2,400 frames spilled to a temporary file in c.spill_dir), each frame's Tag (a 57.6 KB luma guide, the 9 KB 64x36
+    luma, the thumbnail), and at the shot end the transition test's and the range's temporaries (~0.2 MB a frame): a
+    20,000-frame shot would need ~3-3.5 GB of RAM and ~4 GB of spill. Two shots can be alive at once (one finishing,
+    one being made). The model-resolution maps never accumulate (a window or two: 61 MB at 518, 116 MB at 714, x2
+    with flip).
     stats (a dict), if given, collects counts: frames, shots, flash_frames, blank_frames, dissolves, fades, dips,
     segments, flat_frames, clipped (pixels at 0 or 255)."""
+    import queue
+    import threading
     det = depthproc.CutDetector(c.src_w, c.src_h, c.cut_threshold, c.cut_ratio)
     tags = {}
     dm = DepthAtOutput(model, c)
+    shots = queue.Queue(maxsize=1)
+    stop = threading.Event()
+    END = object()
+
+    def put(x):
+        while not stop.is_set():
+            try:
+                shots.put(x, timeout=0.2)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def produce():
+        try:
+            for item in _make_shots(frames, dm, c, det, tags, stop):
+                if not put(item):
+                    item[1].close()
+                    return
+            put(END)
+        except BaseException as e:  # noqa: BLE001 - handed to the caller's thread
+            put(e)
+
+    th = threading.Thread(target=produce, name='fvd-shots', daemon=True)
+    th.start()
     try:
-        yield from _process(frames, dm, c, stats, det, tags)
+        while True:
+            x = shots.get()
+            if x is END:
+                break
+            if isinstance(x, BaseException):
+                raise x
+            start, buf, st, pp = x
+            try:
+                yield from _finish_shot(c, stats, buf, st, pp)
+            finally:
+                buf.close()
     finally:
+        stop.set()
+        while True:                     # free what the producer handed over but nobody will finish
+            try:
+                x = shots.get_nowait()
+            except queue.Empty:
+                break
+            if isinstance(x, tuple):
+                x[1].close()
+        th.join()
         dm.close()
+    if tags:
+        raise ConvertError(f'internal: {len(tags)} frames read but not written')
 
 
-def _process(frames, model, c, stats, det, tags):
+def _make_shots(frames, model, c, det, tags, stop):
+    """The producer: yields (start, ShotBuffer, tags, p2/p98) per shot."""
 
     def items():
         guide = (c.out_w, c.out_h) if c.temporal and c.temporal.get('sigma_y', 0) > 0 else None
         for i, (f, t) in enumerate(depthproc.tag_frames(frames, det, c.flash_len, c.blank_std, guide_size=guide)):
+            if stop.is_set():
+                return
             tags[i] = t
             yield i, f
     for start, shot in shot_windows(items(), model, is_start=lambda x: tags[x[0]].cut, frame_of=lambda x: x[1]):
@@ -397,42 +488,48 @@ def _process(frames, model, c, stats, det, tags):
                     raise ConvertError(f'internal: frame {i} came out as frame {start + len(buf)}')
                 buf.append(d)
                 pp.append(np.percentile(buf[len(buf) - 1], (2.0, 98.0)))
+                if stop.is_set():
+                    raise KeyboardInterrupt
             st = [tags.pop(start + k) for k in range(len(buf))]
-            lo, hi, info = depthproc.shot_ranges(buf, st, c.pcts, c.headroom)
-            _count(stats, 'shots')
-            _count(stats, 'segments', len(info['starts']))
-            for tr in info['transitions']:
-                _count(stats, tr['kind'] + 's')
-            seg_of = np.searchsorted(np.asarray(info['starts']), np.arange(len(buf)), side='right') - 1
-
-            def normalised():
-                for k in range(len(buf)):
-                    rng = max(hi[k] - lo[k], depthproc.range_eps(hi[k]))
-                    yield ((buf[k] - np.float32(lo[k])) * np.float32(1.0 / rng), st[k].guide,
-                           not (st[k].blank or st[k].flash), seg_of[k])
-            ns = (depthproc.temporal_bilateral(normalised(), **c.temporal) if c.temporal else
-                  (x[0] for x in normalised()))
-            for k, n in enumerate(ns):
-                t = st[k]
-                if info['flat'][k]:       # an all-blank segment: flat (lo = hi), written as a constant 0
-                    q = np.zeros((c.out_h, c.out_w), np.uint8)
-                else:
-                    q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
-                fl = fvd.FF_CUT if k == 0 else 0
-                if info['blend'][k]:
-                    fl |= fvd.FF_BLEND
-                if t.blank or t.flash:
-                    fl |= fvd.FF_FLASH
-                    _count(stats, 'blank_frames' if t.blank else 'flash_frames')
-                if info['flat'][k]:
-                    _count(stats, 'flat_frames')
-                _count(stats, 'frames')
-                _count(stats, 'clipped', int(np.count_nonzero((q == 0) | (q == 255))))
-                yield q, fl, float(pp[k][0]), float(pp[k][1]), float(lo[k]), float(hi[k]), t.thumb
-        finally:
+        except BaseException:
             buf.close()
-    if tags:
-        raise ConvertError(f'internal: {len(tags)} frames read but not written')
+            raise
+        yield start, buf, st, pp
+
+
+def _finish_shot(c, stats, buf, st, pp):
+    """One shot's ranges, temporal filter and 8 bits: yields process_video's tuples for its frames."""
+    lo, hi, info = depthproc.shot_ranges(buf, st, c.pcts, c.headroom)
+    _count(stats, 'shots')
+    _count(stats, 'segments', len(info['starts']))
+    for tr in info['transitions']:
+        _count(stats, tr['kind'] + 's')
+    seg_of = np.searchsorted(np.asarray(info['starts']), np.arange(len(buf)), side='right') - 1
+
+    def normalised():
+        for k in range(len(buf)):
+            rng = max(hi[k] - lo[k], depthproc.range_eps(hi[k]))
+            yield ((buf[k] - np.float32(lo[k])) * np.float32(1.0 / rng), st[k].guide,
+                   not (st[k].blank or st[k].flash), seg_of[k])
+    ns = (depthproc.temporal_bilateral(normalised(), **c.temporal) if c.temporal else
+          (x[0] for x in normalised()))
+    for k, n in enumerate(ns):
+        t = st[k]
+        if info['flat'][k]:       # an all-blank segment: flat (lo = hi), written as a constant 0
+            q = np.zeros((c.out_h, c.out_w), np.uint8)
+        else:
+            q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
+        fl = fvd.FF_CUT if k == 0 else 0
+        if info['blend'][k]:
+            fl |= fvd.FF_BLEND
+        if t.blank or t.flash:
+            fl |= fvd.FF_FLASH
+            _count(stats, 'blank_frames' if t.blank else 'flash_frames')
+        if info['flat'][k]:
+            _count(stats, 'flat_frames')
+        _count(stats, 'frames')
+        _count(stats, 'clipped', int(np.count_nonzero((q == 0) | (q == 255))))
+        yield q, fl, float(pp[k][0]), float(pp[k][1]), float(lo[k]), float(hi[k]), t.thumb
 
 
 def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=None):

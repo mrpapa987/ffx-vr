@@ -248,6 +248,40 @@ class WindowTest(unittest.TestCase):
                 self.assertTrue(np.allclose(d, i))
                 self.assertLessEqual(state['read'] - i, 32 + 22 + 1)
 
+    def test_submit_runs_one_window_ahead(self):
+        """A model with submit(frames, real): the same output as the plain call, window k+1 submitted before window
+        k's result is taken, and `real` marks the padding copies."""
+        from concurrent.futures import Future
+        log = []
+
+        class Ahead:
+            def __init__(self):
+                self.w = WobblyModel()
+                self.n = 0
+
+            def submit(self, frames, real):
+                k = self.n
+                self.n += 1
+                log.append(('submit', k))
+                self.reals = getattr(self, 'reals', []) + [list(real)]
+                d = self.w(frames)
+                f = Future()
+                f.result = lambda: (log.append(('result', k)), d)[1]
+                return f
+        for n in (1, 21, 22, 23, 75, 100):
+            log.clear()
+            m = Ahead()
+            got = list(W.windowed_depth(range(n), m))
+            ref = list(W.windowed_depth(range(n), WobblyModel()))
+            self.assertEqual([i for i, _d in got], list(range(n)))
+            for (i, d), (_j, r) in zip(got, ref):
+                np.testing.assert_array_equal(d, r)
+            for k in range(1, m.n):                  # k submitted before k-1's result
+                self.assertLess(log.index(('submit', k)), log.index(('result', k - 1)))
+            self.assertEqual(sum(sum(r[OV:]) for r in m.reals for OV in [W.OVERLAP]) + sum(m.reals[0][:W.OVERLAP]),
+                             n)                       # every real frame is marked real once as a new slot
+            self.assertEqual(m.reals[0], [True] * min(n, 32) + [False] * (32 - min(n, 32)))
+
     def test_scale_and_shift(self):
         p = np.array([1.0, 2.0, 3.0, 4.0])
         s, t = W.scale_and_shift(p, 2 * p + 1)

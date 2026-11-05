@@ -357,6 +357,58 @@ class FlipTest(unittest.TestCase):
         self.assertGreater(abs(lr(out[False][1])), 3 * abs(lr(out[True][1])) + 1)
 
 
+class DepthAtOutputTest(unittest.TestCase):
+    def test_padding_slots_skip_the_edge_path_and_overlap_changes_nothing(self):
+        v = synth.Video(W, H, scale=0.25)
+        frames = [v.frame(i) for i in range(30)]       # one shot of 30 frames: two windows
+        outs = {}
+        for overlap in (True, False):
+            m = synth.StubModel(v)
+            cfg = convert.PipeConfig(1280, 720, OW, OH, edge_filter='refine', temporal=dict(convert.TEMPORAL),
+                                     threads=2)
+            dm = convert.DepthAtOutput(m, cfg)
+            if not overlap:
+                dm.submit = None                         # windowed_depth falls back to the plain call
+            import window
+            outs[overlap] = [d for _i, d in window.windowed_depth(iter(frames), dm)]
+            if overlap:
+                # window 0: 30 real + 2 padding; window 1: keyframe slots 0, 12, 24-29 real (8), slots 30-31 and
+                # the 22 new slots padding (the shot has ended): 38 edge maps instead of 64
+                self.assertEqual(dm.maps_full, 30 + 8)
+                self.assertEqual(dm.maps_pad, 2 + 24)
+            dm.close()
+        for a, b in zip(outs[True], outs[False]):
+            np.testing.assert_array_equal(a, b)
+
+
+class ProducerTest(unittest.TestCase):
+    """process_video's producer thread: a model error reaches the caller, and a caller that stops early does not hang."""
+
+    def test_model_error_reaches_the_caller(self):
+        v = synth.Video(W, H, scale=0.25)
+
+        class Boom(synth.StubModel):
+            def __call__(self, frames):
+                if self.calls >= 2:
+                    raise RuntimeError('CUDA out of memory (test)')
+                return super().__call__(frames)
+        cfg = convert.PipeConfig(1280, 720, OW, OH, threads=2)
+        with self.assertRaises(RuntimeError) as cm:
+            list(convert.process_video(v.frames(), Boom(v, out=(OW, OH)), cfg))
+        self.assertIn('out of memory', str(cm.exception))
+
+    def test_caller_stops_early(self):
+        import threading
+        v = synth.Video(W, H, scale=0.5)
+        cfg = convert.PipeConfig(1280, 720, OW, OH, threads=2, temporal=dict(convert.TEMPORAL))
+        g = convert.process_video(v.frames(), synth.StubModel(v, out=(OW, OH)), cfg)
+        for _ in range(5):
+            next(g)
+        g.close()
+        self.assertFalse([t for t in threading.enumerate() if t.name.startswith(('fvd-shots', 'fvd-model',
+                                                                               'fvd-edges'))])
+
+
 class ProcessVideoTest(unittest.TestCase):
     """The whole per-video pipeline on the synthetic FMV (cuts, a flash, a dissolve, a dip), with the stub model."""
 
