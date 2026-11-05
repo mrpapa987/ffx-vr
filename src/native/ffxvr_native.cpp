@@ -4894,7 +4894,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 41;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D)
+constexpr int FFXVR_ABI = 42;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5860,7 +5860,7 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
 #endif
-struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; };
+struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; int median; };   // median: the 3x3 median after each decode (frames decoded from now on)
 struct RelSlot { int32_t idx; uint8_t median; uint8_t err; };
 struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; };   // state 0 pending, 1 open, -1 failed
 static RelReq  g_relw_req = {};               // render thread -> worker (g_fmvw_mx)
@@ -5981,7 +5981,9 @@ static bool relw_step() {
         relief::Io io = { g_relw_h, relw_read_at, 0 };
         relief::Codecs c = { nullptr, { nullptr, nullptr, g_relw_dec ? relw_xpress : nullptr } };
         uint8_t* out = mem + static_cast<size_t>(sl) * px;
-        const int d = relief::decode(F, static_cast<uint32_t>(i), io, c, mem + static_cast<size_t>(relief::k_ring) * px, out);
+        uint8_t* const pay = mem + static_cast<size_t>(relief::k_ring) * px;
+        const int d = relief::decode(F, static_cast<uint32_t>(i), io, c, pay, out);
+        if (d == relief::D_OK && q.median) { relief::median3(out, pay, F.w, F.h); memcpy(out, pay, px); }   // the payload buffer is free again: the scratch
         const uint8_t med = d == relief::D_OK ? relief::median_u8(out, px) : 0;
         QueryPerformanceCounter(&b);
         const double ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
@@ -12292,15 +12294,20 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // movie player (as the S2 probe: the manager pointer and the playing word; the three blocks only while playing), asks the
 // worker for the movie's depth file once (and for the depth frame on screen, the uploaded count - 1, as it changes), and
 // when every condition holds draws the frame as a relief: our own two eye images, cleared black (the room), the grid drawn
-// with each eye's located pose and field of view (xr_render_views: what the projection layer goes out with), the colour
-// from eye 1's backbuffer copy (the flat screen's own source) cropped to the video rect, the depth from an R8 texture
-// updated when the video frame changes (held in between). xr_frame then gets those images as a projection layer and no
-// screen quad. Anything else (fmv_depth 0, no file, a bad file, the hybrid ids, a 3D camera, the save screen, no image, the
-// shaders) leaves today's flat screen exactly as it was, with a reason for F8; the depth itself never waits: a frame not
-// decoded in time is drawn flat (once one frame late at most, never across a cut), a cut ramps the strength from 0.
+// with each eye's located pose and the field of view narrowed to the screen (xr_render_views, relief::tight_fov), each
+// vertex moved along its ray from the nominal eye by the "3D movie" mapping (relief::map_z), the colour from eye 1's
+// backbuffer copy (the flat screen's own source) cropped to the video rect, the depth from an R8 texture updated when the
+// video frame changes (held in between; the worker's 3x3 median, then the temporal filter here at upload). xr_frame then
+// gets those images as a projection layer and no screen quad. Anything else (fmv_depth 0, no file, a bad file, the hybrid
+// ids, a 3D camera, the save screen, no image, the shaders) leaves today's flat screen exactly as it was, with a reason for
+// F8; the depth itself never waits: a frame not decoded in time fades to flat over 150 ms (after one frame late at most,
+// never across a cut), a cut ramps the amount in from 0.
 // Cost with fmv_depth 0: one branch. On but no movie: the manager pointer and the playing word (two guarded reads).
-struct RelCfg { int on; float strength; int flags; int offset; };   // ffxvr_fmv3d_set; flags bit 0: flatten the bottom 15 %, bit 1: the tight field of view (SF-1)
-static RelCfg g_rel_cfg = { 0, 0.08f, 2, 0 };
+// ffxvr_fmv3d_set (ABI 42). flags: 1 flatten the bottom 15 %, 2 the tight field of view (review SF-1), 4 the edge fill, 8 the
+// 3x3 median, 16 the depth as colour. amount 0..1, range / pop in metres (the "3D movie" mapping), smooth 0..0.95.
+struct RelCfg { int on; float amount; int flags; int offset; float range, pop, smooth; };
+static RelCfg g_rel_cfg = { 0, 1.f, 2 | 4 | 8, 0, 3.f, 0.15f, 0.6f };
+static float g_rel_range_now = -1.f, g_rel_pop_now = -1.f; static double g_rel_t_prev = 0.0;   // the range / pop drawn, following the settings at 2 m/s and 0.5 m/s (a slider never jumps)
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
     "the save screen is open", "checking the depth file", "the depth file", "no eye-1 image (the backbuffer copy)", "the relief pass", "the movie player is not readable" };
@@ -12333,31 +12340,53 @@ static ID3D11Texture2D* g_rel_dtex = nullptr; static ID3D11ShaderResourceView* g
 static ID3D11Texture2D* g_rel_eye[2] = { nullptr, nullptr }; static ID3D11RenderTargetView* g_rel_rtv[2] = { nullptr, nullptr };
 static ID3D11Texture2D* g_rel_z = nullptr; static ID3D11DepthStencilView* g_rel_dsv = nullptr;
 static uint8_t* g_rel_up = nullptr;                      // the frame to upload, copied out of the ring under the lock (w * 180 bytes)
+static uint16_t* g_rel_ema = nullptr;                    // the temporal filter's state (8.8 fixed point, w * 180), with g_rel_up
 
 // The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer. The
-// weight and z are relief::weight / relief_z (ffxvr_relief.h); the local frame is the screen quad's (x right, y up, +z
-// toward the viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it). R: the video rect (uv), G: W, H,
-// cells x, y; Z: k_push, k_pop, pivot, flatten the bottom; F: feather, band, band ramp.
+// vertex shader is relief::weight / map_point (ffxvr_relief.h): the screen quad's own frame (x right, y up, +z toward the
+// viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it), each vertex moved along the ray from the
+// nominal eye (0, 0, Ds) through its pixel to distance Z = 1 / (1/Ds + k w (1/Zf + n (1/Zn - 1/Zf) - 1/Ds)). The pixel
+// shader samples the video; on a triangle steeper than k_edge_lo metres of depth per metre of screen (a rubber sheet across
+// a depth edge) it blends toward the colour two cells further to the far side (relief::edge_fill, from ddx / ddy of the
+// depth behind the screen and the uv: constant over a triangle, SM4, no geometry shader); E.z: the depth as colour.
+// R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: feather, band, band ramp, flatten the bottom;
+// E: edge fill on, edge lo, edge hi, depth as colour.
 static const char k_rel_hlsl[] =
-    "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; };\n"
+    "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
-    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; };\n"
+    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float z : TEXCOORD1; float n : TEXCOORD2; };\n"
     "VO vs(uint id : SV_VertexID) {\n"
     "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
     "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
     "    float cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0);\n"
     "    float a = cx / G.z, b = cy / G.w;\n"
-    "    float d = D.SampleLevel(S, float2(a, b), 0);\n"
+    "    float n = saturate(D.SampleLevel(S, float2(a, b), 0));\n"
     "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
     "    float w = smoothstep(0, 1, e / F.x);\n"
-    "    if (Z.w > 0.5) w *= 1 - smoothstep(0, 1, (b - (1 - F.y - F.z)) / F.z);\n"
-    "    float t = d - Z.z; float z = w * (t < 0 ? Z.x * t : Z.y * t);\n"
+    "    if (F.w > 0.5) w *= 1 - smoothstep(0, 1, (b - (1 - F.y - F.z)) / F.z);\n"
+    "    float inv0 = 1 / Z.x; float inv = inv0 + Z.w * w * (Z.z + n * (Z.y - Z.z) - inv0);\n"
+    "    float t = 1 / (inv * Z.x);\n"
     "    float u = R.x + a * R.z, v = R.y + b * R.w;\n"
-    "    VO o; o.p = mul(MVP, float4((u - 0.5) * G.x, (0.5 - v) * G.y, z, 1)); o.t = float2(u, v); return o;\n"
+    "    VO o; o.p = mul(MVP, float4((u - 0.5) * G.x * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.z = Z.x * (t - 1); o.n = n; return o;\n"
     "}\n"
-    "float4 ps(VO i) : SV_Target { return float4(T.Sample(S, i.t).rgb, 1); }\n";
-struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; };
-static_assert(sizeof(RelCb) == 128, "RelCb: 128 bytes");
+    "float4 ps(VO i) : SV_Target {\n"
+    "    float3 c = T.Sample(S, i.t).rgb;\n"
+    "    if (E.x > 0.5) {\n"
+    "        float2 tx = ddx(i.t), ty = ddy(i.t); float zx = ddx(i.z), zy = ddy(i.z);\n"
+    "        float det = tx.x * ty.y - tx.y * ty.x; float ok = abs(det) > 1e-14 ? 1.0 : 0.0; det = ok > 0 ? det : 1.0;\n"
+    "        float2 g = float2((zx * ty.y - zy * tx.y) / det, (zy * tx.x - zx * ty.x) / det);\n"
+    "        float2 gm = float2(g.x / G.x, g.y / G.y);\n"
+    "        float s = length(gm);\n"
+    "        float f = ok * smoothstep(0, 1, (s - E.y) / (E.z - E.y));\n"
+    "        float2 dir = gm / max(s, 1e-6); float L = 2 * G.x / G.z;\n"
+    "        float3 b = T.SampleLevel(S, i.t + float2(dir.x * L / G.x, dir.y * L / G.y), 0).rgb;   // no gradient in a varying branch (SM4)\n"
+    "        c = lerp(c, b, f);\n"
+    "    }\n"
+    "    if (E.w > 0.5) { float n = i.n; c = saturate(float3(2 * n - 1, 1 - abs(2 * n - 1), 1 - 2 * n) + 0.1); }\n"
+    "    return float4(c, 1);\n"
+    "}\n";
+struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; float E[4]; };
+static_assert(sizeof(RelCb) == 144, "RelCb: 144 bytes");
 
 /// At Present, the first time a relief frame is wanted: the shaders and the fixed states.
 static void rel_gpu_init() {
@@ -12406,20 +12435,21 @@ static void rel_gpu_release() {
     drop(g_rel_dsrv); drop(g_rel_dtex); g_rel_dw = 0;
     for (int e = 0; e < 2; ++e) { if (g_rel_eye[e]) g_plain_srvs_forget(g_rel_eye[e]); drop(g_rel_rtv[e]); drop(g_rel_eye[e]); }
     drop(g_rel_dsv); drop(g_rel_z);
-    delete[] g_rel_up; g_rel_up = nullptr;
+    delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr;
 }
 /// The objects for this frame (made on first use, re-made when a size changes); false with g_rel_gpu_why.
 static bool rel_gpu_frame(uint32_t dw, UINT ew, UINT eh, DXGI_FORMAT fmt) {
     if (g_rel_dtex == nullptr || g_rel_dw != dw) {
         if (g_rel_dsrv) { g_rel_dsrv->Release(); g_rel_dsrv = nullptr; } if (g_rel_dtex) { g_rel_dtex->Release(); g_rel_dtex = nullptr; }
-        delete[] g_rel_up; g_rel_up = nullptr; g_rel_dw = 0;
+        delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr; g_rel_dw = 0;
         D3D11_TEXTURE2D_DESC td = {}; td.Width = dw; td.Height = relief::k_h; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8_UNORM;
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_dtex)) || g_rel_dtex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_dtex, nullptr, &g_rel_dsrv))) {
             snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the depth texture could not be made"); rel_gpu_release(); return false;
         }
         g_rel_up = new (std::nothrow) uint8_t[static_cast<size_t>(dw) * relief::k_h];
-        if (g_rel_up == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
+        g_rel_ema = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
+        if (g_rel_up == nullptr || g_rel_ema == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
         g_rel_dw = dw;
     }
     D3D11_TEXTURE2D_DESC like = {}; like.Width = ew; like.Height = eh; like.Format = fmt;
@@ -12446,7 +12476,7 @@ static ID3D11ShaderResourceView* rel_color_srv(ID3D11Texture2D* t) {
 }
 /// Both eyes: clear black, the grid with that eye's view and projection. Saves and restores what it touches.
 static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
-                     uint32_t nx, uint32_t ny, const relief::Shape& sh, bool flat_bottom) {
+                     uint32_t nx, uint32_t ny, const relief::Map& mp, int flags) {
     InEye2 guard;
     UidSaved s; uid_save(s);
     ID3D11ShaderResourceView* o_vsrv = nullptr; ID3D11SamplerState* o_vsmp = nullptr; ID3D11Buffer* o_vcb = nullptr;
@@ -12467,8 +12497,9 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         relief::mat4_mul(PV, M, cb.MVP);
         cb.R[0] = rc.u0; cb.R[1] = rc.v0; cb.R[2] = rc.du; cb.R[3] = rc.dv;
         cb.G[0] = W; cb.G[1] = H; cb.G[2] = static_cast<float>(nx); cb.G[3] = static_cast<float>(ny);
-        cb.Z[0] = sh.k_push; cb.Z[1] = sh.k_pop; cb.Z[2] = sh.pivot; cb.Z[3] = flat_bottom ? 1.f : 0.f;
-        cb.F[0] = relief::k_feather; cb.F[1] = relief::k_band; cb.F[2] = relief::k_band_ramp;
+        cb.Z[0] = mp.Ds; cb.Z[1] = mp.inv_n; cb.Z[2] = mp.inv_f; cb.Z[3] = mp.k;
+        cb.F[0] = relief::k_feather; cb.F[1] = relief::k_band; cb.F[2] = relief::k_band_ramp; cb.F[3] = (flags & 1) ? 1.f : 0.f;
+        cb.E[0] = (flags & 4) ? 1.f : 0.f; cb.E[1] = relief::k_edge_lo; cb.E[2] = relief::k_edge_hi; cb.E[3] = (flags & 16) ? 1.f : 0.f;
         D3D11_MAPPED_SUBRESOURCE ms = {};
         if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
         memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
@@ -12490,7 +12521,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
       const bool on = g_rel.on && g_rel.req;
-      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; }
+      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; g_relw_req.median = (g_rel_cfg.flags & 8) ? 1 : 0; }
     if (g_fmvw_kick) SetEvent(g_fmvw_kick);
     g_rel.want_posted = g_rel.want;
 }
@@ -12517,7 +12548,12 @@ static void rel_end(const char* how) {
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
         if (r.fades || r.loops) n = fmv::add(b, sizeof(b), n, " | fade-outs %u, loops (the count went back) %u", r.fades, r.loops);
-        n = fmv::add(b, sizeof(b), n, " | strength %.3f, flatten the bottom %d, tight field of view %d, offset %d", g_rel_cfg.strength, g_rel_cfg.flags & 1, (g_rel_cfg.flags >> 1) & 1, g_rel_cfg.offset);
+        {
+            const float Ds = g_xr_screen_dist, zn = Ds - relief::clampf(g_rel_cfg.pop, 0.f, Ds - relief::k_min_near), zf = Ds + g_rel_cfg.range;
+            n = fmv::add(b, sizeof(b), n, " | amount %.2f, range %.2f m behind / %.2f m in front of the screen at %.2f m (disparity %+.2f / %+.2f deg at 63 mm), smooth %.2f, flatten the bottom %d, tight field of view %d, edge fill %d, median %d, depth colour %d, offset %d",
+                         g_rel_cfg.amount, g_rel_cfg.range, g_rel_cfg.pop, Ds, relief::disparity_deg(zn, Ds), relief::disparity_deg(zf, Ds), g_rel_cfg.smooth, g_rel_cfg.flags & 1, (g_rel_cfg.flags >> 1) & 1,
+                         (g_rel_cfg.flags >> 2) & 1, (g_rel_cfg.flags >> 3) & 1, (g_rel_cfg.flags >> 4) & 1, g_rel_cfg.offset);
+        }
         if (r.by_fb[FB_GPU] && g_rel_gpu_why[0]) n = fmv::add(b, sizeof(b), n, " | relief pass: %s", g_rel_gpu_why);
         if (g_rel_lines == k_rel_lines_max) fmv::add(b, sizeof(b), n, " | %u fmv3d: lines this session: no more", k_rel_lines_max);
         fmv_put(b);
@@ -12638,13 +12674,23 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
     const relief::Tcfg tc;
-    const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.strength, 0.f, 0.25f), r.n);
-    if (o.upload) { InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w, 0); r.uploads++; }
+    const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.amount, 0.f, 1.f), r.n);
+    if (o.upload) {   // the temporal filter in display order (reset at a cut / after flat), then the texture
+        relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.ramp_start);
+        InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w, 0); r.uploads++;
+    }
     if (o.ramp_start) r.ramps++;   // a ramp in started this Present (a cut, or the first depth after flat)
     if (o.fading && !r.fading) r.fades++;
     r.fading = o.fading;
     r.rel_presents++; r.by_why[o.why]++; r.now_why = o.why; r.now_fb = FB_NONE; r.s_now = o.s; r.pivot_now = o.pivot;
-    const relief::Shape sh = relief::shape(o.s, sc.width, o.pivot);
+    {   // the range and pop-out drawn follow the settings smoothly (2 m/s, 0.5 m/s), like the amount
+        const float dts = static_cast<float>(relief::clampf(static_cast<float>(now - g_rel_t_prev), 0.f, 100.f) / 1000.0);
+        if (g_rel_range_now < 0.f) { g_rel_range_now = g_rel_cfg.range; g_rel_pop_now = g_rel_cfg.pop; }
+        g_rel_range_now += relief::clampf(g_rel_cfg.range - g_rel_range_now, -2.f * dts, 2.f * dts);
+        g_rel_pop_now += relief::clampf(g_rel_cfg.pop - g_rel_pop_now, -0.5f * dts, 0.5f * dts);
+        g_rel_t_prev = now;
+    }
+    const relief::Map mp = relief::make_map(g_xr_screen_dist, g_rel_range_now, g_rel_pop_now, o.s);
     D3D11_TEXTURE2D_DESC bd; e1->GetDesc(&bd);
     const uint32_t vh = s.vh ? s.vh : (r.w == relief::k_w43 ? 480u : 720u);
     const relief::Rect rc = relief::video_rect(s.vw ? s.vw : (r.w == relief::k_w43 ? 640u : 1280u), vh, bd.Width, bd.Height);
@@ -12653,12 +12699,12 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     // clamped to the eye's located field of view; drawn and submitted with that field of view, so the eye image's pixels go to the
     // video. A view that cannot be narrowed (a corner behind the eye, the screen out of view) keeps the eye's whole field of view.
     const float W = sc.width, H = sc.width * 9.f / 16.f;
-    const float pop = sh.k_pop * (1.f - sh.pivot), push = sh.k_push * sh.pivot;
+    const float t_near = relief::map_z(mp, 1.f, 1.f) / mp.Ds, t_far = relief::map_z(mp, 0.f, 1.f) / mp.Ds;   // the relief's frustum
     relief::Fov use[2]; bool tight = false;
     for (int e = 0; e < 2; ++e) {
         const relief::Fov full = { fov[e].l, fov[e].r, fov[e].u, fov[e].d };
         use[e] = full;
-        if ((g_rel_cfg.flags & 2) && relief::tight_fov(views[e].q, views[e].p, full, sc.q, sc.p, W, H, rc, pop, push, 0.03f, &use[e])) tight = true;
+        if ((g_rel_cfg.flags & 2) && relief::tight_fov(views[e].q, views[e].p, full, sc.q, sc.p, W, H, rc, mp.Ds, t_near, t_far, 0.03f, &use[e])) tight = true;
     }
     r.tight_now = tight;
     {
@@ -12676,19 +12722,24 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     }
     XrFovTan draw_fov[2];
     for (int e = 0; e < 2; ++e) draw_fov[e] = XrFovTan{ use[e].l, use[e].r, use[e].u, use[e].d };
-    rel_draw(color, views, draw_fov, sc, rc, r.w / 2, relief::k_h / 2, sh, (g_rel_cfg.flags & 1) != 0);
+    rel_draw(color, views, draw_fov, sc, rc, r.w / 2, relief::k_h / 2, mp, g_rel_cfg.flags);
     *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
 
-/// FMV relief (ABI 41): the settings, from managed every frame. on: ini fmv_depth; strength: 0..0.25 (default 0.08); flags bit
-/// 0: flatten the bottom 15 % (subtitles), bit 1: the tight field of view (ini fmv_depth_tight_fov, default 1; review SF-1);
-/// offset: the Debug sync knob, depth frames (-3..3; + shows a later one; session-only, review N6).
-extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float strength, int flags, int offset) {
+/// FMV relief (ABI 42): the settings, from managed every frame. on: ini fmv_depth; amount: 0..1 (ini fmv_depth_amount, default
+/// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
+/// median, 16 the depth as colour (Debug); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
+/// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
+/// default 0.15); smooth: the temporal filter (0..0.95, default 0.6).
+extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth) {
     g_rel_cfg.on = on ? 1 : 0;
-    g_rel_cfg.strength = std::isfinite(strength) ? relief::clampf(strength, 0.f, 0.25f) : 0.08f;
-    g_rel_cfg.flags = flags & 3;
+    g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
+    g_rel_cfg.flags = flags & 31;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
+    g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
+    g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;
+    g_rel_cfg.smooth = std::isfinite(smooth) ? relief::clampf(smooth, 0.f, 0.95f) : 0.6f;
 }
 /// FMV relief (ABI 41): F8's text (render thread, from the overlay). which 0: the Debug line "FMV 3D: ..."; 1: the main
 /// window's one-line note (empty when there is nothing to say). Returns the length written (NUL-terminated, cut to cap).
@@ -12713,8 +12764,8 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
     if (!r.on) { n = fmv::add(buf, c, 0, "FMV 3D: no movie playing%s%s%s", g_rel_last[0] ? " (" : "", g_rel_last, g_rel_last[0] ? ")" : ""); return static_cast<int>(n); }
     n = fmv::add(buf, c, 0, "FMV 3D: %s frame %d", r.name, r.want);
     if (r.n) n = fmv::add(buf, c, n, "/%u", r.n);
-    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s%s, strength %.3f, pivot %.2f, %.2f rows a video row (%s fov)", r.fading ? "fading to " : "", relief::why_text(r.now_why),
-                                                       r.s_now, r.pivot_now, r.rows_tight, r.tight_now ? "tight" : "whole");
+    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s%s, amount %.2f, %.1f m behind / %.2f m in front, %.2f rows a video row (%s fov)", r.fading ? "fading to " : "", relief::why_text(r.now_why),
+                                                       r.s_now, g_rel_range_now, g_rel_pop_now, r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
     if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
