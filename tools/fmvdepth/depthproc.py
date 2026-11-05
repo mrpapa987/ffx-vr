@@ -11,6 +11,7 @@ SPDX-License-Identifier: MIT (part of the FFX VR repository).
     ShotBuffer         a shot's float depth maps (RAM, then a temporary file)
     shot_ranges        one depth range per shot segment (robust percentiles over all its frames), as lo/hi per frame
     quantise           the 8-bit rule of FORMAT.md
+    temporal_bilateral a centred, edge-preserving temporal filter (per shot)
     edge_snap          the optional light edge filter
 """
 import numpy as np
@@ -132,8 +133,8 @@ class Tag:
     """What the converter knows about one frame before depth: cut (a shot starts here: FF_CUT, the model's windows
     restart), raw_cut (the detector's own verdict, before the flash test), blank (a near-uniform picture: black,
     white, a flat colour), flash (a short bright / changed run inside a shot that returns to the picture before it),
-    small (the detector's 64x36 luma), thumb (the index thumbnail), guide (a luma image at the depth's size, 0..1, for
-    the temporal filter; None until set)."""
+    small (the detector's 64x36 luma), thumb (the index thumbnail), guide (a uint8 luma image at the depth's size, for
+    the temporal filter; None when not asked for)."""
     __slots__ = ('cut', 'raw_cut', 'blank', 'flash', 'small', 'pre', 'diff', 'thumb', 'guide')
 
     def __init__(self, **kw):
@@ -162,7 +163,7 @@ def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, sa
     of the shot's depth range). A cut into or out of a run of blank frames that does not come back stays a cut.
     A detector cut between two non-blank frames whose 64x36 lumas correlate >= same_corr is the same picture
     brighter or darker (a fast fade steps past the threshold every frame): not a cut.
-    guide_size (w, h): also make each frame's luma at that size (Tag.guide, float32 0..1)."""
+    guide_size (w, h): also make each frame's luma at that size (Tag.guide, uint8)."""
     pend = []                     # [frame, Tag], oldest first
     prev_small = None
     prev_blank = True
@@ -177,7 +178,8 @@ def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, sa
                 diff=detector.last_diff, thumb=thumb)
         prev_blank = blank
         if guide_size is not None:
-            t.guide = area_resize(luma(f), guide_size[0], guide_size[1]) * np.float32(1.0 / 255.0)
+            g = area_resize(luma(f, 2 if min(f.shape[:2]) >= 2 * guide_size[1] else 1), guide_size[0], guide_size[1])
+            t.guide = np.clip(g + 0.5, 0, 255).astype(np.uint8)
         prev_small = small
         pend.append([f, t])
         # does this frame close a flash that started at a pending raw cut?
@@ -410,3 +412,77 @@ def edge_snap(depth, strength=0.08):
     edge = (mx - mn) > strength * max(float(p98 - p2), 1e-6)
     snapped = np.where(d - mn < mx - d, mn, mx)
     return np.where(edge, snapped, d).astype(np.float32)
+
+
+# ==================================================================== temporal filter (centred, edge-preserving)
+def _guide01(g):
+    if g is None:
+        return None
+    g = np.asarray(g)
+    return g.astype(np.float32) * np.float32(1.0 / 255.0) if g.dtype == np.uint8 else g.astype(np.float32, copy=False)
+
+
+def _tbil_pass(items, radius, sigma_t, sigma_n, sigma_y):
+    """One pass of temporal_bilateral over a stream of (n, guide, reliable); yields the same triples, filtered."""
+    a_n = np.float32(0.5 / (sigma_n * sigma_n))
+    a_y = np.float32(0.5 / (sigma_y * sigma_y)) if sigma_y > 0 else None
+    tw = {d: float(0.5 * d * d / (sigma_t * sigma_t)) for d in range(-radius, radius + 1)}
+    buf = []                  # (n, guide float or None, reliable)
+    base = 0                  # stream index of buf[0]
+    t = 0                     # next output
+
+    def out(t):
+        c_n, c_g, c_rel = buf[t - base]
+        acc = np.zeros_like(c_n)
+        wsum = np.zeros_like(c_n)
+        for s in range(max(base, t - radius), min(base + len(buf), t + radius + 1)):
+            n, g, rel = buf[s - base]
+            if s == t:
+                w = np.float32(1.0 if c_rel else 1e-3)
+                acc += w * n
+                wsum += w
+                continue
+            if not rel:
+                continue
+            if not c_rel:             # this frame's own value is junk: its reliable neighbours by time alone
+                w = np.float32(np.exp(-tw[s - t]))
+                acc += w * n
+                wsum += w
+                continue
+            e = (n - c_n) ** 2 * a_n + np.float32(tw[s - t])
+            if a_y is not None and g is not None and c_g is not None:
+                e += (g - c_g) ** 2 * a_y
+            w = np.exp(-e)
+            acc += w * n
+            wsum += w
+        return acc / wsum, c_g, c_rel
+
+    for n, g, rel in items:
+        buf.append((np.asarray(n, np.float32), _guide01(g), bool(rel)))
+        while t + radius < base + len(buf):
+            yield out(t)
+            t += 1
+            while base < t - radius:
+                buf.pop(0)
+                base += 1
+    while t < base + len(buf):
+        yield out(t)
+        t += 1
+
+
+def temporal_bilateral(items, radius=3, passes=2, sigma_t=2.0, sigma_n=8.0 / 255, sigma_y=0.05):
+    """A centred (zero-phase, no lag) edge-preserving temporal filter over one shot.
+
+    items: (n, guide, reliable) per frame in order: n the normalised depth (float, 1 = the segment's range), guide the
+    frame's luma at the same size (uint8 or 0..1 float; None to filter by depth alone), reliable False for a flash or
+    blank frame. Each output pixel is the weighted mean of the same pixel in frames t-radius .. t+radius, the weight
+    exp(-dt^2 / 2 sigma_t^2 - dn^2 / 2 sigma_n^2 - dY^2 / 2 sigma_y^2): steady depth averages, while a pixel whose depth
+    or luma changes (something moving across it) keeps its own value, so motion passes without a trail. Unreliable
+    frames give no weight to others and take theirs from their neighbours. `passes` passes (each one needs `radius`
+    frames more on each side). Run it per shot: nothing crosses a cut. Yields the filtered n per frame, in order,
+    radius x passes frames late."""
+    it = ((np.asarray(n, np.float32), g, rel) for n, g, rel in items)
+    for _ in range(passes):
+        it = _tbil_pass(it, radius, sigma_t, sigma_n, sigma_y)
+    for n, _g, _rel in it:
+        yield n

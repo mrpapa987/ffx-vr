@@ -28,6 +28,7 @@ Options:
     --frame N             with --preview: also a PNG of frame N (video | depth)
     --gray                previews in grey instead of a colour map
     --edge-filter none|snap   the optional light edge filter (default none)
+    --temporal on|off     the centred, edge-preserving temporal filter within each shot (default on)
     --model vda-small|fake    fake: no torch / GPU, a pipeline check whose output is NOT depth
     --list                show what would be converted and stop
 """
@@ -59,6 +60,7 @@ FLASH_LEN = 4             # a raw cut whose picture comes back within this many 
 BLANK_STD = 2.5           # a frame whose 64x36 luma has a smaller standard deviation is blank (levels)
 NORM_PCTS = (0.1, 99.9)   # a shot segment's depth range: these percentiles of all its frames' pixels...
 NORM_HEADROOM = 0.02      # ... widened by this share of the range at each end
+TEMPORAL = {'radius': 3, 'passes': 2, 'sigma_t': 2.0, 'sigma_n': 8.0 / 255, 'sigma_y': 0.05}   # --temporal on
 MANIFEST = 'manifest.json'
 EXIT_OOM = 3
 PREVIEW_DEFAULT = 'SIN_us,BTS_us'
@@ -165,6 +167,7 @@ def settings_of(a, model, weights_sha):
         'cut': {'threshold': a.cut_threshold, 'ratio': a.cut_ratio, 'flash_len': FLASH_LEN, 'blank_std': BLANK_STD,
                 'same_corr': 0.9},
         'edge_filter': a.edge_filter,
+        'temporal': dict(TEMPORAL, sigma_n=8.0) if a.temporal == 'on' else 'off',
         'codec': fvd.CODEC_NAMES[a.codec_id],
         'predictor': 'left',
     }
@@ -266,16 +269,18 @@ class PipeConfig:
     """The per-video depth settings process_video() needs (from the command line, see pipe_config)."""
 
     def __init__(self, src_w, src_h, out_w, out_h, cut_threshold=28.0, cut_ratio=3.0, flash_len=4, blank_std=2.5,
-                 pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none'):
+                 pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none', temporal=None):
         self.src_w, self.src_h, self.out_w, self.out_h = src_w, src_h, out_w, out_h
         self.edge_filter = edge_filter
+        self.temporal = temporal          # None (off) or temporal_bilateral's keyword arguments
         self.cut_threshold, self.cut_ratio, self.flash_len, self.blank_std = cut_threshold, cut_ratio, flash_len, blank_std
         self.pcts, self.headroom, self.spill_dir = tuple(pcts), headroom, spill_dir
 
 
 def pipe_config(a, src_w, src_h, out_w, out_h, spill_dir=None):
     return PipeConfig(src_w, src_h, out_w, out_h, a.cut_threshold, a.cut_ratio, FLASH_LEN, BLANK_STD,
-                      NORM_PCTS, NORM_HEADROOM, spill_dir, a.edge_filter)
+                      NORM_PCTS, NORM_HEADROOM, spill_dir, a.edge_filter,
+                      dict(TEMPORAL) if a.temporal == 'on' else None)
 
 
 def _count(stats, k, n=1):
@@ -289,14 +294,16 @@ def process_video(frames, model, c, stats=None):
     frames: the video's RGB frames at the model's input size, in order. model: window.windowed_depth's model.
     Yields (q, flags, p2, p98, lo, hi, thumb) for every frame in order, one shot late (a shot's range needs all of it):
       tag_frames (cuts with the flash test, blank frames) -> shot_windows (VDA restarted at every cut) -> ShotBuffer ->
-      find_transitions + shot_ranges (one range per segment; dissolves cross-faded) -> quantise.
+      find_transitions + shot_ranges (one range per segment; dissolves cross-faded) -> normalised n ->
+      temporal_bilateral (centred +-3 frames, 2 passes, inside the shot only; c.temporal None: off) -> 8 bits.
     stats (a dict), if given, collects counts: frames, cuts, flash_frames, blank_frames, dissolves, fades, dips,
     segments, flat_frames, clipped (pixels at 0 or 255)."""
     det = depthproc.CutDetector(c.src_w, c.src_h, c.cut_threshold, c.cut_ratio)
     tags = {}
 
     def items():
-        for i, (f, t) in enumerate(depthproc.tag_frames(frames, det, c.flash_len, c.blank_std)):
+        guide = (c.out_w, c.out_h) if c.temporal and c.temporal.get('sigma_y', 0) > 0 else None
+        for i, (f, t) in enumerate(depthproc.tag_frames(frames, det, c.flash_len, c.blank_std, guide_size=guide)):
             tags[i] = t
             yield i, f
     for start, shot in shot_windows(items(), model, is_start=lambda x: tags[x[0]].cut, frame_of=lambda x: x[1]):
@@ -316,9 +323,16 @@ def process_video(frames, model, c, stats=None):
             _count(stats, 'segments', len(info['starts']))
             for tr in info['transitions']:
                 _count(stats, tr['kind'] + 's')
-            for k in range(len(buf)):
+            def normalised():
+                for k in range(len(buf)):
+                    rng = max(hi[k] - lo[k], depthproc.range_eps(hi[k]))
+                    yield ((buf[k] - np.float32(lo[k])) * np.float32(1.0 / rng), st[k].guide,
+                           not (st[k].blank or st[k].flash))
+            ns = (depthproc.temporal_bilateral(normalised(), **c.temporal) if c.temporal else
+                  (n for n, _g, _r in normalised()))
+            for k, n in enumerate(ns):
                 t = st[k]
-                q = depthproc.quantise(buf[k], lo[k], hi[k])
+                q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
                 fl = fvd.FF_CUT if k == 0 else 0
                 if info['blend'][k]:
                     fl |= fvd.FF_BLEND
@@ -491,6 +505,7 @@ def parse_args(argv):
     p.add_argument('--fp32', action='store_true', help='full precision (slower, more VRAM)')
     p.add_argument('--attention', default='sdpa', choices=['sdpa', 'plain'])
     p.add_argument('--edge-filter', default='none', choices=['none', 'snap'])
+    p.add_argument('--temporal', default='on', choices=['on', 'off'], help='the centred temporal filter (default on)')
     p.add_argument('--codec', default='auto', choices=['auto', 'xpress', 'zlib'])
     p.add_argument('--cut-threshold', type=float, default=28.0)
     p.add_argument('--cut-ratio', type=float, default=3.0)

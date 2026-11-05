@@ -56,7 +56,7 @@ class TagTest(unittest.TestCase):
     def test_guide(self):
         t = tags_of([scene_img(1)], guide_size=(OW, OH))
         self.assertEqual(t[0].guide.shape, (OH, OW))
-        self.assertLessEqual(float(t[0].guide.max()), 1.0)
+        self.assertEqual(t[0].guide.dtype, np.uint8)
 
 
 class TransitionTest(unittest.TestCase):
@@ -185,6 +185,56 @@ class RangeTest(unittest.TestCase):
             b.close()
 
 
+class TemporalTest(unittest.TestCase):
+    def run_filter(self, maps, guides=None, rel=None, **kw):
+        n = len(maps)
+        items = [(maps[i], None if guides is None else guides[i], True if rel is None else rel[i]) for i in range(n)]
+        return list(dp.temporal_bilateral(iter(items), **kw))
+
+    def test_count_and_static_noise(self):
+        rng = np.random.default_rng(0)
+        maps = [np.float32(0.4) + rng.normal(0, 3 / 255, (20, 30)).astype(np.float32) for _ in range(40)]
+        out = self.run_filter(maps)
+        self.assertEqual(len(out), 40)
+        step_in = np.mean([np.abs(maps[i] - maps[i - 1]).mean() for i in range(1, 40)])
+        step_out = np.mean([np.abs(out[i] - out[i - 1]).mean() for i in range(5, 35)])
+        self.assertLess(step_out, 0.4 * step_in)
+
+    def test_linear_change_has_no_lag(self):
+        maps = [np.full((4, 4), 0.2 + 0.002 * t, np.float32) for t in range(30)]
+        out = self.run_filter(maps)
+        for t in range(6, 24):                     # away from the ends: symmetric weights keep a ramp exactly
+            np.testing.assert_allclose(out[t], maps[t], atol=1e-6)
+
+    def test_moving_edge_passes(self):
+        """A near block moving 3 px a frame: no trail (the depth difference stops the averaging)."""
+        maps, guides = [], []
+        for t in range(30):
+            d = np.full((4, 120), 0.2, np.float32)
+            d[:, 10 + 3 * t:40 + 3 * t] = 0.8
+            maps.append(d)
+            guides.append(np.where(d > 0.5, 200, 80).astype(np.uint8))
+        out = self.run_filter(maps, guides)
+        err = max(float(np.abs(out[t] - maps[t]).max()) for t in range(30))
+        self.assertLess(err, 0.01)
+        out2 = self.run_filter(maps)               # depth alone (no guide) also stops at a 150-level step
+        self.assertLess(max(float(np.abs(out2[t] - maps[t]).max()) for t in range(30)), 0.01)
+
+    def test_unreliable_frame_takes_its_neighbours(self):
+        maps = [np.full((3, 3), 0.5, np.float32) for _ in range(9)]
+        maps[4] = np.full((3, 3), 0.95, np.float32)     # a flash: the model saw a white wall
+        rel = [i != 4 for i in range(9)]
+        out = self.run_filter(maps, rel=rel, passes=1)
+        self.assertAlmostEqual(float(out[4].mean()), 0.5, places=2)
+        for i in (3, 5):
+            self.assertAlmostEqual(float(out[i].mean()), 0.5, places=5)   # the flash leaks into nobody
+
+    def test_short_shots(self):
+        for n in (1, 2, 5):
+            out = self.run_filter([np.full((2, 2), i, np.float32) for i in range(n)])
+            self.assertEqual(len(out), n)
+
+
 class ProcessVideoTest(unittest.TestCase):
     """The whole per-video pipeline on the synthetic FMV (cuts, a flash, a dissolve, a dip), with the stub model."""
 
@@ -192,7 +242,7 @@ class ProcessVideoTest(unittest.TestCase):
     def setUpClass(cls):
         cls.v = synth.Video(W, H, scale=0.5)
         cls.model = synth.StubModel(cls.v, sigma_edge=1.0, out=(OW, OH))
-        cfg = convert.PipeConfig(1280, 720, OW, OH)
+        cfg = convert.PipeConfig(1280, 720, OW, OH, temporal=dict(convert.TEMPORAL))
         cls.stats = {}
         cls.out = list(convert.process_video(cls.v.frames(), cls.model, cfg, cls.stats))
 
