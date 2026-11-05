@@ -72,14 +72,23 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>push_player, the field, first person, every 10th scan tick: is the follow pick the game's player actor
     /// ([0x1300788])? A mismatch is logged (two checks in a row, one line per 10 s, the same pair again after 2 min, 50 a
-    /// session); the pick is not changed (diagnostic only, for now).</summary>
+    /// session); the pick is not changed (diagnostic only, for now).
+    /// lean2: riding is not a mismatch. On the chocobo the game's player actor is the bird (f051) and we follow the rider, who
+    /// is attached to it (+0x19C = the bird's actor; ride.cs). Such a check counts as riding, apart from the mismatches, and
+    /// logs nothing. ride_probe runs after this check, so the attachment is read here (one 4-byte read, only when the two
+    /// differ). The pick attached to some other actor is still a mismatch.</summary>
     private void gates_pick_check(Actor* actors, int pick) {
         if (!gs_player(out uint player)) return;
         nint pa = pick >= 0 ? (nint)(actors + pick) : 0;
-        if (!_gs_pick.Step(pa, (nint)player, _now)) return;
+        bool riding = false;
+        if (pa != 0 && player != 0 && pa != (nint)player && _fn_safe_read != null) {
+            nint par = 0;
+            riding = _fn_safe_read((byte*)pa + 0x19C, &par, 4) != 0 && par != 0 && par == (nint)player;
+        }
+        if (!_gs_pick.Step(pa, (nint)player, _now, riding)) return;
         long d = (long)player - (long)(nint)actors; int gi = d >= 0 && d % sizeof(Actor) == 0 && d / sizeof(Actor) < 48 ? (int)(d / sizeof(Actor)) : -1;
         string gn = gi >= 0 && read(actors + gi, out Actor ga) ? I($"actor {gi} '{actor_name(ga.chr_name)}'") : I($"0x{player:X8} (not in the actor table)");
-        string m = I($"first person: the follow pick ({(pick >= 0 ? _fp_how : "none")}) is not the game's player actor ({gn}, [0x1300788]) on map {map_name()}: the pick is kept (a diagnostic; checks {_gs_pick.checks}, agree {_gs_pick.agree}, differ {_gs_pick.mismatch}, no control {_gs_pick.no_control}){(_gs_pick.lines == PickCheck.k_lines_max ? " (no more of these lines this session)" : "")}");
+        string m = I($"first person: the follow pick ({(pick >= 0 ? _fp_how : "none")}) is not the game's player actor ({gn}, [0x1300788]) on map {map_name()}: the pick is kept (a diagnostic; checks {_gs_pick.checks}, agree {_gs_pick.agree}, differ {_gs_pick.mismatch}, no control {_gs_pick.no_control}, riding {_gs_pick.riding}){(_gs_pick.lines == PickCheck.k_lines_max ? " (no more of these lines this session)" : "")}");
         _gs_pick_last = m;   // F8 shows it in every profile
         if (diag_any()) { _logger.Info(m); d7_log(m); }   // review N5: a pure diagnostic, logged only with a diagnostic key on
     }
@@ -94,7 +103,7 @@ public sealed unsafe partial class FFXVRModule {
         sb.Append(I($" | text byte 0x{_gs_text_byte:X2}, windows open 0x{_gs_text.open:X2} shown 0x{_gs_text.shown:X2}"));
         sb.Append(_gs_text.choice_slot >= 0 ? I($" | CHOICE BOX: slot {_gs_text.choice_slot}, row {_gs_text.choice_row}") : " | no choice box");
         if (_gs_text.odd != 0) sb.Append(I($" | pointers outside the pools 0x{_gs_text.odd:X4}"));
-        sb.Append(I($" | follow pick check: agree {_gs_pick.agree}, differ {_gs_pick.mismatch}, no control {_gs_pick.no_control} of {_gs_pick.checks}"));
+        sb.Append(I($" | follow pick check: agree {_gs_pick.agree}, differ {_gs_pick.mismatch}, no control {_gs_pick.no_control}, riding {_gs_pick.riding} of {_gs_pick.checks}"));
         return sb.ToString();
     }
 }
@@ -157,15 +166,19 @@ internal static class GameGates {
 }
 
 /// <summary>The follow pick against the game's player actor (pure; gates_pick_check). Step returns true when a mismatch line
-/// is due: the second mismatching check in a row, 10 s after the last line (2 min for the same pair), 50 lines a session.</summary>
+/// is due: the second mismatching check in a row, 10 s after the last line (2 min for the same pair), 50 lines a session.
+/// lean2: ride = the pick rides the player actor (attached to it): counted in riding, not a mismatch, never a line; it ends a
+/// streak as an agreement does.</summary>
 internal struct PickCheck {
     public const int k_lines_max = 50; public const double k_gap = 10.0, k_same_gap = 120.0;
-    public int checks, agree, mismatch, no_control, lines;
+    public int checks, agree, mismatch, no_control, riding, lines;
     int _streak; nint _lp, _lpl; double _last_t;
-    public bool Step(nint pick, nint player, double now) {
+    public bool Step(nint pick, nint player, double now) => Step(pick, player, now, false);
+    public bool Step(nint pick, nint player, double now, bool ride) {
         checks++;
         if (player == 0) { no_control++; _streak = 0; return false; }
         if (pick == player) { agree++; _streak = 0; return false; }
+        if (ride) { riding++; _streak = 0; return false; }
         mismatch++; _streak++;
         if (_streak < 2 || lines >= k_lines_max) return false;
         bool same = pick == _lp && player == _lpl;
