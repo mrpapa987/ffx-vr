@@ -20,6 +20,9 @@ namespace FFXVR;
 //   fmv_depth_median     0 / 1 (default 1; Debug): a 3x3 median on each decoded depth frame (speckle);
 //   fmv_depth_edges      0 / 1 (default 1; Debug): the edge fill: a triangle stretched across a depth edge shows the colour of
 //                        the far side instead of a smear;
+//   fmv_depth_edge_band  0..0.15 (default 0.04; Debug): the band at the border over which content in front of the screen is
+//                        brought back to the screen plane; content behind it is never feathered (the window rule, owner
+//                        test round 3: the old feather on everything made a "shelf" at the top edge);
 //   depth as colour      Debug, session-only: the depth drawn as colour (red near, green middle, blue far) to judge it;
 //   fmv_depth_flat_subs  0 / 1 (default 0): the bottom 15 % of the video stays flat (the subtitles are in the same image and
 //                        would otherwise lie on the relief);
@@ -29,7 +32,7 @@ namespace FFXVR;
 //                        video frame + this (a sync test knob).
 // ABI 41: ffxvr_fmv3d_set (every frame from push_all) and ffxvr_fmv3d_text (the text, only while it is drawn); ABI 42:
 // ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), flags 1 flatten the bottom, 2 tight fov, 4 edge fill, 8 median,
-// 16 depth as colour.
+// 16 depth as colour. ABI 43: + edge (the edge band).
 public sealed unsafe partial class FFXVRModule {
 
     private bool  _fmv_depth = false;              // ini fmv_depth
@@ -41,10 +44,11 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
     private bool  _fmv_depth_edges = true;         // ini fmv_depth_edges (Debug)
     private bool  _fmv_depth_colour = false;       // Debug, session-only
+    private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
     private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Debug)
     private int   _fmv_depth_offset = 0;           // Debug, session-only (not in the ini)
-    private delegate* unmanaged[Cdecl]<int, float, int, int, float, float, float, void> _fn_fmv3d_set;   // ABI 42
+    private delegate* unmanaged[Cdecl]<int, float, int, int, float, float, float, float, void> _fn_fmv3d_set;   // ABI 43
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_fmv3d_text;         // ABI 41: (which, buf, cap) -> length
     private readonly byte[][] _fmv3d_raw = { new byte[600], new byte[600] };         // the bytes last turned into _fmv3d_str (per which)
     private readonly int[] _fmv3d_len = { -1, -1 };
@@ -53,7 +57,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>From push_all, every frame (applies at the next Present).</summary>
     private void fmv3d_push() {
         int flags = (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0) | (_fmv_depth_edges ? 4 : 0) | (_fmv_depth_median ? 8 : 0) | (_fmv_depth_colour ? 16 : 0);
-        if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_amount, flags, _fmv_depth_offset, _fmv_depth_range, _fmv_depth_pop, _fmv_depth_smooth);
+        if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_amount, flags, _fmv_depth_offset, _fmv_depth_range, _fmv_depth_pop, _fmv_depth_smooth, _fmv_depth_edge_band);
     }
 
     /// <summary>The ini's old linear strength (0..0.25, default 0.08) as the new amount, unless fmv_depth_amount was read.</summary>
@@ -101,7 +105,8 @@ public sealed unsafe partial class FFXVRModule {
         if (_fmv_depth) {
             ImGui.Checkbox("FMV 3D: depth as colour (red near, blue far)##fmv3d", ref _fmv_depth_colour); ImGui.SameLine();
             ImGui.Checkbox("edge fill##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
-            ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median);
+            ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
+            ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0f, 0.15f, "%.3f");
             ImGui.Checkbox("FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)##fmv3d", ref _fmv_depth_tight_fov);
             ImGui.SameLine(); ImGui.SetNextItemWidth(100);
             ImGui.SliderInt("depth frame offset (sync test, not saved)##fmv3d", ref _fmv_depth_offset, -3, 3);
