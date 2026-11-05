@@ -4050,22 +4050,40 @@ shot's last window is filled with copies of its last frame) get the area shrink,
 runs ~1.45 maps per output frame (the 10 keyframe slots of every window after the first are real and needed). With a
 stand-in GPU (sleeping, on the reviewer's edge-dense maps at 18 % step pixels, 2 threads on this 2-core box): 173 ->
 115 ms a frame when the CPU is the bottleneck (here), and 312 ms against 300 ms of GPU alone when the GPU is: the edge
-pass is hidden, what remains is the last window of each shot (GPU idle during its edges, ~0.1-0.3 s a shot).
+pass is hidden, what remains is the last window of each shot: the next shot's first window is only submitted after
+it, so the GPU waits for that window's edges (~30 real maps: ~0.3-0.4 s at 518, ~0.8-1.2 s at 714 on the owner's
+CPU by the per-map figures below; round-2 review R2-N-3).
 
 Edge-path cost per map, one core of this 2.1 GHz Xeon: 38 ms on the synthetic video (few edges); on edge-dense maps
 88 / 148 / 339 ms at 8 / 18 / 35 % step pixels (924x518) and 190 / 416 / 665 ms at 1274x714 (the reviewer's
 t_dense.py). How dense VDA-Small's maps of FFX's CG are is not known (10-20 % assumed). Model for the owner's PC (a
 P-core ~2x this one, 8 threads ~6x one P-core; the 3080 Ti at 16.4 ms a frame in 0.1, +20 % for per-shot windows):
 
-| settings | GPU a frame | edge pass a frame (10-20 % dense) | bound | 86,353 frames |
-|---|---|---|---|---|
-| defaults (518) | ~20 ms | 13-18 ms | GPU | ~35-45 min (up to ~1 h at 35 % dense: CPU-bound) |
-| -Flip | ~40 ms | 13-18 ms | GPU | ~1-1.1 h |
-| -InputSize 714 (model 2.2-2.7x) | 44-54 ms | 30-51 ms | mostly GPU | ~1.1-1.4 h |
-| -InputSize 714 -Flip | 88-108 ms | 30-51 ms | GPU | ~2.2-2.8 h |
+| settings | GPU a frame | edge pass a frame (10-20 % dense) | bound | shot-end gaps | 86,353 frames |
+|---|---|---|---|---|---|
+| defaults (518) | ~20 ms | 13-18 ms | GPU | ~5-7 min | ~35-45 min (up to ~1 h at 35 % dense: CPU-bound) |
+| -Flip | ~40 ms | 13-18 ms | GPU | ~5-7 min | ~1.1-1.2 h |
+| -InputSize 714 (model 2.2-2.7x) | 44-54 ms | 30-51 ms | mostly GPU | ~13-20 min | ~1.3-1.6 h |
+| -InputSize 714 -Flip | 88-108 ms | 30-51 ms | GPU | ~13-20 min | ~2.3-2.9 h |
 
-(The review's estimates for the unoverlapped pipeline were 45-60 min and 2.5-3.5 h; the model factors are estimates
-from fmv3d-models.md and the review; nothing was run on a GPU.)
+Assumptions, all estimates: a P-core ~2x this Xeon and 8 threads ~6x one P-core; 10-20 % of the pixels near a depth
+step; VDA-S at 714 costing 2.2-2.7x its 518 time; **~1,000 shots in the US list** (86k frames / ~90 a shot: a guess,
+the converter's log will give the real count), each costing one shot-end gap. The review's estimates for the
+unoverlapped pipeline were 45-60 min and 2.5-3.5 h; the model factors are from fmv3d-models.md and the review; nothing
+was run on a GPU. (Removing the gap would need the next shot's first window submitted before the last one's result
+is taken, across the shot boundary: not done.)
+
+**Ctrl+C (round-2 review R2-S-1).** On Windows a plain Queue.get() / Thread.join() is not interrupted by Ctrl+C before
+Python 3.14 (cpython #74157, #139689), and the launcher accepts 3.10-3.13; so the caller's thread waits for the next
+shot, and for the producer on the way out, in 0.25 s steps. The producer checks the stop flag after every depth map of
+a shot (within one model window), and ffmpeg, which runs without a console (CREATE_NO_WINDOW) and never sees Ctrl+C,
+is killed at once (FrameReader.kill). So Ctrl+C lands within a quarter of a second and the run is wound up within one
+model window (a second or a few at 714 + flip); the executors' final shutdown waits for a model call in flight.
+
+Left as it is (R2-N-4): a fade of 28+ levels a frame during a fast pan (8+ model px a frame) leaves the pan in the
+affine residual, so same_picture says "different" and every step of that fade becomes a cut (1-frame shots). Rare in
+FFX; if it shows up, accept a step whose brightness change has the same sign as the detector's previous step (a fade
+is a ramp) at a lower correlation.
 
 Not verified here: VDA with full-resolution output (the same forward, without the area resize: ~1.9 MB a frame over
 PCIe), VRAM and speed at 714, real VDA edges (the stub's blur of 2 model px is a guess; sharpen_edges handles 1-4

@@ -16,7 +16,8 @@
 # Python 3.10 - 3.13 (py launcher), ffmpeg + ffprobe (winget install Gyan.FFmpeg), ~1.5 GB free for the depth (US list) and
 # ~5 GB for the environment. Time: converter 0.1 took 22 min for the US list on the owner's 3080 Ti; 0.2 adds a CPU
 # edge pass (overlapped with the model) and per-shot windows: estimate ~35-45 min at the defaults (up to ~1 h on very
-# edge-dense depth), ~1-1.1 h with -Flip, ~1.1-1.4 h with -InputSize 714, ~2.2-2.8 h with both (overnight; estimates).
+# edge-dense depth), ~1.1-1.2 h with -Flip, ~1.3-1.6 h with -InputSize 714, ~2.3-2.9 h with both (overnight;
+# estimates, assuming ~1,000 shots in the list).
 #
 # Run with (from the repository):
 #   powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1 -Preview           (S0: SIN_us + BTS_us and previews)

@@ -217,7 +217,7 @@ Requirements:
 | Python | 3.10 - 3.13 (`winget install Python.Python.3.12`); the script makes its own venv |
 | ffmpeg + ffprobe | any recent build on PATH (`winget install Gyan.FFmpeg`), or `-Ffmpeg <path>` |
 | Disk | ~1.2-1.5 GB of `.fvd` for the US list (estimate from a proxy; measure on the first run), plus ~3-5 GB for `%LOCALAPPDATA%\ffxvr\fmvdepth-venv` (PyTorch with CUDA) and ~110 MB of weights |
-| Time | US list (61 videos, 86,353 frames, 48 min of video) on a 3080 Ti + i9-12900KF: converter 0.1 took 22 min. 0.2 (per-shot windows, sharper edges on the CPU while the GPU runs the next window) is estimated at ~35-45 min with the defaults (up to ~1 h if FFX's depth turns out very edge-dense), ~1-1.1 h with `-Flip`, ~1.1-1.4 h with `-InputSize 714`, ~2.2-2.8 h with both (an overnight job; estimates until measured). `-InputSize 392` is faster. |
+| Time | US list (61 videos, 86,353 frames, 48 min of video) on a 3080 Ti + i9-12900KF: converter 0.1 took 22 min. 0.2 (per-shot windows, sharper edges on the CPU while the GPU runs the next window) is estimated at ~35-45 min with the defaults (up to ~1 h if FFX's depth turns out very edge-dense), ~1.1-1.2 h with `-Flip`, ~1.3-1.6 h with `-InputSize 714`, ~2.3-2.9 h with both (an overnight job; estimates until measured, assuming ~1,000 shots in the list). Ctrl+C stops within a second or so; finished videos are kept. `-InputSize 392` is faster. |
 | Disk | while converting, a few GB free in the output folder for one very long shot (its depth is held in a temporary `fvdshot-*` file past 2,400 frames, deleted afterwards; a leftover from a power cut is deleted on the next run) |
 
 First run sets up, under `%LOCALAPPDATA%\ffxvr\`: `fmvdepth-venv\` (pinned torch 2.6.0 + torchvision 0.21.0 from the
