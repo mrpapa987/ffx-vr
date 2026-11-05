@@ -55,6 +55,30 @@ def _bins(n_in, n_out):
     return (np.arange(n_out) * n_in) // n_out
 
 
+def _bin_rows(op, a, starts):
+    """op over each run of rows starting at `starts` (the runs tile the rows): whole-row array operations, one per row
+    of the longest run (a few), instead of one reduceat segment at a time."""
+    n = a.shape[0]
+    cnt = np.diff(np.append(starts, n))
+    out = a[starts].copy()
+    for k in range(1, int(cnt.max())):
+        rows = a[np.minimum(starts + k, n - 1)]
+        sel = cnt > k
+        if sel.all():
+            out = op(out, rows)
+        else:
+            out[sel] = op(out[sel], rows[sel])
+    return out
+
+
+def _bin_reduce(op, a, ry, rx):
+    """op (np.add / np.maximum / np.minimum) over every (row bin x column bin) of a 2-D (or H x W x C) array."""
+    r = _bin_rows(op, a, ry)
+    if a.ndim == 2:
+        return np.ascontiguousarray(_bin_rows(op, np.ascontiguousarray(r.T), rx).T)
+    return np.ascontiguousarray(_bin_rows(op, np.ascontiguousarray(r.transpose(1, 0, 2)), rx).transpose(1, 0, 2))
+
+
 def area_resize(img, w, h):
     """Box-filter a 2-D array to h x w: each output pixel is the mean of its input bin (bins as even as possible).
     Downscaling only (w <= width, h <= height)."""
@@ -63,9 +87,11 @@ def area_resize(img, w, h):
     if w > W or h > H:
         raise ValueError('area_resize only shrinks')
     ry, rx = _bins(H, h), _bins(W, w)
-    s = np.add.reduceat(np.add.reduceat(a, ry, axis=0), rx, axis=1)
+    s = _bin_reduce(np.add, a, ry, rx)
     cy = np.diff(np.append(ry, H)).astype(np.float32)
     cx = np.diff(np.append(rx, W)).astype(np.float32)
+    if s.ndim == 3:
+        return s / cy[:, None, None] / cx[None, :, None]
     return s / cy[:, None] / cx[None, :]
 
 
@@ -515,7 +541,7 @@ def robust_range(d, sample=4):
 _OFF5 = [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3)]
 
 
-def noise_level(d, sample=2):
+def noise_level(d, sample=4):
     """The depth's pixel-to-pixel noise (sigma), from the median absolute horizontal difference (robust: edges are
     few)."""
     a = np.asarray(d, np.float32)[::sample]
@@ -562,7 +588,8 @@ def sharpen_edges(d, tau=0.05, sigma=0.2, beta=0.1, slope=2.1, iters=4, thr=None
     core = cand & (r11 <= slope * r5)
     if not core.any():
         return out
-    _z, near = box_minmax(core.astype(np.uint8), 4, 4)
+    pc = np.pad(core.view(np.uint8), 4, mode='constant')
+    near = _run_op(_run_op(pc, 9, 1, np.maximum), 9, 0, np.maximum)
     b = np.float32(beta) * r11
     mixed = (near > 0) & (r11 > thr) & (d - mn11 > b) & (mx11 - d > b)
     if not mixed.any():
@@ -610,15 +637,17 @@ def grow_near(d, gx=2, gy=1, tau=0.05, thr=None):
     thr = np.float32(thr)
     for axis, n in ((1, gx), (0, gy)):
         for _ in range(n):
-            p = np.pad(d, [(1, 1) if a == axis else (0, 0) for a in (0, 1)], mode='edge')
+            a_ = np.empty_like(d)
+            b_ = np.empty_like(d)
             if axis == 1:
-                a_, b_ = p[:, :-2], p[:, 2:]
+                a_[:, 1:], a_[:, 0] = d[:, :-1], d[:, 0]
+                b_[:, :-1], b_[:, -1] = d[:, 1:], d[:, -1]
             else:
-                a_, b_ = p[:-2], p[2:]
-            new = d
-            new = np.where(a_ - new > thr, np.maximum(new, a_), new)
-            new = np.where(b_ - d > thr, np.maximum(new, b_), new)
-            d = new.astype(np.float32, copy=False)
+                a_[1:], a_[0] = d[:-1], d[0]
+                b_[:-1], b_[-1] = d[1:], d[-1]
+            a_[a_ - d <= thr] = -np.inf           # only a neighbour nearer by a real step counts
+            b_[b_ - d <= thr] = -np.inf
+            d = np.maximum(d, np.maximum(a_, b_))
     return d
 
 
@@ -635,31 +664,36 @@ def edge_shrink(d, w, h, tau=0.05, mid_share=0.2, thr=None):
     ry, rx = _bins(H, h), _bins(W, w)
     cy = np.diff(np.append(ry, H))
     cx = np.diff(np.append(rx, W))
-    cnt = (cy[:, None] * cx[None, :]).astype(np.float32)
-    mean = np.add.reduceat(np.add.reduceat(a, ry, axis=0), rx, axis=1) / cnt
+    mean = _bin_reduce(np.add, a, ry, rx) / (cy[:, None] * cx[None, :]).astype(np.float32)
     if not thr > 0:
         return mean
-    bmx = np.maximum.reduceat(np.maximum.reduceat(a, ry, axis=0), rx, axis=1)
-    bmn = np.minimum.reduceat(np.minimum.reduceat(a, ry, axis=0), rx, axis=1)
-    edge = (bmx - bmn) > thr
-    if not edge.any():
+    rng = _bin_reduce(np.maximum, a, ry, rx) - _bin_reduce(np.minimum, a, ry, rx)
+    by, bx = np.nonzero(rng > thr)
+    if len(by) == 0:
         return mean
-    rep = lambda m: np.repeat(np.repeat(m, cy, axis=0), cx, axis=1)  # noqa: E731
-    mid = rep((bmx + bmn) * np.float32(0.5))
-    quarter = rep((bmx - bmn) * np.float32(0.25))
-    hi = a > mid
-    inner = np.abs(a - mid) < quarter
-    s = lambda m: np.add.reduceat(np.add.reduceat(m, ry, axis=0), rx, axis=1)  # noqa: E731
-    n_hi = s(hi.astype(np.float32))
-    sum_hi = s(np.where(hi, a, 0).astype(np.float32))
-    n_in = s(inner.astype(np.float32))
-    sum_all = mean * cnt
-    n_lo = cnt - n_hi
-    mean_hi = sum_hi / np.maximum(n_hi, 1)
-    mean_lo = (sum_all - sum_hi) / np.maximum(n_lo, 1)
-    pick = np.where(n_hi >= n_lo, mean_hi, mean_lo)
-    two = edge & (n_in <= mid_share * cnt) & (n_hi > 0) & (n_lo > 0)
-    return np.where(two, pick, mean).astype(np.float32)
+    # the edge bins' pixels, gathered into (n, KY, KX) with a validity mask (bins are KY or KY - 1 rows, ...)
+    KY, KX = int(cy.max()), int(cx.max())
+    oy, ox = np.arange(KY), np.arange(KX)
+    yy = ry[by][:, None] + oy[None, :]
+    xx = rx[bx][:, None] + ox[None, :]
+    ok = (oy[None, :] < cy[by][:, None])[:, :, None] & (ox[None, :] < cx[bx][:, None])[:, None, :]
+    V = a[np.minimum(yy, H - 1)[:, :, None], np.minimum(xx, W - 1)[:, None, :]]
+    big = np.float32(np.finfo(np.float32).max)
+    mn = np.where(ok, V, big).min(axis=(1, 2))
+    mx = np.where(ok, V, -big).max(axis=(1, 2))
+    mid = ((mn + mx) * np.float32(0.5))[:, None, None]
+    quarter = ((mx - mn) * np.float32(0.25))[:, None, None]
+    hi = ok & (V > mid)
+    lo = ok & ~hi
+    n_hi = hi.sum(axis=(1, 2))
+    n_lo = lo.sum(axis=(1, 2))
+    n_in = (ok & (np.abs(V - mid) < quarter)).sum(axis=(1, 2))
+    m_hi = np.where(hi, V, 0).sum(axis=(1, 2)) / np.maximum(n_hi, 1)
+    m_lo = np.where(lo, V, 0).sum(axis=(1, 2)) / np.maximum(n_lo, 1)
+    two = (n_in <= mid_share * (n_hi + n_lo)) & (n_hi > 0) & (n_lo > 0)
+    out = mean.copy()
+    out[by[two], bx[two]] = np.where(n_hi >= n_lo, m_hi, m_lo)[two]
+    return out
 
 
 def refine_and_shrink(d, w, h, tau=0.05, sigma=0.2, grow=(2, 1)):
