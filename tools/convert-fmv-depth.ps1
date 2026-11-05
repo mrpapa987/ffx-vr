@@ -15,8 +15,8 @@
 # Needs: Windows 10/11, an NVIDIA GPU with a current driver (8 GB VRAM or more; tested design: RTX 3080 Ti, 12 GB),
 # Python 3.10 - 3.13 (py launcher), ffmpeg + ffprobe (winget install Gyan.FFmpeg), ~1.5 GB free for the depth (US list) and
 # ~5 GB for the environment. Time: converter 0.1 took 22 min for the US list on the owner's 3080 Ti; 0.2 adds a CPU
-# edge pass and per-shot windows (estimate ~35-45 min at the defaults; -InputSize 714 and -Flip each about double the
-# model time: both together an overnight job of ~2-3 h, an estimate until measured).
+# edge pass (overlapped with the model) and per-shot windows: estimate ~35-45 min at the defaults (up to ~1 h on very
+# edge-dense depth), ~1-1.1 h with -Flip, ~1.1-1.4 h with -InputSize 714, ~2.2-2.8 h with both (overnight; estimates).
 #
 # Run with (from the repository):
 #   powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1 -Preview           (S0: SIN_us + BTS_us and previews)

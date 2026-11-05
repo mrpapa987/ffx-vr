@@ -3968,7 +3968,8 @@ the windowing, the normalisation, the edges and adds a temporal filter; the bull
 ### Converter 0.2 (ALGO 2, branch `fmv-conv2`, 5 Nov 2026)
 
 Item 7 of the FMV pipeline audit (research `fmv3d-pipeline.md`; techniques from `fmv3d-projects.md` T1/T2/T6/T9 and
-`fmv3d-models.md`). Converter only: the .fvd format stays version 1 and the runtime needs no change; every video is
+`fmv3d-models.md`). The .fvd format stays version 1; the files carry header flag HF_SEGMENT_RANGE, which the runtime
+must honour (fmv-relief 9812b55: no per-shot re-normalisation of such files; see "For the runtime" below); every video is
 converted again once (ALGO 2 is in the settings fingerprint). The pipeline core is `convert.process_video()` (no I/O;
 numpy only: the depth model is the one GPU step), wrapped by `convert_one()` with ffmpeg and the writer.
 
@@ -4041,24 +4042,53 @@ shrink is that the step sits on the 320 texel grid: its crawl grows from 1.0 to 
 Sharpening with a plain area shrink instead gives 5.7 px / 1.08 px; the runtime's guided upsample (audit item 5) is
 the fix for the crawl. In the 0.1 column the dolly is "absorbed": the per-frame normalisation pins the plane.
 
-CPU cost per frame, one core of the 2.1 GHz container CPU (the synthetic frames have few edges: count ~1.5x for real
-ones), 924x518 / 1274x714: edge path 38 / 74 ms, tags + luma guide 3.3 / 5.2 ms, temporal filter 2.8 ms, ranges
-0.1 ms. On the owner's i9-12900KF (a P-core ~2.5x this one, 8 threads for the edge path) that is about 4-6 ms wall a
-frame at 518 and 8-12 at 714 on top of the model, i.e. ~6-8 min (518) or ~12-16 min (714) for the 82k frames,
-plus ~4 min of single-threaded tag / filter work. Estimated totals: defaults ~35-45 min (22 min of model today,
-+~20 % for per-shot windows, + the CPU passes); `-Flip` ~1-1.2 h; `-InputSize 714` ~1-1.5 h; both ~2-3 h (the model
-estimates are from fmv3d-models.md; nothing was run on a GPU).
+**Time (review S-1).** Three things run at once: a producer thread reads, tags and windows the frames; the model
+runs on its own thread one window ahead of the edge pass (window.windowed_depth submits window k+1 before it takes
+window k; torch and numpy both release the GIL), which spreads each window's maps over `--threads` (default up to 8);
+and the caller's thread finishes the previous shot (ranges, temporal filter, 8 bits, the writer). Padding slots (a
+shot's last window is filled with copies of its last frame) get the area shrink, not the edge path, so the edge path
+runs ~1.45 maps per output frame (the 10 keyframe slots of every window after the first are real and needed). With a
+stand-in GPU (sleeping, on the reviewer's edge-dense maps at 18 % step pixels, 2 threads on this 2-core box): 173 ->
+115 ms a frame when the CPU is the bottleneck (here), and 312 ms against 300 ms of GPU alone when the GPU is: the edge
+pass is hidden, what remains is the last window of each shot (GPU idle during its edges, ~0.1-0.3 s a shot).
+
+Edge-path cost per map, one core of this 2.1 GHz Xeon: 38 ms on the synthetic video (few edges); on edge-dense maps
+88 / 148 / 339 ms at 8 / 18 / 35 % step pixels (924x518) and 190 / 416 / 665 ms at 1274x714 (the reviewer's
+t_dense.py). How dense VDA-Small's maps of FFX's CG are is not known (10-20 % assumed). Model for the owner's PC (a
+P-core ~2x this one, 8 threads ~6x one P-core; the 3080 Ti at 16.4 ms a frame in 0.1, +20 % for per-shot windows):
+
+| settings | GPU a frame | edge pass a frame (10-20 % dense) | bound | 86,353 frames |
+|---|---|---|---|---|
+| defaults (518) | ~20 ms | 13-18 ms | GPU | ~35-45 min (up to ~1 h at 35 % dense: CPU-bound) |
+| -Flip | ~40 ms | 13-18 ms | GPU | ~1-1.1 h |
+| -InputSize 714 (model 2.2-2.7x) | 44-54 ms | 30-51 ms | mostly GPU | ~1.1-1.4 h |
+| -InputSize 714 -Flip | 88-108 ms | 30-51 ms | GPU | ~2.2-2.8 h |
+
+(The review's estimates for the unoverlapped pipeline were 45-60 min and 2.5-3.5 h; the model factors are estimates
+from fmv3d-models.md and the review; nothing was run on a GPU.)
 
 Not verified here: VDA with full-resolution output (the same forward, without the area resize: ~1.9 MB a frame over
 PCIe), VRAM and speed at 714, real VDA edges (the stub's blur of 2 model px is a guess; sharpen_edges handles 1-4
 px), dissolve detection on real FFX dissolves (tested on synthetic blends and pans), the threshold of the flash test
 on real white flashes, the 2,400-frame spill on Windows (a TemporaryFile in the output folder).
 
-For the runtime (no change needed; notes for whoever touches it next): lo/hi are now constant per segment, so a
-runtime re-normalisation from the index (audit item 2) becomes the identity inside a segment; a segment starts at
-FF_CUT or where lo/hi change outside FF_BLEND frames, and a per-shot L/H that spans two segments would merge them
-again (shallower): treat a lo/hi change as a segment start. FF_FLASH frames' depth is interpolated from their
-neighbours. The temporal filter makes the runtime EMA largely redundant (A/B it at 0.3 or off).
+**For the runtime (review B-1).** 0.2 files set header byte 27 bit 2, HF_SEGMENT_RANGE (0x04): lo/hi are already one
+fixed range per shot segment, so the runtime must not re-normalise them per shot. The 2c4bd03 runtime's shot_norm (p10
+of lo / p90 of hi per FF_CUT run, short shots folded into the one before) would map a short shot (its own VDA chain,
+its own raw scale) through the previous shot's range, and squash or clip a shot whose dissolve split it into two
+ranges. fmv-relief 9812b55 checks the bit and uses a = 1, b = 0 for such files; files without it (0.1) keep the
+re-normalisation. Both must land together: reconverting with 0.2 while playing an older build shows both artefacts.
+FF_FLASH frames' depth is interpolated from their neighbours. The temporal filter makes the runtime EMA largely
+redundant (A/B it at 0.3 or off).
+
+Known trade-offs (review): a 1-4 frame cutaway A -> B -> A counts as a flash, so B shows A's depth (N-9); the edge
+path runs inside each model window, before the 8-frame cross-fade between windows, so where two windows put an edge a
+pixel apart the cross-fade makes in-between values again for those 8 frames (N-4: small, and the temporal filter's
+depth weight keeps most of it; worth knowing when judging edge width on real output). The "same picture, brighter"
+rule (a detector cut that is no cut) now needs a correlation >= 0.98 and an affine fit to 10 % of the step: two
+different sky-over-ground shots with a brightness change (r 0.95, a quarter of the step left over) stay a cut (S-2).
+Blank-only segments are written as a constant 0; the temporal filter gives no weight across a dissolve / dip segment
+start; leftover spill files older than 3 h are deleted at the start of a run.
 
 ### Optional high-quality mode: DA3MONO-LARGE detail on VDA-S (design only, not implemented)
 
