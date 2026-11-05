@@ -1253,6 +1253,18 @@ units) too high; the other characters are fine. Suspect the head point
 picked for his model (tall hair?). Needs a battle census, actor table and
 motion log while viewing as Wakka.
 
+Controls, Quest controllers only (owner, 4 Nov 2026): not fully solved yet; the controls map is in the
+artifact "FFX VR Quest Controls". (1) The save/load screen can't be used with the Quest controllers: it is
+Fahrenheit's own replacement save UI (FhSaveUiX / FhSaveUiSelector), drawn with ImGui. ImGui's Win32
+backend reads the gamepad through XInput itself (imgui_impl_win32 loads its own XInput DLL, xinput1_4
+first), while our VR pad is merged only into the game's XINPUT9_1_0 import. So the save screen never sees
+the VR pad. Fix: also feed the VR pad to ImGui (its gamepad key events), or hook the XInput DLL ImGui
+uses. (2) In battle the stick axes sometimes seem rotated: left/right moves up/down in the battle menus.
+Rule (owner): the stick must act like a gamepad's, whatever the view's angle; a made-for-VR UI comes later.
+(3) Every significant battle action must be reachable from the Quest controllers: defend, switch
+characters, scroll the CTB window, overdrives. Auron's button inputs and Lulu's stick spin are left for
+later VR gestures, not buttons; the owner keeps an Xbox pad nearby meanwhile.
+
 Field / modes: per-area diorama memory by event_id; swimming / underwater
 eye height and the distortion pass; blitzball and chocobo (doc only);
 gesture tuning.
