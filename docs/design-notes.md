@@ -1253,17 +1253,37 @@ units) too high; the other characters are fine. Suspect the head point
 picked for his model (tall hair?). Needs a battle census, actor table and
 motion log while viewing as Wakka.
 
-Controls, Quest controllers only (owner, 4 Nov 2026): not fully solved yet; the controls map is in the
-artifact "FFX VR Quest Controls". (1) The save/load screen can't be used with the Quest controllers: it is
-Fahrenheit's own replacement save UI (FhSaveUiX / FhSaveUiSelector), drawn with ImGui. ImGui's Win32
-backend reads the gamepad through XInput itself (imgui_impl_win32 loads its own XInput DLL, xinput1_4
-first), while our VR pad is merged only into the game's XINPUT9_1_0 import. So the save screen never sees
-the VR pad. Fix: also feed the VR pad to ImGui (its gamepad key events), or hook the XInput DLL ImGui
-uses. (2) In battle the stick axes sometimes seem rotated: left/right moves up/down in the battle menus.
-Rule (owner): the stick must act like a gamepad's, whatever the view's angle; a made-for-VR UI comes later.
-(3) Every significant battle action must be reachable from the Quest controllers: defend, switch
-characters, scroll the CTB window, overdrives. Auron's button inputs and Lulu's stick spin are left for
-later VR gestures, not buttons; the owner keeps an Xbox pad nearby meanwhile.
+Controls, Quest controllers only (owner, 4 Nov 2026; design research/quest-controls-design.md, built 5 Nov on branch
+quest-ctl, ABI 44; the pure rules in src/native/ffxvr_pad.h with a unit test; owner test pending). Done:
+(1) **Save / load screen**: Fahrenheit's save UI is ImGui, and ImGui's Win32 backend reads pad 0 through its own XInput
+DLL (xinput1_4 first), not the game's XINPUT9_1_0 import. imgui_pad.cs detours that DLL's XInputGetState /
+XInputGetCapabilities (FhCallHandle, like the D3D11 detours); native merges the VR pad in (ffxvr_imgui_xstate: buttons OR,
+the stronger stick, no rotation, no tap, no Start / Back: Start is Fahrenheit's soft reset with L1 + R1; buttons already
+held when the screen opens stay masked until released) and posts one WM_DEVICECHANGE (DBT_DEVNODES_CHANGED) so the backend
+asks the capabilities again. It refuses when ImGui picked the game's own DLL, and logs the functions' first bytes (another
+hooker shows as a jump). Pushing ImGui key events from our module instead was rejected: with an Xbox pad connected the
+backend re-adds the pad's state every packet and the two sources fight (repeated presses). The game gets nothing more:
+Fahrenheit locks its input while the save screen is open. ini `imgui_vrpad` 0 / 1 (default: the save screen only) / 2 (all
+of ImGui, Start and Back too). (2) **Rotated stick in battle**: the cause was our first-person movement remap
+(`g_move_delta` = the view's yaw, head included, minus the game camera's), applied in every view but the seat, battle
+included. The walk gate: the remap now applies only while the player can walk (not battle, a field menu, no player
+control, a choice box, the save screen, the sphere grid; riding and blitzball keep it; game bits older than 250 ms mean
+raw). ini `move_remap_walk_only` (default 1; 0 = the old behaviour for an A/B). (3) **Battle actions**: verified in our exe
+(design 3.1): Defend = **Y** (bit 0x10; our exe-analysis tables label 0x10 Square and 0x80 Triangle: that looks swapped,
+the owner's test confirms), switch = LB, CTB scroll = RB / RT held, overdrive = stick left and Weapon / Armor / Escape =
+stick right at the command menu, help = Back. The grips were lost to the seat / diorama grab and the left-grip chords
+leaked an LB press: now a **quick squeeze** (released within `grip_tap_ms`, 300 ms; the hand moved < 3 cm and turned
+< 10 degrees; no stick click meanwhile; the other grip not down) is LB / RB, sent on release as a press of >= 100 ms and 3
+new packets (the tap's rule), and a grab's nudge during it is undone; a held grip stays the grab and the chord modifier and
+the game never sees it. In battle (all views) and the seat / diorama only (`grip_lbrb` 1; 0 = the old behaviour, 2 =
+everywhere); in the field's first / third person the grips are LB / RB at once as before (the main menu's character pages
+hold L1 / R1). `vd_overlay_mask` (1): both stick clicks (Virtual Desktop's overlay) send neither Back nor R3. Left: Auron's
+button sequence and Lulu's stick spin as VR gestures (meanwhile the Xbox pad; Lulu's spin works with the raw stick);
+whether blitzball's pass / shoot menus want the raw stick (owner test); RB held (continuous CTB back-scroll) is now one row
+per squeeze in battle; a follow-up: the game's own walk direction g_PlayerDirFix (0x13007C4 flag / 0x13007C8 yaw, read by
+Sg_ControlPlayer at 0x82D795 instead of the latched camera yaw 0x130079C) could walk the player relative to the headset
+with no stick rotation at all, but event scripts also set it (0x82D990, called from 0x83B519 and 0xA77C07), so we would
+have to own it only in our first-person views and give the script's value back; untested.
 
 Field / modes: per-area diorama memory by event_id; swimming / underwater
 eye height and the distortion pass; blitzball and chocobo (doc only);

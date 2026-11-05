@@ -162,6 +162,33 @@ first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
 diorama), `overlay_at_start` (0 = no mod window until F8). `hands_dev=1`
 shows the experimental VR-hands section.
 
+## Controls (Quest controllers only)
+
+The Quest controllers are the gamepad (`vrpad=1`), merged with an Xbox pad if one is connected (buttons OR, the stick
+pushed further wins). Mapping: right A / B = A / B, left X / Y = X / Y, triggers = LT / RT, grips = LB / RB (below), left
+menu = Start, left stick click = Back, right stick click = R3, sticks = sticks.
+
+| Where | Grips | Left stick |
+|---|---|---|
+| Field, first / third person | LB / RB at once (holdable: the main menu's character pages) | walks relative to where you look |
+| Field, seat / diorama | a held grip grabs the world; a **quick squeeze** (released within 300 ms, the hand still) is LB / RB and the world does not move | seat: as the game's camera; diorama: relative to where you look |
+| Battle, every view | a **quick squeeze** is LB / RB (left: open the switch list, next in it; right: one CTB row back); a held grip is the chord modifier (and the grab in the diorama) | raw, as a gamepad (menus, targets; left = Overdrive, right = Weapon / Armor / Escape) |
+| Field menus, shops, choice boxes, the sphere grid | LB / RB at once (a quick squeeze if the seat / diorama stays in 3D behind them) | raw |
+| Fahrenheit's save / load screen | page the list | moves the highlight; A loads / saves, B backs out, triggers jump to the ends |
+
+Battle: Y = Defend, right trigger held = scroll the turn order forward, left trigger = previous in the switch list. Chords
+(never reach the game): right grip + right stick click = the next view, left grip + right stick click = the next party
+member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
+game gets neither Back nor R3). Auron's and Lulu's overdrive inputs: an Xbox pad for now (Lulu's spin works with the left
+stick).
+
+Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
+behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
+behaviour; 2 = quick squeeze everywhere), `grip_tap_ms` (300, 150..500), `vd_overlay_mask` (1), `imgui_vrpad` (1 = the
+Quest controllers in Fahrenheit's save screen; 0 = off, also not installed at the next launch; 2 = in every ImGui window,
+Start and Back too, so L grip + R grip + menu soft-resets as on a pad). The save screen's line in `ffxvr_diag.log` starts
+with `imgui pad:`; quick squeezes log `grips:` lines.
+
 ## Texture packs (External File Loader style) under Fahrenheit
 
 Loose-file texture packs for this game (e.g. HitokageWorshipper's

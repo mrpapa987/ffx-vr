@@ -26,7 +26,10 @@ recommended.
   screen** with automatic depth for blitzball (optionally for the whole game).
 - **The game's own battle cursors in 3D** over their targets.
 - **The battle-entry glass break** shown in the headset.
-- **Quest controllers as the gamepad**, with the game's rumble on the controllers.
+- **Quest controllers as the gamepad**, with the game's rumble on the controllers. They also work in Fahrenheit's
+  save / load screen; the left stick acts as a gamepad's in battle and menus (it follows your view only while you walk);
+  in battle and the diorama a quick squeeze of a grip is LB / RB (switch characters, scroll the turn order) while a held
+  grip still grabs.
 - **Smooth stick turning at the headset's refresh rate** (stick reprojection), and the last picture
   kept, head-tracked, while the game loads instead of a black headset.
 - **Faster loads in the headset**: the game's loader no longer waits while the mod waits for the headset's next frame.
