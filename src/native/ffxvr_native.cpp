@@ -12327,6 +12327,7 @@ struct RelFmv {
     bool req = false;                                    // review N3: the file asked for (only once the movie can show a relief)
     bool fading = false; uint32_t fades = 0, loops = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
     float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
+    bool pop_limited = false, range_limited = false; float pop_used = 0.f, range_used = 0.f;   // review3 SF-2: the comfort limits at this screen distance
 };
 static RelFmv g_rel;
 static uint32_t g_rel_gen = 0, g_rel_lines = 0;
@@ -12345,17 +12346,17 @@ static uint16_t* g_rel_ema = nullptr;                    // the temporal filter'
 // The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer. The
 // vertex shader is relief::weight / map_point (ffxvr_relief.h): the screen quad's own frame (x right, y up, +z toward the
 // viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it), each vertex moved along the ray from the
-// nominal eye (0, 0, Ds) through its pixel to distance Z = 1 / (1/Ds + k D'), D = 1/Zf + n (1/Zn - 1/Zf) - 1/Ds, D' = D x
+// nominal eye (X.x, 0, Ds) (the midpoint between the eyes, review3 N-1) through its pixel to distance Z = 1 / (1/Ds + k D'), D = 1/Zf + n (1/Zn - 1/Zf) - 1/Ds, D' = D x
 // (the edge weight when D > 0: only pop-out is feathered at the border, the window rule) x (the subtitle band). The pixel
-// shader samples the video; on a triangle steeper than k_edge_lo metres of depth per metre of screen (a rubber sheet across
-// a depth edge) it blends toward the colour two cells further to the far side (relief::edge_fill, from ddx / ddy of the
-// depth behind the screen and the uv: constant over a triangle, SM4, no geometry shader); E.z: the depth as colour.
+// shader samples the video; on a triangle whose disparity slope |d(1/Z) / d(screen)| exceeds k_edge_lo (1/m per m; review3
+// SF-1: the same at any range) it blends toward the colour two cells further to the far side (relief::edge_fill, from ddx /
+// ddy of 1/Z and the uv: constant over a triangle, SM4, no geometry shader); E.w: the depth as colour.
 // R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: the edge band (pop-out only), band, band ramp, flatten the bottom;
-// E: edge fill on, edge lo, edge hi, depth as colour.
+// E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m).
 static const char k_rel_hlsl[] =
-    "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; };\n"
+    "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; float4 X; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
-    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float z : TEXCOORD1; float n : TEXCOORD2; };\n"
+    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float q : TEXCOORD1; float n : TEXCOORD2; };\n"
     "VO vs(uint id : SV_VertexID) {\n"
     "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
     "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
@@ -12369,26 +12370,26 @@ static const char k_rel_hlsl[] =
     "    float inv = inv0 + Z.w * dd;\n"
     "    float t = 1 / (inv * Z.x);\n"
     "    float u = R.x + a * R.z, v = R.y + b * R.w;\n"
-    "    VO o; o.p = mul(MVP, float4((u - 0.5) * G.x * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.z = Z.x * (t - 1); o.n = n; return o;\n"
+    "    VO o; o.p = mul(MVP, float4(X.x + ((u - 0.5) * G.x - X.x) * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.q = inv; o.n = n; return o;\n"
     "}\n"
     "float4 ps(VO i) : SV_Target {\n"
     "    float3 c = T.Sample(S, i.t).rgb;\n"
     "    if (E.x > 0.5) {\n"
-    "        float2 tx = ddx(i.t), ty = ddy(i.t); float zx = ddx(i.z), zy = ddy(i.z);\n"
+    "        float2 tx = ddx(i.t), ty = ddy(i.t); float zx = ddx(i.q), zy = ddy(i.q);\n"
     "        float det = tx.x * ty.y - tx.y * ty.x; float ok = abs(det) > 1e-14 ? 1.0 : 0.0; det = ok > 0 ? det : 1.0;\n"
     "        float2 g = float2((zx * ty.y - zy * tx.y) / det, (zy * tx.x - zx * ty.x) / det);\n"
     "        float2 gm = float2(g.x / G.x, g.y / G.y);\n"
     "        float s = length(gm);\n"
     "        float f = ok * smoothstep(0, 1, (s - E.y) / (E.z - E.y));\n"
-    "        float2 dir = gm / max(s, 1e-6); float L = 2 * G.x / G.z;\n"
+    "        float2 dir = -gm / max(s, 1e-6); float L = 2 * G.x / G.z;\n"
     "        float3 b = T.SampleLevel(S, i.t + float2(dir.x * L / G.x, dir.y * L / G.y), 0).rgb;   // no gradient in a varying branch (SM4)\n"
     "        c = lerp(c, b, f);\n"
     "    }\n"
     "    if (E.w > 0.5) { float n = i.n; c = saturate(float3(2 * n - 1, 1 - abs(2 * n - 1), 1 - 2 * n) + 0.1); }\n"
     "    return float4(c, 1);\n"
     "}\n";
-struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; float E[4]; };
-static_assert(sizeof(RelCb) == 144, "RelCb: 144 bytes");
+struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; float E[4]; float X[4]; };
+static_assert(sizeof(RelCb) == 160, "RelCb: 160 bytes");
 
 /// At Present, the first time a relief frame is wanted: the shaders and the fixed states.
 static void rel_gpu_init() {
@@ -12502,10 +12503,12 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         cb.Z[0] = mp.Ds; cb.Z[1] = mp.inv_n; cb.Z[2] = mp.inv_f; cb.Z[3] = mp.k;
         cb.F[0] = g_rel_cfg.edge; cb.F[1] = relief::k_band; cb.F[2] = relief::k_band_ramp; cb.F[3] = (flags & 1) ? 1.f : 0.f;
         cb.E[0] = (flags & 4) ? 1.f : 0.f; cb.E[1] = relief::k_edge_lo; cb.E[2] = relief::k_edge_hi; cb.E[3] = (flags & 16) ? 1.f : 0.f;
+        cb.X[0] = mp.ex;
         D3D11_MAPPED_SUBRESOURCE ms = {};
         if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
         memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
         g_orig_vssetcb(g_ctx, 0, 1, &g_rel_cb[e]);
+        g_ctx->PSSetConstantBuffers(0, 1, &g_rel_cb[e]);   // review3 B-1: the pixel shader reads G and E too (uid_save / uid_restore keep the game's PS b0)
         ID3D11RenderTargetView* rts[1] = { g_rel_rtv[e] };
         g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, g_rel_dsv, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
         D3D11_TEXTURE2D_DESC td; g_rel_eye[e]->GetDesc(&td);
@@ -12551,9 +12554,10 @@ static void rel_end(const char* how) {
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
         if (r.fades || r.loops) n = fmv::add(b, sizeof(b), n, " | fade-outs %u, loops (the count went back) %u", r.fades, r.loops);
         {
-            const float Ds = g_xr_screen_dist, zn = Ds - relief::clampf(g_rel_cfg.pop, 0.f, Ds - relief::k_min_near), zf = Ds + g_rel_cfg.range;
-            n = fmv::add(b, sizeof(b), n, " | amount %.2f, range %.2f m behind / %.2f m in front of the screen at %.2f m (disparity %+.2f / %+.2f deg at 63 mm), smooth %.2f, edge band %.3f, flatten the bottom %d, tight field of view %d, edge fill %d, median %d, depth colour %d, offset %d",
-                         g_rel_cfg.amount, g_rel_cfg.range, g_rel_cfg.pop, Ds, relief::disparity_deg(zn, Ds), relief::disparity_deg(zf, Ds), g_rel_cfg.smooth, g_rel_cfg.edge, g_rel_cfg.flags & 1, (g_rel_cfg.flags >> 1) & 1,
+            const relief::Map lm = relief::make_map(g_xr_screen_dist, g_rel_cfg.range, g_rel_cfg.pop, 1.f);   // with the comfort limits (review3 SF-2)
+            const float Ds = lm.Ds, zn = Ds - lm.pop, zf = Ds + lm.range;
+            n = fmv::add(b, sizeof(b), n, " | amount %.2f, range %.2f m behind%s / %.2f m in front%s of the screen at %.2f m (disparity %+.2f / %+.2f deg at 63 mm), smooth %.2f, edge band %.3f, flatten the bottom %d, tight field of view %d, edge fill %d, median %d, depth colour %d, offset %d",
+                         g_rel_cfg.amount, lm.range, lm.range_limited ? " (limited)" : "", lm.pop, lm.pop_limited ? " (limited)" : "", Ds, relief::disparity_deg(zn, Ds), relief::disparity_deg(zf, Ds), g_rel_cfg.smooth, g_rel_cfg.edge, g_rel_cfg.flags & 1, (g_rel_cfg.flags >> 1) & 1,
                          (g_rel_cfg.flags >> 2) & 1, (g_rel_cfg.flags >> 3) & 1, (g_rel_cfg.flags >> 4) & 1, g_rel_cfg.offset);
         }
         if (r.by_fb[FB_GPU] && g_rel_gpu_why[0]) n = fmv::add(b, sizeof(b), n, " | relief pass: %s", g_rel_gpu_why);
@@ -12605,6 +12609,7 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     if (!g_rel.on) {
         if (!s.s_ok || !s.p_ok || !s.n_ok || s.name[0] == 0) return false;   // nothing known yet: next Present
         g_rel = RelFmv{};
+        g_rel_range_now = g_rel_pop_now = -1.f;   // review3 N-3: the range / pop-out followers start at the settings (a change made between movies does not slide in)
         g_rel.on = true; memcpy(g_rel.name, s.name, sizeof(g_rel.name)); g_rel.id = s.id; g_rel.n = fmv::frames_from_ms(s.dur_ms);
         if (++g_rel_gen == 0) g_rel_gen = 1;
         g_rel.gen = g_rel_gen;   // the file is asked for below, once nothing static rules the relief out (review N3)
@@ -12692,7 +12697,13 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         g_rel_pop_now += relief::clampf(g_rel_cfg.pop - g_rel_pop_now, -0.5f * dts, 0.5f * dts);
         g_rel_t_prev = now;
     }
-    const relief::Map mp = relief::make_map(g_xr_screen_dist, g_rel_range_now, g_rel_pop_now, o.s);
+    // review3 N-1: the nominal eye at the midpoint between the eyes: the screen is placed from the left eye at the recentre,
+    // so in the screen's frame the midpoint is half the eye separation to the right (the views' distance; 63 mm if odd)
+    float ipd = sqrtf((views[1].p[0] - views[0].p[0]) * (views[1].p[0] - views[0].p[0]) + (views[1].p[1] - views[0].p[1]) * (views[1].p[1] - views[0].p[1])
+                      + (views[1].p[2] - views[0].p[2]) * (views[1].p[2] - views[0].p[2]));
+    if (!(ipd > 0.045f && ipd < 0.085f)) ipd = relief::k_ipd;
+    const relief::Map mp = relief::make_map(g_xr_screen_dist, g_rel_range_now, g_rel_pop_now, o.s, 0.5f * ipd);   // review3 SF-2: the comfort limits inside
+    r.pop_limited = mp.pop_limited; r.range_limited = mp.range_limited; r.pop_used = mp.pop; r.range_used = mp.range;
     D3D11_TEXTURE2D_DESC bd; e1->GetDesc(&bd);
     const uint32_t vh = s.vh ? s.vh : (r.w == relief::k_w43 ? 480u : 720u);
     const relief::Rect rc = relief::video_rect(s.vw ? s.vw : (r.w == relief::k_w43 ? 640u : 1280u), vh, bd.Width, bd.Height);
@@ -12706,7 +12717,7 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     for (int e = 0; e < 2; ++e) {
         const relief::Fov full = { fov[e].l, fov[e].r, fov[e].u, fov[e].d };
         use[e] = full;
-        if ((g_rel_cfg.flags & 2) && relief::tight_fov(views[e].q, views[e].p, full, sc.q, sc.p, W, H, rc, mp.Ds, t_near, t_far, 0.03f, &use[e])) tight = true;
+        if ((g_rel_cfg.flags & 2) && relief::tight_fov(views[e].q, views[e].p, full, sc.q, sc.p, W, H, rc, mp.Ds, t_near, t_far, 0.03f, &use[e], mp.ex)) tight = true;
     }
     r.tight_now = tight;
     {
@@ -12743,7 +12754,7 @@ extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int 
     g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
     g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;
     g_rel_cfg.smooth = std::isfinite(smooth) ? relief::clampf(smooth, 0.f, 0.95f) : 0.6f;
-    g_rel_cfg.edge = std::isfinite(edge) ? relief::clampf(edge, 0.f, relief::k_feather_max) : relief::k_feather;
+    g_rel_cfg.edge = std::isfinite(edge) ? relief::clampf(edge, relief::k_feather_min, relief::k_feather_max) : relief::k_feather;   // review3 N-5: never 0
 }
 /// FMV relief (ABI 41): F8's text (render thread, from the overlay). which 0: the Debug line "FMV 3D: ..."; 1: the main
 /// window's one-line note (empty when there is nothing to say). Returns the length written (NUL-terminated, cut to cap).
@@ -12768,8 +12779,9 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
     if (!r.on) { n = fmv::add(buf, c, 0, "FMV 3D: no movie playing%s%s%s", g_rel_last[0] ? " (" : "", g_rel_last, g_rel_last[0] ? ")" : ""); return static_cast<int>(n); }
     n = fmv::add(buf, c, 0, "FMV 3D: %s frame %d", r.name, r.want);
     if (r.n) n = fmv::add(buf, c, n, "/%u", r.n);
-    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s%s, amount %.2f, %.1f m behind / %.2f m in front, %.2f rows a video row (%s fov)", r.fading ? "fading to " : "", relief::why_text(r.now_why),
-                                                       r.s_now, g_rel_range_now, g_rel_pop_now, r.rows_tight, r.tight_now ? "tight" : "whole");
+    if (r.now_fb == FB_NONE && r.now_why >= 0) n = fmv::add(buf, c, n, ", %s%s, amount %.2f, %.1f m behind%s / %.2f m in front%s, %.2f rows a video row (%s fov)", r.fading ? "fading to " : "", relief::why_text(r.now_why),
+                                                       r.s_now, r.range_used, r.range_limited ? " (limited: 1.5 deg)" : "", r.pop_used, r.pop_limited ? " (limited: 1 deg)" : "",
+                                                       r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
     if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), ring %d/%d", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors, r.ring, relief::k_ring);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
