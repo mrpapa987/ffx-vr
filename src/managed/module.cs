@@ -112,7 +112,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private const int k_ply_n = 18, k_mon_n = 16;   // battle entity slots: players 18 (party, Aeons, the Magus Sisters), monsters 16
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
-    private int _fp_head_anchor = 1; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
+    private int _fp_head_anchor = 1; private float _fp_head_reach = 8f; private float _fp_head_up = 1.5f, _fp_head_smooth = 0.35f, _fp_head_fwd = 1.5f;   // 0 fixed, 1 head-bone height (default: swimming, crouching), 2 full head bone
     private delegate* unmanaged[Cdecl]<int> _fn_fp_hidden;
     private int _fp_mode = 0; private float _fp_eye_h = 18f, _fp_follow_dist = 60f, _fp_follow_h = 25f, _fp_hide_radius = 0.75f;
     private float _tp_dist = 24f, _tp_h = 22f, _tp_pitch = -8f, _tp_follow_rate = 0f;   // third person: units, units, degrees, deg/s (0 = heading never follows)
@@ -1019,6 +1019,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     else _ini_bad.Add($"{k}='{v}'");
                 } break;
                 case "fp_head_up":        pf(k, v, ref _fp_head_up, -5f, 10f); break;
+                case "fp_head_reach":     pf(k, v, ref _fp_head_reach, 0f, 40f); break;
                 case "fp_head_smooth":    pf(k, v, ref _fp_head_smooth, 0.05f, 1f); break;
                 case "fp_head_fwd":       pf(k, v, ref _fp_head_fwd, 0f, 6f); break;
                 case "fp_head_parts":     _fp_head_parts = v; break;
@@ -1389,6 +1390,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"battle_view={_battle_view.ToString(ci)}\n" +
             $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
             $"fp_head_up={_fp_head_up.ToString("F2", ci)}\n" +
+            $"fp_head_reach={_fp_head_reach.ToString("F1", ci)}\n" +
             $"fp_head_smooth={_fp_head_smooth.ToString("F2", ci)}\n" +
             $"fp_head_fwd={_fp_head_fwd.ToString("F2", ci)}\n" +
             $"fp_head_parts={_fp_head_parts}\n" +
@@ -1861,6 +1863,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.RadioButton("full head bone (leans too)", ref _fp_head_anchor, 2);
             if (_fp_head_anchor != 0) {
                 ImGui.SliderFloat("eye offset above the head bone", ref _fp_head_up, -5f, 10f);
+                ImGui.SliderFloat("head: ignore points further out than (units; 0 = off)", ref _fp_head_reach, 0f, 40f, "%.1f");
                 ImGui.SliderFloat("head smoothing (1 = none, 0.1 = heavy)", ref _fp_head_smooth, 0.05f, 1f);
                 if (_fp_head_anchor == 2) ImGui.SliderFloat("eye offset forward of the head bone (the bone is the neck joint)", ref _fp_head_fwd, 0f, 6f);
             }
@@ -2392,6 +2395,28 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (sb != null) { optpos_log(actors, sb); _logger.Info(sb.ToString()); }
     }
 
+    /// <summary>The first-person head: the highest sub-position (actor space has Y down, so the lowest Y) that is not on the
+    /// axis, leaving out points more than fp_head_reach units sideways from sub-position 0 (the body's base). The other
+    /// sub-positions of every party model sit within about 6 units of it, but Wakka's battle model carries one 14 units out
+    /// and 8-12 units above his head (index 11: the ball he holds up), which put his eye about 2 ft high (owner, 4-5 Nov 2026
+    /// captures). Falls back to the old rule (no reach limit) when sub-position 0 is on the axis, nothing is within reach,
+    /// or fp_head_reach is 0. Returns the index, or -1.</summary>
+    private int fp_head_pick(ref Actor a, out bool limited) {
+        limited = false; Vector4 b = a.chr_optpos[0];
+        bool use = _fp_head_reach > 0f && MathF.Abs(b.X) + MathF.Abs(b.Z) > 0.01f; float r2 = _fp_head_reach * _fp_head_reach;
+        for (int pass = use ? 0 : 1; pass < 2; pass++) {
+            int pick = -1; float hy = float.MaxValue;
+            for (int k = 0; k < 26; k++) {
+                Vector4 sp = a.chr_optpos[k];
+                if (!(MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) || !(sp.Y < hy)) continue;
+                if (pass == 0) { float dx = sp.X - b.X, dz = sp.Z - b.Z; if (!(dx * dx + dz * dz <= r2)) continue; }
+                hy = sp.Y; pick = k;
+            }
+            if (pick >= 0) { limited = pass == 0; return pick; }
+        }
+        return -1;
+    }
+
     /// <summary>"log this table" only (diagnostics: Wakka's first-person eye in battle sits ~7 units high): for the followed
     /// actor and every live party model (c0xx), the 26 chr_optpos sub-positions (+0x524; all-zero ones left out), with the
     /// index push_player's head rule picks marked '*' (the lowest actor-space Y with |X| + |Z| > 0.01: the highest point;
@@ -2404,8 +2429,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             string name = actor_name(a.chr_name);
             bool party = name.Length == 4 && name[0] == 'c' && name[1] == '0';
             if (i != _fp_actor_idx && !party) continue;
-            int pick = -1; float hy = float.MaxValue;
-            for (int k = 0; k < 26; k++) { Vector4 sp = a.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; pick = k; } }   // push_player's rule, copied
+            int pick = fp_head_pick(ref a, out _);   // push_player's rule (shared)
             sb.Append(System.FormattableString.Invariant($"\n  optpos {i} {name}{(i == _fp_actor_idx ? " (followed)" : "")}: root ({a.chr_pos_vec.X:F2},{a.chr_pos_vec.Y:F2},{a.chr_pos_vec.Z:F2})"));
             for (int k = 0; k < 26; k++) {
                 Vector4 sp = a.chr_optpos[k];
@@ -2651,7 +2675,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // space has Y pointing down (render space negates it), so the head is
             // the one with the LOWEST actor-space Y.
             float hy = float.MaxValue; Vector4 head = default; bool have = false;
-            for (int k = 0; k < 26; k++) { Vector4 sp = p.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = sp; have = true; } }
+            { int hk = fp_head_pick(ref p, out bool _); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } }
             // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
