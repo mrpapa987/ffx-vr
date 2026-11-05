@@ -4305,6 +4305,10 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   - *Tools:* tools/fmvdepth/fvd_stats.py (read-only figures of the owner's files; setup.md has the command).
   - Checks: relief_test 941 / 0, 25 / 25 mutants (one at a time), nchk 14 / 2 / 0, vkd3d vs_4_0 / ps_4_0, the static
     check; fvd_stats' unit test. Not verified: anything at run time (the GPU time, the worker's cost in 32-bit MSVC, the look).
+  - Review 7 (fixes/fmv-relief-review7.md, no blockers): SF-1, a cut onto a flat frame faded on the previous shot's depth
+    over the new shot: a flat frame now fades only within its shot and is flat at once after a cut (the reviewer's repro is
+    a test). N-1: the Debug causal filter starts over when it is switched on. N-5: past the file's end the worker no longer
+    refills from frame 0. Left as notes: N-2 (the timestamp queries live for the process, like the shaders), N-3, N-4.
   - Owner A/B (F8 > Debug, the FMV 3D line's checkboxes; all session-only): `each frame to its own range` on and off in a
     shot where something enters or leaves (a hand, a sword, a creature): with it off the rest should stay put; `old cut
     ramp`: watch shot changes for the "inflate" pulse; `old causal filter`: depth trailing moving edges, shimmer on still

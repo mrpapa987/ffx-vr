@@ -363,7 +363,7 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     enum { OK, FADE, FLAT } act = OK;
     if (want < 0) { o.why = sel == SEL_PAST ? W_PAST : W_NO_FRAME; act = (sel == SEL_PAST && t.bound >= 0) ? FADE : FLAT; }
     else if (want == t.bound) o.why = W_DEPTH;                          // held between video frames: the texture has it
-    else if (bit(b.flat, static_cast<uint32_t>(want))) { o.why = W_FLAT_FRAME; act = t.bound >= 0 ? FADE : FLAT; }
+    else if (bit(b.flat, static_cast<uint32_t>(want))) { o.why = W_FLAT_FRAME; act = (t.bound >= 0 && !cut_between(b, t.bound, want)) ? FADE : FLAT; }   // review7 SF-1: fade only within the shot; a cut onto a flat frame is flat at once
     else if (a.ready && !a.error) {
         const bool cut = t.bound < 0 || want < t.bound || cut_between(b, t.bound, want);
         const bool from_flat = !t.shown;

@@ -12610,7 +12610,8 @@ static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, 
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
       const bool on = g_rel.on && g_rel.req;
-      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; g_relw_req.cfg = rel_cfg_word(); }
+      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = !on ? -1 : (g_rel.want < 0 && g_rel.sel == relief::SEL_PAST) ? static_cast<int32_t>(g_rel.n) : g_rel.want;   // review7 N-5: past the end, nothing (not frame 0 again)
+      g_relw_req.cfg = rel_cfg_word(); }
     if (g_fmvw_kick) SetEvent(g_fmvw_kick);
     g_rel.want_posted = g_rel.want;
 }
@@ -12772,7 +12773,10 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     relief::Tcfg tc; tc.old_cut_ramp = (g_rel_cfg.flags & 128) != 0;   // Debug: the old ramp at every cut (A/B)
     const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.amount, 0.f, 1.f), r.n);
     if (o.upload) {   // the temporal filter in display order (reset at a cut / after flat), then the texture
-        if (g_rel_cfg.flags & 64) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.reset);   // the causal filter (Debug since round 7.4)
+        static bool s_ema_was = false;   // review7 N-1: the causal filter starts over when it is switched on (its state is stale or uninitialised)
+        const bool ema_on = (g_rel_cfg.flags & 64) != 0;
+        if (ema_on) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.reset || !s_ema_was);   // the causal filter (Debug since round 7.4)
+        s_ema_was = ema_on;
         InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w * 2, 0); r.uploads++;
     }
     if (o.ramp_start) r.ramps++;   // a ramp in started this Present (the first depth after flat; every cut with the old ramp)
