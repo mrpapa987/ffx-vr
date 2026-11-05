@@ -190,14 +190,17 @@ check that the files are being served.
 ## FMV depth (the converter, stage S1; 3 Nov 2026) - experimental
 
 **Experimental:** the converter has not yet had its first run on a real PC (the GPU setup, the model download and
-Windows' compression are untested), and the mod does not use the depth yet. Treat it as a developer tool for now.
+Windows' compression are untested), and the mod's relief screen (below) has not been tried in a headset yet. Treat it as a
+developer tool for now.
 
 `tools\convert-fmv-depth.ps1` makes 8-bit relative depth for every frame of the game's FMVs, for a later
 "relief screen" (FMVs shown with depth in VR). It runs **on your own PC, against your own copy**: each video is
 streamed out of `data\FFX_Data.vbf` (read only, nothing extracted), decoded by ffmpeg, and run through
 Video-Depth-Anything-**Small** (Apache-2.0) on the GPU. Output: one `<name>.fvd` per video (320x180 a frame, 240x180
 for the 4:3 clips; format in `tools/fmvdepth/FORMAT.md`), `manifest.json` and `convert.log` in
-`<game>\fahrenheit\mods\ffxvr\fmvdepth\`. The mod does not read it yet (no runtime code in this round).
+`<game>\fahrenheit\mods\ffxvr\fmvdepth\`. With F8 > View > `FMVs in 3D (needs converted depth)` (ini `fmv_depth=1`,
+off by default; `fmv_depth_strength`, `fmv_depth_flat_subs`) a converted FMV plays on the virtual screen with real depth in
+the headset (stage S3, design-notes "FMV relief screen"); any other FMV stays on the flat screen, and F8 says why.
 
 **The depth is derived from Square Enix's videos: it is made locally, it stays private, and it is never shipped.**
 The folder holds `PRIVATE-do-not-share.txt`; `package-release.ps1` fails on any `.fvd` or `fmvdepth\` path;
