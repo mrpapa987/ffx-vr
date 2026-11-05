@@ -293,16 +293,6 @@ inline int decode(const File& f, uint32_t i, const Io& io, const Codecs& c, uint
     return D_OK;
 }
 
-/// The median of n bytes (the smallest value with at least half of them at or below it).
-inline uint8_t median_u8(const uint8_t* p, uint32_t n) {
-    if (n == 0) return 0;
-    uint32_t hist[256] = {};
-    for (uint32_t i = 0; i < n; ++i) hist[p[i]]++;
-    const uint32_t half = (n + 1) / 2; uint32_t cum = 0;
-    for (int v = 0; v < 256; ++v) { cum += hist[v]; if (cum >= half) return static_cast<uint8_t>(v); }
-    return 255;
-}
-
 // -- which depth frame: the frame on screen is the uploaded count - 1 (design-notes "FMV sync probe") --------------------
 enum Sel : int { SEL_OK = 0, SEL_NONE_YET, SEL_PAST, SEL_BEFORE };
 /// count: player+0x100; offset: ini fmv_depth_offset (frames; + shows a later depth frame); frames: the file's.
@@ -315,7 +305,7 @@ inline int32_t frame_for(uint32_t count, int32_t offset, uint32_t frames, int* w
     return static_cast<int32_t>(i);
 }
 
-// -- per Present: hold, the depth level (ramps in and out), pivot, strength ----------------------------------------------
+// -- per Present: hold, the depth level (ramps in and out), strength ----------------------------------------------------
 /// Why a Present shows depth or not (counted per FMV; F8 names the current one). With depth on while the reason is not
 /// W_DEPTH / W_HELD, the relief is fading out on the last depth uploaded (review N1).
 enum Why : int { W_DEPTH = 0, W_HELD, W_LAG, W_FLAT_FRAME, W_NO_FRAME, W_PAST, W_DECODE, W_N };
@@ -326,8 +316,6 @@ inline const char* why_text(int w) { return w >= 0 && w < W_N ? k_why[w] : "?"; 
 struct Tcfg {
     float ramp_ms = 150.f;     // the depth level moves between 0 (flat) and 1 (full) over this, both ways
     float frame_ms = 1001.f / 30.f;   // a video frame (29.97 fps): the level is capped to reach 0 at the file's last frame
-    float p_alpha = 0.15f;     // the pivot follows the frame's median: this share of the gap per video frame ...
-    float p_step = 0.02f;      // ... at most this much per video frame (0..1 units)
     float s_rate = 0.5f;       // the strength setting is followed at most this fast (per second): a slider never pops
     bool old_cut_ramp = false; // Debug (A/B): every cut starts flat and ramps in over ramp_ms, as before round 7.3
 };
@@ -335,18 +323,18 @@ struct Tstate {
     int32_t bound = -1;        // the frame whose depth is in the texture (-1: none)
     float lvl = 0.f;           // the depth level 0..1 (0: flat; the output uses smoothstep(lvl)); set to 0 by a cut or a fallback
     bool shown = false;        // the last Present drew depth (false: flat, or a fallback to the flat screen: the next depth ramps in)
-    float pivot = 0.5f;
     float s_cur = 0.f; bool have_t = false; double t_prev = 0.0;
 };
 /// A Present that did not reach step (a fallback to the flat screen): the next relief frame ramps in from 0.
 inline void to_flat(Tstate& t) { t.lvl = 0.f; t.shown = false; }
-/// The ring's answer for `want`: ready (decoded, idx == want), error (its decode failed), median (0..255).
-struct Avail { bool ready; bool error; uint8_t median; };
+/// The ring's answer for `want`: ready (made, idx == want), error (its decode failed). (Round 7.5: the median that fed the
+/// unused pivot is gone.)
+struct Avail { bool ready; bool error; };
 /// depth: draw the relief with s (false: flat, s = 0); upload: the ring's frame goes into the texture first; ramp_start: the
 /// level was reset to 0 this Present (the first depth after flat; with old_cut_ramp every cut too); fading: depth on the
 /// last upload, going to flat; cut: a cut crossed with its depth ready, switched at once; reset: a cut or a return from
 /// flat (the causal filter starts over).
-struct Tout { bool depth; bool upload; bool ramp_start; bool fading; int why; float s; float pivot; int32_t bound; float level; bool cut, reset; };
+struct Tout { bool depth; bool upload; bool ramp_start; bool fading; int why; float s; int32_t bound; float level; bool cut, reset; };
 /// A cut in (a, b] (frames), by the bit map; a span longer than 64 frames counts as a cut (a jump).
 inline bool cut_between(const Bits& b, int32_t a, int32_t c) {
     if (a < 0 || c <= a) return true;
@@ -371,7 +359,7 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     const float ds = static_cast<float>(c.s_rate * dt / 1000.0);
     t.s_cur += clampf(s_target - t.s_cur, -ds, ds);
     const float dl = static_cast<float>(gap / c.ramp_ms);
-    Tout o = { false, false, false, false, W_DEPTH, 0.f, t.pivot, t.bound, 0.f, false, false };
+    Tout o = { false, false, false, false, W_DEPTH, 0.f, t.bound, 0.f, false, false };
     enum { OK, FADE, FLAT } act = OK;
     if (want < 0) { o.why = sel == SEL_PAST ? W_PAST : W_NO_FRAME; act = (sel == SEL_PAST && t.bound >= 0) ? FADE : FLAT; }
     else if (want == t.bound) o.why = W_DEPTH;                          // held between video frames: the texture has it
@@ -379,10 +367,7 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     else if (a.ready && !a.error) {
         const bool cut = t.bound < 0 || want < t.bound || cut_between(b, t.bound, want);
         const bool from_flat = !t.shown;
-        const float m = a.median / 255.f;
         if (from_flat || (cut && c.old_cut_ramp)) { t.lvl = 0.f; o.ramp_start = true; }
-        if (cut || from_flat) t.pivot = m;
-        else t.pivot += clampf(c.p_alpha * (m - t.pivot), -c.p_step, c.p_step);
         o.cut = cut && !from_flat && !c.old_cut_ramp; o.reset = cut || from_flat;
         t.bound = want; o.upload = true; o.why = W_DEPTH;
     }
@@ -396,7 +381,7 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     float cap = 1.f;
     if (frames > 0 && want >= 0) cap = clampf((static_cast<float>(frames) - 1.f - static_cast<float>(want)) * c.frame_ms / c.ramp_ms, 0.f, 1.f);
     const float lv = fminf(t.lvl, cap);
-    o.level = lv; o.pivot = t.pivot; o.bound = t.bound;
+    o.level = lv; o.bound = t.bound;
     o.depth = act != FLAT && t.lvl > 0.f;
     if (act == OK && o.ramp_start) o.depth = true;                      // the first Present of a ramp: drawn (flat) as the relief
     o.fading = o.depth && act == FADE;
@@ -556,6 +541,13 @@ inline uint32_t grid_cells(uint32_t texels) { return texels + 1; }
 
 /// The video's rect in the backbuffer (uv, the game letterboxes / pillarboxes it centred): vw x vh into bw x bh.
 struct Rect { float u0, v0, du, dv; };
+/// Round 7.5 (audit 6): the colour's uv kept half a backbuffer texel inside the rect, so the edge vertices of a pillarboxed
+/// (4:3) video do not sample the boundary between the picture and the black bar (a 50 % blend: a dark 1-texel rim). The VS
+/// copy: clamp(uv, R.xy + Y.xy, R.xy + R.zw - Y.xy), Y = 0.5 / the backbuffer's size.
+inline void inset_uv(const Rect& r, uint32_t bw, uint32_t bh, float& u, float& v) {
+    const float hx = 0.5f / static_cast<float>(bw ? bw : 1), hy = 0.5f / static_cast<float>(bh ? bh : 1);
+    u = clampf(u, r.u0 + hx, r.u0 + r.du - hx); v = clampf(v, r.v0 + hy, r.v0 + r.dv - hy);
+}
 inline Rect video_rect(uint32_t vw, uint32_t vh, uint32_t bw, uint32_t bh) {
     if (vw == 0 || vh == 0 || bw == 0 || bh == 0) return { 0.f, 0.f, 1.f, 1.f };
     const double va = static_cast<double>(vw) / vh, ba = static_cast<double>(bw) / bh;
