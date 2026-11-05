@@ -3878,7 +3878,8 @@ checked by the importer's limits.
 ## FMV depth converter (3 Nov 2026)
 
 Branch `fmv-depth`. Stages S0 (quality check) and S1 (converter v0) of the FMV "relief screen" research; no runtime or
-mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/FORMAT.md.
+mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/FORMAT.md. (Converter 0.2, below, changes
+the windowing, the normalisation, the edges and adds a temporal filter; the bullets here describe 0.1.)
 
 - **What the game has** (measured read-only on the owner's copy). The FMVs are WebM: VP8 + Vorbis, 29.97 fps
   (30000/1001), no colour metadata (treated as BT.601 limited range), inside `data\FFX_Data.vbf` under
@@ -3963,6 +3964,130 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
 - **Next**: S0 exit = the owner judges SIN_us / BTS_us depth plausible and notes VRAM and frames/s; S1 exit = the whole US
   list converted with total time, peak VRAM and GB measured (pin the weights hash then); S2 = the read-only sync probe in
   the mod.
+
+### Converter 0.2 (ALGO 2, branch `fmv-conv2`, 5 Nov 2026)
+
+Item 7 of the FMV pipeline audit (research `fmv3d-pipeline.md`; techniques from `fmv3d-projects.md` T1/T2/T6/T9 and
+`fmv3d-models.md`). Converter only: the .fvd format stays version 1 and the runtime needs no change; every video is
+converted again once (ALGO 2 is in the settings fingerprint). The pipeline core is `convert.process_video()` (no I/O;
+numpy only: the depth model is the one GPU step), wrapped by `convert_one()` with ffmpeg and the writer.
+
+- **Cut-aware model windows** (`window.shot_windows`): VDA's 32-frame window chain restarts at every cut, so no window
+  holds two shots' frames, slot 0 and the scale/shift reference are the shot's own frames, a short shot is padded with
+  its own last frame. Cost: each shot rounds up to whole windows (~+5 % on the synthetic test, ~+20 % at an average
+  shot of 3 s).
+- **Uncertain cuts** (`depthproc.tag_frames`, `find_transitions`): a detector cut whose picture comes back within 4
+  frames is a flash, not a cut (no window restart, its frames flagged FF_FLASH and left out of the range); a cut between
+  two correlated (>= 0.9) non-blank pictures is a brightness change; a blank frame (64x36 luma std < 2.5 levels) is
+  flagged FF_FLASH. Inside a shot, cross-dissolves (sustained change with a near-zero second difference, then checked
+  as a least-squares blend of the end pictures, ends >= 20 levels apart) and dips through black (a blank run between
+  uncorrelated pictures) start a new normalisation segment; fades to / from black do not. Dissolve and fade frames are
+  flagged FF_BLEND (index flag bit 2; FF_FLASH is bit 3; v1 readers ignore both).
+- **One depth range per shot segment** (`depthproc.shot_ranges`): each shot is buffered (RAM, then a temporary file in
+  the output folder past 2,400 frames = 550 MB), and lo/hi = the 0.1 / 99.9 percentiles of all its reliable frames'
+  pixels together, widened by 2 % each end, written as every frame's lo/hi (the v1 meaning d = lo + q/255 (hi - lo)).
+  No plateau at the nearest 2 %; nothing sinks back when something enters; across a dissolve lo/hi move linearly
+  between the two segments. A segment whose frames are all blank is written flat (lo = hi).
+- **Centred temporal filter** (`depthproc.temporal_bilateral`, `--temporal on`): per pixel a weighted mean over t-3..t+3,
+  2 passes, weights Gaussian in time (2 frames), in normalised depth (8 levels) and in the frame's luma (0.05; a
+  320x180 guide from the model-size frame), inside the shot only. Zero phase: no lag; a pixel whose depth or luma
+  changes keeps its own value, so motion passes. Flash / blank frames take their depth from their neighbours.
+- **Edges before the shrink** (`--edge-filter refine`, replaces the old late `edge_snap`): the model hands over its maps
+  at its own resolution (924x518), and per frame (numpy, `--threads`, default up to 8): `sharpen_edges`, a forced
+  foreground / background weighted median after Kopf et al. 2020 (our formulation: pixels in the band a soft step
+  leaves, near a step core where the 11x11 range is <= 2.1 x the 5x5 range so slopes and round surfaces are untouched,
+  take the weighted median of their settled 5x5 neighbours, Gaussian weights in depth, in-between pixels weight 0,
+  4 rounds so the two sides meet at the 50 % crossing); `grow_near`, the near side grown 2 px across and 1 px up/down
+  across real steps (iw3's Edge Fix idea, reimplemented from its description); `edge_shrink`, a 320x180 texel over a
+  two-valued step takes its larger group's mean. Edge threshold: 5 % of the frame's p2..p98, at least 8x the pixel
+  noise.
+- **Options**: `--input-size 714` (1274x714; the default stays 518, what VDA-S was trained at, until an A/B says
+  otherwise), `--flip` (each window also run mirrored, fitted by one scale/shift and averaged), the settings
+  fingerprint logged at the start (a video made with other settings or an older converter is converted again; the
+  rest is skipped), converter 0.2.0 / algo 2 in the log and the manifest (which also records segments, dissolves, dips,
+  fades, flash / blank / flat frames and the clipped share per video).
+
+Measured on a synthetic FMV (tests/synth.py: a textured disc moving 3 px a frame in front of a textured far plane, two
+hard cuts, a 30-frame dissolve, a fade out / black / fade in, a 2-frame white flash, a slow dolly, an object entering)
+with a stub model that has VDA-like flaws (edge blur 2 model px, per-window scale / shift, a window's mean leaking into
+its frames, a left/right bias, i.i.d. noise and smooth flicker). The audit's measures (fmv3d_exp/fvd_stats.py, e2, e3,
+e4) on the stored 320x180 maps; "% step" = levels / the levels between the disc and the plane in that variant's own
+mapping. The stub cannot show what real VDA does across a cut, so the windows' benefit shows only as less stride-22
+pumping here; the rest transfers as ratios, not absolute values. Scripts: scratchpad/conv2_exp (run.py, metrics.py).
+
+| measure | 0.1 (3d9aaa9) | 0.2 | 0.2 no temporal | 0.2 no edges | 0.2 whole-video windows | 0.2 + flip |
+|---|---|---|---|---|---|---|
+| noise, median 2nd difference (lv) | 1.54 | 0.07 | 1.35 | 0.07 | 0.07 | 0.06 |
+| noise, mean 2nd difference (% step) | 1.28 | 0.33 | 1.23 | 0.24 | 0.33 | 0.31 |
+| pumping, frame median (lv / frame) | 0.68 | 0.09 | 0.47 | 0.09 | 0.08 | 0.09 |
+| stride-22 power (x mean bin) | 0.51 | 0.14 | 0.39 | 0.27 | 0.61 | 1.03 |
+| subject (disc centre) p-p in shot 1 (% step) | 54 | 5.4 | 7.8 | 5.4 | 5.5 | 4.6 |
+| disc interior clipped at 255 | 80 % | 0 % | 0 % | 0 % | 0 % | 0 % |
+| pixels at 255 / at 0 | 2.5 / 3.1 % | 0 / 0 % | 0 / 0 % | 0 / 0 % | 0 / 0 % | 0 / 0 % |
+| silhouette 10-90 % width (video px) | 9.4 | 3.2 | 3.3 | 8.8 | 3.2 | 3.2 |
+| halo into the background (video px) | 3.8 | 4.1 | 4.1 | 3.5 | 4.1 | 4.1 |
+| bite into the subject (video px) | 5.6 | -0.9 | -0.8 | 5.3 | -0.9 | -0.9 |
+| edge crawl, std of the 50 % crossing (video px) | 1.0 | 1.65 | 1.64 | 1.0 | 1.64 | 1.63 |
+| edge lag (frames) | -0.09 | -0.10 | -0.10 | -0.10 | -0.10 | -0.10 |
+| dolly seen (% of the true change) | 9 | 85 | 88 | 85 | 85 | 92 |
+| left/right bias (% step) | 4.1 | 3.4 | 3.4 | 3.4 | 3.7 | 0.8 |
+| model calls | 20 | 21 | 21 | 21 | 20 | 42 |
+
+Readings: the temporal filter takes the frame-to-frame noise down ~4x with no lag (the edge lag and the dolly do not
+move); the per-shot range removes the subject sinking when the object enters (54 % -> 5 % of the step; the rest is
+the stub's own window leak) and the clipped plateau; the edge path narrows the silhouette from 9.4 to 3.2 video px and
+puts the whole subject on the near side (bite < 0; the grown 2 model px land in the halo). The cost of a sharp
+shrink is that the step sits on the 320 texel grid: its crawl grows from 1.0 to 1.65 px (std; a texel is 4 video px).
+Sharpening with a plain area shrink instead gives 5.7 px / 1.08 px; the runtime's guided upsample (audit item 5) is
+the fix for the crawl. In the 0.1 column the dolly is "absorbed": the per-frame normalisation pins the plane.
+
+CPU cost per frame, one core of the 2.1 GHz container CPU (the synthetic frames have few edges: count ~1.5x for real
+ones), 924x518 / 1274x714: edge path 38 / 74 ms, tags + luma guide 3.3 / 5.2 ms, temporal filter 2.8 ms, ranges
+0.1 ms. On the owner's i9-12900KF (a P-core ~2.5x this one, 8 threads for the edge path) that is about 4-6 ms wall a
+frame at 518 and 8-12 at 714 on top of the model, i.e. ~6-8 min (518) or ~12-16 min (714) for the 82k frames,
+plus ~4 min of single-threaded tag / filter work. Estimated totals: defaults ~35-45 min (22 min of model today,
++~20 % for per-shot windows, + the CPU passes); `-Flip` ~1-1.2 h; `-InputSize 714` ~1-1.5 h; both ~2-3 h (the model
+estimates are from fmv3d-models.md; nothing was run on a GPU).
+
+Not verified here: VDA with full-resolution output (the same forward, without the area resize: ~1.9 MB a frame over
+PCIe), VRAM and speed at 714, real VDA edges (the stub's blur of 2 model px is a guess; sharpen_edges handles 1-4
+px), dissolve detection on real FFX dissolves (tested on synthetic blends and pans), the threshold of the flash test
+on real white flashes, the 2,400-frame spill on Windows (a TemporaryFile in the output folder).
+
+For the runtime (no change needed; notes for whoever touches it next): lo/hi are now constant per segment, so a
+runtime re-normalisation from the index (audit item 2) becomes the identity inside a segment; a segment starts at
+FF_CUT or where lo/hi change outside FF_BLEND frames, and a per-shot L/H that spans two segments would merge them
+again (shallower): treat a lo/hi change as a segment start. FF_FLASH frames' depth is interpolated from their
+neighbours. The temporal filter makes the runtime EMA largely redundant (A/B it at 0.3 or off).
+
+### Optional high-quality mode: DA3MONO-LARGE detail on VDA-S (design only, not implemented)
+
+A plan until it can be tried on the owner's PC (fmv3d-models.md, "Optional higher quality").
+
+- **Licences** (from the LICENSE files and model cards, read 5 Nov 2026): Depth Anything 3 code is Apache-2.0
+  (github.com/ByteDance-Seed/Depth-Anything-3, LICENSE and pyproject). Its weights differ per model: **DA3MONO-LARGE
+  is Apache-2.0** (README model-card table; the Hugging Face page is tagged apache-2.0), as are DA3-SMALL, DA3-BASE and
+  DA3METRIC-LARGE; DA3-LARGE, DA3-GIANT and DA3NESTED-GIANT-LARGE (and their -1.1) are CC BY-NC 4.0 and must never be
+  offered. VDA-Small stays Apache-2.0 (VDA-Base/Large: CC-BY-NC-4.0, never offered).
+- **Why**: DA3MONO-LARGE (ViT-L + DPT, per frame, relative depth plus a sky head) is the strongest permissive
+  per-frame model found: Sintel (CG) delta1 82.3 vs DA2-L 77.2 (DA3 paper, Table 10). Per frame, so it must not decide
+  the low frequencies (shot-to-shot scale drift, flicker): VDA-S does.
+- **Fusion** (per window, inside DepthAtOutput, before the edge path): V_t = VDA-S at 518 as now (cut-aware windows);
+  D_t = DA3MONO-L per frame at 924x518 (or larger), fp16, optionally with flip averaging, inverted to disparity (sky
+  -> 0, the far end), resized to V's grid. Per frame a robust affine fit a_t D_t + b_t ~ V_t (trimmed least squares at
+  320x180, edge pixels masked), a_t / b_t smoothed zero-phase within the window. Output = lowpass(V_t) +
+  (a_t D_t + b_t - lowpass(a_t D_t + b_t)), the low pass a Gaussian of ~1/20 of the frame width: coarse from VDA,
+  fine from DA3. Then the 0.2 pipeline unchanged (edge path, per-segment range, temporal filter: the latter also
+  damps what flicker the fine band brings).
+- **Cost** (estimates, fmv3d-models.md): ~6-8 frames/s at 518 with flip and VDA-S, ~3-4 h for 82k frames; at 728
+  short side ~6-7.5 h; ~4-6 GB VRAM (the two models run one after the other).
+- **Integration**: the launcher downloads DA3's code at a pinned commit (3d835ec was HEAD when read) and only the
+  model files mono depth needs (dinov2, dpt, the da3 model, cfg and configs/da3mono-large.yaml; not api.py, which
+  pulls open3d / trimesh / pycolmap), checked by SHA-256 like VDA's; the weights (model.safetensors, ~1.4 GB) from
+  huggingface.co/depth-anything/DA3MONO-LARGE at a pinned revision with their SHA-256 recorded. xformers stays optional
+  (SDPA). A `-Quality hq` switch; the fingerprint names both models and both weights' hashes.
+- **Exit test**: an A/B on SIN_us / BTS_us with `-Preview` against the 0.2 default (fine-detail flicker; if it
+  flickers, lower the fine band's weight), then the owner's eye in the headset.
 
 ## FMV sync probe (S2, 4 Nov 2026)
 
