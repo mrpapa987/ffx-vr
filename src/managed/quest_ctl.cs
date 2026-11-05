@@ -8,19 +8,21 @@ namespace FFXVR;
 // bits, pushes the settings every frame and draws the F8 rows.
 public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_move_gate_set;     // ABI 44
-    private delegate* unmanaged[Cdecl]<int, int, int, void> _fn_grip_set;
+    private delegate* unmanaged[Cdecl]<int, int, int, int, void> _fn_grip_set;
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_ctl_text;
     private bool _move_walk_only = true;     // ini move_remap_walk_only (1): the remap only while walking; 0 = in every first-person view (the old behaviour, for an A/B)
     private int  _grip_lbrb = 1;             // ini grip_lbrb: 0 the grips are LB / RB at once (old), 1 a quick squeeze in battle and the seat / diorama, 2 everywhere
     private int  _grip_tap_ms = 300;         // ini grip_tap_ms (150..500): a quick squeeze is released within this
+    private int  _grip_tap_press_ms = 0;     // ini grip_tap_press_ms (0..300): the LB / RB press lasts 2 game polls and at least this (0: one CTB row a squeeze)
     private bool _vd_overlay_mask = true;    // ini vd_overlay_mask (1): both stick clicks send neither Back nor R3
     private int  _imgui_vrpad = 1;           // ini imgui_vrpad: 0 off, 1 the Quest controllers in Fahrenheit's save screen (default), 2 in all of ImGui
+    private bool _imgui_vrpad_strict = false;   // ini imgui_vrpad_strict (0): 1 = refuse when the game's XInput import resolves into ImGui's DLL (at the install)
     private int  _qc_tap_game; private ulong _qc_tap_frame = ulong.MaxValue;   // hands2_tap_push's game bits and the frame they were read in (the choice box)
 
     /// <summary>The exports (load_native's req: a missing one is a mismatched pair).</summary>
     private void qc_bind(Func<string, nint> req) {
         _fn_move_gate_set = (delegate* unmanaged[Cdecl]<int, int, void>)req("ffxvr_move_gate_set");
-        _fn_grip_set = (delegate* unmanaged[Cdecl]<int, int, int, void>)req("ffxvr_grip_set");
+        _fn_grip_set = (delegate* unmanaged[Cdecl]<int, int, int, int, void>)req("ffxvr_grip_set");
         _fn_ctl_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_ctl_text");
         imgui_pad_bind(req);
     }
@@ -33,8 +35,10 @@ public sealed unsafe partial class FFXVRModule {
             case "move_remap_walk_only": pb(k, v, ref _move_walk_only); return true;
             case "grip_lbrb":            pe(k, v, ref _grip_lbrb, 0, 1, 2); return true;
             case "grip_tap_ms":          pi(k, v, ref _grip_tap_ms, 150, 500); return true;
+            case "grip_tap_press_ms":    pi(k, v, ref _grip_tap_press_ms, 0, 300); return true;
             case "vd_overlay_mask":      pb(k, v, ref _vd_overlay_mask); return true;
             case "imgui_vrpad":          pe(k, v, ref _imgui_vrpad, 0, 1, 2); return true;
+            case "imgui_vrpad_strict":   pb(k, v, ref _imgui_vrpad_strict); return true;
             default: return false;
         }
     }
@@ -44,8 +48,10 @@ public sealed unsafe partial class FFXVRModule {
             $"move_remap_walk_only={(_move_walk_only ? 1 : 0)}\n" +
             $"grip_lbrb={_grip_lbrb.ToString(ci)}\n" +
             $"grip_tap_ms={_grip_tap_ms.ToString(ci)}\n" +
+            $"grip_tap_press_ms={_grip_tap_press_ms.ToString(ci)}\n" +
             $"vd_overlay_mask={(_vd_overlay_mask ? 1 : 0)}\n" +
-            $"imgui_vrpad={_imgui_vrpad.ToString(ci)}\n";
+            $"imgui_vrpad={_imgui_vrpad.ToString(ci)}\n" +
+            $"imgui_vrpad_strict={(_imgui_vrpad_strict ? 1 : 0)}\n";
     }
 
     /// <summary>The game bits for the walk gate and the grips (the tap gate's bits, ffxvr_gates.h GB_*). The battle bit every
@@ -68,7 +74,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Every frame from push_all, after hands2_push (its tap read gives the choice box) and push_player (riding).</summary>
     private void qc_push() {
         if (_fn_move_gate_set != null) _fn_move_gate_set(_move_walk_only ? 1 : 0, qc_game_bits());
-        if (_fn_grip_set != null) _fn_grip_set(_grip_lbrb, _grip_tap_ms, _vd_overlay_mask ? 1 : 0);
+        if (_fn_grip_set != null) _fn_grip_set(_grip_lbrb, _grip_tap_ms, _grip_tap_press_ms, _vd_overlay_mask ? 1 : 0);
         imgui_pad_push();
     }
     private string qc_text(int which) {
@@ -96,7 +102,7 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.Checkbox("Quest controllers in Fahrenheit's save screen", ref im)) _imgui_vrpad = im ? (im_all ? 2 : 1) : 0;
         if (im) {
             ImGui.SameLine();
-            if (ImGui.Checkbox("in every ImGui window too (Start and Back as well: L grip + R grip + menu soft-resets)", ref im_all)) _imgui_vrpad = im_all ? 2 : 1;
+            if (ImGui.Checkbox("in every ImGui window too (Start and Back as well: both grips + menu = Fahrenheit's soft reset, a game over in battle)", ref im_all)) _imgui_vrpad = im_all ? 2 : 1;
         }
         ImGui.TextDisabled(esc(imgui_pad_status()));
     }

@@ -36,8 +36,14 @@ struct Gamepad { uint16_t wButtons; uint8_t bLeftTrigger, bRightTrigger; int16_t
 struct Out { uint16_t buttons = 0; uint8_t lt = 0, rt = 0; float ls[2] = { 0.f, 0.f }, rs[2] = { 0.f, 0.f }; };
 
 inline bool grip_down(float squeeze) { return squeeze > 0.5f; }
-/// 0..1 -> 0..255 (as `(BYTE)(t * 255.f)`; out-of-range and NaN clamp instead of overflowing).
-inline uint8_t trigger_byte(float t) { if (!(t > 0.f)) t = 0.f; if (t > 1.f) t = 1.f; return static_cast<uint8_t>(t * 255.f); }
+/// 0..1 -> 0..255, exactly as vrpad_apply's `(BYTE)(t * 255.f)` did on x86 (MSVC truncates through a 32-bit int, so an
+/// out-of-range value wraps: -0.1 -> 231, 1.01 -> 1; NaN and values beyond int32 give 0x80000000, low byte 0). Written
+/// without the undefined float-to-byte conversion. Not clamped: the old code did not clamp the triggers (only the sticks).
+inline uint8_t trigger_byte(float t) {
+    const float f = t * 255.f;
+    if (!(f > -2147483648.f && f < 2147483648.f)) return 0;
+    return static_cast<uint8_t>(static_cast<uint32_t>(static_cast<int32_t>(f)) & 0xFFu);
+}
 /// -1..1 -> a stick short (vrpad_apply's stick_s).
 inline int16_t stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return static_cast<int16_t>(v * 32767.f); }
 
@@ -148,11 +154,12 @@ template <class G> inline bool imgui_apply(ImguiFeed& f, int mode, uint32_t save
     f.calls++;
     const bool on = vr_ok && imgui_feed_on(mode, save_state);
     Out o;
-    if (on && !suppress) o = compose(in, grips_down(in), C_VD_MASK);
+    if (on) o = compose(in, grips_down(in), C_VD_MASK);   // composed even while suppressed: the held mask must see what is down
     o.buttons = static_cast<uint16_t>(o.buttons & imgui_mask(mode));
     const bool opening = on && !f.held.was_on;
     f.held.step(on, o);
     if (opening) f.masked_at_open = f.held.held;
+    if (suppress) o = Out{};   // a chord or a seat grip owns the controllers this frame: ImGui sees them all up
     if (!on) return false;
     merge(o, g);
     packet = (real_ok ? packet : 0u) + vr_packet;
@@ -259,6 +266,30 @@ inline int grip_step(GripTap& s, const GripCfg& c, const GripSample& in, uint32_
 }
 /// The controllers went away (no sync, the VR pad off): a squeeze in progress ends without a verdict of its own.
 inline void grip_reset(GripTap& s) { if (s.down) { s.down = false; s.last = GV_LOST; } }
+
+/// The press slot in the game's poll (input thread), hv_tap_hook's rule (ffxvr_hands.cpp) with the minimum of new packets as
+/// a parameter. The game's pad poll (0x62DBA0) ignores a state whose packet did not change, so a press is ORed in until
+/// press_ms has passed AND the game got min_polls new packets with it, never at or past k_press_cap_ms; after a release one
+/// new packet without the button reaches the game before the next press. polls: the caller's count for this press (it adds
+/// 1 on HV_HOOK_COUNT's value 4). Returns 1 hold, 2 release, | 4 count (the HV_HOOK_* values).
+/// A quick squeeze uses min_polls = 2, press_ms = grip_tap_press_ms (default 0): the battle CTB scroll (0x89F021) steps a
+/// row when R1 is held and the list is at rest (target == shown), and the shown offset slides 11 px (half a row) a tick, so
+/// R1 seen on 1 or 2 consecutive UI ticks is exactly one row, 3 or 4 ticks two rows. 2 polls is one row when the game polls
+/// once or twice per battle UI tick (the poll and the UI are the same logic frame: about 24 polls a second in the owner's
+/// 4 Nov log, 30 Hz logic); two rows only if the UI ticked twice per poll. The tap's 3 polls / 100 ms is 3-4 ticks: 2 rows.
+constexpr int32_t k_press_cap_ms = 400;
+struct PressHook { uint32_t pkt = 0; bool need_clear = false; };
+inline int press_hook(PressHook& h, bool pressed, uint32_t pkt, int32_t el_ms, int32_t press_ms, int32_t polls, int32_t min_polls) {
+    const bool new_pkt = pkt != h.pkt; h.pkt = pkt;
+    if (!pressed) { if (new_pkt) h.need_clear = false; return 0; }
+    if (el_ms < 0 || el_ms >= k_press_cap_ms) { h.need_clear = !new_pkt; return 2; }
+    if (h.need_clear) { if (new_pkt) h.need_clear = false; return 0; }
+    const int count = new_pkt ? 4 : 0;
+    if (el_ms >= press_ms && polls >= min_polls) { h.need_clear = !new_pkt; return 2; }
+    return 1 | count;
+}
+constexpr int k_sh_min_polls = 2;
+inline int32_t clamp_press_ms(int ms) { return ms < 0 ? 0 : ms > 300 ? 300 : ms; }
 
 /// Quick squeezes waiting for the input thread's press slot (render thread only): at most 3 per hand, oldest first,
 /// alternating fairly when both hands queued.

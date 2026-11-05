@@ -1260,8 +1260,11 @@ DLL (xinput1_4 first), not the game's XINPUT9_1_0 import. imgui_pad.cs detours t
 XInputGetCapabilities (FhCallHandle, like the D3D11 detours); native merges the VR pad in (ffxvr_imgui_xstate: buttons OR,
 the stronger stick, no rotation, no tap, no Start / Back: Start is Fahrenheit's soft reset with L1 + R1; buttons already
 held when the screen opens stay masked until released) and posts one WM_DEVICECHANGE (DBT_DEVNODES_CHANGED) so the backend
-asks the capabilities again. It refuses when ImGui picked the game's own DLL, and logs the functions' first bytes (another
-hooker shows as a jump). Pushing ImGui key events from our module instead was rejected: with an Xbox pad connected the
+asks the capabilities again. It logs the functions' first bytes (another hooker shows as a jump). If the game's import
+resolves into the same DLL (xinput9_1_0 forwarding into xinput1_4) it installs anyway and logs so: the game's own calls
+pass through untouched (a thread-local re-entry guard set around the game's call; the managed shim throttles only
+ImGui's render-thread reads); `imgui_vrpad_strict=1` refuses instead. It always refuses when ImGui picked xinput9_1_0
+without our import hook (no guard). Pushing ImGui key events from our module instead was rejected: with an Xbox pad connected the
 backend re-adds the pad's state every packet and the two sources fight (repeated presses). The game gets nothing more:
 Fahrenheit locks its input while the save screen is open. ini `imgui_vrpad` 0 / 1 (default: the save screen only) / 2 (all
 of ImGui, Start and Back too). (2) **Rotated stick in battle**: the cause was our first-person movement remap
@@ -1273,8 +1276,12 @@ raw). ini `move_remap_walk_only` (default 1; 0 = the old behaviour for an A/B). 
 the owner's test confirms), switch = LB, CTB scroll = RB / RT held, overdrive = stick left and Weapon / Armor / Escape =
 stick right at the command menu, help = Back. The grips were lost to the seat / diorama grab and the left-grip chords
 leaked an LB press: now a **quick squeeze** (released within `grip_tap_ms`, 300 ms; the hand moved < 3 cm and turned
-< 10 degrees; no stick click meanwhile; the other grip not down) is LB / RB, sent on release as a press of >= 100 ms and 3
-new packets (the tap's rule), and a grab's nudge during it is undone; a held grip stays the grab and the chord modifier and
+< 10 degrees; no stick click meanwhile; the other grip not down) is LB / RB, sent on release as a press of 2 new packets
+(`grip_tap_press_ms`, default 0, can lengthen it), and a grab's nudge during it is undone. Why 2: the CTB scroll
+(0x89F021) steps a row when R1 is held and the list is at rest, then slides 11 px (half a row) a tick, so R1 seen on 1 or 2
+UI ticks is one row and the tap's 3 polls / 100 ms would be two; the game polls once per logic frame (about 24 polls a
+second in the owner's 4 Nov log), so 2 polls is one row when the UI ticks once per poll or slower (unit test against a
+model of the handler); a held grip stays the grab and the chord modifier and
 the game never sees it. In battle (all views) and the seat / diorama only (`grip_lbrb` 1; 0 = the old behaviour, 2 =
 everywhere); in the field's first / third person the grips are LB / RB at once as before (the main menu's character pages
 hold L1 / R1). `vd_overlay_mask` (1): both stick clicks (Virtual Desktop's overlay) send neither Back nor R3. Left: Auron's

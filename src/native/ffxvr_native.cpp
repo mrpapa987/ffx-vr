@@ -1462,12 +1462,13 @@ volatile LONG g_mg_why = pad::W_STALE;                                       // 
 // in g_grip_pass at once and presses a quick squeeze's LB / RB through g_sh_press (hv_tap_hook's rules, as the tap's press).
 // ini vd_overlay_mask: both stick clicks (Virtual Desktop's overlay) send neither Back nor R3.
 int      g_grip_mode = pad::G_BATTLE_GRAB; uint32_t g_grip_tap_ms = 300; bool g_vd_mask = true;
+volatile LONG g_grip_press_ms = 0;                                       // grip_tap_press_ms: the press's least length (0: just 2 new packets, ffxvr_pad.h press_hook)
 pad::GripTap g_grip[2]; pad::ShQueue g_sh_queue;
 float    g_grip_snap[2][3] = {}; int g_grip_snap_mode[2] = { -1, -1 };   // the grab offset at each squeeze (restored after a quick one)
 uint32_t g_grip_lines = 0;
 volatile LONG g_grip_pass = 3;                                           // 1 left, 2 right: the grips the hook passes to the game as LB / RB now
 volatile LONG g_sh_press = 0, g_sh_press_t0 = 0, g_sh_press_polls = 0;   // the shoulder held now (0 none), GetTickCount at the press, new packets with it
-HvTapHook g_sh_hook;                                                     // input thread only
+pad::PressHook g_sh_hook;                                                // input thread only
 pad::VdGate g_vd_gate;                                                   // vd_overlay_mask: the stick clicks 80 ms late, none while both are down (input thread only)
 thread_local bool t_in_game_xi = false;   // the game's own XInputGetState is running on this thread (the ImGui feed's re-entry guard)
 static bool vrpad_live() { return g_vrpad_enabled && g_xr_active && g_vrpad.ready; }
@@ -1480,12 +1481,14 @@ static pad::In vrpad_in() {
     }
     return in;
 }
-/// A quick squeeze's LB / RB (input thread): held >= 100 ms and >= 3 new packets, then one clear packet (hv_tap_hook).
-/// touched: this poll carries the press or its release (its packet must reach the game).
+/// A quick squeeze's LB / RB (input thread): held for 2 new packets and at least grip_tap_press_ms, then one clear packet
+/// (ffxvr_pad.h press_hook: one CTB row per squeeze). touched: this poll carries the press or its release (its packet
+/// must reach the game).
+static_assert(HV_HOOK_HOLD == 1 && HV_HOOK_RELEASE == 2 && HV_HOOK_COUNT == 4, "pad::press_hook returns the HV_HOOK_* values");
 static WORD vrpad_sh_bits(bool* touched) {
     const LONG sb = g_sh_press;
     const LONG el = sb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_sh_press_t0)) : 0;
-    const int hk = hv_tap_hook(&g_sh_hook, sb != 0, g_vrpad_packet, el, 100, g_sh_press_polls);
+    const int hk = pad::press_hook(g_sh_hook, sb != 0, g_vrpad_packet, el, g_grip_press_ms, g_sh_press_polls, pad::k_sh_min_polls);
     if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_sh_press_polls);
     *touched = (hk & (HV_HOOK_HOLD | HV_HOOK_RELEASE)) != 0;
     if (hk & HV_HOOK_HOLD) return static_cast<WORD>(sb);
@@ -11555,10 +11558,11 @@ extern "C" __declspec(dllexport) void ffxvr_move_gate_set(int walk_only, int bit
     g_mg_on = walk_only != 0 ? 1 : 0; g_mg_bits = bits;
     const DWORD t = GetTickCount(); g_mg_tick = static_cast<LONG>(t); g_mg_have = 1;
 }
-/// Quick-squeeze grips (ini grip_lbrb 0 / 1 / 2, grip_tap_ms 150..500) and vd_overlay_mask.
-extern "C" __declspec(dllexport) void ffxvr_grip_set(int mode, int tap_ms, int vd_mask) {
+/// Quick-squeeze grips (ini grip_lbrb 0 / 1 / 2, grip_tap_ms 150..500, grip_tap_press_ms 0..300) and vd_overlay_mask.
+extern "C" __declspec(dllexport) void ffxvr_grip_set(int mode, int tap_ms, int press_ms, int vd_mask) {
     g_grip_mode = mode < pad::G_OFF ? pad::G_OFF : mode > pad::G_ALWAYS ? pad::G_ALWAYS : mode;
     g_grip_tap_ms = pad::clamp_tap_ms(tap_ms); g_vd_mask = vd_mask != 0;
+    const LONG pm = pad::clamp_press_ms(press_ms); if (g_grip_press_ms != pm) g_grip_press_ms = pm;
 }
 // The ImGui feed (ini imgui_vrpad, design-notes "Quest controllers only" 1): Fahrenheit's save screen is ImGui, and ImGui's
 // Win32 backend reads pad 0 through its own XInput DLL (xinput1_4 first), not the game's import. Managed (imgui_pad.cs)
@@ -11569,11 +11573,14 @@ pad::ImguiFeed g_im_feed;
 bool     g_im_installed = false, g_im_avail_posted = false, g_im_posted_once = false, g_im_was_on = false;
 ULONGLONG g_im_post_at = 0; uint32_t g_im_posts = 0, g_im_caps_faked = 0, g_im_calls0 = 0, g_im_merged0 = 0, g_im_reentry = 0;
 HWND     g_im_hwnd = nullptr;
+bool     g_im_shared = false;   // ImGui's XInput DLL is the one the game's import resolves into (detoured anyway: the re-entry guard)
 char     g_im_text[320] = "imgui pad: not installed (imgui_vrpad=0 at the first frame, or not tried yet)";
 /// ImGui's chosen DLL, the way its backend chose it (the first of its list that is loaded; its LoadLibraryA keeps it loaded).
 /// 0: found (the two addresses out, their first bytes logged); 1 none loaded; 2 refused: it is the game's own XInput DLL
-/// (a detour there would sit under the game's import hook too); 3 an export is missing.
-extern "C" __declspec(dllexport) int ffxvr_imgui_pad_find(void** get_state, void** get_caps) {
+/// with the game's import hook not in (no re-entry guard for its calls), or, with strict (ini imgui_vrpad_strict=1), whenever
+/// the game's XInputGetState import resolves into it; 3 an export is missing. Without strict a shared DLL (xinput9_1_0
+/// forwarding into xinput1_4) is detoured anyway: the game's calls pass through untouched (t_in_game_xi, the re-entry guard).
+extern "C" __declspec(dllexport) int ffxvr_imgui_pad_find(void** get_state, void** get_caps, int strict) {
     static const wchar_t* const k_dll[5] = { L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinput1_2.dll", L"xinput1_1.dll" };
     static const char* const k_name[5] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll" };
     if (get_state) *get_state = nullptr;
@@ -11586,11 +11593,14 @@ extern "C" __declspec(dllexport) int ffxvr_imgui_pad_find(void** get_state, void
     }
     HMODULE game = nullptr;
     if (g_xi_orig) GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(g_xi_orig), &game);
-    if ((game != nullptr && m == game) || (g_xi_orig == nullptr && k == 2)) {
+    const bool shared = game != nullptr && m == game;
+    if ((shared && strict) || (g_xi_orig == nullptr && k == 2)) {
         snprintf(g_im_text, sizeof(g_im_text), "imgui pad: REFUSED: ImGui reads the pad through %s, %s; the save screen keeps ignoring the Quest controllers",
-                 k_name[k], g_xi_orig ? "the DLL the game's own XInputGetState import resolves into" : "the game's own XInput DLL (its import hook is not in)");
+                 k_name[k], g_xi_orig ? "the DLL the game's own XInputGetState import resolves into (imgui_vrpad_strict=1)" : "the game's own XInput DLL (its import hook is not in)");
         diag("%s", g_im_text); return 2;
     }
+    g_im_shared = shared;
+    if (shared) diag("imgui pad: the game's XInputGetState import resolves into %s too (a forwarded export): detoured anyway, the game's calls pass through untouched (the re-entry guard; imgui_vrpad_strict=1 refuses instead)", k_name[k]);
     void* gs = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetState"));
     void* gc = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetCapabilities"));
     if (gs == nullptr || gc == nullptr) {
@@ -11691,7 +11701,7 @@ extern "C" __declspec(dllexport) int ffxvr_ctl_text(int which, char* out, int n)
     else if (which == 1) {
         const char* m = g_grip_mode == pad::G_OFF ? "LB / RB at once everywhere (grip_lbrb=0: the old behaviour)"
                       : g_grip_mode == pad::G_ALWAYS ? "a quick squeeze = LB / RB everywhere" : "a quick squeeze = LB / RB in battle and the seat / diorama";
-        k = snprintf(out, n, "grips: %s (within %u ms)", m, g_grip_tap_ms);
+        k = snprintf(out, n, "grips: %s (within %u ms; the press: 2 polls%s)", m, g_grip_tap_ms, g_grip_press_ms > 0 ? " and grip_tap_press_ms" : "");
         for (int h = 0; h < 2 && k >= 0 && k < n; ++h) {
             const pad::GripTap& t = g_grip[h];
             const int j = snprintf(out + k, n - k, " | %s: %u sent of %u squeezes, last %s (%u ms, %.1f cm, %.0f deg)%s", h ? "R" : "L", t.fired, t.squeezes,
@@ -11700,8 +11710,9 @@ extern "C" __declspec(dllexport) int ffxvr_ctl_text(int which, char* out, int n)
         }
     }
     else if (which == 2) {
-        k = snprintf(out, n, "%s | feed %s, %u reads, %u merged, capabilities answered %u, device changes posted %u%s", g_im_text,
-                     g_im_was_on ? "ON" : "off", g_im_feed.calls, g_im_feed.merged, g_im_caps_faked, g_im_posts, g_im_reentry ? " | the game's reads forwarded here: passed through" : "");
+        k = snprintf(out, n, "%s | feed %s, %u reads, %u merged, capabilities answered %u, device changes posted %u%s%s", g_im_text,
+                     g_im_was_on ? "ON" : "off", g_im_feed.calls, g_im_feed.merged, g_im_caps_faked, g_im_posts, g_im_shared ? " | shared with the game's import" : "",
+                     g_im_reentry ? " | the game's reads came through here: passed through" : "");
     }
     if (k < 0) { out[0] = 0; return 0; }
     return k < n ? k : n - 1;

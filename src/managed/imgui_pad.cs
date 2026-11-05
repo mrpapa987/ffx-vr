@@ -8,7 +8,8 @@ namespace FFXVR;
 // no Start or Back unless imgui_vrpad=2, no stick rotation, no tap, the buttons already held when the screen opens masked).
 // Native posts one WM_DEVICECHANGE so the backend asks the capabilities again. The game itself gets nothing more: Fahrenheit
 // locks its input while the save screen is open. Installed once, at the first frame with imgui_vrpad != 0; native refuses
-// when ImGui uses the game's own XInput DLL. imgui_vrpad=0 at launch: never installed (the escape hatch).
+// only when ImGui uses the game's own XInput DLL without our import hook (no re-entry guard), or, with imgui_vrpad_strict=1,
+// whenever the game's import resolves into ImGui's DLL. imgui_vrpad=0 at launch: never installed (the escape hatch).
 public sealed unsafe partial class FFXVRModule {
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate uint d_XInputGetState(uint idx, nint state);
@@ -19,17 +20,18 @@ public sealed unsafe partial class FFXVRModule {
     private nint _a_im_state, _a_im_caps, _im_hwnd;
     private bool _im_tried, _im_installed, _im_hwnd_tried;
     private string _im_status = "not installed yet (it installs at the first frame with this on)";
-    private long _im_real_absent_until;   // Environment.TickCount64: the real pad 0 did not answer; not asked again for a second
+    private int  _im_real_absent_until;   // Environment.TickCount (32-bit, wraps; Volatile): ImGui's pad 0 did not answer; ImGui's reads skip it for a second
+    private int  _im_render_tid = -1;     // the render thread's managed id (the install runs there; ImGui's reads come from it): only its calls are throttled
     private int  _im_faults;              // exceptions caught in the two detours (never thrown into the native caller)
     private const uint k_xi_not_connected = 1167;   // ERROR_DEVICE_NOT_CONNECTED
 
-    private delegate* unmanaged[Cdecl]<nint*, nint*, int> _fn_imgui_pad_find;          // ABI 44
+    private delegate* unmanaged[Cdecl]<nint*, nint*, int, int> _fn_imgui_pad_find;     // ABI 44
     private delegate* unmanaged[Cdecl]<int, uint, nint, int, void> _fn_imgui_pad_set;
     private delegate* unmanaged[Cdecl]<uint, nint, uint, uint> _fn_imgui_xstate;
     private delegate* unmanaged[Cdecl]<uint, nint, uint, uint> _fn_imgui_xcaps;
 
     private void imgui_pad_bind(Func<string, nint> req) {
-        _fn_imgui_pad_find = (delegate* unmanaged[Cdecl]<nint*, nint*, int>)req("ffxvr_imgui_pad_find");
+        _fn_imgui_pad_find = (delegate* unmanaged[Cdecl]<nint*, nint*, int, int>)req("ffxvr_imgui_pad_find");
         _fn_imgui_pad_set = (delegate* unmanaged[Cdecl]<int, uint, nint, int, void>)req("ffxvr_imgui_pad_set");
         _fn_imgui_xstate = (delegate* unmanaged[Cdecl]<uint, nint, uint, uint>)req("ffxvr_imgui_xstate");
         _fn_imgui_xcaps = (delegate* unmanaged[Cdecl]<uint, nint, uint, uint>)req("ffxvr_imgui_xcaps");
@@ -43,9 +45,10 @@ public sealed unsafe partial class FFXVRModule {
         if (_im_tried || _imgui_vrpad == 0 || !_native_ready || _fn_imgui_pad_find == null) return;
         _im_tried = true;
         nint gs = 0, gc = 0;
-        int rc = _fn_imgui_pad_find(&gs, &gc);   // native logs the DLL and the functions' first bytes, or why not
+        _im_render_tid = Environment.CurrentManagedThreadId;
+        int rc = _fn_imgui_pad_find(&gs, &gc, _imgui_vrpad_strict ? 1 : 0);   // native logs the DLL and the functions' first bytes, or why not
         if (rc != 0 || gs == 0 || gc == 0) {
-            _im_status = rc == 2 ? "refused: ImGui reads the game's own XInput DLL (ffxvr_diag.log)" : "not installed (ffxvr_diag.log says why)";
+            _im_status = rc == 2 ? "refused: ImGui reads the game's own XInput DLL (ffxvr_diag.log; imgui_vrpad_strict)" : "not installed (ffxvr_diag.log says why)";
             _logger.Info("imgui pad: " + _im_status);
             return;
         }
@@ -74,15 +77,24 @@ public sealed unsafe partial class FFXVRModule {
         if (o == null && _h_im_caps != null) { o = new FhCallHandle<d_XInputGetCapabilities>(new FhCallLocation((void*)_a_im_caps)).chain_from(_h_im_caps).fnptr; System.Threading.Volatile.Write(ref _o_im_caps, o); }
         return o;
     }
-    /// <summary>ImGui's XInputGetState (its backend's NewFrame, the render thread). Never throws into the caller.</summary>
+    /// <summary>XInputGetState of ImGui's DLL: ImGui's backend (its NewFrame, the render thread) and, when the game's import
+    /// resolves into the same DLL, the game's own polls (its input thread; native passes those through untouched). Never
+    /// throws into the caller.</summary>
     private uint h_im_state(uint idx, nint st) {
         uint r = k_xi_not_connected;
         try {
             d_XInputGetState? o = im_orig_state();
-            long now = Environment.TickCount64;
             // Once ImGui believes in a pad (ours) it asks every frame; a disconnected slot's query can be slow (the backend's own
-            // comment), so after a failure pad 0 is not asked again for a second (a plugged-in pad shows within that).
-            if (o != null && !(idx == 0 && now < _im_real_absent_until)) { r = o(idx, st); if (idx == 0 && r != 0) _im_real_absent_until = now + 1000; }
+            // comment), so after a failure ImGui's reads of pad 0 skip the real call for a second (a plugged-in pad shows within
+            // that). Only ImGui's: every other thread's call (the game's) always goes to the real XInput.
+            bool imgui = idx == 0 && Environment.CurrentManagedThreadId == _im_render_tid;
+            int now = Environment.TickCount;
+            int left = unchecked(System.Threading.Volatile.Read(ref _im_real_absent_until) - now);   // wrap-safe: skip only inside the second
+            bool skip = imgui && left > 0 && left <= 1000;
+            if (o != null && !skip) {
+                r = o(idx, st);
+                if (imgui && r != 0) System.Threading.Volatile.Write(ref _im_real_absent_until, unchecked(now + 1000));
+            }
             if (_fn_imgui_xstate != null) r = _fn_imgui_xstate(idx, st, r);
         }
         catch { _im_faults++; }
@@ -94,7 +106,7 @@ public sealed unsafe partial class FFXVRModule {
         try {
             d_XInputGetCapabilities? o = im_orig_caps();
             if (o != null) r = o(idx, flags, caps);
-            if (idx == 0 && r == 0) _im_real_absent_until = 0;   // a real pad: its state is asked again at once
+            if (idx == 0 && r == 0) System.Threading.Volatile.Write(ref _im_real_absent_until, Environment.TickCount);   // a real pad: its state is asked again at once
             if (_fn_imgui_xcaps != null) r = _fn_imgui_xcaps(idx, caps, r);
         }
         catch { _im_faults++; }

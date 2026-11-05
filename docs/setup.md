@@ -184,9 +184,12 @@ stick).
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
-behaviour; 2 = quick squeeze everywhere), `grip_tap_ms` (300, 150..500), `vd_overlay_mask` (1), `imgui_vrpad` (1 = the
-Quest controllers in Fahrenheit's save screen; 0 = off, also not installed at the next launch; 2 = in every ImGui window,
-Start and Back too, so L grip + R grip + menu soft-resets as on a pad). The save screen's line in `ffxvr_diag.log` starts
+behaviour; 2 = quick squeeze everywhere), `grip_tap_ms` (300, 150..500), `grip_tap_press_ms` (0: the LB / RB press lasts 2
+game polls, one turn-order row; raise it, e.g. 100, if a squeeze is ever missed), `vd_overlay_mask` (1: also delays Back
+and R3 by 80 ms, so the chord is seen first), `imgui_vrpad` (1 = the Quest controllers in Fahrenheit's save screen; 0 =
+off, also not installed at the next launch; 2 = in every ImGui window, Start and Back too, so both grips + menu is
+Fahrenheit's soft reset, a game over in battle), `imgui_vrpad_strict` (0; 1 = do not install when the game's XInput
+import resolves into ImGui's XInput DLL). The save screen's line in `ffxvr_diag.log` starts
 with `imgui pad:`; quick squeezes log `grips:` lines.
 
 ## Texture packs (External File Loader style) under Fahrenheit
