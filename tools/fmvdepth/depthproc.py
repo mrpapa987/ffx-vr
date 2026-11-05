@@ -12,7 +12,8 @@ SPDX-License-Identifier: MIT (part of the FFX VR repository).
     shot_ranges        one depth range per shot segment (robust percentiles over all its frames), as lo/hi per frame
     quantise           the 8-bit rule of FORMAT.md
     temporal_bilateral a centred, edge-preserving temporal filter (per shot)
-    edge_snap          the optional light edge filter
+    refine_and_shrink  depth edges at the model's resolution: forced fg/bg weighted median (sharpen_edges), near side
+                       grown (grow_near), shrink without averaging across a step (edge_shrink)
 """
 import numpy as np
 
@@ -398,22 +399,6 @@ def shot_ranges(buf, tags, pcts=(0.1, 99.9), headroom=0.02, sample=4, transition
     return lo, hi, {'blend': blend, 'starts': starts, 'flat': flat, 'transitions': transitions}
 
 
-def edge_snap(depth, strength=0.08):
-    """Light edge filter: where a 3x3 neighbourhood spans more than `strength` x the frame's p2..p98 range (a depth
-    edge), move the pixel to whichever of the local min / max it is closer to. That removes the in-between values a
-    downscale leaves on an edge (which would become a stretched "rubber sheet" in the relief); flat areas are untouched."""
-    d = np.asarray(depth, dtype=np.float32)
-    p = np.pad(d, 1, mode='edge')
-    H, W = d.shape
-    views = [p[y:y + H, x:x + W] for y in range(3) for x in range(3)]
-    mn = np.minimum.reduce(views)
-    mx = np.maximum.reduce(views)
-    p2, p98 = np.percentile(d, (2.0, 98.0))
-    edge = (mx - mn) > strength * max(float(p98 - p2), 1e-6)
-    snapped = np.where(d - mn < mx - d, mn, mx)
-    return np.where(edge, snapped, d).astype(np.float32)
-
-
 # ==================================================================== temporal filter (centred, edge-preserving)
 def _guide01(g):
     if g is None:
@@ -486,3 +471,204 @@ def temporal_bilateral(items, radius=3, passes=2, sigma_t=2.0, sigma_n=8.0 / 255
         it = _tbil_pass(it, radius, sigma_t, sigma_n, sigma_y)
     for n, _g, _rel in it:
         yield n
+
+
+# ==================================================================== depth edges at the model's resolution
+def _run_op(a, w, axis, op):
+    """op (np.maximum / np.minimum) over every run of w consecutive samples along axis; len - w + 1 results (doubling:
+    ~log2(w) + 1 array operations instead of w - 1)."""
+    if w <= 1:
+        return a
+    n = a.shape[axis]
+
+    def sl(lo, hi):
+        ix = [slice(None)] * a.ndim
+        ix[axis] = slice(lo, hi)
+        return tuple(ix)
+    cur, span = a, 1
+    while span * 2 <= w:
+        m = cur.shape[axis]
+        cur = op(cur[sl(0, m - span)], cur[sl(span, m)])
+        span *= 2
+    if span < w:
+        m = cur.shape[axis]
+        k = w - span
+        cur = op(cur[sl(0, m - k)], cur[sl(k, m)])
+    assert cur.shape[axis] == n - w + 1
+    return cur
+
+
+def box_minmax(d, ry, rx):
+    """(min, max) over the (2 ry + 1) x (2 rx + 1) box around every pixel (edges replicated)."""
+    p = np.pad(d, ((ry, ry), (rx, rx)), mode='edge')
+    mn = _run_op(_run_op(p, 2 * rx + 1, 1, np.minimum), 2 * ry + 1, 0, np.minimum)
+    mx = _run_op(_run_op(p, 2 * rx + 1, 1, np.maximum), 2 * ry + 1, 0, np.maximum)
+    return mn, mx
+
+
+def robust_range(d, sample=4):
+    """p2..p98 of every sample-th pixel each way: the frame's own depth range (the scale edge thresholds use)."""
+    lo, hi = np.percentile(np.asarray(d, np.float32)[::sample, ::sample], (2.0, 98.0))
+    return float(hi - lo)
+
+
+_OFF5 = [(dy, dx) for dy in range(-2, 3) for dx in range(-2, 3)]
+
+
+def noise_level(d, sample=2):
+    """The depth's pixel-to-pixel noise (sigma), from the median absolute horizontal difference (robust: edges are
+    few)."""
+    a = np.asarray(d, np.float32)[::sample]
+    return float(np.median(np.abs(a[:, 1:] - a[:, :-1]))) / 0.954
+
+
+def edge_threshold(d, tau=0.05, rng=None, noise_k=8.0):
+    """The smallest depth step the edge steps treat as an edge: tau x the frame's range, and never less than
+    noise_k x its pixel noise (so noise is not taken for edges)."""
+    r = robust_range(d) if rng is None else rng
+    return max(tau * r, noise_k * noise_level(d)), r
+
+
+def sharpen_edges(d, tau=0.05, sigma=0.2, beta=0.1, slope=2.1, iters=4, thr=None, rng=None):
+    """The forced foreground / background weighted median (after Kopf et al., "One Shot 3D Photography", 2020: a 5x5
+    weighted median, Gaussian weights in disparity, the weights of in-between pixels off so that every edge pixel has
+    to take one side). Our own formulation:
+
+      step cores: the 5x5 range > the edge threshold (edge_threshold: tau x the frame's range, at least 8 x the
+      pixel noise), and the 11x11 range <= slope x the 5x5 range (a soft step levels out within a few pixels: 1.6-2.1
+      for model edge blurs of 2.5-4 px; a straight slope gives 2.5, so slopes and curved surfaces are left alone);
+      mixed: a pixel within 4 px of a step core whose value lies inside the middle (1 - 2 beta) of its 11x11
+      min..max (the band the model's soft edge leaves between the two surfaces; a sharp step has none);
+      each mixed pixel becomes the weighted median of its 5x5 neighbours that are not mixed, weights
+      exp(-(v - v_centre)^2 / 2 (sigma x range)^2), so it joins the side its own value is closer to, at that side's
+      local value. Repeated `iters` times, resolved pixels counting as settled, so the two sides grow into a wide
+      soft edge from both ends and meet in its middle; what is left then takes the nearer of its 11x11 min and max.
+
+    Pixels that are not mixed keep their value exactly. Returns a new float32 array."""
+    d = np.asarray(d, np.float32)
+    if thr is None:
+        thr, rng = edge_threshold(d, tau, rng)
+    out = d.copy()
+    if not thr > 0:
+        return out
+    r = rng if rng else thr / tau
+    mn5, mx5 = box_minmax(d, 2, 2)
+    r5 = mx5 - mn5
+    cand = r5 > thr
+    if not cand.any():
+        return out
+    mn11, mx11 = box_minmax(d, 5, 5)
+    r11 = mx11 - mn11
+    core = cand & (r11 <= slope * r5)
+    if not core.any():
+        return out
+    _z, near = box_minmax(core.astype(np.uint8), 4, 4)
+    b = np.float32(beta) * r11
+    mixed = (near > 0) & (r11 > thr) & (d - mn11 > b) & (mx11 - d > b)
+    if not mixed.any():
+        return out
+    H, W = d.shape
+    offs = np.array([dy * (W + 4) + dx for dy, dx in _OFF5])
+    s2 = np.float32(0.5 / (sigma * r) ** 2)
+    for _ in range(iters):
+        ys, xs = np.nonzero(mixed)
+        if len(ys) == 0:
+            break
+        pv = np.pad(out, 2, mode='edge').ravel()
+        pm = np.pad(mixed, 2, mode='edge').ravel()
+        ix = ((ys + 2) * (W + 4) + (xs + 2))[:, None] + offs[None, :]
+        V = pv[ix]
+        Wt = np.exp(-((V - d[ys, xs][:, None]) ** 2) * s2) * ~pm[ix]
+        order = np.argsort(V, axis=1)
+        Vs = np.take_along_axis(V, order, axis=1)
+        cw = np.cumsum(np.take_along_axis(Wt, order, axis=1), axis=1)
+        tot = cw[:, -1]
+        done = tot > 1e-6
+        if not done.any():
+            break
+        k = np.argmax(cw >= 0.5 * tot[:, None], axis=1)
+        med = Vs[np.arange(len(k)), k]
+        out[ys[done], xs[done]] = med[done]
+        mixed[ys[done], xs[done]] = False
+    ys, xs = np.nonzero(mixed)
+    if len(ys):
+        v, lo, hi = d[ys, xs], mn11[ys, xs], mx11[ys, xs]
+        out[ys, xs] = np.where(v - lo < hi - v, lo, hi)
+    return out
+
+
+def grow_near(d, gx=2, gy=1, tau=0.05, thr=None):
+    """Grow the near side of every depth step by gx pixels horizontally and gy vertically (iw3's "edge dilation" idea,
+    our own code): one pixel per step, a pixel takes a neighbour's value when that neighbour is nearer by more than
+    tau x the frame's range (a real step, not a slope). The step then sits a pixel or two outside the object, so the
+    object's own edge pixels move with it and the stretch of the relief falls on the background."""
+    d = np.asarray(d, np.float32).copy()
+    if thr is None:
+        thr, _r = edge_threshold(d, tau)
+    if not thr > 0:
+        return d
+    thr = np.float32(thr)
+    for axis, n in ((1, gx), (0, gy)):
+        for _ in range(n):
+            p = np.pad(d, [(1, 1) if a == axis else (0, 0) for a in (0, 1)], mode='edge')
+            if axis == 1:
+                a_, b_ = p[:, :-2], p[:, 2:]
+            else:
+                a_, b_ = p[:-2], p[2:]
+            new = d
+            new = np.where(a_ - new > thr, np.maximum(new, a_), new)
+            new = np.where(b_ - d > thr, np.maximum(new, b_), new)
+            d = new.astype(np.float32, copy=False)
+    return d
+
+
+def edge_shrink(d, w, h, tau=0.05, mid_share=0.2, thr=None):
+    """Shrink to h x w (bins as area_resize) without averaging across a depth step: a bin whose range exceeds the
+    edge threshold and that holds two groups of values (at most mid_share of its pixels in the middle half of its
+    min..max: a step, not a slope) takes the mean of its larger group; every other bin is its plain mean."""
+    a = np.asarray(d, np.float32)
+    H, W = a.shape
+    if w > W or h > H:
+        raise ValueError('edge_shrink only shrinks')
+    if thr is None:
+        thr, _r = edge_threshold(a, tau)
+    ry, rx = _bins(H, h), _bins(W, w)
+    cy = np.diff(np.append(ry, H))
+    cx = np.diff(np.append(rx, W))
+    cnt = (cy[:, None] * cx[None, :]).astype(np.float32)
+    mean = np.add.reduceat(np.add.reduceat(a, ry, axis=0), rx, axis=1) / cnt
+    if not thr > 0:
+        return mean
+    bmx = np.maximum.reduceat(np.maximum.reduceat(a, ry, axis=0), rx, axis=1)
+    bmn = np.minimum.reduceat(np.minimum.reduceat(a, ry, axis=0), rx, axis=1)
+    edge = (bmx - bmn) > thr
+    if not edge.any():
+        return mean
+    rep = lambda m: np.repeat(np.repeat(m, cy, axis=0), cx, axis=1)  # noqa: E731
+    mid = rep((bmx + bmn) * np.float32(0.5))
+    quarter = rep((bmx - bmn) * np.float32(0.25))
+    hi = a > mid
+    inner = np.abs(a - mid) < quarter
+    s = lambda m: np.add.reduceat(np.add.reduceat(m, ry, axis=0), rx, axis=1)  # noqa: E731
+    n_hi = s(hi.astype(np.float32))
+    sum_hi = s(np.where(hi, a, 0).astype(np.float32))
+    n_in = s(inner.astype(np.float32))
+    sum_all = mean * cnt
+    n_lo = cnt - n_hi
+    mean_hi = sum_hi / np.maximum(n_hi, 1)
+    mean_lo = (sum_all - sum_hi) / np.maximum(n_lo, 1)
+    pick = np.where(n_hi >= n_lo, mean_hi, mean_lo)
+    two = edge & (n_in <= mid_share * cnt) & (n_hi > 0) & (n_lo > 0)
+    return np.where(two, pick, mean).astype(np.float32)
+
+
+def refine_and_shrink(d, w, h, tau=0.05, sigma=0.2, grow=(2, 1)):
+    """The converter's edge path for one model-resolution depth map: sharpen_edges (forced fg/bg weighted median) ->
+    grow_near (near side +grow[0] px across, +grow[1] px up/down) -> edge_shrink to w x h. One edge threshold (from
+    the frame's range and noise) for all three steps."""
+    d = np.asarray(d, np.float32)
+    thr, r = edge_threshold(d, tau)
+    d = sharpen_edges(d, tau=tau, sigma=sigma, thr=thr, rng=r)
+    if grow[0] or grow[1]:
+        d = grow_near(d, grow[0], grow[1], thr=thr)
+    return edge_shrink(d, w, h, thr=thr)

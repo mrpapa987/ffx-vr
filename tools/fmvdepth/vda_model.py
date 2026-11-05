@@ -5,9 +5,11 @@ github.com/DepthAnything/Video-Depth-Anything) is NOT in this repository: tools/
 pinned commit below, and its Small weights (Apache-2.0) from Hugging Face. Only the Small model is supported: the Base and
 Large weights are CC-BY-NC-4.0.
 
-The interface (window.windowed_depth's `model`): model(frames) with 32 RGB uint8 frames (H x W x 3, already at the
-model's input size) returns float32 [32, out_h, out_w] relative disparity. torch is imported only when a VdaSmall is made,
-so the rest of the converter (and its tests) runs without it.
+The interface: model(frames) with 32 RGB uint8 frames (H x W x 3, already at the model's input size) returns float32
+[32, H, W] relative disparity at the model's own resolution after prepare(..., full=True) (the converter's edge path,
+flip averaging and shrink then run in numpy: convert.DepthAtOutput), or [32, out_h, out_w] area-shrunk on the GPU
+otherwise. torch is imported only when a VdaSmall is made, so the rest of the converter (and its tests) runs without
+it; everything after the model call is numpy.
 """
 import hashlib
 import os
@@ -170,8 +172,10 @@ class VdaSmall:
             return self.proj_drop(self.proj(x))
         A.Attention.forward = forward       # MemEffAttention falls back to Attention.forward without xformers
 
-    def prepare(self, in_w, in_h, out_w, out_h):
-        self.in_w, self.in_h, self.out_w, self.out_h = in_w, in_h, out_w, out_h
+    def prepare(self, in_w, in_h, out_w, out_h, full=False):
+        """full: return the depth at the model's own (input) resolution, for the converter's edge path (numpy, on the
+        CPU); otherwise area-shrunk to out_w x out_h on the GPU."""
+        self.in_w, self.in_h, self.out_w, self.out_h, self.full = in_w, in_h, out_w, out_h, full
 
     def __call__(self, frames):
         torch, F = self.torch, self.F
@@ -182,8 +186,9 @@ class VdaSmall:
             with torch.inference_mode():
                 with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=not self.fp32):
                     d = self.net(x)                                       # [1, T, H, W], relu'd
-                d = d.float()[0].unsqueeze(1)
-                d = F.interpolate(d, size=(self.out_h, self.out_w), mode='area')[:, 0]
+                d = d.float()[0]                                          # [T, H, W]
+                if not self.full:
+                    d = F.interpolate(d.unsqueeze(1), size=(self.out_h, self.out_w), mode='area')[:, 0]
                 out = d.cpu().numpy()
         except RuntimeError as e:
             if is_oom(e):
@@ -211,11 +216,15 @@ class FakeModel:
 
     model_name = 'fake'
 
-    def prepare(self, in_w, in_h, out_w, out_h):
-        self.out_w, self.out_h = out_w, out_h
+    def prepare(self, in_w, in_h, out_w, out_h, full=False):
+        self.out_w, self.out_h, self.full = out_w, out_h, full
 
     def __call__(self, frames):
         import depthproc
+        if self.full:
+            h, w = frames[0].shape[:2]
+            ramp = np.linspace(0.5, 1.5, h, dtype=np.float32)[:, None]
+            return np.stack([depthproc.luma(f) / np.float32(255.0) * ramp + np.float32(0.1) for f in frames])
         out = np.empty((len(frames), self.out_h, self.out_w), np.float32)
         ramp = np.linspace(0.5, 1.5, self.out_h, dtype=np.float32)[:, None]
         for i, f in enumerate(frames):

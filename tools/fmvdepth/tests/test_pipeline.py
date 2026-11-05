@@ -112,9 +112,9 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(self.run_convert(), 0)
         self.assertEqual(os.path.getmtime(os.path.join(self.out, 'tst_us.fvd')), m0)
         # other settings: converted again
-        self.assertEqual(self.run_convert('--only', 'tst_US.webm', '--edge-filter', 'snap'), 0)
+        self.assertEqual(self.run_convert('--only', 'tst_US.webm', '--edge-filter', 'none'), 0)
         man = self.manifest()
-        self.assertEqual(man['files']['tst_us']['settings']['edge_filter'], 'snap')
+        self.assertEqual(man['files']['tst_us']['settings']['edge_filter'], 'none')
         # --force with the same settings
         self.assertEqual(self.run_convert('--only', 'four_480', '--force'), 0)
         # a stale .part from a crash is not mistaken for anything and is removed on the next run of that video
@@ -156,7 +156,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(n, self.frames_a)
         frames = [np.frombuffer(raw, np.uint8, iw * ih * 3, i * iw * ih * 3).reshape(ih, iw, 3) for i in range(n)]
         m = vda_model.FakeModel()
-        m.prepare(iw, ih, 320, 180)
+        m.prepare(iw, ih, 320, 180, full=True)
         cfg = convert.pipe_config(convert.parse_args(['--vbf', 'x', '--out', 'y']), 320, 180, 320, 180)
         expect = [q for q, *_rest in convert.process_video(frames, m, cfg)]
         with fvd.FvdReader(os.path.join(self.out, 'tst_us.fvd')) as r:

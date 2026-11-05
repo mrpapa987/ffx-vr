@@ -11,8 +11,8 @@ weights first. Directly:
 
 Per video, streaming (memory: one shot of 320x180 maps, spilled to a temporary file past 2,400 frames):
     VBF reader -> ffmpeg (pipe, rgb24 at the model's input size) -> Video-Depth-Anything-Small in windows of 32 frames
-    (fp16, CUDA; restarted at every cut; a flash is not a cut) -> each depth map shrunk to 320x180 (240x180 for 4:3)
-    -> one shot buffered -> one depth range per shot segment (robust percentiles of all its frames; dissolves and dips
+    (fp16, CUDA; restarted at every cut; a flash is not a cut) -> depth edges sharpened at the model's resolution and
+    shrunk to 320x180 (240x180 for 4:3) without averaging across them -> one shot buffered -> one depth range per shot segment (robust percentiles of all its frames; dissolves and dips
     through black split a shot, cross-faded) -> 8 bits -> left predictor -> XPRESS_HUFF -> <name>.fvd.part, renamed to
     <name>.fvd when complete.
 manifest.json in the output folder records each video (status, source size and VBF offset, model, settings, frames,
@@ -27,7 +27,10 @@ Options:
     --preview             after converting, render a side-by-side check video of each --only video (preview.py)
     --frame N             with --preview: also a PNG of frame N (video | depth)
     --gray                previews in grey instead of a colour map
-    --edge-filter none|snap   the optional light edge filter (default none)
+    --edge-filter refine|none   depth edges at the model's resolution before the shrink (default refine: a forced
+                          foreground/background weighted median, the near side grown 2 px across and 1 px up and
+                          down, a shrink that never averages across a step); none: a plain area shrink
+    --threads N           CPU threads for the edge path (default up to 4)
     --temporal on|off     the centred, edge-preserving temporal filter within each shot (default on)
     --model vda-small|fake    fake: no torch / GPU, a pipeline check whose output is NOT depth
     --list                show what would be converted and stop
@@ -61,6 +64,7 @@ BLANK_STD = 2.5           # a frame whose 64x36 luma has a smaller standard devi
 NORM_PCTS = (0.1, 99.9)   # a shot segment's depth range: these percentiles of all its frames' pixels...
 NORM_HEADROOM = 0.02      # ... widened by this share of the range at each end
 TEMPORAL = {'radius': 3, 'passes': 2, 'sigma_t': 2.0, 'sigma_n': 8.0 / 255, 'sigma_y': 0.05}   # --temporal on
+EDGES = {'tau': 0.05, 'sigma': 0.2, 'grow': (2, 1)}      # --edge-filter refine (depthproc.refine_and_shrink)
 MANIFEST = 'manifest.json'
 EXIT_OOM = 3
 PREVIEW_DEFAULT = 'SIN_us,BTS_us'
@@ -167,6 +171,8 @@ def settings_of(a, model, weights_sha):
         'cut': {'threshold': a.cut_threshold, 'ratio': a.cut_ratio, 'flash_len': FLASH_LEN, 'blank_std': BLANK_STD,
                 'same_corr': 0.9},
         'edge_filter': a.edge_filter,
+        'edges': {'tau': EDGES['tau'], 'sigma': EDGES['sigma'], 'grow': list(EDGES['grow'])} if a.edge_filter == 'refine'
+        else 'area',
         'temporal': dict(TEMPORAL, sigma_n=8.0) if a.temporal == 'on' else 'off',
         'codec': fvd.CODEC_NAMES[a.codec_id],
         'predictor': 'left',
@@ -269,10 +275,13 @@ class PipeConfig:
     """The per-video depth settings process_video() needs (from the command line, see pipe_config)."""
 
     def __init__(self, src_w, src_h, out_w, out_h, cut_threshold=28.0, cut_ratio=3.0, flash_len=4, blank_std=2.5,
-                 pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none', temporal=None):
+                 pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none', temporal=None, edges=None,
+                 threads=1):
         self.src_w, self.src_h, self.out_w, self.out_h = src_w, src_h, out_w, out_h
-        self.edge_filter = edge_filter
+        self.edge_filter = edge_filter    # 'refine' (refine_and_shrink at the model's resolution) or 'none' (area)
+        self.edges = dict(EDGES if edges is None else edges)
         self.temporal = temporal          # None (off) or temporal_bilateral's keyword arguments
+        self.threads = max(1, int(threads))
         self.cut_threshold, self.cut_ratio, self.flash_len, self.blank_std = cut_threshold, cut_ratio, flash_len, blank_std
         self.pcts, self.headroom, self.spill_dir = tuple(pcts), headroom, spill_dir
 
@@ -280,7 +289,39 @@ class PipeConfig:
 def pipe_config(a, src_w, src_h, out_w, out_h, spill_dir=None):
     return PipeConfig(src_w, src_h, out_w, out_h, a.cut_threshold, a.cut_ratio, FLASH_LEN, BLANK_STD,
                       NORM_PCTS, NORM_HEADROOM, spill_dir, a.edge_filter,
-                      dict(TEMPORAL) if a.temporal == 'on' else None)
+                      dict(TEMPORAL) if a.temporal == 'on' else None, EDGES, a.threads)
+
+
+class DepthAtOutput:
+    """window.windowed_depth's model: the depth model's maps (at its own resolution, or already at the output size),
+    then in numpy, per frame: the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size.
+    Frames of one window are spread over `threads` threads (numpy releases the GIL in its array loops)."""
+
+    def __init__(self, model, c):
+        self.model, self.c = model, c
+        self.pool = None
+        if c.threads > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            self.pool = ThreadPoolExecutor(max_workers=c.threads)
+
+    def one(self, d):
+        c = self.c
+        if d.shape == (c.out_h, c.out_w):
+            return d
+        if c.edge_filter == 'refine':
+            e = c.edges
+            return depthproc.refine_and_shrink(d, c.out_w, c.out_h, tau=e['tau'], sigma=e['sigma'], grow=e['grow'])
+        return depthproc.area_resize(d, c.out_w, c.out_h)
+
+    def __call__(self, frames):
+        d = np.asarray(self.model(frames), dtype=np.float32)
+        maps = list(self.pool.map(self.one, d)) if self.pool else [self.one(x) for x in d]
+        return np.stack(maps)
+
+    def close(self):
+        if self.pool:
+            self.pool.shutdown()
+            self.pool = None
 
 
 def _count(stats, k, n=1):
@@ -291,15 +332,25 @@ def _count(stats, k, n=1):
 def process_video(frames, model, c, stats=None):
     """The depth pipeline of one video, without file or ffmpeg I/O (numpy only; `model` is the only GPU step).
 
-    frames: the video's RGB frames at the model's input size, in order. model: window.windowed_depth's model.
+    frames: the video's RGB frames at the model's input size, in order. model: the depth model (its maps at its own
+    resolution, or at the output size): DepthAtOutput makes the stored-size maps from them.
     Yields (q, flags, p2, p98, lo, hi, thumb) for every frame in order, one shot late (a shot's range needs all of it):
-      tag_frames (cuts with the flash test, blank frames) -> shot_windows (VDA restarted at every cut) -> ShotBuffer ->
+      DepthAtOutput (the edge path at the model's resolution: forced fg/bg weighted median, near side grown 2 px across
+      and 1 px up/down, shrink without averaging across a step) inside tag_frames (cuts with the flash test, blank frames) -> shot_windows (VDA restarted at every cut) -> ShotBuffer ->
       find_transitions + shot_ranges (one range per segment; dissolves cross-faded) -> normalised n ->
       temporal_bilateral (centred +-3 frames, 2 passes, inside the shot only; c.temporal None: off) -> 8 bits.
     stats (a dict), if given, collects counts: frames, cuts, flash_frames, blank_frames, dissolves, fades, dips,
     segments, flat_frames, clipped (pixels at 0 or 255)."""
     det = depthproc.CutDetector(c.src_w, c.src_h, c.cut_threshold, c.cut_ratio)
     tags = {}
+    dm = DepthAtOutput(model, c)
+    try:
+        yield from _process(frames, dm, c, stats, det, tags)
+    finally:
+        dm.close()
+
+
+def _process(frames, model, c, stats, det, tags):
 
     def items():
         guide = (c.out_w, c.out_h) if c.temporal and c.temporal.get('sigma_y', 0) > 0 else None
@@ -313,8 +364,6 @@ def process_video(frames, model, c, stats=None):
             for i, d in shot:
                 if i != start + len(buf):
                     raise ConvertError(f'internal: frame {i} came out as frame {start + len(buf)}')
-                if c.edge_filter == 'snap':
-                    d = depthproc.edge_snap(d)
                 buf.append(d)
                 pp.append(np.percentile(buf[len(buf) - 1], (2.0, 98.0)))
             st = [tags.pop(start + k) for k in range(len(buf))]
@@ -363,7 +412,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     out_w, out_h = depthproc.output_size(sw, sh)
     tw, th = depthproc.thumb_size(sw, sh)
     est = int(round(info['duration'] * info['fps_num'] / info['fps_den'])) if info['duration'] else None
-    model.prepare(in_w, in_h, out_w, out_h)
+    model.prepare(in_w, in_h, out_w, out_h, full=a.edge_filter == 'refine')
     model.reset_peak()
     cfg = pipe_config(a, sw, sh, out_w, out_h, spill_dir=out_dir)
     log(f'{entry.name}: {sw}x{sh} {info["fps_num"]}/{info["fps_den"]} fps, ~{est or "?"} frames, '
@@ -504,7 +553,9 @@ def parse_args(argv):
     p.add_argument('--weights-sha256', default='', help='recorded by the launcher; computed here if not given')
     p.add_argument('--fp32', action='store_true', help='full precision (slower, more VRAM)')
     p.add_argument('--attention', default='sdpa', choices=['sdpa', 'plain'])
-    p.add_argument('--edge-filter', default='none', choices=['none', 'snap'])
+    p.add_argument('--edge-filter', default='refine', choices=['refine', 'none'])
+    p.add_argument('--threads', type=int, default=min(4, os.cpu_count() or 1),
+                   help='CPU threads for the edge path (default: up to 4; the output does not depend on it)')
     p.add_argument('--temporal', default='on', choices=['on', 'off'], help='the centred temporal filter (default on)')
     p.add_argument('--codec', default='auto', choices=['auto', 'xpress', 'zlib'])
     p.add_argument('--cut-threshold', type=float, default=28.0)
