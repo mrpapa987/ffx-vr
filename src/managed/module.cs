@@ -2376,7 +2376,36 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ImGui.Text(esc(line));   // actor names read from the game
             sb?.Append("\n  ").Append(line);
         }
-        if (sb != null) _logger.Info(sb.ToString());
+        if (sb != null) { optpos_log(actors, sb); _logger.Info(sb.ToString()); }
+    }
+
+    /// <summary>"log this table" only (diagnostics: Wakka's first-person eye in battle sits ~7 units high): for the followed
+    /// actor and every live party model (c0xx), the 26 chr_optpos sub-positions (+0x524; all-zero ones left out), with the
+    /// index push_player's head rule picks marked '*' (the lowest actor-space Y with |X| + |Z| > 0.01: the highest point;
+    /// fp_head_anchor puts the eye fp_head_up above it), the root, and whether push_player would fold the pick as an offset
+    /// (more than 100 units from the root in X / Z). Read only; nothing here changes what push_player does.</summary>
+    private void optpos_log(Actor* actors, System.Text.StringBuilder sb) {
+        for (int i = 0; i < 48; i++) {
+            if (!read(actors + i, out Actor a)) break;
+            if (!live(a)) continue;
+            string name = actor_name(a.chr_name);
+            bool party = name.Length == 4 && name[0] == 'c' && name[1] == '0';
+            if (i != _fp_actor_idx && !party) continue;
+            int pick = -1; float hy = float.MaxValue;
+            for (int k = 0; k < 26; k++) { Vector4 sp = a.chr_optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; pick = k; } }   // push_player's rule, copied
+            sb.Append(System.FormattableString.Invariant($"\n  optpos {i} {name}{(i == _fp_actor_idx ? " (followed)" : "")}: root ({a.chr_pos_vec.X:F2},{a.chr_pos_vec.Y:F2},{a.chr_pos_vec.Z:F2})"));
+            for (int k = 0; k < 26; k++) {
+                Vector4 sp = a.chr_optpos[k];
+                if (sp.X == 0f && sp.Y == 0f && sp.Z == 0f && sp.W == 0f) continue;
+                sb.Append(System.FormattableString.Invariant($" {k}{(k == pick ? "*" : "")}:({sp.X:F2},{sp.Y:F2},{sp.Z:F2},{sp.W:F2})"));
+            }
+            if (pick < 0) sb.Append(" | head: none (no sub-position off the axis)");
+            else {
+                Vector4 h = a.chr_optpos[pick];
+                bool fold = MathF.Abs(h.X - a.chr_pos_vec.X) + MathF.Abs(h.Z - a.chr_pos_vec.Z) > 100f;
+                sb.Append(System.FormattableString.Invariant($" | head = {pick} (y {h.Y:F2}, {a.chr_pos_vec.Y - h.Y:F2} above the root{(fold ? "; push_player would fold it as an offset from the root" : "")}); eye {(_fp_head_anchor != 0 ? $"{_fp_head_up:F2} above it (fp_head_anchor {_fp_head_anchor})" : "fixed (fp_head_anchor 0)")}"));
+            }
+        }
     }
 
     /// <summary>The player: the enabled field actor whose model name is in the fp_actor list, best first (Tidus is
