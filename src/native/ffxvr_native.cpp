@@ -2512,21 +2512,60 @@ static cpu::Mbi cpu_vq(uintptr_t q) {
     return m;
 }
 
+// lean2: the render thread's reads that cost a VirtualQuery or a working-set check, by caller: the return address into the
+// caller of ffxvr_safe_read (managed: JIT code), or of range_readable for its direct native callers. The cpu: line names the
+// top four with their counts, time, length and the allocation the last query landed in. Diagnostic only (render thread).
+static cpu::SiteTable<16> g_rs;
+static cpu::Mbi g_rs_last;                 // the current call's last VirtualQuery answer (render thread)
+static uintptr_t g_cpu_exe_end = 0;        // the end of FFX.exe's image (SizeOfImage; ~0 if unknown: the hinted path stays off)
+static cpu::Mbi cpu_vq_rt(uintptr_t q) { const cpu::Mbi m = cpu_vq(q); g_rs_last = m; return m; }   // render thread only
+static void cpu_exe_init() {
+    if (g_cpu_exe_base != 0) return;
+    g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    MODULEINFO mi = {};
+    g_cpu_exe_end = g_cpu_exe_base != 0 && GetModuleInformation(GetCurrentProcess(), reinterpret_cast<HMODULE>(g_cpu_exe_base), &mi, sizeof(mi)) && mi.SizeOfImage != 0
+                  ? g_cpu_exe_base + mi.SizeOfImage : ~static_cast<uintptr_t>(0);
+}
+
+// lean2: QueryWorkingSetEx on our own process (the pseudo-handle has PROCESS_QUERY_INFORMATION; K32QueryWorkingSetEx, kernel32),
+// for cpu::ws_check: one look-up a page, not VirtualQuery's scan to the end of the run. g_ws_state: 0 untried, 1 it answered,
+// -1 off for the session (8 failures before any answer: VirtualQuery alone, as before). Any thread.
+static volatile LONG g_ws_state = 0, g_ws_fails = 0;
+static bool ws_query(const uintptr_t* va, uint32_t* at, int n) {
+    if (g_ws_state < 0 || n <= 0 || n > cpu::k_ws_max_pages) return false;
+    PSAPI_WORKING_SET_EX_INFORMATION w[cpu::k_ws_max_pages];
+    for (int i = 0; i < n; ++i) { w[i].VirtualAddress = reinterpret_cast<PVOID>(va[i]); w[i].VirtualAttributes.Flags = 0; }
+    if (!QueryWorkingSetEx(GetCurrentProcess(), w, static_cast<DWORD>(n * sizeof(w[0])))) {
+        if (InterlockedIncrement(&g_ws_fails) >= 8) InterlockedCompareExchange(&g_ws_state, -1, 0);
+        return false;
+    }
+    if (g_ws_state == 0) InterlockedCompareExchange(&g_ws_state, 1, 0);
+    for (int i = 0; i < n; ++i) at[i] = static_cast<uint32_t>(w[i].VirtualAttributes.Flags);   // Valid .. Bad: the low 32 bits
+    return true;
+}
+
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
 /// access violation fatal even inside __try, so this check, not SEH, is what keeps a stale pointer harmless.
 /// (cpu-lean: the loop is cpu::range_check, ffxvr_cpu.h, the same test; on the render thread it is timed and counted, and a
 /// range inside a page run of FFX.exe's image already seen readable this frame is answered from the region cache: the exe is
 /// never unloaded and its sections never decommitted, so such a run cannot be freed between the query and the read.)
-static bool range_readable(const void* p, size_t len) {
+/// (lean2: site = the caller, for the cpu: line's table; the walk is unchanged.)
+static bool range_readable_at(const void* p, size_t len, const void* site) {
     const uintptr_t a = reinterpret_cast<uintptr_t>(p);
     if (g_render_tid == 0 || GetCurrentThreadId() != g_render_tid)
         return cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq, nullptr, 0, nullptr);
-    if (g_cpu_exe_base == 0) g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    cpu_exe_init();
     const LONGLONG t0 = cpu_q();
-    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
-    g_cpu_rr_q += cpu_q() - t0;
+    const uint32_t q0 = g_cpu_rr.queries;
+    g_rs_last = cpu::Mbi{};
+    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
+    const LONGLONG d = cpu_q() - t0;
+    g_cpu_rr_q += d;
+    if (g_cpu_rr.queries != q0) g_rs.note(reinterpret_cast<uintptr_t>(site), g_cpu_rr.queries - q0, 0, d, static_cast<uint32_t>(len), a, g_rs_last.alloc_base, g_rs_last.size);
     return ok;
 }
+static __declspec(noinline) bool range_readable(const void* p, size_t len) { return range_readable_at(p, len, _ReturnAddress()); }
+
 
 // vq-lean (ini fast_reads, default 1; ffxvr_cpu.h FastReader): the render thread's ffxvr_safe_read keeps every run VirtualQuery
 // answered readable until the next Present (at most 50 ms; a failed copy drops them all), and copies out of anything but
@@ -2538,6 +2577,12 @@ static bool range_readable(const void* p, size_t len) {
 // The setting comes from managed through ffxvr_cpu_report: alone (n = -3, right after the native loads, before any frame,
 // and on a frame that does not finish) and with every report (v[M_N + 2]). Off until it comes (review SF1): an older
 // ffxvr.dll that never sends it runs the old path.
+// lean2: the kept runs still end with the frame, so a read into one of the game's big blocks cost one long scan a frame
+// (~225 us in the virtual screen). Where VirtualQuery answered a long run (>= 1 MB), the range is noted as a hint (kept across
+// frames, a cost guess only), and a read there that the kept runs do not cover gets QueryWorkingSetEx first: one look-up a
+// page. Resident and readable (a guard page is never resident until its first touch) -> its pages are kept for the frame,
+// never as image, and the kernel copies it; anything else -> the walk above, unchanged. The other threads use the same
+// check before range_readable's walk and copy as before. fast_reads=0 turns all of it off (the old path, unchanged).
 static volatile LONG g_fast_reads = 0;
 static cpu::FastReader<32, 16> g_fr;
 static uint32_t g_fr_frames = 0, g_fr_off = 0;   // frames of this cpu: window with fast_reads on / off (cpu_frame_roll)
@@ -2567,20 +2612,52 @@ static bool fr_kernel_copy(void* dst, const void* src, unsigned len) {
 
 /// The render thread's ffxvr_safe_read with fast_reads on. Counts and times as range_readable does: its time is the walk's
 /// alone, without either copy (review N8); the kernel copies are timed on their own.
-static int safe_read_fast(const void* src, void* dst, unsigned len) {
-    if (g_cpu_exe_base == 0) g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+/// lean2: the hinted path (ffxvr_cpu.h FastReader): a read in a range where VirtualQuery answered long runs gets the
+/// working-set check first (ws_query, timed on its own too); site = the caller, for the cpu: line's table.
+static LONGLONG g_fr_ws_q = 0;             // lean2: this frame's QPC ticks in QueryWorkingSetEx (render thread; also in range_readable's)
+static int safe_read_fast(const void* src, void* dst, unsigned len, const void* site) {
+    cpu_exe_init();
     if (g_fr_qpf == 0) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_fr_qpf = f.QuadPart; }
+    const uintptr_t a = reinterpret_cast<uintptr_t>(src);
     const LONGLONG t0 = cpu_q();
-    LONGLONG copy_q = 0, plain_q = 0;
+    LONGLONG copy_q = 0, plain_q = 0, ws_q = 0;
     const cpu::FastStats before = g_fr.st;
-    const int ok = g_fr.read(reinterpret_cast<uintptr_t>(src), len, t0, g_fr_qpf / 20, g_cpu_exe_base, cpu_vq,
+    g_rs_last = cpu::Mbi{};
+    const int ok = g_fr.read(a, len, t0, g_fr_qpf / 20, g_cpu_exe_base, g_cpu_exe_end, cpu_vq_rt,
+        [&](const uintptr_t* va, uint32_t* at, int n) { const LONGLONG c0 = cpu_q(); const bool r = ws_query(va, at, n); ws_q += cpu_q() - c0; return r; },
         [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_plain_copy(dst, src, len); plain_q = cpu_q() - c0; return done; },
         [&]() { const LONGLONG c0 = cpu_q(); const bool done = fr_kernel_copy(dst, src, len); copy_q = cpu_q() - c0; return done; });
-    g_cpu_rr.queries += g_fr.st.queries - before.queries;
+    const uint32_t dq = g_fr.st.queries - before.queries, dw = g_fr.st.ws - before.ws;
+    g_cpu_rr.queries += dq;
     g_cpu_rr.hits += g_fr.st.hits - before.hits;
     g_fr_copy_q += copy_q;
+    g_fr_ws_q += ws_q;
     if (copy_q != 0 && len > 4096) { g_fr_big_n++; g_fr_big_q += copy_q; }
-    g_cpu_rr_q += (cpu_q() - t0) - copy_q - plain_q;
+    const LONGLONG walk = (cpu_q() - t0) - copy_q - plain_q;
+    g_cpu_rr_q += walk;
+    if (dq != 0 || dw != 0) g_rs.note(reinterpret_cast<uintptr_t>(site), dq, dw, walk, len, a, g_rs_last.alloc_base, g_rs_last.size);
+    return ok;
+}
+
+// lean2: the guarded reads on every thread but the render thread (the main thread's post-join and battle-cursor snapshots,
+// diag7.cs, per game frame; the loader's): never counted before. [0] the main thread, [1] the others: reads, the ones the
+// working-set check answered, VirtualQuery calls, QPC ticks spent checking. Swapped out by the cpu: line.
+static volatile LONG g_ot_n[2] = {}, g_ot_ws[2] = {}, g_ot_vq[2] = {}, g_ot_t[2] = {};
+/// The check for those threads (no cache there): with fast_reads on, the working-set check first (it answers "readable now" or
+/// "unknown"), else range_readable's walk exactly as before; the copy after it is the plain one under __try, as before.
+static bool ot_readable(const void* p, size_t len, DWORD tid) {
+    const int k = (g_main_tid != 0 && tid == g_main_tid) ? 0 : 1;
+    const uintptr_t a = reinterpret_cast<uintptr_t>(p);
+    const LONGLONG t0 = cpu_q();
+    bool ok;
+    if (g_fast_reads != 0 && cpu::ws_check(a, len, ws_query)) { ok = true; InterlockedIncrement(&g_ot_ws[k]); }
+    else {
+        cpu::RangeStats st;
+        ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq, nullptr, 0, &st);
+        if (st.queries != 0) InterlockedExchangeAdd(&g_ot_vq[k], static_cast<LONG>(st.queries));
+    }
+    InterlockedIncrement(&g_ot_n[k]);
+    InterlockedExchangeAdd(&g_ot_t[k], static_cast<LONG>(cpu_q() - t0));
     return ok;
 }
 
@@ -2589,14 +2666,17 @@ static int safe_read_fast(const void* src, void* dst, unsigned len) {
 /// start-up). The pages are checked with VirtualQuery first: Fahrenheit's
 /// stage-0 is a debugger and an access violation is fatal under it even
 /// inside __try, so faulting on purpose is not an option. (vq-lean: on the
-/// render thread with fast_reads on, safe_read_fast.)
+/// render thread with fast_reads on, safe_read_fast. lean2: the other threads
+/// check with ot_readable, the working-set check first with fast_reads on.)
 extern "C" __declspec(dllexport) int ffxvr_safe_read(const void* src, void* dst, unsigned len) {
     if (src == nullptr || dst == nullptr || len == 0) return 0;
-    if (g_render_tid != 0 && GetCurrentThreadId() == g_render_tid) {
+    const DWORD tid = GetCurrentThreadId();
+    if (g_render_tid != 0 && tid == g_render_tid) {
         g_cpu_sr_calls++;
-        if (g_fast_reads != 0) return safe_read_fast(src, dst, len);
+        if (g_fast_reads != 0) return safe_read_fast(src, dst, len, _ReturnAddress());
+        if (!range_readable_at(src, len, _ReturnAddress())) return 0;
     }
-    if (!range_readable(src, len)) return 0;
+    else if (!ot_readable(src, len, tid)) return 0;
     __try { memcpy(dst, src, len); return 1; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
@@ -5316,7 +5396,8 @@ static IDXGIAdapter3* g_adapter3 = nullptr; static bool g_adapter3_tried = false
 //   xrEndFrame, xrBeginFrame, sync, locate, input), perf (C2, the pointer sprites, perf_tick without slow_frame), slow
 //   (slow_frame), tail (the end-of-frame bookkeeping); all = the whole call.
 //   Managed (ffxvr_cpu_report, once a frame at the end of render_imgui): its Stopwatch sections and the GC counts.
-//   Reads: ffxvr_safe_read calls, VirtualQuery calls and range_readable's time per frame (render thread).
+//   Reads: ffxvr_safe_read calls, VirtualQuery calls and range_readable's time per frame (render thread); lean2: the
+//   working-set checks, the reads that queried or checked by caller (top four), and the other threads' reads per window.
 //   After our hook: the end of our managed hook (or of ffxvr_begin_frame without one) to the render thread's next ring wait
 //   (stickrep's rt_ring_wait: Fahrenheit's later ImGui work, the real Present, the rest of the Present list), and how far
 //   past the open slot's deadline the ring wait was entered; "skipped by us" counts the sr: line's skip_ours over this window.
@@ -5331,6 +5412,7 @@ static cpu::Acc g_cpu_srn, g_cpu_vqn, g_cpu_hitn, g_cpu_rrms;   // per frame: sa
 static cpu::Acc g_cpu_cpyn, g_cpu_cpyms, g_cpu_prbn;            // vq-lean, per frame: kernel copies, their ms, allocation-base probes
 static cpu::Acc g_cpu_bign, g_cpu_bigms;                        // vq-lean (review N7), per frame: kernel copies over 4 KB, their ms
 static uint32_t g_cpu_cpy_fail = 0;                             // vq-lean: failed kernel copies over the window
+static cpu::Acc g_cpu_wsn, g_cpu_wsy, g_cpu_wsms;                // lean2, per frame: working-set checks, the reads they answered, their ms
 static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
 static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
 static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu_hook_end_q = 0;
@@ -5350,6 +5432,7 @@ static void cpu_frame_roll() {
     g_cpu_srn.add(g_cpu_sr_calls); g_cpu_vqn.add(g_cpu_rr.queries); g_cpu_hitn.add(g_cpu_rr.hits); g_cpu_rrms.add(cpu_ms(g_cpu_rr_q));
     g_cpu_cpyn.add(g_fr.copies); g_cpu_cpyms.add(cpu_ms(g_fr_copy_q)); g_cpu_prbn.add(g_fr.st.probes); g_cpu_cpy_fail += g_fr.fails;
     g_cpu_bign.add(g_fr_big_n); g_cpu_bigms.add(cpu_ms(g_fr_big_q));
+    g_cpu_wsn.add(g_fr.st.ws); g_cpu_wsy.add(g_fr.st.ws_yes); g_cpu_wsms.add(cpu_ms(g_fr_ws_q)); g_fr_ws_q = 0;   // lean2
     if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
     g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
@@ -5396,6 +5479,46 @@ extern "C" __declspec(dllexport) void ffxvr_cpu_report(const float* v, int n) {
     if (n > M_N + 2) InterlockedExchange(&g_fast_reads, v[M_N + 2] != 0.f ? 1 : 0);   // vq-lean: ini fast_reads (an older managed sends none: off)
     g_cpu_hook_end_q = cpu_q(); g_cpu_gap_armed = true;
 }
+/// lean2: the site table's top four by time, per frame of the window, then a new table. A return address in this DLL is named
+/// ffxvr_native+RVA (the pdb has it); one in FFX.exe ffx+RVA; anything else is JIT code (a managed caller: ffxvr.dll's
+/// _fn_safe_read call sites; read<T> is one site per T), named by its address, the read's length and where it landed.
+/// No module API is called here (no loader lock on the render thread).
+extern "C" IMAGE_DOS_HEADER __ImageBase;
+static void cpu_sites_part(char* out, size_t n, uint32_t frames) {
+    static uintptr_t self_lo = 0, self_hi = 0;
+    if (self_hi == 0) {
+        self_lo = reinterpret_cast<uintptr_t>(&__ImageBase);
+        const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(self_lo + __ImageBase.e_lfanew);
+        self_hi = self_lo + nt->OptionalHeader.SizeOfImage;
+    }
+    const double f = frames ? static_cast<double>(frames) : 1.0;
+    int idx[4]; const int k = g_rs.top(idx, 4);
+    int len = snprintf(out, n, " | reads that queried or checked, by caller (render thread, top %d by time):", k);
+    if (k == 0 && len > 0 && static_cast<size_t>(len) < n) len += snprintf(out + len, n - len, " none");
+    for (int i = 0; i < k && len > 0 && static_cast<size_t>(len) < n; ++i) {
+        const cpu::SiteStat& e = g_rs.s[idx[i]];
+        char who[48];
+        if (e.ret >= self_lo && e.ret < self_hi) snprintf(who, sizeof(who), "ffxvr_native+0x%X", static_cast<unsigned>(e.ret - self_lo));
+        else if (g_cpu_exe_base != 0 && e.ret >= g_cpu_exe_base && e.ret < g_cpu_exe_end) snprintf(who, sizeof(who), "ffx+0x%X", static_cast<unsigned>(e.ret - g_cpu_exe_base));
+        else snprintf(who, sizeof(who), "JIT 0x%08X", static_cast<unsigned>(e.ret));
+        len += snprintf(out + len, n - len, "%s %s %.1f/frame (VirtualQuery %.1f, working-set %.1f) %.3f ms/frame, len %u at 0x%08X",
+                        i ? ";" : "", who, e.calls / f, e.queries / f, e.ws / f, cpu_ms(e.ticks) / f, e.len, static_cast<unsigned>(e.addr));
+        if (e.run != 0 && len > 0 && static_cast<size_t>(len) < n)
+            len += snprintf(out + len, n - len, " (allocation 0x%08X, last answer %.1f MB)", static_cast<unsigned>(e.alloc), e.run / 1048576.0);
+    }
+    if (g_rs.other.calls != 0 && len > 0 && static_cast<size_t>(len) < n)
+        len += snprintf(out + len, n - len, "; others (table full) %.1f/frame %.3f ms/frame", g_rs.other.calls / f, cpu_ms(g_rs.other.ticks) / f);
+    g_rs.clear();
+}
+/// lean2: the other threads' guarded reads over the window (swapped out: a new window).
+static void cpu_other_part(char* out, size_t n, double secs) {
+    LONG c[2], w[2], q[2], t[2];
+    for (int i = 0; i < 2; ++i) { c[i] = InterlockedExchange(&g_ot_n[i], 0); w[i] = InterlockedExchange(&g_ot_ws[i], 0); q[i] = InterlockedExchange(&g_ot_vq[i], 0); t[i] = InterlockedExchange(&g_ot_t[i], 0); }
+    const double s = secs > 0.0 ? secs : 1.0;
+    snprintf(out, n, " | other threads' reads (not in the counts above): main %ld (%.0f/s; working-set %ld, VirtualQuery %ld; %.2f ms, %.3f ms/s), others %ld (working-set %ld, VirtualQuery %ld; %.2f ms)",
+             static_cast<long>(c[0]), c[0] / s, static_cast<long>(w[0]), static_cast<long>(q[0]), cpu_ms(t[0]), cpu_ms(t[0]) / s,
+             static_cast<long>(c[1]), static_cast<long>(w[1]), static_cast<long>(q[1]), cpu_ms(t[1]));
+}
 /// With the perf: line (perf_tick, render thread): the window's line, then a new window.
 static void cpu_log_line() {
     using namespace cpu_line;
@@ -5415,18 +5538,29 @@ static void cpu_log_line() {
                   M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
     char gt[1200];
     gt_line_part(gt, sizeof(gt));   // grid-timer: the timer, the game window, the main loop and the limiter's Sleep (a new window)
-    char fr[320];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
+    char fr[512];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
     if (g_fr_frames == 0) snprintf(fr, sizeof(fr), ", fast_reads off");
-    else snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f",
-                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
-                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx);
-    diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms%s | after our hook to the ring wait %s%s",
+    else {
+        char ws[96];   // lean2: QueryWorkingSetEx's state
+        if (g_ws_state < 0) snprintf(ws, sizeof(ws), "; QueryWorkingSetEx off (failed %ld times, never answered)", static_cast<long>(g_ws_fails));
+        else snprintf(ws, sizeof(ws), "%s", g_ws_fails != 0 ? "; QueryWorkingSetEx failed sometimes" : "");
+        snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)",
+                 g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
+                 g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx,
+                 g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws);
+    }
+    char sites[900];   // lean2: the render thread's reads that queried or checked, by caller, the top four by time
+    cpu_sites_part(sites, sizeof(sites), g_cpu_frames);
+    char ot[400];      // lean2: the other threads' guarded reads
+    cpu_other_part(ot, sizeof(ot), secs);
+    diag("cpu: %.0f s, %u frames, avg/max ms | begin_frame %.2f/%.1f (head %.2f/%.1f, pre %.2f/%.1f, xr wait %.2f/%.1f, xr rest %.2f/%.1f, perf %.2f/%.1f, slow %.2f/%.1f, tail %.2f/%.1f) | managed %s | safe_read %.0f/%.0f a frame, VirtualQuery %.0f/%.0f (cache hits %.0f/%.0f), range_readable %.3f/%.2f ms%s%s%s | after our hook to the ring wait %s%s",
          secs, g_cpu_frames, N[N_ALL].avg(), N[N_ALL].mx, N[N_HEAD].avg(), N[N_HEAD].mx, N[N_PRE].avg(), N[N_PRE].mx, N[N_XWAIT].avg(), N[N_XWAIT].mx, N[N_XREST].avg(), N[N_XREST].mx,
          N[N_PERF].avg(), N[N_PERF].mx, N[N_SLOW].avg(), N[N_SLOW].mx, N[N_TAIL].avg(), N[N_TAIL].mx, man,
-         g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, fr, gap, gt);
+         g_cpu_srn.avg(), g_cpu_srn.mx, g_cpu_vqn.avg(), g_cpu_vqn.mx, g_cpu_hitn.avg(), g_cpu_hitn.mx, g_cpu_rrms.avg(), g_cpu_rrms.mx, fr, sites, ot, gap, gt);
     for (auto& a : g_cpu_nat) a = cpu::Acc{};
     for (auto& a : g_cpu_man) a = cpu::Acc{};
     g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = g_cpu_bign = g_cpu_bigms = cpu::Acc{};
+    g_cpu_wsn = g_cpu_wsy = g_cpu_wsms = cpu::Acc{};
     g_cpu_cpy_fail = 0; g_fr_frames = g_fr_off = 0;
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;
