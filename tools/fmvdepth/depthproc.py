@@ -6,7 +6,11 @@ SPDX-License-Identifier: MIT (part of the FFX VR repository).
     output_size        the stored depth size: 180 lines high (320x180 for 16:9, 240x180 for 4:3)
     area_resize        box-filter resize (exact bin means)
     CutDetector        shot cuts from the mean absolute luma change of 64x36 thumbnails
-    ShotNormalizer     8-bit quantisation by p2/p98, EMA-smoothed within a shot, reset at a cut
+    tag_frames         per-frame tags: cuts with the flash test, blank frames (streaming, a few frames late)
+    find_transitions   dissolves, fades and dips through black inside a shot
+    ShotBuffer         a shot's float depth maps (RAM, then a temporary file)
+    shot_ranges        one depth range per shot segment (robust percentiles over all its frames), as lo/hi per frame
+    quantise           the 8-bit rule of FORMAT.md
     edge_snap          the optional light edge filter
 """
 import numpy as np
@@ -112,6 +116,7 @@ class CutDetector:
             avg = (sum(self.hist) / len(self.hist)) if self.hist else 0.0
             cut = d >= self.threshold and d >= self.ratio * (avg + 1.0)
         self.prev = small
+        self.small = small
         self.last_diff = d
         if cut:
             self.hist = []
@@ -122,33 +127,273 @@ class CutDetector:
         return cut, thumb
 
 
-class ShotNormalizer:
-    """Quantise relative disparity to 8 bits: q = 255 * clip((d - lo) / (hi - lo)), with lo/hi the frame's 2nd/98th
-    percentiles smoothed by an EMA (weight `alpha` on the past) within a shot and reset at a cut.
-    Returns (q uint8, p2, p98, lo, hi): p2/p98 raw for this frame, lo/hi the values used (so d = lo + q/255*(hi-lo))."""
+# ==================================================================== frame tags: cuts, flashes, blank frames
+class Tag:
+    """What the converter knows about one frame before depth: cut (a shot starts here: FF_CUT, the model's windows
+    restart), raw_cut (the detector's own verdict, before the flash test), blank (a near-uniform picture: black,
+    white, a flat colour), flash (a short bright / changed run inside a shot that returns to the picture before it),
+    small (the detector's 64x36 luma), thumb (the index thumbnail), guide (a luma image at the depth's size, 0..1, for
+    the temporal filter; None until set)."""
+    __slots__ = ('cut', 'raw_cut', 'blank', 'flash', 'small', 'pre', 'diff', 'thumb', 'guide')
 
-    def __init__(self, alpha=0.9, lo_pct=2.0, hi_pct=98.0):
-        if not 0.0 <= alpha < 1.0:
-            raise ValueError('alpha must be in [0, 1)')
-        self.alpha, self.pcts = float(alpha), (float(lo_pct), float(hi_pct))
-        self.lo = self.hi = None
+    def __init__(self, **kw):
+        self.guide = None
+        self.pre = None
+        for k, v in kw.items():
+            setattr(self, k, v)
 
-    def __call__(self, depth, cut):
-        d = np.asarray(depth, dtype=np.float32)
-        p2, p98 = (float(v) for v in np.percentile(d, self.pcts))
-        if cut or self.lo is None:
-            self.lo, self.hi = p2, p98
+
+def _corr(a, b):
+    x = np.asarray(a, np.float64).ravel()
+    y = np.asarray(b, np.float64).ravel()
+    x = x - x.mean()
+    y = y - y.mean()
+    den = float(np.sqrt((x * x).sum() * (y * y).sum()))
+    return float((x * y).sum()) / den if den > 0 else 1.0
+
+
+def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, same_corr=0.9):
+    """Yield (frame, Tag) for every frame, `flash_len` + 1 frames late (the flash test looks ahead).
+
+    blank: the 64x36 luma's standard deviation < blank_std levels (nothing a depth model can read).
+    flash: a raw cut at t whose picture comes back within flash_len frames (some u in t+1..t+flash_len has
+    mean |small[u] - small[t-1]| < half the cut threshold and < half the cut's own step): frames t..u-1 are a flash,
+    and the cuts at t..u are dropped (the shot goes on; the model's windows are not restarted; the frames are left out
+    of the shot's depth range). A cut into or out of a run of blank frames that does not come back stays a cut.
+    A detector cut between two non-blank frames whose 64x36 lumas correlate >= same_corr is the same picture
+    brighter or darker (a fast fade steps past the threshold every frame): not a cut.
+    guide_size (w, h): also make each frame's luma at that size (Tag.guide, float32 0..1)."""
+    pend = []                     # [frame, Tag], oldest first
+    prev_small = None
+    prev_blank = True
+    half = detector.threshold * 0.5
+    for f in frames:
+        cut, thumb = detector(f)
+        small = detector.small
+        blank = float(small.std()) < blank_std
+        if cut and prev_small is not None and not blank and not prev_blank and _corr(small, prev_small) >= same_corr:
+            cut = False           # the same picture, brighter or darker (a quick fade): not a new shot
+        t = Tag(cut=cut, raw_cut=cut, blank=blank, flash=False, small=small, pre=prev_small,
+                diff=detector.last_diff, thumb=thumb)
+        prev_blank = blank
+        if guide_size is not None:
+            t.guide = area_resize(luma(f), guide_size[0], guide_size[1]) * np.float32(1.0 / 255.0)
+        prev_small = small
+        pend.append([f, t])
+        # does this frame close a flash that started at a pending raw cut?
+        u = len(pend) - 1
+        for k in range(max(0, u - flash_len), u):
+            c = pend[k][1]
+            if c.raw_cut and c.pre is not None and not c.flash:
+                back = float(np.mean(np.abs(small - c.pre)))
+                if back < half and back < 0.5 * c.diff:
+                    for j in range(k, u):
+                        pend[j][1].flash = True
+                        pend[j][1].cut = False
+                    t.cut = False
+                    break
+        while len(pend) > flash_len + 1:
+            yield tuple(pend.pop(0))
+    for p in pend:
+        yield tuple(p)
+
+
+# ==================================================================== transitions inside a shot: dissolves, fades, dips
+def _runs(mask):
+    """[(start, end_exclusive)] of the True runs of a 1-D bool array."""
+    m = np.concatenate([[False], np.asarray(mask, bool), [False]])
+    d = np.flatnonzero(m[1:] != m[:-1])
+    return list(zip(d[::2].tolist(), d[1::2].tolist()))
+
+
+def find_transitions(smalls, blank, min_len=6, d1_min=0.5, curv=0.5, min_change=20.0, max_resid=0.25, gap=2,
+                     dip_corr=0.6):
+    """Gradual transitions inside one shot (between two cuts), from the 64x36 luma of its frames.
+
+    A cross-dissolve from picture A to picture B is, frame by frame, (1 - a) A + a B with a rising: the luma keeps
+    changing (mean |step| >= d1_min) while its second difference stays small (<= curv x the step: a linear blend has
+    none; motion has). Runs of such frames (gaps up to `gap` frames bridged, at least min_len long) are then checked:
+    the end pictures must differ (mean |B - A| >= min_change levels) and every frame between must be such a blend
+    (least-squares a per frame, residual <= max_resid x |B - A|, a not falling). A blend with a blank end is a fade
+    (to or from black / white): one shot, no boundary. A blend between two pictures is a dissolve: a new
+    normalisation segment starts where a crosses 0.5.
+    A dip: a run of blank frames inside the shot with different pictures on either side (correlation of the nearest
+    non-blank frames < dip_corr): a fade out and in through black. A new segment starts in the middle of the run.
+
+    Returns a list of dicts: kind ('dissolve' | 'fade' | 'dip'), a, b (the frames just outside the transition: frames
+    a+1 .. b-1 are its blend / blank frames), boundary (the first frame of the new segment, or None), alpha (per
+    frame a+1 .. b-1, the blend weight of B; dips: 0 before the boundary, 1 after)."""
+    n = len(smalls)
+    out = []
+    blank = np.asarray(blank, bool)
+    if n >= 3:
+        S = np.stack([np.asarray(s, np.float32) for s in smalls])
+        d1 = np.zeros(n)
+        d1[1:] = np.abs(S[1:] - S[:-1]).mean(axis=(1, 2))
+        d2 = np.full(n, np.inf)
+        d2[1:-1] = np.abs(S[2:] - 2 * S[1:-1] + S[:-2]).mean(axis=(1, 2))
+        cand = (d1 >= d1_min) & (d2 <= curv * d1)
+        cand[0] = cand[-1] = False
+        runs = _runs(cand)
+        merged = []
+        for s, e in runs:
+            if merged and s - merged[-1][1] <= gap:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        for s, e in merged:
+            if e - s < min_len:
+                continue
+            a, b = s - 1, min(e, n - 1)
+            A, B = S[a], S[b]
+            dAB = B - A
+            change = float(np.abs(dAB).mean())
+            if change < min_change:
+                continue
+            den = float((dAB * dAB).sum())
+            mid = S[a + 1:b]
+            al = ((mid - A) * dAB).sum(axis=(1, 2)) / den
+            res = np.abs(mid - A - al[:, None, None] * dAB).mean(axis=(1, 2)) / change
+            if res.max() > max_resid or al.min() < -0.15 or al.max() > 1.15 or np.any(np.diff(al) < -0.1):
+                continue
+            al = np.clip(al, 0.0, 1.0)
+            if blank[a] or blank[b]:
+                out.append({'kind': 'fade', 'a': a, 'b': b, 'boundary': None, 'alpha': al})
+            else:
+                k = int(np.argmax(al >= 0.5)) if (al >= 0.5).any() else len(al)
+                out.append({'kind': 'dissolve', 'a': a, 'b': b, 'boundary': a + 1 + k, 'alpha': al})
+        for p, q in _runs(blank):
+            if p == 0 or q >= n:
+                continue
+            if _corr(S[p - 1], S[q]) < dip_corr:
+                bnd = (p + q) // 2
+                al = (np.arange(p, q) >= bnd).astype(np.float64)
+                out.append({'kind': 'dip', 'a': p - 1, 'b': q, 'boundary': bnd, 'alpha': al})
+    out.sort(key=lambda t: t['a'])
+    return out
+
+
+# ==================================================================== the depth range of a shot
+class ShotBuffer:
+    """The float depth maps of one shot, in order: in RAM up to ram_frames maps, then in a temporary file (in spill_dir,
+    deleted when closed), so a long shot cannot run the PC out of memory."""
+
+    def __init__(self, ram_frames=2400, spill_dir=None):
+        self.ram, self.ram_frames, self.spill_dir = [], int(ram_frames), spill_dir
+        self.file = None
+        self.n = 0
+        self.shape = None
+
+    def append(self, d):
+        d = np.ascontiguousarray(d, dtype=np.float32)
+        if self.shape is None:
+            self.shape = d.shape
+        elif d.shape != self.shape:
+            raise ValueError(f'depth map {d.shape}, the shot has {self.shape}')
+        if len(self.ram) < self.ram_frames:
+            self.ram.append(d)
         else:
-            a = self.alpha
-            self.lo = a * self.lo + (1.0 - a) * p2
-            self.hi = a * self.hi + (1.0 - a) * p98
-        lo, hi = self.lo, self.hi
-        rng = hi - lo
-        eps = max(1e-6, abs(hi) * 1e-4)
-        if rng < eps:
-            rng = eps
-        q = np.clip((d - lo) * (255.0 / rng) + 0.5, 0, 255).astype(np.uint8)
-        return q, p2, p98, lo, hi
+            if self.file is None:
+                import tempfile
+                self.file = tempfile.TemporaryFile(prefix='fvdshot-', dir=self.spill_dir)
+            self.file.seek((self.n - self.ram_frames) * d.nbytes)
+            self.file.write(d.tobytes())
+        self.n += 1
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, k):
+        if not 0 <= k < self.n:
+            raise IndexError(k)
+        if k < len(self.ram):
+            return self.ram[k]
+        nb = int(np.prod(self.shape)) * 4
+        self.file.seek((k - self.ram_frames) * nb)
+        return np.frombuffer(self.file.read(nb), dtype=np.float32).reshape(self.shape)
+
+    def close(self):
+        self.ram = []
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+
+def range_eps(hi):
+    """FORMAT.md "The values": a range below this is a flat frame."""
+    return max(1e-6, abs(hi) * 1e-4)
+
+
+def quantise(d, lo, hi):
+    """8-bit depth against (lo, hi), exactly as FORMAT.md "The values" says: q = 255 (d - lo) / (hi - lo) rounded
+    half up, clamped to 0..255, the range floored at range_eps (a flat frame)."""
+    rng = max(hi - lo, range_eps(hi))
+    return np.clip((np.asarray(d, np.float32) - np.float32(lo)) * np.float32(255.0 / rng) + np.float32(0.5),
+                   0, 255).astype(np.uint8)
+
+
+def shot_ranges(buf, tags, pcts=(0.1, 99.9), headroom=0.02, sample=4, transitions=None):
+    """One depth range per normalisation segment of a shot, written as every frame's lo/hi (FORMAT.md v1 meaning:
+    d ~ lo + q/255 (hi - lo)).
+
+    Segments: the shot, split at each dissolve / dip boundary (find_transitions). A segment's range: the pcts
+    percentiles of all its reliable frames' pixels together (every `sample`-th pixel each way; reliable = not blank,
+    not a flash, not a transition frame; if none, its non-blank frames; if none, the segment is flat: lo = hi), widened
+    by `headroom` x the range at both ends. So nothing but true outliers clips (no plateau at the nearest 2 % of every
+    frame), and the mapping is the same for the whole segment (nothing breathes or sinks when something enters).
+    Dissolve / dip frames get lo/hi interpolated between the two segments by their blend weight; fade frames keep
+    their segment's.
+
+    Returns (lo, hi, info): float arrays per frame, and a per-frame list of 'blend' flags plus segment starts."""
+    n = len(buf)
+    if transitions is None:
+        transitions = find_transitions([t.small for t in tags], [t.blank for t in tags])
+    blend = np.zeros(n, bool)
+    alpha = {}
+    starts = [0]
+    for tr in transitions:
+        blend[tr['a'] + 1:tr['b']] = True
+        if tr['boundary'] is not None:
+            starts.append(tr['boundary'])
+            for j, al in enumerate(tr['alpha']):
+                alpha[tr['a'] + 1 + j] = (tr['boundary'], float(al))
+    starts = sorted(set(starts))
+    seg_of = np.zeros(n, int)
+    for k, s in enumerate(starts):
+        seg_of[s:] = k
+    rel = np.array([not (t.blank or t.flash) for t in tags]) & ~blend
+    nonblank = np.array([not t.blank for t in tags])
+    rngs = []
+    for k, s in enumerate(starts):
+        e = starts[k + 1] if k + 1 < len(starts) else n
+        idx = [i for i in range(s, e) if rel[i]] or [i for i in range(s, e) if nonblank[i]]
+        if not idx:
+            rngs.append(None)
+            continue
+        pool = np.concatenate([buf[i][::sample, ::sample].ravel() for i in idx])
+        L, H = (float(v) for v in np.percentile(pool, pcts))
+        w = (H - L) * headroom
+        rngs.append((L - w, H + w))
+    # a flat segment takes a neighbour's range if it has one (its frames are blank: they show nothing anyway)
+    lo = np.zeros(n)
+    hi = np.zeros(n)
+    flat = np.zeros(n, bool)
+    for i in range(n):
+        r = rngs[seg_of[i]]
+        if r is None:
+            d = buf[i]
+            m = float(np.median(d))
+            lo[i] = hi[i] = m
+            flat[i] = True
+        else:
+            lo[i], hi[i] = r
+    for i, (bnd, al) in alpha.items():
+        k = starts.index(bnd)
+        a_r, b_r = rngs[k - 1], rngs[k]
+        if a_r is not None and b_r is not None:
+            lo[i] = (1 - al) * a_r[0] + al * b_r[0]
+            hi[i] = (1 - al) * a_r[1] + al * b_r[1]
+    return lo, hi, {'blend': blend, 'starts': starts, 'flat': flat, 'transitions': transitions}
 
 
 def edge_snap(depth, strength=0.08):

@@ -43,6 +43,8 @@ HF_THUMBS = 0x02        # a luma thumbnail per frame follows the index
 # frame flags (index entry u16)
 FF_CUT = 0x0001         # first frame of a shot (the converter's cut detector; frame 0 always)
 FF_STORED = 0x0002      # payload is stored (not compressed): compression did not make it smaller
+FF_BLEND = 0x0004       # (converter 0.2) part of a dissolve or fade inside a shot (a v1 reader may ignore it)
+FF_FLASH = 0x0008       # (converter 0.2) a flash or blank (near-uniform) frame: depth unreliable (may be ignored)
 
 _HDR = struct.Struct('<4sHHHHIII BBBB HH Q Q Q HH I Q Q 48s')
 _IDX = struct.Struct('<QIHHffff')

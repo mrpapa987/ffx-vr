@@ -39,37 +39,21 @@ class SizesTest(unittest.TestCase):
         self.assertEqual(dp.resize_bilinear(ramp, 8, 4).shape, (4, 8))
 
 
-class NormalizerTest(unittest.TestCase):
-    def test_first_frame_and_quantisation(self):
-        n = dp.ShotNormalizer(alpha=0.9)
+class QuantiseTest(unittest.TestCase):
+    def test_rule(self):
         d = np.linspace(0, 10, 10000, dtype=np.float32).reshape(100, 100)
-        q, p2, p98, lo, hi = n(d, cut=False)              # first frame acts as a cut
-        self.assertAlmostEqual(p2, 0.2, places=2)
-        self.assertAlmostEqual(p98, 9.8, places=2)
-        self.assertEqual((lo, hi), (p2, p98))
+        q = dp.quantise(d, 1.0, 9.0)
         self.assertEqual(q.dtype, np.uint8)
-        self.assertEqual(int(q.min()), 0)
-        self.assertEqual(int(q.max()), 255)
-        # decode: d ~ lo + q/255*(hi-lo) inside the range
-        inside = (d > lo) & (d < hi)
-        rec = lo + q.astype(np.float32) / 255 * (hi - lo)
-        self.assertLess(float(np.abs(rec - d)[inside].max()), (hi - lo) / 255)
+        self.assertEqual(int(q[d < 1].max()), 0)
+        self.assertEqual(int(q[d > 9].min()), 255)
+        inside = (d > 1) & (d < 9)
+        rec = 1.0 + q.astype(np.float32) / 255 * 8.0
+        self.assertLessEqual(float(np.abs(rec - d)[inside].max()), 8.0 / 255 / 2 + 1e-5)   # half a step
 
-    def test_ema_and_reset(self):
-        n = dp.ShotNormalizer(alpha=0.5)
-        a = np.linspace(0, 1, 1000, dtype=np.float32)
-        n(a, True)
-        _q, p2, p98, lo, hi = n(a + 10, False)            # inside a shot: half way
-        self.assertAlmostEqual(lo, (0.02 + 10.02) / 2, places=2)
-        self.assertAlmostEqual(hi, (0.98 + 10.98) / 2, places=2)
-        _q, p2, p98, lo, hi = n(a + 10, True)             # a cut: reset to this frame
-        self.assertEqual((lo, hi), (p2, p98))
-
-    def test_flat_frame(self):
-        n = dp.ShotNormalizer()
-        q, p2, p98, lo, hi = n(np.full((10, 10), 3.0, np.float32), True)
-        self.assertEqual(p2, p98)
+    def test_flat(self):
+        q = dp.quantise(np.full((10, 10), 3.0, np.float32), 3.0, 3.0)
         self.assertEqual(q.dtype, np.uint8)
+        self.assertLess(dp.range_eps(3.0), 1e-3)
 
 
 class CutTest(unittest.TestCase):
