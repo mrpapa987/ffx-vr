@@ -426,10 +426,15 @@ def main(argv):
         print(f'{argv[1]}: {h.src_name} {h.width}x{h.height} {h.frame_count} frames {h.fps:.3f} fps, '
               f'codec {CODEC_NAMES.get(h.codec, h.codec)}, model {MODEL_NAMES.get(h.model_id, h.model_id)} '
               f'input {h.input_w}x{h.input_h}, settings {h.settings_hash:016x}')
-        cuts = sum(1 for i in range(len(r)) if r.entry(i).flags & FF_CUT)
+        ents = [r.entry(i) for i in range(len(r))]
+        cuts = sum(1 for e in ents if e.flags & FF_CUT)
+        blend = sum(1 for e in ents if e.flags & FF_BLEND)
+        flash = sum(1 for e in ents if e.flags & FF_FLASH)
+        ranges = len({(e.lo, e.hi) for e in ents})
         for i in range(len(r)):
             r.frame(i)
-        print(f'  {cuts} cuts; every frame decodes; payload {h.index_offset - h.header_size:,} bytes')
+        print(f'  {cuts} cuts, {blend} dissolve/fade frames, {flash} flash/blank frames, {ranges} distinct lo/hi; '
+              f'every frame decodes; payload {h.index_offset - h.header_size:,} bytes')
     return 0
 
 
