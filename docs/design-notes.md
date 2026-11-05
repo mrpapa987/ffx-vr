@@ -4281,6 +4281,36 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   little positional swim on head translation that the flat screen does not have (the 3D view already behaves so). Check it
   in step 5 below; if it shows, a depth layer for the relief is the next step.
 
+- **Round 7** (runtime items 1-4 and 9 of the audit's ranked plan, research fmv3d-pipeline.md; no reconversion, ABI 43):
+  - *A vertex per depth texel.* The 160 x 90 grid had its vertices on texel boundaries of the 320 x 180 map (each read
+    the mean of 2 x 2 texels). Now a vertex at every texel centre plus one on each edge of the rect (relief::grid_coord,
+    321 x 181 cells, 241 x 181 for 4:3; 348,606 vertices an eye, no buffers): the audit's silhouette transition goes from
+    11.5-14 to 6.8-10.6 video px. The pass is timed (D3D11 timestamps, both eyes): F8's FMV 3D line and the fmv3d: end
+    line give it (the audit expects well under 0.3 ms an eye).
+  - *One fixed range per shot.* relief::shot_norm at open: per shot the 10th percentile of the index's lo and the 90th of
+    its hi (flat frames left out; a "shot" under 6 frames, a flash, folded into the one before), and per frame n' = a n + b
+    against them. So the subject no longer sinks back when something nearer enters (the audit's 0.25 deg / 6 px swings at
+    the defaults) and nothing breathes. The worker now outputs 16-bit n' (the depth texture is R16_UNORM). Index entries
+    are 16 B (a 32-bit offset), at most 32,768 frames. Debug: `each frame to its own range (old; A/B)`.
+  - *Cuts.* A cut whose depth is ready switches at once at the level it was at (the old reset to flat and 150 ms inflate
+    pulsed at every cut and at a flash that tripped the cut flag twice mid-shot); the 150 ms ramp stays for returns from
+    flat, and a cut whose depth is not decoded yet is still flat at once. Debug: `old cut ramp (flat at every cut; A/B)`.
+  - *A centred temporal filter on the worker* (relief::tfilter): each output frame is a depth-only temporal bilateral of
+    the decoded frames -3 .. +3 (time sigma 3 x `smoothing`, depth sigma 7 levels; nothing across a cut, a flat or failed
+    frame), on each frame's own per-shot n'. No lag (the EMA's was ~1.6 video frames), less flicker, no ghost under a gate.
+    The worker keeps 12 decoded and 6 output frames (1.44 MB; with END_us's index 1.84 MB) on a tested schedule
+    (relief::next_unit); ~2.4 ms a frame on the worker. Debug: `old causal filter (EMA, lags; A/B)`.
+  - *Clean-ups:* the dead pivot and the per-frame median that fed it are gone; the colour's uv stays half a backbuffer texel
+    inside the rect (no dark rim on 4:3 videos).
+  - *Tools:* tools/fmvdepth/fvd_stats.py (read-only figures of the owner's files; setup.md has the command).
+  - Checks: relief_test 941 / 0, 25 / 25 mutants (one at a time), nchk 14 / 2 / 0, vkd3d vs_4_0 / ps_4_0, the static
+    check; fvd_stats' unit test. Not verified: anything at run time (the GPU time, the worker's cost in 32-bit MSVC, the look).
+  - Owner A/B (F8 > Debug, the FMV 3D line's checkboxes; all session-only): `each frame to its own range` on and off in a
+    shot where something enters or leaves (a hand, a sword, a creature): with it off the rest should stay put; `old cut
+    ramp`: watch shot changes for the "inflate" pulse; `old causal filter`: depth trailing moving edges, shimmer on still
+    backgrounds; `smoothing` 0 / 0.6 / 0.9 with the centred filter (0.9 should not lag); silhouettes against the round-6
+    build (finer depth edges, less halo).
+
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
 1. F8 > View: tick `FMVs in 3D (needs converted depth)`. F8 > Debug shows `FMV 3D: no movie playing`.
