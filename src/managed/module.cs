@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 40;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2)
+    private const int k_abi = 41;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -426,6 +426,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_fp_self_set  = (delegate* unmanaged[Cdecl]<float, float, float, int, int, float*, int>)req("ffxvr_fp_self_set");   // ABI 37: the body hide's ownership (body_hide.cs); ABI 38: + its return
             _fn_fp_others_set = (delegate* unmanaged[Cdecl]<float*, float*, int, int>)req("ffxvr_fp_others_set");   // ABI 39: + the heads (npc-anchor)
             _fn_fp_ib_set    = (delegate* unmanaged[Cdecl]<uint*, int, uint, int>)req("ffxvr_fp_ib_set");   // ABI 40: the exact owner by index buffer (npc-anchor round 2)
+            _fn_fmv3d_set    = (delegate* unmanaged[Cdecl]<int, float, int, int, void>)req("ffxvr_fmv3d_set"); _fn_fmv3d_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_fmv3d_text");   // ABI 41: FMVs in 3D (fmv_relief.cs)
             _fn_cpu_report   = (delegate* unmanaged[Cdecl]<float*, int, void>)req("ffxvr_cpu_report");   // ABI 38: the cpu: line's managed sections (cpu_report.cs)
             _fn_sg_install   = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_shadow_guard_install");    // ABI 34: the ShadowManager pool guard (shadow_cam.cs)
             _fn_sg_budget    = (delegate* unmanaged[Cdecl]<float, int, void>)req("ffxvr_shadow_budget_set");
@@ -594,6 +595,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_imgui_status = null;   // ABI 21 (saveui; _fn_imgui_layer_set is cleared above)
         _fn_haze_set = null; _fn_haze_status = null;   // ABI 22 (heat haze)
         _fn_slow_set = null; _fn_slow_status = null;   // ABI 36 (the slow-GPU guard)
+        _fn_fmv3d_set = null; _fn_fmv3d_text = null;   // ABI 41 (FMVs in 3D)
         _fn_load_info = null;   // ABI 23 (loads)
         _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
         _fn_pre_resolve = null; _fn_hands2_set = null; _fn_hands2_status = null; _fn_hands2_cal = null; _fn_hands2_pack = null; _fn_hands2_pack_error = null;   // ABI 27, 28, 29 (VR hands v2)
@@ -1060,6 +1062,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "shadow_cam":        pi(k, v, ref _shadow_cam, 0, 1); break;       // character shadows: 1 the game's light camera left alone (default), 0 overridden (old, A/B)
                 case "fp_self_shadow":    pi(k, v, ref _fp_self_shadow, 0, 1); break;   // 1 own shadow always drawn (default), 0 hidden in first person's whole-body mode
                 case "heat_haze":         pi(k, v, ref _heat_haze, 0, 2); break;        // fire shimmer: 0 off in the headset's 3D view (default), 1 fixed per eye (experimental), 2 as before (A/B)
+                case "fmv_depth":         pb(k, v, ref _fmv_depth); break;              // FMVs in 3D with a converted depth file (fmv_relief.cs; default 0)
+                case "fmv_depth_strength": pf(k, v, ref _fmv_depth_strength, 0f, 0.25f); break;   // the relief's depth, a share of the screen width (default 0.08)
+                case "fmv_depth_flat_subs": pb(k, v, ref _fmv_depth_flat_subs); break;  // the bottom 15 % flat (subtitles; default 0)
+                case "fmv_depth_offset":  pi(k, v, ref _fmv_depth_offset, -3, 3); break;   // Debug: the depth frame shown = the video frame + this (default 0)
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
                 case "follow_rate":       pf(k, v, ref _follow_rate, 1f, 360f); break;
@@ -1409,6 +1415,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"shadow_near={_shadow_near.ToString("F0", ci)}\n" +
             $"shadow_budget={_shadow_budget.ToString(ci)}\n" +
             $"heat_haze={_heat_haze.ToString(ci)}\n" +
+            $"fmv_depth={(_fmv_depth ? 1 : 0)}\n" +
+            $"fmv_depth_strength={_fmv_depth_strength.ToString("F3", ci)}\n" +
+            $"fmv_depth_flat_subs={(_fmv_depth_flat_subs ? 1 : 0)}\n" +
+            $"fmv_depth_offset={_fmv_depth_offset.ToString(ci)}\n" +
             $"hist_mode={_hist_mode.ToString(ci)}\n" +
             $"follow_pans={(_follow_pans ? 1 : 0)}\n" +
             $"follow_rate={_follow_rate.ToString("F0", ci)}\n" +
@@ -1577,6 +1587,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
         ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
         ImGui.RadioButton("never", ref _xr_screen_mode, 2);
+        fmv3d_ui();    // fmv-relief (S3): fmv_depth, fmv_depth_strength, fmv_depth_flat_subs (fmv_relief.cs)
         ImGui.Text("stereo screen (3D scenes on the big screen, through the game's own camera, in 3D):"); ImGui.SameLine();
         ImGui.Checkbox("in blitzball##s3", ref _s3_blitz); ImGui.SameLine(); ImGui.Checkbox("everywhere##s3", ref _s3_all);
         if (_s3_blitz || _s3_all) {
@@ -1655,6 +1666,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
         timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
         fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
+        fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; fmv_depth_offset (fmv_relief.cs)
 
         if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
             float* c = stackalloc float[48];
@@ -2157,6 +2169,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_noimg_set != null) _fn_noimg_set(_noimg_mode);
         shadow_push();   // shadow camera: shadow_cam, fp_self_shadow (every frame)
         haze_push();     // heat haze: heat_haze (every frame; applied at the next Present)
+        fmv3d_push();    // fmv-relief (S3): fmv_depth and its settings (every frame; applied at the next Present)
         slow_push();     // the slow-GPU guard: slow_guard, slow_guard_restart (every frame)
         sr_push();       // stickrep: stick_reproject and its Debug knobs, the turn keys (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
