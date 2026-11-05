@@ -389,7 +389,7 @@ def _count(stats, k, n=1):
         stats[k] = stats.get(k, 0) + n
 
 
-def process_video(frames, model, c, stats=None):
+def process_video(frames, model, c, stats=None, on_stop=None):
     """The depth pipeline of one video, without file or ffmpeg I/O (numpy only; `model` is the only GPU step).
 
     frames: the video's RGB frames at the model's input size, in order. model: the depth model (its maps at its own
@@ -404,11 +404,17 @@ def process_video(frames, model, c, stats=None):
     frames, 2 passes, never across a cut or a segment start; c.temporal None: off) -> 8 bits. So the next shot's
     model work does not wait for this one's finish.
 
+    Stopping (Ctrl+C, an error, or the caller closing this generator): the caller's thread only ever waits with a
+    timeout (0.25 s), because on Windows a plain Queue.get() / Thread.join() is not interrupted by Ctrl+C before
+    Python 3.14 (cpython #74157, #139689); the producer checks the stop flag after every depth map of a shot, so it
+    leaves within one model window. on_stop(), if given, is called first: convert_one passes FrameReader.kill, since
+    ffmpeg runs without a console (CREATE_NO_WINDOW) and never sees the Ctrl+C itself.
+
     Memory for the longest shot (it is all kept until the shot ends): its 320x180 float maps (230 KB a frame; past
     2,400 frames spilled to a temporary file in c.spill_dir), each frame's Tag (a 57.6 KB luma guide, the 9 KB 64x36
     luma, the thumbnail), and at the shot end the transition test's and the range's temporaries (~0.2 MB a frame): a
-    20,000-frame shot would need ~3-3.5 GB of RAM and ~4 GB of spill. Two shots can be alive at once (one finishing,
-    one being made). The model-resolution maps never accumulate (a window or two: 61 MB at 518, 116 MB at 714, x2
+    20,000-frame shot would need ~3-3.5 GB of RAM and ~4 GB of spill. Three shots can be alive at once (the caller
+    finishing one, one waiting in the hand-over queue, the producer holding the next finished one). The model-resolution maps never accumulate (a window or two: 61 MB at 518, 116 MB at 714, x2
     with flip).
     stats (a dict), if given, collects counts: frames, shots, flash_frames, blank_frames, dissolves, fades, dips,
     segments, flat_frames, clipped (pixels at 0 or 255)."""
@@ -442,9 +448,25 @@ def process_video(frames, model, c, stats=None):
 
     th = threading.Thread(target=produce, name='fvd-shots', daemon=True)
     th.start()
+    def wait(get):
+        while True:                     # a timed wait: Ctrl+C is raised between two of them
+            try:
+                return get(timeout=0.25)
+            except queue.Empty:
+                pass
+
+    def drain():                        # free what the producer handed over but nobody will finish
+        while True:
+            try:
+                x = shots.get_nowait()
+            except queue.Empty:
+                return
+            if isinstance(x, tuple):
+                x[1].close()
+
     try:
         while True:
-            x = shots.get()
+            x = wait(shots.get)
             if x is END:
                 break
             if isinstance(x, BaseException):
@@ -456,14 +478,15 @@ def process_video(frames, model, c, stats=None):
                 buf.close()
     finally:
         stop.set()
-        while True:                     # free what the producer handed over but nobody will finish
+        if on_stop is not None:
             try:
-                x = shots.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(x, tuple):
-                x[1].close()
-        th.join()
+                on_stop()
+            except Exception:  # noqa: BLE001 - stopping goes on
+                pass
+        drain()
+        while th.is_alive():
+            th.join(0.25)
+        drain()                         # a put() that was waiting when the first drain made room
         dm.close()
     if tags:
         raise ConvertError(f'internal: {len(tags)} frames read but not written')
@@ -475,8 +498,6 @@ def _make_shots(frames, model, c, det, tags, stop):
     def items():
         guide = (c.out_w, c.out_h) if c.temporal and c.temporal.get('sigma_y', 0) > 0 else None
         for i, (f, t) in enumerate(depthproc.tag_frames(frames, det, c.flash_len, c.blank_std, guide_size=guide)):
-            if stop.is_set():
-                return
             tags[i] = t
             yield i, f
     for start, shot in shot_windows(items(), model, is_start=lambda x: tags[x[0]].cut, frame_of=lambda x: x[1]):
@@ -488,7 +509,7 @@ def _make_shots(frames, model, c, det, tags, stop):
                     raise ConvertError(f'internal: frame {i} came out as frame {start + len(buf)}')
                 buf.append(d)
                 pp.append(np.percentile(buf[len(buf) - 1], (2.0, 98.0)))
-                if stop.is_set():
+                if stop.is_set():      # within one model window of a stop: read no further
                     raise KeyboardInterrupt
             st = [tags.pop(start + k) for k in range(len(buf))]
         except BaseException:
@@ -561,7 +582,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     vs = {}
     try:
         reader = media.FrameReader(arc, entry, ff['ffmpeg'], in_w, in_h, ff['passthrough'])
-        for q, flags, p2, p98, lo, hi, thumb in process_video(reader, model, cfg, vs):
+        for q, flags, p2, p98, lo, hi, thumb in process_video(reader, model, cfg, vs, on_stop=reader.kill):
             w.add_frame(q, flags, p2, p98, lo, hi, thumb)
             if progress:
                 el = time.perf_counter() - t0

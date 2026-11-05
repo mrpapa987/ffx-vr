@@ -409,6 +409,112 @@ class ProducerTest(unittest.TestCase):
                                                                                'fvd-edges'))])
 
 
+class StopAndOverlapTest(unittest.TestCase):
+    """Round 2 review: two model calls never run at once (it would double the activation VRAM); a stop inside a long
+    shot is seen within a window (the producer reads no further), and on_stop (ffmpeg's kill) is called."""
+
+    class CheapModel:
+        """Depth at the output size from the frame's luma; fails if called while another call is running."""
+
+        def __init__(self, delay=0.0):
+            import threading
+            self.lock, self.delay, self.calls, self.overlaps = threading.Lock(), delay, 0, 0
+
+        def __call__(self, frames):
+            import time
+            if not self.lock.acquire(blocking=False):
+                self.overlaps += 1
+                raise RuntimeError('two model calls at once')
+            try:
+                self.calls += 1
+                time.sleep(self.delay)
+                return np.stack([dp.area_resize(dp.luma(f), OW, OH) / 255.0 + 0.1 for f in frames]).astype(np.float32)
+            finally:
+                self.lock.release()
+
+    def test_model_calls_never_overlap(self):
+        frames = [scene_img(1, i) for i in range(70)] + [scene_img(2, i) for i in range(50)]
+        m = self.CheapModel(delay=0.03)
+        cfg = convert.PipeConfig(1280, 720, OW, OH, threads=2, flip=True, temporal=dict(convert.TEMPORAL))
+        out = list(convert.process_video(iter(frames), m, cfg))
+        self.assertEqual(len(out), 120)
+        self.assertEqual(m.overlaps, 0)
+        self.assertEqual(m.calls, 2 * (-(-70 // 22) + -(-50 // 22)))       # flip: two calls a window, one at a time
+
+    def test_early_stop_closes_every_shot_buffer(self):
+        """The producer runs ahead (shot k finishing, k+1 queued, k+2 waiting in put); after a stop every buffer it
+        made is closed, also the one a waiting put() slipped in after the first drain."""
+        import time
+        made, closed = [], []
+        orig = dp.ShotBuffer
+
+        class Counted(orig):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                made.append(self)
+                self._closed = False
+
+            def close(self):
+                if not self._closed:
+                    closed.append(self)
+                    self._closed = True
+                super().close()
+        frames = [scene_img(1 + (i // 5) % 2, i) for i in range(200)]        # 40 shots of 5 frames
+        dp.ShotBuffer = Counted
+        try:
+            for pause in (0.3, 0.6):
+                made.clear(), closed.clear()
+                g = convert.process_video(iter(frames), self.CheapModel(), convert.PipeConfig(1280, 720, OW, OH))
+                next(g)
+                time.sleep(pause)
+                g.close()
+                self.assertGreaterEqual(len(made), 3)
+                self.assertEqual(len(made), len(closed))
+        finally:
+            dp.ShotBuffer = orig
+
+    def test_ctrl_c_while_waiting_for_a_shot(self):
+        """Ctrl+C while the caller waits for a long shot: KeyboardInterrupt within ~a second, ffmpeg's kill called,
+        no thread left. (On Linux a signal interrupts a plain wait too; the timed wait is what Windows needs.)"""
+        import _thread
+        import threading
+        import time
+        a = scene_img(1)
+        killed = []
+        g = convert.process_video((a for _ in range(5000)), self.CheapModel(delay=0.05),
+                                  convert.PipeConfig(1280, 720, OW, OH), on_stop=lambda: killed.append(1))
+        threading.Timer(0.5, _thread.interrupt_main).start()
+        t0 = time.perf_counter()
+        with self.assertRaises(KeyboardInterrupt):
+            next(g)                                      # one 5000-frame shot: nothing is handed over for minutes
+        self.assertLess(time.perf_counter() - t0, 2.0)
+        g.close()
+        self.assertEqual(killed, [1])
+        self.assertFalse([t for t in threading.enumerate() if t.name.startswith(('fvd-shots', 'fvd-model',
+                                                                               'fvd-edges'))])
+
+    def test_stop_inside_a_long_shot(self):
+        import threading
+        read = {'n': 0}
+        a, b = scene_img(1), scene_img(2)
+
+        def frames():
+            for i in range(2006):
+                read['n'] += 1
+                yield a if i < 6 else b                 # a 6-frame shot, then a 2000-frame one
+        stopped = []
+        m = self.CheapModel(delay=0.02)
+        cfg = convert.PipeConfig(1280, 720, OW, OH, threads=2)
+        g = convert.process_video(frames(), m, cfg, on_stop=lambda: stopped.append(read['n']))
+        next(g)                                          # shot 1 is out; the producer is inside shot 2
+        g.close()
+        self.assertEqual(len(stopped), 1)
+        self.assertLess(read['n'] - stopped[0], 3 * 32)  # at most a window or two read after the stop
+        self.assertLess(read['n'], 1000)
+        self.assertFalse([t for t in threading.enumerate() if t.name.startswith(('fvd-shots', 'fvd-model',
+                                                                               'fvd-edges'))])
+
+
 class ProcessVideoTest(unittest.TestCase):
     """The whole per-video pipeline on the synthetic FMV (cuts, a flash, a dissolve, a dip), with the stub model."""
 
