@@ -235,6 +235,35 @@ class TemporalTest(unittest.TestCase):
             self.assertEqual(len(out), n)
 
 
+class FlipTest(unittest.TestCase):
+    def test_flip_merge(self):
+        rng = np.random.default_rng(0)
+        base = rng.random((4, 10, 16)).astype(np.float32) + 1
+        ramp = np.linspace(-0.1, 0.1, 16, dtype=np.float32)[None, None, :]
+        a = base + ramp                       # a model with a left/right bias...
+        b = (base[:, :, ::-1] + ramp)[:, :, ::-1] * 2.0 + 0.5    # ...run on the mirror (other scale), mirrored back
+        m = dp.flip_merge(a, b)
+        # up to one scale and shift (relative depth), the merge is the unbiased depth: the ramps cancelled
+        A = np.vstack([base.ravel(), np.ones(base.size)]).T
+        k, c = np.linalg.lstsq(A, m.ravel().astype(np.float64), rcond=None)[0]
+        self.assertLess(float(np.abs(m - (k * base + c)).max()), 0.01)
+        self.assertGreater(float(np.abs(a - base).max()), 0.09)
+        np.testing.assert_allclose(dp.flip_merge(a, a), a, atol=1e-5)
+
+    def test_flip_in_process_video(self):
+        v = synth.Video(W, H, scale=0.25)
+        out = {}
+        for flip in (False, True):
+            m = synth.StubModel(v, out=(OW, OH), noise=0.0, flicker=0.0, leak=0.0, bias=0.2, bias_jitter=0.0)
+            cfg = convert.PipeConfig(1280, 720, OW, OH, flip=flip)
+            out[flip] = (m.calls, [o[0] for o in convert.process_video(v.frames(), m, cfg)])
+        self.assertEqual(out[True][0], 2 * out[False][0])        # every window twice
+        # the left/right bias (0.2 across the frame) is gone: the plane's left and right columns agree again
+        def lr(qs):
+            return float(np.mean([q[2:10, 2].astype(float).mean() - q[2:10, -3].astype(float).mean() for q in qs[5:30]]))
+        self.assertGreater(abs(lr(out[False][1])), 3 * abs(lr(out[True][1])) + 1)
+
+
 class ProcessVideoTest(unittest.TestCase):
     """The whole per-video pipeline on the synthetic FMV (cuts, a flash, a dissolve, a dip), with the stub model."""
 

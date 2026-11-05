@@ -220,10 +220,10 @@ class StubModel:
     model_name = 'stub'
 
     def __init__(self, video, sigma_edge=2.0, scale_jitter=0.3, shift_jitter=0.2, leak=0.15, bias=0.03, noise=0.01,
-                 flicker=0.006, seed=5, out=None):
+                 flicker=0.006, seed=5, out=None, bias_jitter=0.5):
         self.v = video
         self.sigma_edge, self.sj, self.tj, self.leak, self.bias = sigma_edge, scale_jitter, shift_jitter, leak, bias
-        self.noise, self.flicker, self.seed, self.out = noise, flicker, seed, out
+        self.noise, self.flicker, self.seed, self.out, self.bias_jitter = noise, flicker, seed, out, bias_jitter
         self.calls = 0
         self.frames_seen = 0
 
@@ -242,7 +242,7 @@ class StubModel:
         rng = np.random.default_rng((self.seed, k))
         s = 1.0 + self.sj * float(rng.uniform(-1, 1))
         t = self.tj * float(rng.uniform(-1, 1))
-        beta = self.bias * (1.0 + 0.5 * float(rng.normal()))   # a fixed left/right bias (flip averaging cancels it)
+        beta = self.bias * (1.0 + self.bias_jitter * float(rng.normal()))   # a left/right bias, mostly fixed
         h, w = self.v.h, self.v.w
         base = []
         for f in frames:

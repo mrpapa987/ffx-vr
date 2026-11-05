@@ -22,7 +22,10 @@ Options:
     --region us|jp|asia   which game video list (default us: what an English game plays)
     --all                 every .webm in the archive instead (95 files)
     --only A,B            just these (e.g. --only SIN_us,BTS_us; case and '.webm' optional)
-    --input-size 518|392  the model's input height (default 518; 392 is faster and needs less VRAM)
+    --input-size 518|714|392  the model's input height (default 518, what the model was trained at; 714: finer
+                          detail, ~2x the model time and VRAM; 392: faster, less VRAM)
+    --flip                flip averaging: every window is also run on the mirrored frames, the two averaged (2x
+                          the model time; less noise and no left/right bias)
     --force               convert again even if done
     --preview             after converting, render a side-by-side check video of each --only video (preview.py)
     --frame N             with --preview: also a PNG of frame N (video | depth)
@@ -30,7 +33,7 @@ Options:
     --edge-filter refine|none   depth edges at the model's resolution before the shrink (default refine: a forced
                           foreground/background weighted median, the near side grown 2 px across and 1 px up and
                           down, a shrink that never averages across a step); none: a plain area shrink
-    --threads N           CPU threads for the edge path (default up to 4)
+    --threads N           CPU threads for the edge path (default up to 8; the output does not depend on it)
     --temporal on|off     the centred, edge-preserving temporal filter within each shot (default on)
     --model vda-small|fake    fake: no torch / GPU, a pipeline check whose output is NOT depth
     --list                show what would be converted and stop
@@ -57,7 +60,7 @@ import vbf  # noqa: E402
 import vda_model  # noqa: E402
 from window import shot_windows  # noqa: E402
 
-CONVERTER_VERSION = '0.1.1'
+CONVERTER_VERSION = '0.2.0'
 ALGO_VERSION = 2          # bump when the depth a given input produces changes (forces reconversion)
 FLASH_LEN = 4             # a raw cut whose picture comes back within this many frames is a flash, not a cut
 BLANK_STD = 2.5           # a frame whose 64x36 luma has a smaller standard deviation is blank (levels)
@@ -165,6 +168,7 @@ def settings_of(a, model, weights_sha):
         'input_size': a.input_size,
         'windows': 'per-shot',
         'out_h': depthproc.OUT_H,
+        'flip': bool(a.flip),
         'precision': 'fp32' if a.fp32 else 'fp16',
         'attention': a.attention,
         'norm': {'mode': 'segment', 'pcts': list(NORM_PCTS), 'headroom': NORM_HEADROOM, 'transitions': 1},
@@ -276,8 +280,9 @@ class PipeConfig:
 
     def __init__(self, src_w, src_h, out_w, out_h, cut_threshold=28.0, cut_ratio=3.0, flash_len=4, blank_std=2.5,
                  pcts=(0.1, 99.9), headroom=0.02, spill_dir=None, edge_filter='none', temporal=None, edges=None,
-                 threads=1):
+                 threads=1, flip=False):
         self.src_w, self.src_h, self.out_w, self.out_h = src_w, src_h, out_w, out_h
+        self.flip = bool(flip)            # flip averaging: each window also run mirrored (2x model time)
         self.edge_filter = edge_filter    # 'refine' (refine_and_shrink at the model's resolution) or 'none' (area)
         self.edges = dict(EDGES if edges is None else edges)
         self.temporal = temporal          # None (off) or temporal_bilateral's keyword arguments
@@ -289,12 +294,13 @@ class PipeConfig:
 def pipe_config(a, src_w, src_h, out_w, out_h, spill_dir=None):
     return PipeConfig(src_w, src_h, out_w, out_h, a.cut_threshold, a.cut_ratio, FLASH_LEN, BLANK_STD,
                       NORM_PCTS, NORM_HEADROOM, spill_dir, a.edge_filter,
-                      dict(TEMPORAL) if a.temporal == 'on' else None, EDGES, a.threads)
+                      dict(TEMPORAL) if a.temporal == 'on' else None, EDGES, a.threads, a.flip)
 
 
 class DepthAtOutput:
     """window.windowed_depth's model: the depth model's maps (at its own resolution, or already at the output size),
-    then in numpy, per frame: the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size.
+    then in numpy: with flip, the same window run again on the mirrored frames and averaged (depthproc.flip_merge);
+    per frame, the edge path (depthproc.refine_and_shrink) or a plain area shrink to the stored size.
     Frames of one window are spread over `threads` threads (numpy releases the GIL in its array loops)."""
 
     def __init__(self, model, c):
@@ -315,6 +321,9 @@ class DepthAtOutput:
 
     def __call__(self, frames):
         d = np.asarray(self.model(frames), dtype=np.float32)
+        if self.c.flip:
+            m = np.asarray(self.model([np.ascontiguousarray(f[:, ::-1]) for f in frames]), dtype=np.float32)
+            d = depthproc.flip_merge(d, m[:, :, ::-1])
         maps = list(self.pool.map(self.one, d)) if self.pool else [self.one(x) for x in d]
         return np.stack(maps)
 
@@ -541,7 +550,8 @@ def parse_args(argv):
     p.add_argument('--region', default='us', choices=['us', 'jp', 'asia'])
     p.add_argument('--all', action='store_true')
     p.add_argument('--only', default='')
-    p.add_argument('--input-size', type=int, default=518, choices=[518, 392])
+    p.add_argument('--input-size', type=int, default=518, choices=[518, 392, 714])
+    p.add_argument('--flip', action='store_true', help='flip averaging: every window also mirrored (2x model time)')
     p.add_argument('--force', action='store_true')
     p.add_argument('--preview', action='store_true')
     p.add_argument('--frame', type=int, default=-1)
@@ -554,8 +564,8 @@ def parse_args(argv):
     p.add_argument('--fp32', action='store_true', help='full precision (slower, more VRAM)')
     p.add_argument('--attention', default='sdpa', choices=['sdpa', 'plain'])
     p.add_argument('--edge-filter', default='refine', choices=['refine', 'none'])
-    p.add_argument('--threads', type=int, default=min(4, os.cpu_count() or 1),
-                   help='CPU threads for the edge path (default: up to 4; the output does not depend on it)')
+    p.add_argument('--threads', type=int, default=min(8, os.cpu_count() or 1),
+                   help='CPU threads for the edge path (default: up to 8; the output does not depend on it)')
     p.add_argument('--temporal', default='on', choices=['on', 'off'], help='the centred temporal filter (default on)')
     p.add_argument('--codec', default='auto', choices=['auto', 'xpress', 'zlib'])
     p.add_argument('--cut-threshold', type=float, default=28.0)
@@ -632,7 +642,8 @@ def main(argv=None):
         log(f'  note: {a.preview_note}')
     scope = f'--only {a.only}' if a.only else ('--all' if a.all else f'the {a.region} video list')
     total_mb = sum(e.size for _n, e in todo) / 2**20
-    log(f'FFX VR FMV depth converter {CONVERTER_VERSION}: {len(todo)} videos ({scope}), {total_mb:,.0f} MB of video')
+    log(f'FFX VR FMV depth converter {CONVERTER_VERSION} (algo {ALGO_VERSION}): {len(todo)} videos ({scope}), '
+        f'{total_mb:,.0f} MB of video')
     log(f'  output: {out}  (private: made from your game copy, never share it)')
     if a.list:
         for n, e in todo:
@@ -651,15 +662,24 @@ def main(argv=None):
         return 1
     ff = {'ffmpeg': a.ffmpeg, 'ffprobe': a.ffprobe, 'passthrough': passthrough}
     settings, shash = settings_of(a, model, wsha)
+    log(f'  settings fingerprint {shash:016x}: input {a.input_size}, edges {a.edge_filter}, temporal {a.temporal}, '
+        f'flip {"on" if a.flip else "off"}, cut-aware windows, one depth range per shot segment (a video converted '
+        f'with other settings or another algo is converted again)')
     man = load_manifest(out)
     work = []
+    changed = 0
     for n, e in todo:
-        if not a.force and is_done(out, man['files'].get(out_name(n)), e, shash):
+        rec = man['files'].get(out_name(n))
+        if not a.force and is_done(out, rec, e, shash):
             continue
+        if rec and rec.get('status') == 'done' and rec.get('settings_hash') != f'{shash:016x}':
+            changed += 1
         work.append((n, e))
     skipped = len(todo) - len(work)
     if skipped:
         log(f'  {skipped} already done with these settings (skipped; --force converts them again)')
+    if changed:
+        log(f'  {changed} converted before with other settings or an older converter: converting them again')
     prog = Progress(log, sum(e.size for _n, e in work))
     done = failed = 0
     frames_total, peak = 0, 0
@@ -686,7 +706,9 @@ def main(argv=None):
                 save_manifest(out, man)
                 log('')
                 log(f'ERROR: the GPU ran out of memory (VRAM) at --input-size {a.input_size} on {n}.')
-                if a.input_size > 392:
+                if a.input_size > 518:
+                    log('  Run again with --input-size 518 (convert-fmv-depth.ps1 -InputSize 518, the default).')
+                elif a.input_size > 392:
                     log('  Run again with --input-size 392 (convert-fmv-depth.ps1 -InputSize 392): faster, less VRAM.')
                 log('  Close other programs that use the GPU (the game, the VR streamer, browsers) first.')
                 return EXIT_OOM

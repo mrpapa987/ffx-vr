@@ -115,6 +115,17 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(self.run_convert('--only', 'tst_US.webm', '--edge-filter', 'none'), 0)
         man = self.manifest()
         self.assertEqual(man['files']['tst_us']['settings']['edge_filter'], 'none')
+        # flip averaging is a setting too: converted again, then skipped when run the same way
+        m1 = os.path.getmtime(os.path.join(self.out, 'tst_us.fvd'))
+        self.assertEqual(self.run_convert('--only', 'tst_us', '--flip', '--temporal', 'off'), 0)
+        rec = self.manifest()['files']['tst_us']
+        self.assertTrue(rec['settings']['flip'])
+        self.assertEqual(rec['settings']['temporal'], 'off')
+        self.assertEqual(rec['converter_version'], convert.CONVERTER_VERSION)
+        m2 = os.path.getmtime(os.path.join(self.out, 'tst_us.fvd'))
+        self.assertNotEqual(m1, m2)
+        self.assertEqual(self.run_convert('--only', 'tst_us', '--flip', '--temporal', 'off'), 0)
+        self.assertEqual(os.path.getmtime(os.path.join(self.out, 'tst_us.fvd')), m2)
         # --force with the same settings
         self.assertEqual(self.run_convert('--only', 'four_480', '--force'), 0)
         # a stale .part from a crash is not mistaken for anything and is removed on the next run of that video

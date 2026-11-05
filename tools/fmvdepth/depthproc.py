@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT (part of the FFX VR repository).
     shot_ranges        one depth range per shot segment (robust percentiles over all its frames), as lo/hi per frame
     quantise           the 8-bit rule of FORMAT.md
     temporal_bilateral a centred, edge-preserving temporal filter (per shot)
+    flip_merge         flip averaging: a window's depth and its mirrored run's, fitted and averaged
     refine_and_shrink  depth edges at the model's resolution: forced fg/bg weighted median (sharpen_edges), near side
                        grown (grow_near), shrink without averaging across a step (edge_shrink)
 """
@@ -706,3 +707,22 @@ def refine_and_shrink(d, w, h, tau=0.05, sigma=0.2, grow=(2, 1)):
     if grow[0] or grow[1]:
         d = grow_near(d, grow[0], grow[1], thr=thr)
     return edge_shrink(d, w, h, thr=thr)
+
+
+# ==================================================================== flip averaging
+def flip_merge(d, d_mirror, sample=8):
+    """Average a window's depth with the depth of its mirrored frames (already mirrored back): the second is first
+    fitted to the first by one least-squares scale and shift over the whole window (every sample-th pixel each way),
+    as two runs of a relative-depth model need not share a scale. Halves what is left-right biased in the model and
+    averages two independent noises. d, d_mirror: [T, H, W]."""
+    a = np.asarray(d, np.float32)
+    b = np.asarray(d_mirror, np.float32)
+    if a.shape != b.shape:
+        raise ValueError(f'flip_merge: {a.shape} vs {b.shape}')
+    p = b[:, ::sample, ::sample].astype(np.float64).ravel()
+    t = a[:, ::sample, ::sample].astype(np.float64).ravel()
+    a00, a01, a11 = float(p @ p), float(p.sum()), float(p.size)
+    b0, b1 = float(p @ t), float(t.sum())
+    det = a00 * a11 - a01 * a01
+    s_, t_ = ((a11 * b0 - a01 * b1) / det, (-a01 * b0 + a00 * b1) / det) if det != 0 else (1.0, 0.0)
+    return np.maximum((a + b * np.float32(s_) + np.float32(t_)) * np.float32(0.5), 0)
