@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <new>
 #include <vector>
 #include "ffxvr_fmv.h"
@@ -22,8 +23,10 @@
 namespace relief {
 
 constexpr uint32_t k_h = 180, k_w169 = 320, k_w43 = 240, k_max_px = k_w169 * k_h;   // the sizes the converter writes
-constexpr uint32_t k_max_frames = 65536;     // 16 B an entry: at most 1 MB of index (END_us, the longest, has 24,828 frames)
-constexpr int      k_ring = 8;               // decoded frames: the one on screen and the ones after it
+constexpr uint32_t k_max_frames = 32768;     // 16 B an entry: at most 512 KB of index (END_us, the longest, has 24,828 frames: 397 KB)
+constexpr int      k_ring = 6;               // round 7: the worker's output ring: the frame on screen and the 5 after it (16-bit n')
+constexpr int      k_raw = 12;               // round 7: the decoded (8-bit) ring: the output frames' temporal neighbours (-3 .. +3)
+constexpr int      k_trad = 3;               // the temporal filter's radius (frames)
 constexpr int      k_stale_tol = 2;          // the file's frame count may differ from the game's duration by this many frames
 static_assert(k_max_px <= 0xFFFF, "a payload size fits 16 bits");
 
@@ -35,7 +38,9 @@ struct Io { void* ctx; ReadAtFn read_at; uint64_t size; };
 struct Codecs { void* ctx; DecompressFn fn[3]; };
 
 enum : uint8_t { EF_CUT = 1, EF_STORED = 2, EF_FLAT = 4 };
-struct Entry { uint64_t off; uint16_t size; uint8_t flags; uint8_t pad[5]; };   // the index as kept (the checks are made at open)
+/// The index as kept (the checks are made at open). a, b (round 7, per-shot normalisation): n' = a n + b maps the frame's
+/// 8-bit n (normalised to the frame's own lo / hi) to the shot's fixed L / H; during the read they hold lo / hi.
+struct Entry { uint32_t off; uint16_t size; uint8_t flags; uint8_t pad; float a, b; };
 static_assert(sizeof(Entry) == 16, "16 bytes a frame");
 
 enum Open : int { OP_NONE = 0, OP_OK, OP_HEADER, OP_SIZE, OP_CODEC, OP_FAKE, OP_OTHER, OP_NO_FRAMES, OP_TOO_MANY, OP_STALE, OP_ENTRY,
@@ -53,15 +58,19 @@ inline void set_bit(uint8_t* b, uint32_t i) { if (i < k_max_frames) b[i >> 3] = 
 
 struct File {
     fmv::FvdInfo info;                       // the header (ffxvr_fmv.h fvd_parse: FORMAT.md checks 1-5)
-    uint32_t w = 0, h = 0, n = 0, header_size = 0, cuts = 0, flats = 0, bad_entry = 0, game_frames = 0;
+    uint32_t w = 0, h = 0, n = 0, header_size = 0, cuts = 0, flats = 0, bad_entry = 0, game_frames = 0, shots = 0;
     uint8_t codec = 0, predictor = 0;
     uint64_t index_offset = 0;
     std::vector<Entry> idx;
     int status = OP_NONE;
-    void reset() { std::vector<Entry>().swap(idx); info = fmv::FvdInfo{}; w = h = n = header_size = cuts = flats = bad_entry = game_frames = 0; codec = predictor = 0; index_offset = 0; status = OP_NONE; }
+    void reset() { std::vector<Entry>().swap(idx); info = fmv::FvdInfo{}; w = h = n = header_size = cuts = flats = bad_entry = game_frames = shots = 0; codec = predictor = 0; index_offset = 0; status = OP_NONE; }
 };
 
 inline uint32_t rd32(const uint8_t* b) { uint32_t v; memcpy(&v, b, 4); return v; }
+struct File;
+inline uint32_t shot_norm(File& f);
+inline float smooth01(float x) { x = x < 0.f ? 0.f : x > 1.f ? 1.f : x; return x * x * (3.f - 2.f * x); }
+inline float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 inline uint16_t rd16(const uint8_t* b) { uint16_t v; memcpy(&v, b, 2); return v; }
 inline uint64_t rd64(const uint8_t* b) { uint64_t v; memcpy(&v, b, 8); return v; }
 inline float    rdf(const uint8_t* b) { float v; memcpy(&v, b, 4); return v; }
@@ -110,17 +119,78 @@ inline int open_file(File& f, const Io& io, const char* game, uint32_t game_fram
             const uint8_t* e = chunk + 32 * j; const uint32_t i = i0 + j;
             const uint64_t off = rd64(e); const uint32_t size = rd32(e + 8); const uint16_t fl = rd16(e + 12);
             const bool stored = (fl & 2) != 0 || f.codec == 0;
-            const bool ok6 = off >= f.header_size && size <= f.index_offset && off <= f.index_offset - size;   // offset + size <= index_offset, no overflow
+            const bool ok6 = off >= f.header_size && size <= f.index_offset && off <= f.index_offset - size   // offset + size <= index_offset, no overflow
+                          && off <= 0xFFFFFFFFull - size;                                                       // round 7: kept as 32 bits (the files are < 0.5 GB)
             const bool ok7 = size > 0 && size <= px && (!stored || size == px);
             if (!ok6 || !ok7) { f.bad_entry = i; std::vector<Entry>().swap(f.idx); return f.status = OP_ENTRY; }
             Entry& x = f.idx[i];
-            x.off = off; x.size = static_cast<uint16_t>(size); x.flags = 0; memset(x.pad, 0, sizeof(x.pad));
+            x.off = static_cast<uint32_t>(off); x.size = static_cast<uint16_t>(size); x.flags = 0; x.pad = 0; x.a = rdf(e + 24); x.b = rdf(e + 28);
             if (stored) x.flags |= EF_STORED;
             if ((fl & 1) || i == 0) { x.flags |= EF_CUT; f.cuts++; if (bits) set_bit(bits->cut, i); }   // frame 0 is a shot start whatever its flag says
             if (range_flat(rdf(e + 24), rdf(e + 28))) { x.flags |= EF_FLAT; f.flats++; if (bits) set_bit(bits->flat, i); }
         }
     }
+    f.shots = shot_norm(f);
     return f.status = OP_OK;
+}
+
+// -- round 7 (audit plan 2): per-shot re-normalisation from the index ------------------------------------------------------
+// The converter normalised each frame to its own p2 / p98 (EMA-smoothed within the shot): n = (d - lo) / (hi - lo), so when
+// something nearer enters, hi rises and everything else sinks back (the subject "jumps"), and the nearest 2 % of each frame
+// is clipped flat. The index keeps lo / hi per frame and n is exact against them, so one fixed range per shot (L, H) gives
+// n' = (d - L) / (H - L) = a n + b, a = (hi - lo) / (H - L), b = (lo - L) / (H - L): no reconversion. L / H are robust (the
+// 10th percentile of the shot's lo, the 90th of its hi: one odd frame cannot flatten the shot); flat frames are left out.
+// A "shot" shorter than k_min_shot frames (a flash that tripped the converter's cut detector twice) is folded into the one
+// before it, so it does not get a range of its own. n' is clamped to 0..1.
+constexpr uint32_t k_min_shot = 6;
+inline float pct(std::vector<float>& v, float p) {   // nearest rank (v is reordered)
+    const size_t k = static_cast<size_t>(p * static_cast<float>(v.size() - 1) + 0.5f);
+    std::nth_element(v.begin(), v.begin() + static_cast<ptrdiff_t>(k), v.end());
+    return v[k];
+}
+/// Sets every entry's (a, b) from its lo / hi (held in a / b by open_file). Returns the number of shots (segments) used;
+/// on an allocation failure every frame keeps its own range (a = 1, b = 0).
+inline uint32_t shot_norm(File& f) {
+    const uint32_t n = static_cast<uint32_t>(f.idx.size());
+    std::vector<float> lo, hi;
+    try { lo.reserve(n); hi.reserve(n); }
+    catch (const std::bad_alloc&) { for (Entry& e : f.idx) { e.a = 1.f; e.b = 0.f; } return 0; }
+    uint32_t shots = 0;
+    for (uint32_t s = 0; s < n;) {
+        uint32_t e = s + 1;
+        for (; e < n; ++e) {   // the segment ends at the next cut that starts a shot of at least k_min_shot frames (or the end)
+            if (!(f.idx[e].flags & EF_CUT)) continue;
+            uint32_t nx = e + 1; while (nx < n && !(f.idx[nx].flags & EF_CUT)) ++nx;
+            if (nx - e >= k_min_shot || nx >= n) break;
+        }
+        lo.clear(); hi.clear();
+        for (uint32_t i = s; i < e; ++i) if (!(f.idx[i].flags & EF_FLAT)) { lo.push_back(f.idx[i].a); hi.push_back(f.idx[i].b); }
+        float L = 0.f, H = 0.f; bool ok = !lo.empty();
+        if (ok) { L = pct(lo, 0.10f); H = pct(hi, 0.90f); ok = std::isfinite(L) && std::isfinite(H) && !range_flat(L, H); }
+        for (uint32_t i = s; i < e; ++i) {
+            Entry& x = f.idx[i];
+            if (!ok || (x.flags & EF_FLAT)) { x.a = 1.f; x.b = 0.f; continue; }
+            const float r = H - L; const float l0 = x.a, h0 = x.b;
+            x.a = (h0 - l0) / r; x.b = (l0 - L) / r;
+        }
+        shots++; s = e;
+    }
+    return shots;
+}
+/// The worker's processing settings as one word (an output frame made with another word is made again): bit 0 the 3x3
+/// median, bit 1 each frame to its own range (Debug), bit 2 the centred temporal filter (round 7.4), bits 8-15 its smoothing
+/// (x 100).
+inline int cfg_word(bool median, bool per_frame, bool centred, float smooth) {
+    return (median ? 1 : 0) | (per_frame ? 2 : 0) | (centred ? 4 | (static_cast<int>(clampf(smooth, 0.f, 0.95f) * 100.f + 0.5f) << 8) : 0);
+}
+/// The decoded frames an output frame needs on each side (0: itself only).
+inline int filter_radius(int cfg) { return (cfg & 4) ? k_trad : 0; }
+/// One frame's n' as 16 bits: out = round(clamp(a v / 255 + b, 0, 1) x 65535). per_frame: the frame's own range (a 1, b 0).
+inline void norm16(const uint8_t* v, uint32_t px, float a, float b, uint16_t* out) {
+    for (uint32_t i = 0; i < px; ++i) {
+        const float x = a * (static_cast<float>(v[i]) * (1.f / 255.f)) + b;
+        out[i] = static_cast<uint16_t>(clampf(x, 0.f, 1.f) * 65535.f + 0.5f);
+    }
 }
 
 /// The left predictor's inverse (FORMAT.md), in place.
@@ -209,8 +279,6 @@ struct Avail { bool ready; bool error; uint8_t median; };
 /// depth: draw the relief with s (false: flat, s = 0); upload: the ring's frame goes into the texture first; ramp_start: the
 /// level was reset to 0 this Present (a cut, or the first depth after flat); fading: depth on the last upload, going to flat.
 struct Tout { bool depth; bool upload; bool ramp_start; bool fading; int why; float s; float pivot; int32_t bound; float level; };
-inline float smooth01(float x) { x = x < 0.f ? 0.f : x > 1.f ? 1.f : x; return x * x * (3.f - 2.f * x); }
-inline float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 /// A cut in (a, b] (frames), by the bit map; a span longer than 64 frames counts as a cut (a jump).
 inline bool cut_between(const Bits& b, int32_t a, int32_t c) {
     if (a < 0 || c <= a) return true;
@@ -382,23 +450,25 @@ inline void median3(const uint8_t* src, uint8_t* dst, uint32_t w, uint32_t h) {
         }
     }
 }
-constexpr int k_ema_gate = 24;   // a change larger than this (of 255) is motion, not noise: the pixel follows at once
-/// The temporal filter, per pixel, at each upload (render thread, display order): acc (8.8 fixed point) follows the new frame
-/// by (1 - smooth) of the gap when the gap is below k_ema_gate, else jumps to it (no ghost behind a moving edge); reset (a
-/// cut, or depth after flat): acc = the frame. io: the new frame in, the filtered frame out (in place). smooth 0..0.95.
-inline void ema(uint16_t* acc, uint8_t* io, uint32_t n, float smooth, bool reset) {
+constexpr int k_ema_gate = 24;   // a change larger than this (of 255 levels) is motion, not noise: the pixel follows at once
+/// The causal filter (Debug since round 7; the default is the worker's centred one), per pixel, at each upload (render
+/// thread, display order), on the 16-bit n' (round 7: the R16 upload; it used to be 8.8 on 8 bits): acc follows the new
+/// frame by (1 - smooth) of the gap when the gap is below k_ema_gate levels, else jumps to it (no ghost behind a moving edge);
+/// reset (a cut, or depth after flat): acc = the frame. io: the new frame in, the filtered frame out (in place).
+inline void ema(uint16_t* acc, uint16_t* io, uint32_t n, float smooth, bool reset) {
     const int a = static_cast<int>(256.f * (1.f - clampf(smooth, 0.f, 0.95f)) + 0.5f);   // the share of the gap taken, /256
+    const int gate = k_ema_gate * 257;
     for (uint32_t i = 0; i < n; ++i) {
-        const int v = io[i] << 8;
+        const int v = io[i];
         int s = acc[i];
         if (reset || a >= 256) s = v;
         else {
             const int d = v - s;
-            if (d > (k_ema_gate << 8) || d < -(k_ema_gate << 8)) s = v;
+            if (d > gate || d < -gate) s = v;
             else s += (d * a + (d >= 0 ? 128 : -128)) / 256;
         }
-        acc[i] = static_cast<uint16_t>(s < 0 ? 0 : s > 0xFF00 ? 0xFF00 : s);
-        io[i] = static_cast<uint8_t>((acc[i] + 128) >> 8 > 255 ? 255 : (acc[i] + 128) >> 8);
+        s = s < 0 ? 0 : s > 65535 ? 65535 : s;
+        acc[i] = static_cast<uint16_t>(s); io[i] = static_cast<uint16_t>(s);
     }
 }
 

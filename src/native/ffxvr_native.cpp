@@ -5847,11 +5847,14 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 // The same thread as the header check above. The render thread posts one request (g_relw_req, under g_fmvw_mx): the movie
 // (a generation number, 0 = none, the game's name, its frame count by the game's duration) and the depth frame it wants now.
 // The worker opens the .fvd once per movie (the cloud-only rule; share read + delete), reads and checks the whole index
-// (ffxvr_relief.h open_file), keeps the handle, and decodes the wanted frame and the k_ring - 1 after it into the ring, one
-// frame per loop so a new request is seen at once; a new generation closes the file and frees everything. The ring's pixels
-// (k_ring + 1 frames: the slots and the payload buffer) are allocated at open and freed at close: with the index (16 B a
-// frame) under 1.6 MB of address space for the longest video. A slot is written only with its idx at -2 (set under the
-// lock), so the render thread, which copies a slot under the lock, never sees a half-written frame. The cut / flat bits
+// (ffxvr_relief.h open_file, which also works out each shot's fixed range: shot_norm), keeps the handle, and fills two
+// rings, one unit of work per loop so a new request is seen at once: the decoded ring (k_raw 8-bit frames after the 3x3
+// median, worker-only) and the output ring (k_ring 16-bit n' frames: the frame on screen and the ones after it, each
+// normalised to its shot's range; round 7). A new generation closes the file and frees everything. The pixels (k_raw +
+// 1 + 2 k_ring frames: 1.44 MB at 320 x 180) are allocated at open and freed at close: with the index (16 B a frame) under
+// 2 MB of address space for the longest video. An output slot is written only with its idx at -2 (set under the lock),
+// so the render thread, which copies a slot under the lock, never sees a half-written frame; a slot made with other
+// settings (its cfg) is not used and is made again. The cut / flat bits
 // (g_rel_bits) are written at open before the result is published; the render thread reads them only for an open result
 // of its current generation, and a new generation is only ever posted by the render thread after it stopped reading them.
 #ifndef COMPRESS_ALGORITHM_XPRESS_HUFF
@@ -5860,13 +5863,16 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
 #endif
-struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; int median; };   // median: the 3x3 median after each decode (frames decoded from now on)
-struct RelSlot { int32_t idx; uint8_t median; uint8_t err; };
+// cfg (rel_cfg_word): bit 0 the 3x3 median, bit 1 the per-frame normalisation (Debug), the rest the temporal filter's word
+struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; int cfg; };
+struct RelSlot { int32_t idx; uint8_t median; uint8_t err; int cfg; };   // the output ring (shared)
+struct RelRaw { int32_t idx; uint8_t err; uint8_t med; };                  // the decoded ring (worker-only)
 struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, flats; double open_ms; uint32_t decoded, errors; double dec_sum, dec_max; };   // state 0 pending, 1 open, -1 failed
 static RelReq  g_relw_req = {};               // render thread -> worker (g_fmvw_mx)
 static RelRes  g_relw_res = {};               // worker -> render thread (g_fmvw_mx)
 static RelSlot g_relw_slot[relief::k_ring];   // (g_fmvw_mx) idx -1 empty, -2 being written
-static uint8_t* g_relw_px = nullptr;          // (g_fmvw_mx for the pointer) k_ring slots of w * 180 bytes, then the payload buffer
+static uint8_t* g_relw_px = nullptr;          // (g_fmvw_mx for the pointer) k_raw decoded frames (w x 180 B), the payload buffer, k_ring output frames (2 w x 180 B)
+static RelRaw g_relw_raw[relief::k_raw]; static int g_relw_cfg = -1;   // worker-only
 static relief::Bits g_rel_bits;               // see above
 // worker-only
 static relief::File g_relw_file; static HANDLE g_relw_h = INVALID_HANDLE_VALUE; static uint32_t g_relw_gen = 0;
@@ -5901,7 +5907,9 @@ static void relw_close() {
     if (g_relw_h != INVALID_HANDLE_VALUE) { CloseHandle(g_relw_h); g_relw_h = INVALID_HANDLE_VALUE; }
     g_relw_file.reset();
     uint8_t* px;
-    { std::lock_guard<std::mutex> lk(g_fmvw_mx); px = g_relw_px; g_relw_px = nullptr; for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0 }; }
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); px = g_relw_px; g_relw_px = nullptr; for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0, 0 }; }
+    for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
+    g_relw_cfg = -1;
     delete[] px;
 }
 /// Worker: opens `name`'s depth file for generation gen; the result (and why not) into g_relw_res.
@@ -5912,7 +5920,7 @@ static void relw_open(uint32_t gen, const char* name, uint32_t game_frames) {
     auto done = [&]() {
         QueryPerformanceCounter(&b); r.open_ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
         std::lock_guard<std::mutex> lk(g_fmvw_mx);
-        if (r.state == 1) for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0 };
+        if (r.state == 1) for (RelSlot& sl : g_relw_slot) sl = RelSlot{ -1, 0, 0, 0 };
         g_relw_res = r;
     };
     if (!fmv::fvd_file_name(name, file, sizeof(file))) { snprintf(r.why, sizeof(r.why), "no depth file (the name has no depth file form)"); done(); return; }
@@ -5947,16 +5955,58 @@ static void relw_open(uint32_t gen, const char* name, uint32_t game_frames) {
         else snprintf(r.why, sizeof(r.why), "the depth file is %s (fmvdepth\\%s)", relief::open_text(st), file);
         CloseHandle(h); g_relw_file.reset(); done(); return;
     }
-    uint8_t* px = new (std::nothrow) uint8_t[static_cast<size_t>(relief::k_ring + 1) * F.w * F.h];
+    uint8_t* px = new (std::nothrow) uint8_t[static_cast<size_t>(relief::k_raw + 1 + 2 * relief::k_ring) * F.w * F.h];
     if (px == nullptr) { snprintf(r.why, sizeof(r.why), "out of memory for the depth frames (fmvdepth\\%s)", file); CloseHandle(h); g_relw_file.reset(); done(); return; }
     { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_relw_px = px; }
+    for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
     g_relw_h = h;
     r.state = 1; r.n = F.n; r.w = F.w; r.cuts = F.cuts; r.flats = F.flats;
-    snprintf(r.why, sizeof(r.why), "fmvdepth\\%s: %u frames %ux%u, %u cuts, %u flat frames, %s", file, F.n, F.w, F.h, F.cuts, F.flats, F.codec == 2 ? "XPRESS" : "stored");
+    snprintf(r.why, sizeof(r.why), "fmvdepth\\%s: %u frames %ux%u, %u cuts (%u shots normalised), %u flat frames, %s", file, F.n, F.w, F.h, F.cuts, F.shots, F.flats, F.codec == 2 ? "XPRESS" : "stored");
     done();
 }
-/// Worker, every loop: follows the request (a new generation opens / closes), then decodes at most one frame of the window
-/// [want, want + k_ring) that the ring lacks (from frame 0 while none is wanted yet). True: more to decode (no wait).
+/// Worker: decodes frame i into its decoded-ring slot (the 3x3 median when cfg bit 0), counting the time.
+static void relw_decode(int32_t i, int cfg) {
+    const relief::File& F = g_relw_file; const uint32_t px = F.w * F.h;
+    uint8_t* mem; { std::lock_guard<std::mutex> lk(g_fmvw_mx); mem = g_relw_px; }
+    RelRaw& rr = g_relw_raw[i % relief::k_raw];
+    LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+    relief::Io io = { g_relw_h, relw_read_at, 0 };
+    relief::Codecs c = { nullptr, { nullptr, nullptr, g_relw_dec ? relw_xpress : nullptr } };
+    uint8_t* out = mem + static_cast<size_t>(i % relief::k_raw) * px;
+    uint8_t* const pay = mem + static_cast<size_t>(relief::k_raw) * px;
+    const int d = relief::decode(F, static_cast<uint32_t>(i), io, c, pay, out);
+    if (d == relief::D_OK && (cfg & 1)) { relief::median3(out, pay, F.w, F.h); memcpy(out, pay, px); }   // the payload buffer is free again: the scratch
+    rr = RelRaw{ i, static_cast<uint8_t>(d == relief::D_OK ? 0 : 1), static_cast<uint8_t>(cfg & 1) };
+    QueryPerformanceCounter(&b);
+    const double ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
+    std::lock_guard<std::mutex> lk(g_fmvw_mx);
+    if (g_relw_res.gen == g_relw_gen) {
+        if (d == relief::D_OK) { g_relw_res.decoded++; g_relw_res.dec_sum += ms; if (ms > g_relw_res.dec_max) g_relw_res.dec_max = ms; }
+        else g_relw_res.errors++;
+    }
+}
+/// Worker: output frame i (16-bit n') from the decoded ring.
+static void relw_output(int32_t i, int cfg) {
+    const relief::File& F = g_relw_file; const uint32_t px = F.w * F.h;
+    const int sl = i % relief::k_ring;
+    uint8_t* mem;
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_relw_slot[sl].idx = -2; mem = g_relw_px; }
+    const RelRaw& rr = g_relw_raw[i % relief::k_raw];
+    const uint8_t* raw = mem + static_cast<size_t>(i % relief::k_raw) * px;
+    uint16_t* out = reinterpret_cast<uint16_t*>(mem + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(sl) * px;
+    uint8_t med = 0;
+    if (!rr.err) {
+        const relief::Entry& e = F.idx[static_cast<uint32_t>(i)];
+        const bool per_frame = (cfg & 2) != 0;   // Debug: each frame to its own range (the converter's), for an A/B
+        relief::norm16(raw, px, per_frame ? 1.f : e.a, per_frame ? 0.f : e.b, out);
+        med = relief::median_u8(raw, px);
+    }
+    std::lock_guard<std::mutex> lk(g_fmvw_mx);
+    g_relw_slot[sl] = RelSlot{ i, med, rr.err, cfg };
+}
+/// Worker, every loop: follows the request (a new generation opens / closes; new settings make the rings again), then does
+/// one unit of work for the window [want, want + k_ring): a decode the next output frame lacks, or that output frame.
+/// True: more to do (no wait).
 static bool relw_step() {
     RelReq q;
     { std::lock_guard<std::mutex> lk(g_fmvw_mx); q = g_relw_req; }
@@ -5967,32 +6017,19 @@ static bool relw_step() {
     }
     const relief::File& F = g_relw_file;
     if (g_relw_h == INVALID_HANDLE_VALUE || F.status != relief::OP_OK) return false;
-    const uint32_t px = F.w * F.h;
+    { bool have; { std::lock_guard<std::mutex> lk(g_fmvw_mx); have = g_relw_px != nullptr; } if (!have) return false; }
+    if (q.cfg != g_relw_cfg) {   // other settings: the output ring is made again (and the decoded one when the median changed)
+        if (g_relw_cfg < 0 || ((q.cfg ^ g_relw_cfg) & 1)) for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
+        g_relw_cfg = q.cfg;
+    }
+    const int32_t n = static_cast<int32_t>(F.n);
     const int32_t w0 = q.want < 0 ? 0 : q.want;   // no frame wanted yet (the movie's start): the first ones
-    for (int32_t i = w0; i < w0 + relief::k_ring && static_cast<uint32_t>(i) < F.n; ++i) {
-        const int sl = i % relief::k_ring;
-        uint8_t* mem;
-        {
-            std::lock_guard<std::mutex> lk(g_fmvw_mx);
-            if (g_relw_slot[sl].idx == i || g_relw_px == nullptr) continue;
-            g_relw_slot[sl].idx = -2; mem = g_relw_px;
-        }
-        LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
-        relief::Io io = { g_relw_h, relw_read_at, 0 };
-        relief::Codecs c = { nullptr, { nullptr, nullptr, g_relw_dec ? relw_xpress : nullptr } };
-        uint8_t* out = mem + static_cast<size_t>(sl) * px;
-        uint8_t* const pay = mem + static_cast<size_t>(relief::k_ring) * px;
-        const int d = relief::decode(F, static_cast<uint32_t>(i), io, c, pay, out);
-        if (d == relief::D_OK && q.median) { relief::median3(out, pay, F.w, F.h); memcpy(out, pay, px); }   // the payload buffer is free again: the scratch
-        const uint8_t med = d == relief::D_OK ? relief::median_u8(out, px) : 0;
-        QueryPerformanceCounter(&b);
-        const double ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0;
-        std::lock_guard<std::mutex> lk(g_fmvw_mx);
-        g_relw_slot[sl] = RelSlot{ i, med, static_cast<uint8_t>(d == relief::D_OK ? 0 : 1) };
-        if (g_relw_res.gen == g_relw_gen) {
-            if (d == relief::D_OK) { g_relw_res.decoded++; g_relw_res.dec_sum += ms; if (ms > g_relw_res.dec_max) g_relw_res.dec_max = ms; }
-            else g_relw_res.errors++;
-        }
+    const int rad = relief::filter_radius(q.cfg);
+    for (int32_t i = w0; i < w0 + relief::k_ring && i < n; ++i) {
+        { std::lock_guard<std::mutex> lk(g_fmvw_mx); const RelSlot& sl = g_relw_slot[i % relief::k_ring]; if (sl.idx == i && sl.cfg == q.cfg) continue; }
+        for (int32_t s2 = std::max(0, i - rad); s2 <= std::min(n - 1, i + rad); ++s2)
+            if (g_relw_raw[s2 % relief::k_raw].idx != s2) { relw_decode(s2, q.cfg); return true; }
+        relw_output(i, q.cfg);
         return true;
     }
     return false;
@@ -12306,7 +12343,7 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // ffxvr_fmv3d_set (ABI 42). flags: 1 flatten the bottom 15 %, 2 the tight field of view (review SF-1), 4 the edge fill, 8 the
 // 3x3 median, 16 the depth as colour. amount 0..1, range / pop in metres (the "3D movie" mapping), smooth 0..0.95.
 struct RelCfg { int on; float amount; int flags; int offset; float range, pop, smooth, edge; };   // edge: the band (share of the rect) where pop-out ramps to 0 (ABI 43)
-static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // edge fill (4) off by default (round 6: blocks along silhouettes)
+static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8 | 64, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // edge fill (4) off by default (round 6: blocks along silhouettes)
 static float g_rel_range_now = -1.f, g_rel_pop_now = -1.f; static double g_rel_t_prev = 0.0;   // the range / pop drawn, following the settings at 2 m/s and 0.5 m/s (a slider never jumps)
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
@@ -12340,8 +12377,8 @@ static bool g_rel_tried = false, g_rel_ok = false;
 static ID3D11Texture2D* g_rel_dtex = nullptr; static ID3D11ShaderResourceView* g_rel_dsrv = nullptr; static uint32_t g_rel_dw = 0;   // the depth map
 static ID3D11Texture2D* g_rel_eye[2] = { nullptr, nullptr }; static ID3D11RenderTargetView* g_rel_rtv[2] = { nullptr, nullptr };
 static ID3D11Texture2D* g_rel_z = nullptr; static ID3D11DepthStencilView* g_rel_dsv = nullptr;
-static uint8_t* g_rel_up = nullptr;                      // the frame to upload, copied out of the ring under the lock (w * 180 bytes)
-static uint16_t* g_rel_ema = nullptr;                    // the temporal filter's state (8.8 fixed point, w * 180), with g_rel_up
+static uint16_t* g_rel_up = nullptr;                     // the frame to upload (16-bit n'), copied out of the ring under the lock (w x 180)
+static uint16_t* g_rel_ema = nullptr;                    // the causal filter's state (w x 180), with g_rel_up
 
 // The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer; a
 // vertex at every depth texel's centre and at the rect's edges (round 7: relief::grid_coord, (texels + 1)^2 cells). The
@@ -12471,12 +12508,12 @@ static bool rel_gpu_frame(uint32_t dw, UINT ew, UINT eh, DXGI_FORMAT fmt) {
     if (g_rel_dtex == nullptr || g_rel_dw != dw) {
         if (g_rel_dsrv) { g_rel_dsrv->Release(); g_rel_dsrv = nullptr; } if (g_rel_dtex) { g_rel_dtex->Release(); g_rel_dtex = nullptr; }
         delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr; g_rel_dw = 0;
-        D3D11_TEXTURE2D_DESC td = {}; td.Width = dw; td.Height = relief::k_h; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R8_UNORM;
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = dw; td.Height = relief::k_h; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R16_UNORM;   // round 7: 16-bit n' (the per-shot range, the filters)
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_dtex)) || g_rel_dtex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_dtex, nullptr, &g_rel_dsrv))) {
             snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the depth texture could not be made"); rel_gpu_release(); return false;
         }
-        g_rel_up = new (std::nothrow) uint8_t[static_cast<size_t>(dw) * relief::k_h];
+        g_rel_up = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
         g_rel_ema = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
         if (g_rel_up == nullptr || g_rel_ema == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
         g_rel_dw = dw;
@@ -12553,11 +12590,13 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
     if (o_vsrv) o_vsrv->Release(); if (o_vsmp) o_vsmp->Release(); if (o_vcb) o_vcb->Release();
     uid_restore(s);
 }
+/// The worker's processing settings (RelReq::cfg; an output slot made with another word is made again).
+static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, (g_rel_cfg.flags & 32) != 0, (g_rel_cfg.flags & 64) == 0, g_rel_cfg.smooth); }
 /// The worker's request: this movie (gen 0 = none) and the frame wanted now.
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
       const bool on = g_rel.on && g_rel.req;
-      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; g_relw_req.median = (g_rel_cfg.flags & 8) ? 1 : 0; }
+      g_relw_req.gen = on ? g_rel.gen : 0; memcpy(g_relw_req.name, g_rel.name, sizeof(g_relw_req.name)); g_relw_req.game_frames = on ? g_rel.n : 0; g_relw_req.want = on ? g_rel.want : -1; g_relw_req.cfg = rel_cfg_word(); }
     if (g_fmvw_kick) SetEvent(g_fmvw_kick);
     g_rel.want_posted = g_rel.want;
 }
@@ -12701,13 +12740,15 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     {
         std::lock_guard<std::mutex> lk(g_fmvw_mx);
         if (r.want >= 0) {
+            const int cw = rel_cfg_word(); const size_t px = static_cast<size_t>(r.w) * relief::k_h;
             const RelSlot& sl = g_relw_slot[r.want % relief::k_ring];
-            if (sl.idx == r.want) {
+            if (sl.idx == r.want && sl.cfg == cw) {   // made with the current settings
                 a.ready = true; a.error = sl.err != 0; a.median = sl.median;
-                if (!a.error && r.want != r.t.bound && g_relw_px != nullptr) memcpy(g_rel_up, g_relw_px + static_cast<size_t>(r.want % relief::k_ring) * r.w * relief::k_h, static_cast<size_t>(r.w) * relief::k_h);
+                if (!a.error && r.want != r.t.bound && g_relw_px != nullptr)
+                    memcpy(g_rel_up, reinterpret_cast<const uint16_t*>(g_relw_px + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(r.want % relief::k_ring) * px, px * 2);
                 if (!a.error && g_relw_px == nullptr) a.ready = false;
             }
-            for (int i = 0; i < relief::k_ring; ++i) { const int32_t x = g_relw_slot[i].idx; if (x >= r.want && x < r.want + relief::k_ring && !g_relw_slot[i].err) fill++; }
+            for (int i = 0; i < relief::k_ring; ++i) { const int32_t x = g_relw_slot[i].idx; if (x >= r.want && x < r.want + relief::k_ring && !g_relw_slot[i].err && g_relw_slot[i].cfg == cw) fill++; }
         }
     }
     r.ring = fill; r.ring_sum += fill; r.ring_n++;
@@ -12716,8 +12757,8 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     const relief::Tcfg tc;
     const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.amount, 0.f, 1.f), r.n);
     if (o.upload) {   // the temporal filter in display order (reset at a cut / after flat), then the texture
-        relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.ramp_start);
-        InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w, 0); r.uploads++;
+        if (g_rel_cfg.flags & 64) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.ramp_start);   // the causal filter (Debug since round 7.4)
+        InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w * 2, 0); r.uploads++;
     }
     if (o.ramp_start) r.ramps++;   // a ramp in started this Present (a cut, or the first depth after flat)
     if (o.fading && !r.fading) r.fades++;
@@ -12776,14 +12817,15 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
 
 /// FMV relief (ABI 42): the settings, from managed every frame. on: ini fmv_depth; amount: 0..1 (ini fmv_depth_amount, default
 /// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
-/// median, 16 the depth as colour (Debug); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
+/// median, 16 the depth as colour (Debug), 32 each frame normalised to its own range (Debug; round 7: the default is the
+/// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
 /// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
 /// default 0.15); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
 /// pop-out ramps to 0 (0..0.15 of the rect, default 0.04; content behind the screen is never feathered: the window rule).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth, float edge) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
-    g_rel_cfg.flags = flags & 31;
+    g_rel_cfg.flags = flags & 127;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
     g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
     g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;

@@ -23,6 +23,9 @@ namespace FFXVR;
 //   fmv_depth_edge_band  0.01..0.15 (default 0.04; Debug; never 0, review3 N-5): the band at the border over which content in front of the screen is
 //                        brought back to the screen plane; content behind it is never feathered (the window rule, owner
 //                        test round 3: the old feather on everything made a "shelf" at the top edge);
+//   each frame to its own range  Debug, session-only (round 7): the depth normalised per frame as the converter stored it
+//                        (the default since round 7 is one fixed range per shot from the index: the subject stops sinking back
+//                        when something nearer enters);
 //   depth as colour      Debug, session-only: the depth drawn as colour (red near, green middle, blue far) to judge it;
 //   fmv_depth_flat_subs  0 / 1 (default 0): the bottom 15 % of the video stays flat (the subtitles are in the same image and
 //                        would otherwise lie on the relief);
@@ -44,6 +47,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
     private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Debug; default 0 since round 6: the fill made blocks along silhouettes)
     private bool  _fmv_depth_colour = false;       // Debug, session-only
+    private bool  _fmv_depth_per_frame = false;    // Debug, session-only (round 7): each frame normalised to its own range, as before (A/B)
     private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
     private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Debug)
@@ -56,7 +60,7 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>From push_all, every frame (applies at the next Present).</summary>
     private void fmv3d_push() {
-        int flags = (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0) | (_fmv_depth_edges ? 4 : 0) | (_fmv_depth_median ? 8 : 0) | (_fmv_depth_colour ? 16 : 0);
+        int flags = (_fmv_depth_flat_subs ? 1 : 0) | (_fmv_depth_tight_fov ? 2 : 0) | (_fmv_depth_edges ? 4 : 0) | (_fmv_depth_median ? 8 : 0) | (_fmv_depth_colour ? 16 : 0) | (_fmv_depth_per_frame ? 32 : 0) | 64;   // 64: the causal filter (until the centred one, round 7.4)
         if (_fn_fmv3d_set != null) _fn_fmv3d_set(_fmv_depth ? 1 : 0, _fmv_depth_amount, flags, _fmv_depth_offset, _fmv_depth_range, _fmv_depth_pop, _fmv_depth_smooth, _fmv_depth_edge_band);
     }
 
@@ -117,6 +121,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.TextDisabled(esc(fmv3d_text(0)));
         if (_fmv_depth) {
             ImGui.Checkbox("FMV 3D: depth as colour (red near, blue far)##fmv3d", ref _fmv_depth_colour); ImGui.SameLine();
+            ImGui.Checkbox("each frame to its own range (old; A/B)##fmv3d", ref _fmv_depth_per_frame); ImGui.SameLine();
             ImGui.Checkbox("edge fill (experimental)##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
             ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");
