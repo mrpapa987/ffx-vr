@@ -16,7 +16,7 @@ import fvd
 import preview
 import vbf
 import vda_model
-from window import windowed_depth
+from window import shot_windows
 
 FF = shutil.which('ffmpeg')
 FP = shutil.which('ffprobe')
@@ -160,7 +160,8 @@ class PipelineTest(unittest.TestCase):
         m.prepare(iw, ih, 320, 180)
         cuts, norm = depthproc.CutDetector(320, 180), depthproc.ShotNormalizer()
         flags = [cuts(f)[0] for f in frames]
-        expect = [norm(d, flags[i])[0] for i, d in windowed_depth(frames, m)]
+        expect = [norm(d, flags[i])[0] for _s, shot in shot_windows(range(n), lambda ids: m([frames[i] for i in ids]),
+                                                                    is_start=lambda i: flags[i]) for i, d in shot]
         with fvd.FvdReader(os.path.join(self.out, 'tst_us.fvd')) as r:
             got = [r.frame(i).astype(int) for i in range(len(r))]
         self.assertEqual(len(got), len(expect))

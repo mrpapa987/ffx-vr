@@ -11,8 +11,8 @@ weights first. Directly:
 
 Per video, streaming and in constant memory (nothing but the .fvd is written):
     VBF reader -> ffmpeg (pipe, rgb24 at the model's input size) -> Video-Depth-Anything-Small in windows of 32 frames
-    (fp16, CUDA) -> each depth map shrunk to 320x180 (240x180 for 4:3) -> per-shot 8-bit normalisation (p2/p98, EMA,
-    reset at cuts) -> left predictor -> XPRESS_HUFF -> <name>.fvd.part, renamed to <name>.fvd when complete.
+    (fp16, CUDA; restarted at every cut) -> each depth map shrunk to 320x180 (240x180 for 4:3) -> per-shot 8-bit
+    normalisation (p2/p98, EMA, reset at cuts) -> left predictor -> XPRESS_HUFF -> <name>.fvd.part, renamed to <name>.fvd when complete.
 manifest.json in the output folder records each video (status, source size and VBF offset, model, settings, frames,
 seconds); a video whose .fvd is complete and matches is skipped, so an interrupted run resumes per video.
 
@@ -49,10 +49,10 @@ import fvd  # noqa: E402
 import media  # noqa: E402
 import vbf  # noqa: E402
 import vda_model  # noqa: E402
-from window import windowed_depth  # noqa: E402
+from window import shot_windows  # noqa: E402
 
 CONVERTER_VERSION = '0.1.1'
-ALGO_VERSION = 1          # bump when the depth a given input produces changes (forces reconversion)
+ALGO_VERSION = 2          # bump when the depth a given input produces changes (forces reconversion)
 MANIFEST = 'manifest.json'
 EXIT_OOM = 3
 PREVIEW_DEFAULT = 'SIN_us,BTS_us'
@@ -151,6 +151,7 @@ def settings_of(a, model, weights_sha):
         'model': model.model_name,
         'weights_sha256': weights_sha or '',
         'input_size': a.input_size,
+        'windows': 'per-shot',
         'out_h': depthproc.OUT_H,
         'precision': 'fp32' if a.fp32 else 'fp16',
         'attention': a.attention,
@@ -286,22 +287,24 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
         def frames():
             for i, f in enumerate(reader):
                 side[i] = cuts(f)
-                yield f
+                yield i, f
         n_cuts = 0
-        for idx, depth in windowed_depth(frames(), model):
-            if idx != w.count:
-                raise ConvertError(f'internal: frame {idx} came out as frame {w.count}')
-            cut, thumb = side.pop(idx)
-            if a.edge_filter == 'snap':
-                depth = depthproc.edge_snap(depth)
-            q, p2, p98, lo, hi = norm(depth, cut)
-            w.add_frame(q, fvd.FF_CUT if cut else 0, p2, p98, lo, hi, thumb)
-            n_cuts += bool(cut)
-            if progress:
-                el = time.perf_counter() - t0
-                frac = entry.size * min(reader.bytes_fed / max(entry.size, 1), 1.0)
-                progress.update(entry.name.split('/')[-1], w.count, est, w.count / el if el > 0 else 0.0, frac,
-                                model.peak_vram())
+        # cut-aware: Video-Depth-Anything's windows restart at every cut (window.shot_windows)
+        for _start, shot in shot_windows(frames(), model, is_start=lambda x: side[x[0]][0], frame_of=lambda x: x[1]):
+            for idx, depth in shot:
+                if idx != w.count:
+                    raise ConvertError(f'internal: frame {idx} came out as frame {w.count}')
+                cut, thumb = side.pop(idx)
+                if a.edge_filter == 'snap':
+                    depth = depthproc.edge_snap(depth)
+                q, p2, p98, lo, hi = norm(depth, cut)
+                w.add_frame(q, fvd.FF_CUT if cut else 0, p2, p98, lo, hi, thumb)
+                n_cuts += bool(cut)
+                if progress:
+                    el = time.perf_counter() - t0
+                    frac = entry.size * min(reader.bytes_fed / max(entry.size, 1), 1.0)
+                    progress.update(entry.name.split('/')[-1], w.count, est, w.count / el if el > 0 else 0.0, frac,
+                                    model.peak_vram())
         if side:
             raise ConvertError(f'internal: {len(side)} frames read but not written')
         if w.count == 0:

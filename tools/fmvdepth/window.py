@@ -20,6 +20,13 @@ was first computed (or at the end of the video).
 One deliberate difference: the caller's model function returns depth already shrunk to the output size (320x180), so
 the fit and the cross-fade run on those maps, not on full-resolution ones. Both are linear per pixel, so this only
 changes which pixels the least-squares fit samples.
+
+Cut-aware windows (converter 0.2): upstream runs one chain of windows over the whole video, so a window that spans a
+cut feeds the model frames of two shots (its temporal attention mixes them), and every later window keeps video frame
+0 and an earlier window's slot 12 as keyframes and alignment reference. shot_windows() instead splits the stream at
+each shot start and runs windowed_depth() on every shot on its own: slot 0 is the shot's first frame, no window holds
+frames of two shots, no fit uses another shot, and a short shot is padded with its own last frame (as upstream pads the
+end of a video). Cost: each shot rounds up to whole windows, ~10-25 % more model calls on FFX's cut rate.
 """
 import numpy as np
 
@@ -134,3 +141,55 @@ def windowed_depth(frames, model, on_window=None):
         prev = cur
         k += 1
     yield from emit(0)
+
+
+_END = object()
+
+
+def split_shots(items, is_start):
+    """Split the iterable `items` into consecutive runs, a new run at every item after the first for which
+    is_start(item) is true. Yields one iterator per run, lazily: it reads one item ahead (to see where the run ends) and
+    never holds more than that one. A run the caller does not finish is skipped over before the next one starts."""
+    it = iter(items)
+    nxt = [next(it, _END)]
+
+    def run():
+        first = True
+        while nxt[0] is not _END:
+            x = nxt[0]
+            if not first and is_start(x):
+                return
+            first = False
+            nxt[0] = next(it, _END)
+            yield x
+
+    while nxt[0] is not _END:
+        g = run()
+        yield g
+        for _x in g:
+            pass
+
+
+def shot_windows(items, model, is_start, frame_of=lambda x: x, on_window=None):
+    """Cut-aware windowed depth. `items` are the video's frames in order (or tuples carrying them: frame_of(item) gives
+    the frame for the model); a shot starts at every item for which is_start(item) is true (the first item always
+    starts one). Yields (start, depths) per shot: `start` the shot's first frame index in the video, `depths` a
+    generator of (frame_index, depth) for that shot's frames, in order, each exactly once (windowed_depth restarted on
+    the shot alone). A shot's generator left unfinished is run to its end before the next shot starts."""
+    base = 0
+    for shot in split_shots(items, is_start):
+        count = [0]
+
+        def frames(shot=shot, count=count):
+            for x in shot:
+                count[0] += 1
+                yield frame_of(x)
+
+        def depths(frames=frames, base=base):
+            for j, d in windowed_depth(frames(), model, on_window):
+                yield base + j, d
+        g = depths()
+        yield base, g
+        for _x in g:            # (normally already consumed: then this does nothing)
+            pass
+        base += count[0]
