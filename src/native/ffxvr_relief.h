@@ -8,8 +8,9 @@
 // 4:3) at the virtual screen's pose and size; the vertex shader samples the frame's depth map (R8, 320 x 180 / 240 x 180)
 // and moves each vertex along the ray from the nominal eye through its pixel to a distance given by the "3D movie"
 // mapping (map_z below: the shot's nearest content slightly in front of the screen, its farthest a few metres behind,
-// linear in disparity); the weight feathers the outer 4 % to flat and, as an option, the bottom 15 % (the subtitles).
-// map_point / weight / edge_fill below are the CPU copy of the shader's maths (the test checks them).
+// linear in disparity); only the part in front of the screen is feathered to the screen plane at the edges (the window
+// rule), and as an option the bottom 15 % lies flat (the subtitles).
+// map_point / weights / edge_fill below are the CPU copy of the shader's maths (the test checks them).
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -267,8 +268,12 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
 // that disparity normalised per shot between lo and hi (FORMAT.md), so the stereographer's choice is the affine map itself:
 // n = 1 (the shot's nearest, hi) -> the near distance Zn = Ds - pop, n = 0 (the farthest, lo) -> Zf = Ds + range, linear in
 // disparity in between (depth = 1 / disparity): 1/Z(n) = 1/Zf + n (1/Zn - 1/Zf). Ds is the viewer's distance to the screen
-// (the screen sits Ds ahead of the reference: screen_distance). The amount k (strength x the ramp level x the edge / bottom
-// weight) blends toward the flat screen in disparity: 1/Z = 1/Ds + k (1/Z(n) - 1/Ds), so k = 0 is the flat screen.
+// (the screen sits Ds ahead of the reference: screen_distance). The amount k (strength x the ramp level) blends toward the
+// flat screen in disparity: 1/Z = 1/Ds + k D, D = 1/Z(n) - 1/Ds, so k = 0 is the flat screen. The window rule (owner test
+// round 3: the top edge made a "shelf"): content behind the screen (D < 0) is never feathered: along its ray it stays inside
+// the screen's outline, as through a window, and the black around the frame is the window's frame. Only content in front
+// of the screen (D > 0) is scaled by the edge weight, to 0 at the border (the floating window). The subtitle band, when on,
+// scales both (the bottom 15 % lies on the screen plane, readable).
 // A point goes along the ray from the nominal eye E (Ds in front of the screen's centre, on its normal) through its pixel,
 // to distance Z: from E the picture is exactly the flat screen's (no pixel moves, nothing is uncovered); the depth comes
 // from the two eyes' parallax. In the screen's frame (x right, y up, +z toward the viewer, E = (0, 0, Ds)), with t = Z / Ds:
@@ -281,27 +286,32 @@ inline Map make_map(float Ds, float range, float pop, float k) {
     Ds = fmaxf(Ds, 0.6f); range = clampf(range, 0.f, 50.f); pop = clampf(pop, 0.f, Ds - k_min_near);
     return { Ds, 1.f / (Ds - pop), 1.f / (Ds + range), clampf(k, 0.f, 1.f) };
 }
-/// The distance from E (m) of disparity n (0..1) at weight w (0..1).
-inline float map_z(const Map& m, float n, float w) {
+/// The distance from E (m) of disparity n (0..1); w_pop (0..1) scales only the part in front of the screen (the edge band),
+/// w_all (0..1) all of it (the subtitle band). Continuous in n, w_pop and w_all (D * w_pop and D agree at D = 0).
+inline float map_z(const Map& m, float n, float w_pop, float w_all = 1.f) {
     const float inv0 = 1.f / m.Ds, inv = m.inv_f + clampf(n, 0.f, 1.f) * (m.inv_n - m.inv_f);
-    return 1.f / (inv0 + m.k * w * (inv - inv0));
+    float d = inv - inv0;
+    d *= (d > 0.f ? w_pop : 1.f) * w_all;
+    return 1.f / (inv0 + m.k * d);
 }
-/// The point in the screen's frame for screen position (x, y) (m) at disparity n and weight w.
-inline void map_point(const Map& m, float x, float y, float n, float w, float P[3]) {
-    const float t = map_z(m, n, w) / m.Ds;
+/// The point in the screen's frame for screen position (x, y) (m) at disparity n and the weights.
+inline void map_point(const Map& m, float x, float y, float n, float w_pop, float P[3], float w_all = 1.f) {
+    const float t = map_z(m, n, w_pop, w_all) / m.Ds;
     P[0] = x * t; P[1] = y * t; P[2] = m.Ds * (1.f - t);
 }
 /// The angular disparity (degrees) of a point at distance Z against the screen plane at Ds, for an eye separation ipd:
 /// + crossed (in front of the screen), - uncrossed (behind). The comfort figure of the design note.
 inline float disparity_deg(float Z, float Ds, float ipd = 0.063f) { return ipd * (1.f / Z - 1.f / Ds) * 57.29578f; }
 
-constexpr float k_feather = 0.04f, k_band = 0.15f, k_band_ramp = 0.05f;
-/// The relief's weight at grid point (a, b) (0..1 across the video rect, b down): flat at the border, full 4 % in; with
-/// flat_bottom 0 in the bottom 15 % (b >= 0.85), ramping from 1 at b = 0.80.
-inline float weight(float a, float b, bool flat_bottom) {
+constexpr float k_feather = 0.04f, k_feather_max = 0.15f, k_band = 0.15f, k_band_ramp = 0.05f;   // k_feather: the edge band's default
+struct Weights { float pop, all; };
+/// The weights at grid point (a, b) (0..1 across the video rect, b down). pop (for content in front of the screen only):
+/// 0 at the border, 1 from `band` in (smoothstep; band 0: 1 everywhere). all (everything; flat_bottom only): 0 in the bottom
+/// 15 % (b >= 0.85), ramping from 1 at b = 0.80.
+inline Weights weights(float a, float b, float band, bool flat_bottom) {
     const float e = fminf(fminf(a, 1.f - a), fminf(b, 1.f - b));
-    float w = smooth01(e / k_feather);
-    if (flat_bottom) w *= 1.f - smooth01((b - (1.f - k_band - k_band_ramp)) / k_band_ramp);
+    Weights w = { band > 0.f ? smooth01(e / band) : 1.f, 1.f };
+    if (flat_bottom) w.all = 1.f - smooth01((b - (1.f - k_band - k_band_ramp)) / k_band_ramp);
     return w;
 }
 /// The rubber sheet (the triangles stretched across a depth edge): the pixel shader measures its triangle's depth slope
