@@ -12306,7 +12306,7 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // ffxvr_fmv3d_set (ABI 42). flags: 1 flatten the bottom 15 %, 2 the tight field of view (review SF-1), 4 the edge fill, 8 the
 // 3x3 median, 16 the depth as colour. amount 0..1, range / pop in metres (the "3D movie" mapping), smooth 0..0.95.
 struct RelCfg { int on; float amount; int flags; int offset; float range, pop, smooth, edge; };   // edge: the band (share of the rect) where pop-out ramps to 0 (ABI 43)
-static RelCfg g_rel_cfg = { 0, 1.f, 2 | 4 | 8, 0, 3.f, 0.15f, 0.6f, relief::k_feather };
+static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // edge fill (4) off by default (round 6: blocks along silhouettes)
 static float g_rel_range_now = -1.f, g_rel_pop_now = -1.f; static double g_rel_t_prev = 0.0;   // the range / pop drawn, following the settings at 2 m/s and 0.5 m/s (a slider never jumps)
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",

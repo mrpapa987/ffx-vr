@@ -18,7 +18,7 @@ namespace FFXVR;
 //   fmv_depth_smooth     0..0.95 (default 0.6): the per-pixel temporal filter within a shot (changes over 24 of 255 pass
 //                        at once: motion, not noise); reset at every cut;
 //   fmv_depth_median     0 / 1 (default 1; Debug): a 3x3 median on each decoded depth frame (speckle);
-//   fmv_depth_edges      0 / 1 (default 1; Debug): the edge fill: a triangle stretched across a depth edge shows the colour of
+//   fmv_depth_edge_fill  0 / 1 (default 0; Debug; was fmv_depth_edges, default 1, ignored since round 6): the edge fill: a triangle stretched across a depth edge shows the colour of
 //                        the far side instead of a smear;
 //   fmv_depth_edge_band  0.01..0.15 (default 0.04; Debug; never 0, review3 N-5): the band at the border over which content in front of the screen is
 //                        brought back to the screen plane; content behind it is never feathered (the window rule, owner
@@ -42,7 +42,7 @@ public sealed unsafe partial class FFXVRModule {
     private float _fmv_depth_pop = 0.15f;          // ini fmv_depth_pop (m)
     private float _fmv_depth_smooth = 0.6f;        // ini fmv_depth_smooth
     private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
-    private bool  _fmv_depth_edges = true;         // ini fmv_depth_edges (Debug)
+    private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Debug; default 0 since round 6: the fill made blocks along silhouettes)
     private bool  _fmv_depth_colour = false;       // Debug, session-only
     private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
@@ -117,7 +117,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.TextDisabled(esc(fmv3d_text(0)));
         if (_fmv_depth) {
             ImGui.Checkbox("FMV 3D: depth as colour (red near, blue far)##fmv3d", ref _fmv_depth_colour); ImGui.SameLine();
-            ImGui.Checkbox("edge fill##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
+            ImGui.Checkbox("edge fill (experimental)##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
             ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");
             ImGui.Checkbox("FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)##fmv3d", ref _fmv_depth_tight_fov);

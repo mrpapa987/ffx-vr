@@ -1069,7 +1069,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "fmv_depth_pop":     pf(k, v, ref _fmv_depth_pop, 0f, 0.5f); break;      // m in front of the screen for the nearest content (default 0.15)
                 case "fmv_depth_smooth":  pf(k, v, ref _fmv_depth_smooth, 0f, 0.95f); break;  // the temporal filter within a shot (default 0.6)
                 case "fmv_depth_median":  pb(k, v, ref _fmv_depth_median); break;            // Debug: the 3x3 median (default 1)
-                case "fmv_depth_edges":   pb(k, v, ref _fmv_depth_edges); break;             // Debug: the edge fill (default 1)
+                case "fmv_depth_edges":   break;                                             // round 6: the old edge fill key (saved as 1 by every earlier build) is ignored: the fill starts off
+                case "fmv_depth_edge_fill": pb(k, v, ref _fmv_depth_edges); break;           // Debug: the edge fill (default 0)
                 case "fmv_depth_edge_band": pf(k, v, ref _fmv_depth_edge_band, 0.01f, 0.15f); break;   // Debug: where pop-out ramps to the screen plane at the border (default 0.04)
                 case "fmv_depth_flat_subs": pb(k, v, ref _fmv_depth_flat_subs); break;  // the bottom 15 % flat (subtitles; default 0)
                 case "fmv_depth_tight_fov": pb(k, v, ref _fmv_depth_tight_fov); break;  // Debug: the relief's projection narrowed to the screen (default 1; review SF-1)
@@ -1429,7 +1430,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"fmv_depth_pop={_fmv_depth_pop.ToString("F2", ci)}\n" +
             $"fmv_depth_smooth={_fmv_depth_smooth.ToString("F2", ci)}\n" +
             $"fmv_depth_median={(_fmv_depth_median ? 1 : 0)}\n" +
-            $"fmv_depth_edges={(_fmv_depth_edges ? 1 : 0)}\n" +
+            $"fmv_depth_edge_fill={(_fmv_depth_edges ? 1 : 0)}\n" +
             $"fmv_depth_edge_band={_fmv_depth_edge_band.ToString("F3", ci)}\n" +
             $"fmv_depth_flat_subs={(_fmv_depth_flat_subs ? 1 : 0)}\n" +
             $"fmv_depth_tight_fov={(_fmv_depth_tight_fov ? 1 : 0)}\n" +
