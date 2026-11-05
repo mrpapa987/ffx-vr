@@ -4036,7 +4036,7 @@ the virtual screen as real geometry in the headset. Off by default (`fmv_depth=0
 src/native/ffxvr_relief.h (pure: the .fvd reader, the frame selection, the hold / cut ramp, the shape, the matrices),
 `relief_present` and the relief worker in ffxvr_native.cpp, `xr_render_views` in ffxvr_xr.cpp; managed: src/managed/fmv_relief.cs
 (the settings and F8's text). ABI 41 (+ `ffxvr_fmv3d_set`, `ffxvr_fmv3d_text`). Notes and test results: scratchpad
-fixes/fmv-relief-impl.md.
+fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: done, below).
 
 - **When.** Every Present with the headset on, in xr_tick right before xr_frame, with `fmv_depth=1`: the movie player is read
   as the S2 probe reads it (the manager pointer and the playing word; the state, the player's fields and the name only
@@ -4046,12 +4046,16 @@ fixes/fmv-relief-impl.md.
   screen is closed; the depth file opened and checked (below); eye 1 is our backbuffer copy (`g_bb_copy`, the flat screen's
   own source); the relief pass (shaders, the eye images, located views with a sane field of view) is ready. Otherwise the
   frame goes out exactly as before (the screen quad), and F8 says why. While the relief is drawn the screen quad and the UI
-  panel are not submitted (the head-locked ImGui layer still is).
-- **The file** (all I/O on the FMV worker, the S2 thread, extended). At a movie's first Present the render thread posts a
+  panel are not submitted (the head-locked ImGui layer still is). The depth file is asked for only once the movie could
+  show a relief (review N3): not a hybrid id and the mono virtual screen (re-checked every Present, so a view that settles a
+  few frames in still gets it; a battle transition window does not hold it back): a movie behind 3D, the stereo screen or
+  the 3D view never opens or decodes anything.
+- **The file** (all I/O on the FMV worker, the S2 thread, extended). Once the movie qualifies the render thread posts a
   request (a generation number, the name, the frame count by the game's duration); the worker opens
   `fmvdepth\<name>.fvd` once: `GetFileAttributesW` first (cloud-only: not opened), `CreateFileW` with share read + delete,
   the header through `fmv::fvd_parse` (FORMAT.md checks 1-5), then this runtime's own: 320x180 or 240x180, codec 0 or 2
-  (XPRESS_HUFF via cabinet.dll, `CreateDecompressor` / `Decompress` looked up at run time on the worker; zlib, the tests'
+  (XPRESS_HUFF via cabinet.dll, loaded from System32 only (`LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`, review N5),
+  `CreateDecompressor` / `Decompress` looked up at run time on the worker; zlib, the tests'
   codec, is refused), not the fake model, the source name equal to the game's (ignoring case), 1..65,536 frames, and the
   frame count within 2 of the game's duration (else "stale: convert it again"). The whole index is read in 8 KB chunks and
   every entry checked (checks 6 and 7) at open, kept as 16 B a frame (offset, size, stored / cut / flat), plus a cut bit map
@@ -4064,12 +4068,14 @@ fixes/fmv-relief-impl.md.
   A new generation (or none: the movie ended) closes the file and frees the index and the ring.
 - **Memory** (32-bit): per open video the index (16 B a frame: END_us 0.40 MB, at most 1 MB by the frame cap), the ring and
   the payload buffer (9 x 57.6 KB = 0.52 MB), the render thread's upload copy (57.6 KB); the two 8 KB bit maps are static.
-  At most ~1.6 MB, END_us ~1 MB, all freed at the movie's end. GPU: two eye images at the eye swapchain size in the
-  backbuffer's format, a D32 depth buffer of that size, the 320x180 R8 texture (freed at the movie's end); no vertex or index
-  buffer (the grid comes from SV_VertexID).
+  At most ~1.6 MB, END_us ~1 MB, all freed at the movie's end. Kept from the first relief frame until the headset goes
+  off (a session restart included) or fmv_depth is turned off (review N4: no per-movie churn): the upload copy (57.6 KB of
+  CPU memory) and the GPU objects: two eye images at the eye swapchain size in the backbuffer's format and a D32 depth
+  buffer of that size (at 2496x1404: 2 x 14 MB + 14 MB = ~42 MB of VRAM), the 320x180 R8 texture (57.6 KB; re-made for a
+  240-wide 4:3 file); no vertex or index buffer (the grid comes from SV_VertexID).
 - **The relief** (k_rel_hlsl; relief::weight / relief_z are its CPU copy, tested). Our two eye images are cleared black
   (the room colour) with a depth buffer; each eye draws 160 x 90 cells (120 x 90 for 4:3) x 2 triangles with
-  MVP = P(that eye's located field of view, near 0.05, far 50) * V(that eye's located pose) * M(the virtual screen's pose),
+  MVP = P(that eye's field of view, below; near 0.05, far 50) * V(that eye's located pose) * M(the virtual screen's pose),
   in the screen quad's own frame (x right, y up, +z toward the viewer, W x W * 9/16 for the whole backbuffer, exactly as the
   flat screen shows it). The grid covers the video rect inside the backbuffer (fit and centred: 1280x720 / 640x480 by the
   player's own size into the backbuffer; a 4:3 video is pillarboxed, the bars stay black). The vertex shader samples the
@@ -4078,43 +4084,74 @@ fixes/fmv-relief-impl.md.
   the default s = 0.08 on a 2.5 m screen: 10 cm into the screen, 5 cm out); w = smoothstep over the outer 4 % (the frame's
   border stays flat and straight) times, with `fmv_depth_flat_subs`, 0 in the bottom 15 % ramping from 1 at 80 %. The pixel
   shader samples eye 1's backbuffer copy (subtitles and the skip prompt are in it and bend with the relief: the overlay
-  split is S4). xr_frame gets the two images, `xr_render_views`' poses and field of view as a projection layer: the pose
-  the frame was drawn with is the one it is submitted with (the views located at the last wait, an extra frame's included),
+  split is S4). **The tight field of view** (review SF-1; `fmv_depth_tight_fov`, default 1): the eye images are 16:9 (the
+  eye swapchains) while an eye's field of view is nearly square, so drawn over the whole view the video got only about 0.56
+  of the horizontal density vertically (~360 rows for a 2.5 m screen at 2.5 m, against ~565 display rows that the quad
+  reaches). Each eye's projection is therefore narrowed to the box of the video rect pushed in and popped out by this
+  frame's relief (its 8 corners projected into the eye's located view; a convex box's projection is bounded by its corners),
+  widened by 3 % of the span plus 0.004, clamped to the eye's own field of view (relief::tight_fov); the eye is drawn and
+  submitted with that field of view, so the same image covers the screen with all its rows. Outside it the compositor shows
+  black, the room colour anyway. A corner behind the eye or a screen out of view keeps the eye's whole field of view. The
+  figure (eye-image rows per video row, eye 0, tight and whole) is logged at each movie's first relief frame and shown on
+  F8. A projection view whose field of view differs from the located one is legal OpenXR; how Virtual Desktop reprojects
+  it is the A/B the toggle is for. xr_frame gets the two images, `xr_render_views`' poses and the field of view they were
+  drawn with as a projection layer: the pose the frame was drawn with is the one it is submitted with (the views located at the last wait, an extra frame's included),
   so it is world-locked like the quad was; Home re-places the screen as before. Stickrep's extras re-send it unrotated
   (a screen frame records no stick heading).
 - **Time** (relief::step, per Present). The depth changes only when the video frame does and is held in between (no
-  interpolation). A cut (the index's flag; any cut in (shown, wanted]; a jump of more than 64 frames or backwards), and the
-  first depth after anything flat, ramps the strength from 0 over 150 ms (smoothstep) and resets the pivot to that frame's
-  median; otherwise the pivot follows the median by 15 % of the gap a video frame, at most 0.02. The strength setting is
-  followed at 0.5 a second at most (the slider never pops). A frame not decoded in time: the previous frame's depth once
-  (one frame late, never across a cut), else flat (the grid drawn with s = 0, still as the projection layer), as for a
-  flat frame in the file, a decode error, no frame yet or past the file's end. Never stale beyond one frame.
+  interpolation). A depth level 0..1 (the strength is s x smoothstep(level)) moves over 150 ms both ways (review N1): up
+  while the wanted frame's depth is there, down (on the last depth uploaded) while it is not: a decode lag past one frame,
+  a flat frame in the file, a decode error, past the file's end. It is also capped to reach 0 at the file's last frame
+  (cap = frames left x 33.4 ms / 150 ms), so a movie's natural end and a file a frame or two short fade out. Instant flat
+  only where no depth can stand in: nothing uploaded yet, a new shot (a cut) not decoded yet, and the Presents that fall
+  back to the flat screen (the frame source is not the relief's; review N2: the unreadable-player Present too), after which
+  the next relief frame ramps in from 0. A cut (the index's flag; any cut in (shown, wanted]; a jump of more than 64 frames
+  or backwards), and the first depth after a flat Present, resets the level to 0 and the pivot to that frame's median;
+  otherwise the pivot follows the median by 15 % of the gap a video frame, at most 0.02. The strength setting is followed
+  at 0.5 a second at most (the slider never pops). A frame not decoded in time gets the previous frame's depth once at full
+  strength (one frame late, never across a cut), then fades: while fading the depth shown is up to ~5 video frames old, at a
+  falling strength. A count that goes back with the same name and id while playing stays set (a loop; review N7) keeps the
+  file open: the step sees the jump back as a cut.
 - **F8.** Main window, View, after "2D screens": `FMVs in 3D (needs converted depth)` with `depth strength` (0..0.25) and
-  `flatten the bottom 15% (subtitles)`, then a one-line note while a movie plays: `OPN_us.webm in 3D (depth ok)` or
+  `flatten the bottom 15% (subtitles)`, then a one-line note while a movie plays: `OPN_us.webm in 3D (depth ok)` (`(fading to
+  flat (decode lag))` while fading) or
   `OPN_us.webm on the flat screen: no depth file (fmvdepth\opn_us.fvd)` (afterwards: `last movie OPN_us.webm: in 3D on N of
   M Presents` / `... flat screen: <reason>`). Debug header, after the FMV line: `FMV 3D: OPN_us.webm frame 1234/4750, depth ok,
-  strength 0.080, pivot 0.52 | decode avg 0.31 / max 2.10 ms (1241 decoded, 0 errors), ring 8/8 | in 3D on 2900 of 2950
-  Presents` (or `, flat screen (<reason>)`; `FMV 3D: off (fmv_depth 0)`; `FMV 3D: no movie playing (last movie ...)`), and
-  `depth frame offset (sync test)` (-3..3).
+  strength 0.080, pivot 0.52, 1.80 rows a video row (tight fov) | decode avg 0.31 / max 2.10 ms (1241 decoded, 0 errors),
+  ring 8/8 | in 3D on 2900 of 2950 Presents` (or `, flat screen (<reason>)`; `FMV 3D: off (fmv_depth 0)`; `FMV 3D: no movie
+  playing (last movie ...)`), the checkbox `FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)` (ini
+  `fmv_depth_tight_fov`) and `depth frame offset (sync test, not saved)` (-3..3: session-only, 0 at every start, not in the
+  ini; review N6).
 - **Log** (`fmv3d:`, diagnostic profiles only, 200 a session, through the S2 pending buffer): one line per movie at its end:
   `fmv3d: '<name>' id N: <how it ended> | <the file: frames, size, cuts, flat frames, codec / the reason it was refused> |
   P Presents: relief R (depth ok a, one frame late b, flat (decode lag) c, ...), flat screen F (<reason> k, ...) | depth
   uploads, ramps | decoded n frames, avg / max ms, errors; ring fill avg | opened in ms | video WxH in the backbuffer WxH:
-  crop u, v | strength, flatten the bottom, offset`. Also `fmv3d: relief pass ready / FAILED` once.
+  crop u, v | eye-image rows per video row (tight / whole) | fade-outs, loops | strength, flatten the bottom, tight field of
+  view, offset`; and at each movie's first relief frame `fmv3d: '<name>' id N: first relief frame: eye image WxH, video WxH
+  in the backbuffer WxH | eye 0: R eye-image rows per video row with the tight field of view (l r u d), R' with the eye's
+  whole (l r u d)`. Also `fmv3d: relief pass ready / FAILED` once.
 - **Cost.** fmv_depth 0: one branch. On, no movie: two guarded reads a Present. A movie: three more guarded reads, two
   short locks a Present (three when the frame changes), the 57.6 KB upload 30 times a second, two passes of 86,400 / 64,800 vertices
-  and the eye images' fill; the shaders compile once at the first Present with fmv_depth on and the headset on.
-- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 740 checks, 0 failed; 26 / 26
+  and the eye images' fill; the shaders compile once at the first Present with fmv_depth on and the headset on, the GPU
+  objects at the first relief frame (then kept).
+- **Verified here** (container): ffxvr_relief.h's unit test (fixes/fmv-relief-impl.md: 780 checks, 0 failed; 37 / 37
   mutations caught): the reader on 25 cases written by tools/fmvdepth/fvd.py with the zlib and stored codecs (16:9 / 4:3,
   stored frames inside a zlib file, the left predictor in both codecs; every frame equal to fvd.py's FvdReader and its
   median; damaged headers, entries and payloads; stale, other video, fake model, sizes, codec 2 with no decoder, the frame
   cap), the predictor, the selection, the hold / lag / cut / flat / error / strength-rate logic at 72 Hz, the shape and
   weight, the matrices (centre, edges, depth range, an asymmetric field of view, view * pose = I, a yawed eye), the video
-  rect, and the shader's grid on the CPU; the HLSL compiled with dxc (vs_6_0 / ps_6_0; the game compiles vs_4_0 / ps_4_0
+  rect, the tight field of view (the exact bound of a centred screen, pop-out widening it, every point of the relief's box
+  inside, the clamps both sides, the fallbacks, the rows figure), the fades (lag, flat frame, error, past the end, the end
+  cap, recovery mid-fade, instant across a cut) and the shader's grid on the CPU; the HLSL compiled with dxc (vs_6_0 / ps_6_0; the game compiles vs_4_0 / ps_4_0
   with D3DCompile at run time); the native syntax check (warnings identical to the base) and the managed compile check (the
   same 11 pre-existing errors; a mutation in fmv_relief.cs is reported). **Not verified**: anything at run time (XPRESS
   through cabinet.dll, the worker's file and ring protocol, the D3D objects, the look, the comfort, the sync, the crop, the
-  cost), and the shaders under fxc's SM4 rules.
+  cost, Virtual Desktop with a narrowed projection view), and the shaders under fxc's SM4 rules.
+- **Headset check (review N8): world-lock under head motion.** The relief goes out as a projection layer with the pose it
+  was drawn with and no depth layer (no XrCompositionLayerDepthInfoKHR); between fresh frames VDXR can only reproject it by
+  rotation, while the quad was recomposited exactly every display frame. At the game's Present rate during FMVs expect a
+  little positional swim on head translation that the flat screen does not have (the 3D view already behaves so). Check it
+  in step 5 below; if it shows, a depth layer for the relief is the next step.
 
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
@@ -4126,10 +4163,16 @@ or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
    in over 150 ms. Or set the strength slider to 0 (flat geometry) and back.
 4. Strength: 0.08 is the default (10 cm in, 5 cm out on a 2.5 m screen); try 0.15 and 0.25; the slider moves the depth
    smoothly. With subtitles on, try `flatten the bottom 15% (subtitles)`.
-5. Watch for: the depth lagging or leading the picture (moving edges with a depth "ghost": try `depth frame offset` -1 / +1
+5. Sharpness and world-lock: compare the relief at strength 0 with the flat screen (untick) for sharpness, subtitles
+   included; then F8 > Debug `FMV 3D: tight field of view` off and on (expect the tight one sharper; say if Virtual Desktop
+   shows black edges, a shimmer or a jump with it on). Move your head sideways and forward / back: say whether the relief
+   swims against the room compared with the flat screen (review N8).
+6. Watch for: the depth lagging or leading the picture (moving edges with a depth "ghost": try `depth frame offset` -1 / +1
    in F8 > Debug and say which looks right), a pop at shot changes, the frame's border bending, comfort at the default,
-   and F8 > Debug's decode max and ring (expect ring 8/8, decode under a few ms).
-6. Send the `fmv3d:` and `fmv:` lines, the strength you liked, and whether subtitles were on.
+   and F8 > Debug's decode max and ring (expect ring 8/8, decode under a few ms). The end of a movie should fade to flat
+   over its last ~5 frames rather than snap.
+7. Send the `fmv3d:` and `fmv:` lines (the first-relief-frame line has the rows per video row), the strength you liked,
+   and whether subtitles were on.
 
 ## Slow-GPU guard and overdrive freeze diagnostics (3 Nov 2026)
 
