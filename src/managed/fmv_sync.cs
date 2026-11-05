@@ -11,12 +11,19 @@ namespace FFXVR;
 //                    +0x38: +0x130 u64 the duration in ms, +0x138 u32 frames uploaded (the frame on screen is that - 1)
 //   0x840E28  dword  the event's movie id (-1 none)
 // The depth file: <mod>\fmvdepth\<name lower-cased without .webm>.fvd (tools/fmvdepth/FORMAT.md), its 128-byte header read
-// with FileShare.Read | Delete (the converter renames over it while the game runs), at most once per 5 s per name.
+// on a pool thread (review SF1: no file I/O on the render thread; a cloud-only file is not opened) with FileShare.Read |
+// Delete (the converter renames over it while the game runs), only while a movie plays (review N2), at most once per 5 s
+// per name; "checking..." until the first answer. Per frame nothing is allocated unless something shown changed (N2).
 public sealed unsafe partial class FFXVRModule {
 
-    private string _fmv_fvd_for = "";                 // the file name the cached check is for
-    private FmvSync.Fvd _fmv_fvd;                     // ... and its result
-    private long _fmv_fvd_tick;                       // ... and when (Environment.TickCount64)
+    private readonly byte[] _fmv_name_raw = new byte[FmvSync.k_name_len];   // the name bytes last turned into _fmv_name
+    private string _fmv_name = "";
+    private string _fmv_fvd_for = "";                 // the game name the cached check is for
+    private FmvSync.Fvd _fmv_fvd;                     // ... and its result (k_checking until the first answer)
+    private long _fmv_fvd_tick;                       // ... and when it was asked (Environment.TickCount64)
+    private System.Threading.Tasks.Task<FmvSync.Fvd>? _fmv_fvd_task;
+    private FmvSync.State _fmv_last_st; private int _fmv_last_ev = int.MinValue, _fmv_last_view = int.MinValue, _fmv_last_fvd_st = -1; private uint _fmv_last_fvd_n;
+    private string _fmv_line = "";
 
     /// <summary>The Debug header's FMV line (render thread, only while the header is drawn).</summary>
     private void fmv_debug_ui() => ImGui.TextDisabled(esc(fmv_line()));
@@ -28,33 +35,54 @@ public sealed unsafe partial class FFXVRModule {
         byte* m = (byte*)(nint)mgr;
         if (_fn_safe_read(m + FmvSync.k_s_lo, s, FmvSync.k_s_len) == 0 || _fn_safe_read(m + FmvSync.k_p_lo, p, FmvSync.k_p_len) == 0
             || _fn_safe_read(m + FmvSync.k_n_lo, n, FmvSync.k_name_len) == 0) return "FMV: the movie player is not readable";
-        var st = FmvSync.Parse(new ReadOnlySpan<byte>(s, FmvSync.k_s_len), new ReadOnlySpan<byte>(p, FmvSync.k_p_len), new ReadOnlySpan<byte>(n, FmvSync.k_name_len));
+        var raw = new ReadOnlySpan<byte>(n, FmvSync.k_name_len);
+        if (!raw.SequenceEqual(_fmv_name_raw)) { raw.CopyTo(_fmv_name_raw); _fmv_name = FmvSync.Name(raw); }
+        var st = FmvSync.Parse(new ReadOnlySpan<byte>(s, FmvSync.k_s_len), new ReadOnlySpan<byte>(p, FmvSync.k_p_len), _fmv_name);
         read(FhUtil.ptr_at<int>(FmvSync.k_movie_id), out int ev_id);
         int view = !_xr_on ? -1 : _fn_xr_screen_now != null ? _fn_xr_screen_now() : -2;
-        var fvd = st.name.Length > 0 ? fmv_fvd(st.name) : default;
-        return FmvSync.Line(st, ev_id, view, fvd);
+        var fvd = st.playing && st.name.Length > 0 ? fmv_fvd(st.name) : default;   // N2: the file only while a movie plays
+        if (_fmv_line.Length > 0 && FmvSync.Same(st, _fmv_last_st) && ev_id == _fmv_last_ev && view == _fmv_last_view && fvd.status == _fmv_last_fvd_st && fvd.frames == _fmv_last_fvd_n) return _fmv_line;
+        _fmv_last_st = st; _fmv_last_ev = ev_id; _fmv_last_view = view; _fmv_last_fvd_st = fvd.status; _fmv_last_fvd_n = fvd.frames;
+        return _fmv_line = FmvSync.Line(st, ev_id, view, fvd);
     }
 
-    /// <summary>The depth file's header check, cached per name for 5 s.</summary>
+    /// <summary>The depth file's header check: asked on a pool thread, cached per name for 5 s; the last answer (or
+    /// "checking...") meanwhile.</summary>
     private FmvSync.Fvd fmv_fvd(string game_name) {
-        string? file = FmvSync.FileName(game_name);
-        if (file == null) return new FmvSync.Fvd { status = FmvSync.k_no_name };
+        var t = _fmv_fvd_task;
+        if (t != null) {
+            if (!t.IsCompleted) return game_name == _fmv_fvd_for ? _fmv_fvd : new FmvSync.Fvd { status = FmvSync.k_checking };   // one check at a time
+            _fmv_fvd_task = null;
+            if (game_name == _fmv_fvd_for)   // an answer for a name no longer shown is dropped
+                _fmv_fvd = t.Status == System.Threading.Tasks.TaskStatus.RanToCompletion ? t.Result : new FmvSync.Fvd { status = FmvSync.k_unreadable };
+        }
         long now = Environment.TickCount64;
-        if (file == _fmv_fvd_for && now - _fmv_fvd_tick < 5000) return _fmv_fvd;
-        _fmv_fvd_for = file; _fmv_fvd_tick = now;
+        if (game_name == _fmv_fvd_for && now - _fmv_fvd_tick < 5000) return _fmv_fvd;
+        if (game_name != _fmv_fvd_for) _fmv_fvd = new FmvSync.Fvd { status = FmvSync.k_checking };   // the same name keeps its last answer meanwhile
+        _fmv_fvd_for = game_name; _fmv_fvd_tick = now;
+        string? file = FmvSync.FileName(game_name);
+        if (file == null) return _fmv_fvd = new FmvSync.Fvd { status = FmvSync.k_no_name };
+        string dir = _h2_mod_dir;
+        _fmv_fvd_task = System.Threading.Tasks.Task.Run(() => fmv_fvd_read(dir, file, game_name));
+        return _fmv_fvd;
+    }
+
+    /// <summary>Pool thread: the attributes first (a cloud-only file is not opened, so not hydrated), then 128 bytes.</summary>
+    private static FmvSync.Fvd fmv_fvd_read(string mod_dir, string file, string game_name) {
         var r = new FmvSync.Fvd { status = FmvSync.k_absent, file = file };
         try {
-            string path = Path.Join(_h2_mod_dir, "fmvdepth", file);
-            if (_h2_mod_dir.Length > 0 && File.Exists(path)) {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1, FileOptions.None);
-                Span<byte> h = stackalloc byte[128];
-                int got = 0;
-                while (got < 128) { int k = fs.Read(h.Slice(got)); if (k <= 0) break; got += k; }
-                r = FmvSync.ParseFvd(h.Slice(0, got), fs.Length, game_name); r.file = file;
-            }
+            if (mod_dir.Length == 0) return r;
+            string path = Path.Join(mod_dir, "fmvdepth", file);
+            var fi = new FileInfo(path);
+            if (!fi.Exists) return r;
+            if (FmvSync.CloudOnly((int)fi.Attributes)) return new FmvSync.Fvd { status = FmvSync.k_cloud, file = file };
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1, FileOptions.None);
+            var h = new byte[128];
+            int got = 0;
+            while (got < 128) { int k = fs.Read(h, got, 128 - got); if (k <= 0) break; got += k; }
+            r = FmvSync.ParseFvd(h.AsSpan(0, got), fs.Length, game_name); r.file = file;
         }
-        catch (Exception) { r.status = FmvSync.k_unreadable; }
-        _fmv_fvd = r;
+        catch (Exception) { r = new FmvSync.Fvd { status = FmvSync.k_unreadable, file = file }; }
         return r;
     }
 }
@@ -71,15 +99,20 @@ internal static class FmvSync {
     static int U16(ReadOnlySpan<byte> b, int o) => b[o] | b[o + 1] << 8;
     static ulong U64(ReadOnlySpan<byte> b, int o) => U32(b, o) | (ulong)U32(b, o + 4) << 32;
 
-    /// <summary>s: mgr + 0x6D0 (0x80 bytes), p: mgr + 0x130 (0x5C), n: mgr + 0x4F0 (0x80).</summary>
-    public static State Parse(ReadOnlySpan<byte> s, ReadOnlySpan<byte> p, ReadOnlySpan<byte> n) {
-        var st = new State { playing = s[0] != 0, paused = s[0x6FC - k_s_lo] != 0, frame = U32(s, 0x6D8 - k_s_lo), id = U32(s, 0x6DC - k_s_lo),
-                             dur_ms = U64(p, 0x130 - k_p_lo), count = U32(p, 0x138 - k_p_lo) };
+    /// <summary>s: mgr + 0x6D0 (0x80 bytes), p: mgr + 0x130 (0x5C); name: Name() of mgr + 0x4F0 (the caller keeps it).</summary>
+    public static State Parse(ReadOnlySpan<byte> s, ReadOnlySpan<byte> p, string name) =>
+        new State { playing = s[0] != 0, paused = s[0x6FC - k_s_lo] != 0, frame = U32(s, 0x6D8 - k_s_lo), id = U32(s, 0x6DC - k_s_lo),
+                    dur_ms = U64(p, 0x130 - k_p_lo), count = U32(p, 0x138 - k_p_lo), name = name };
+    /// <summary>The name buffer (0x80 bytes, NUL-terminated or full) as printable ASCII.</summary>
+    public static string Name(ReadOnlySpan<byte> n) {
         var c = new char[k_name_len]; int len = 0;
         for (; len < k_name_len && len < n.Length && n[len] != 0; len++) c[len] = n[len] >= 0x20 && n[len] <= 0x7E ? (char)n[len] : '?';
-        st.name = new string(c, 0, len);
-        return st;
+        return new string(c, 0, len);
     }
+    public static bool Same(in State a, in State b) => a.playing == b.playing && a.paused == b.paused && a.frame == b.frame && a.id == b.id
+        && a.count == b.count && a.dur_ms == b.dur_ms && ReferenceEquals(a.name, b.name);
+    /// <summary>Offline, recall on open or recall on data access (a cloud placeholder): not opened.</summary>
+    public static bool CloudOnly(int attributes) => (attributes & (0x1000 | 0x40000 | 0x400000)) != 0;
 
     /// <summary>The video's frame count by the game's duration (29.97 fps = 30000/1001), rounded.</summary>
     public static uint FramesFromMs(ulong ms) => (uint)(ms * 30.0 / 1001.0 + 0.5);
@@ -96,7 +129,7 @@ internal static class FmvSync {
         return stem + ".fvd";
     }
 
-    public const int k_ok = 1, k_absent = 2, k_no_name = 3, k_unreadable = 4, k_invalid = 5;
+    public const int k_ok = 1, k_absent = 2, k_no_name = 3, k_unreadable = 4, k_invalid = 5, k_checking = 6, k_cloud = 7;
     public struct Fvd { public int status; public uint frames; public string file, why; public bool name_match; }
 
     /// <summary>The header checks 1-5 of FORMAT.md, as ffxvr_fmv.h's fvd_parse (64-bit arithmetic).</summary>
@@ -124,7 +157,7 @@ internal static class FmvSync {
     static string FvdText(in Fvd f) => f.status switch {
         k_ok => f.name_match ? $"present ({f.frames} frames)" : $"present ({f.frames} frames; its source name differs)",
         k_absent => "absent", k_no_name => "absent (the name has no depth file form)", k_unreadable => "unreadable",
-        k_invalid => "invalid (" + f.why + ")", _ => "not checked" };
+        k_invalid => "invalid (" + f.why + ")", k_checking => "checking...", k_cloud => "not checked (cloud-only)", _ => "not checked" };
 
     /// <summary>"FMV: OPN_us.webm id 2 frame 1234/4750 uploaded 1234, mode screen, depth file: present (4750 frames)".
     /// view: ffxvr_xr_screen_now (0 3D, 1 screen, 2 stereo screen), -1 no headset, -2 unknown.</summary>
