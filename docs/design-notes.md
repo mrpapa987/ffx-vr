@@ -771,7 +771,7 @@ in" view switch, diorama on the fight centroid, floor.
 
 To do, by layer:
 - Eyes: face the enemies at battle start and on every eye switch (slot ->
-  monster centroid); a blink on eye jumps (`cut_blink` path); on a summon
+  monster centroid); a blink on eye jumps (`cut_blink` path) [done 5 Nov: "Eye jumps" at the end]; on a summon
   the eyes go to YUNA (she stays on the field to command the Aeon while the
   others walk off) - implemented on the assumption that the Aeon is a
   visible party entry with chr_id 8+ (logged as `aeon out:` when first seen;
@@ -5005,3 +5005,33 @@ Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratc
 - **Not seen in play yet**: a Yes/No box with the tap (the gate should read "a choice box"), the field menu flag over a 3D
   frame, the movie flag with the playing byte (F8: "movie skippable 1, playing 0" after a skippable FMV is B1's case), an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
   ("not located") and research exe-battle-ui.md:296 ("message queues") are corrected by the table above.
+
+## Eye jumps: the blink in battle, and facing the enemies (branch `eye-blink`, 5 Nov 2026)
+
+Roadmap 4.1 (scratchpad research/roadmap-design.md), review fixes from eye-blink-review.md. Logic in `ffxvr_eyejump.h`
+(pure, unit-tested), managed in `eye_jump.cs`, ABI 44 (`ffxvr_eye_jump_set`, `ffxvr_eye_event`).
+
+- **The blink now works on frames with a UI pass.** It used to blank only the plain backbuffer copy, so every battle frame
+  and every field frame with a text box skipped it. It now also clears eye 1's final image (both eyes black); the UI panel
+  (command window, text box) stays. **`cut_blink` therefore now also blinks in battle** (seat view, battle camera cuts),
+  and the first-person head-switch blink ("eye: from the drawn head") shows with a text box up. Cut blinks are limited to
+  one start per 30 frames, and no blink is drawn on frames shown on the virtual screen or the stereo screen.
+- **Eye jumps** (first person and third person): a move of the eye base of more than `eye_jump_units` (8, about 0.7 m)
+  in one frame blinks for `eye_jump_blink` frames (6; 0 = off, and then nothing else changes either). Not while
+  dragging, on the heading's latch frame, after a gap of 3+ frames, on the first frame or on NaN. One start per 30
+  frames; a jump inside the window extends a running blink by at most 2 frames. A jump snaps the head smoothing (at the
+  next head update) and resets the stick reprojection's heading. `eye:` lines (40 a session) give the move, the frame
+  before's move and field / in battle; counts on the `view:` line (diag_verbose=1).
+- **Facing the enemies** (`battle_face` 1 body forward (default), 2 where you look, 0 off): on a battle follow change
+  (start, swap, summon, dismissal, manual) the heading turns to the centre of the monsters (no turn under 15 deg; with the
+  blink). The request waits through the load chain (battle_state 4..0x15, 0x22; the first follow change comes at state
+  4, about 2-3 s before the battle is drawn) and is then sent once a monster counts: 11 monster slots (the allocator
+  0x793530), Chr+0x10 set (0x79F380's per-Chr gate), actor live, stat_visible, not stat_hide, HP > 0, not at (0, 0, 0),
+  within 400 units of the followed character. Native applies it at the next first-person frame (aged in such frames).
+- **The field heading** is kept over a battle (battle_face on only) with the game camera's yaw, and restored at the first
+  first-person frame after the battle in the same view and under the same field camera (30 deg); with another camera
+  (a battle ending into a cutscene), or after 600 frames, the heading re-latches from the game camera instead.
+- Not done (review notes): the manual yaw offset (`g_ovr_yaw`) is not folded into the facing (N4, default 0); the ini
+  ranges differ (managed 0-15 / 4-40, native clamps 0-30 / 2-100, N8); third person with anchor smoothing above 0 glides
+  past the blink (N9, default 0); a run of over-threshold frames (a battle dash, if one exceeds 8 units a frame) is not
+  yet treated as motion (S5: measure first from the `eye:` lines).

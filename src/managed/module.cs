@@ -404,7 +404,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_ui_draws     = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_ui_draws");
             _fn_xr_pitch_follow = (delegate* unmanaged[Cdecl]<float, void>)req("ffxvr_xr_pitch_follow");
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
-            _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
+            _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
@@ -2577,7 +2577,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
             }
         }
-        if (in_battle) ej_face_tick();   // eye jumps: the pending face request (the monsters can appear a few frames after the start)
+        if (in_battle) ej_face_tick(btl_v.battle_state);   // eye jumps: the pending face request (waits through the load chain: review B1)
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
         if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; }
         else {

@@ -41,6 +41,8 @@ struct Result {
     int   why = W_FIRST;
     int   frames = 0;     // the blink the caller asks for: g_blink_frames = max(g_blink_frames, frames) (0: none)
     float dist = 0.f;     // the move this frame (0 when not compared)
+    float prev_dist = 0.f;// the previous frame's move (0 when that frame was not compared): a run of big moves is a dash, one
+                          // alone a teleport (S5: the followed character's battle actions, measured from the owner's eye: lines)
     bool  jump() const { return kind != K_NONE; }
 };
 
@@ -52,6 +54,7 @@ struct State {
     bool     started = false;    // a blink has started this session (start_frame is meaningful)
     uint32_t start_frame = 0;
     int      ext = 0;            // frames added to the blink that started at start_frame
+    float    last_d = 0.f;       // the last frame's move if it was compared, else 0 (Result::prev_dist)
     uint32_t n_jumps = 0, n_start = 0, n_ext = 0, n_held = 0;   // since the last clear (the view: line)
 };
 
@@ -61,7 +64,7 @@ inline bool finite3(const float p[3]) { return std::isfinite(p[0]) && std::isfin
 /// last frame was also a first-person 3D frame (at most 2 frames ago), the heading was latched before (not the latch
 /// frame, nor a re-latch since the last step), nobody is dragging, the mode is 1 or 3, and P is finite.
 inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
-    Result r;
+    Result r; r.prev_dist = s.last_d; s.last_d = 0.f;
     if (!finite3(P)) { s.valid = false; r.why = W_NAN; return r; }
     const bool had = s.valid;
     const uint32_t gap = c.frame - s.prev_frame;
@@ -74,7 +77,7 @@ inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     if (!c.latched || relatched)      { r.why = W_LATCH; return r; }
     if (c.mode != 1 && c.mode != 3)   { r.why = W_MODE;  return r; }
     if (c.dragging)                   { r.why = W_DRAG;  return r; }
-    r.why = W_MOVE; r.dist = d;
+    r.why = W_MOVE; r.dist = d; s.last_d = d;
     if (!(d > cfg.units)) return r;
     s.n_jumps++;
     if (cfg.blink <= 0) { r.kind = K_OFF; return r; }
@@ -126,26 +129,78 @@ inline Face face_yaw(const float pos[3], const float tgt[3], float head_rel, int
     return f;
 }
 
-/// The field heading kept over a battle: saved at the battle's start, restored at the first first-person frame after its end
-/// in the same view mode (a mode switch back from battle_view re-latches the heading from the game's camera first).
+/// The field heading kept over a battle (only with battle_face on: it exists to undo the face's turn): saved at the battle's
+/// start with the game camera's yaw, taken at the first first-person frame after its end in the same view mode (a mode switch
+/// back from battle_view has re-latched from the game's camera by then).
 struct Hold {
     bool     valid = false;    // a heading was saved
-    bool     pending = false;  // the battle ended: restore at the next frame in `mode`
-    float    yaw = 0.f;
+    bool     pending = false;  // the battle ended: take at the next frame in `mode`
+    float    yaw = 0.f;        // g_fp_yaw at the start
+    float    cam = 0.f;        // the game camera's yaw (g_yaw_cam) at the start
     int      mode = 0;
     uint32_t frame = 0;        // the battle's end
 };
-inline void hold_save(Hold& h, bool latched, int mode, float yaw) {
-    h.valid = latched && mode != 0 && std::isfinite(yaw); h.pending = false; h.yaw = yaw; h.mode = mode;
+/// The battle starts (battle_face on; off clears the Hold). N1: an armed restore not yet taken (battle B right after A with no first-person
+/// field frame between) keeps A's field heading: B's start heading is A's faced one, not the field's.
+inline void hold_save(Hold& h, bool latched, int mode, float yaw, float cam, uint32_t frame, uint32_t max_age) {
+    if (h.pending && frame - h.frame <= max_age) { h.pending = false; return; }
+    h.valid = latched && mode != 0 && std::isfinite(yaw) && std::isfinite(cam);
+    h.pending = false; h.yaw = yaw; h.cam = cam; h.mode = mode;
 }
 inline void hold_arm(Hold& h, uint32_t frame) { if (h.valid) { h.pending = true; h.frame = frame; } }
-/// At a first-person advance frame: true (and *yaw) when the saved heading applies now. Waits while the mode differs; given up
-/// max_age frames after the battle's end.
-inline bool hold_take(Hold& h, int mode, uint32_t frame, uint32_t max_age, float* yaw) {
-    if (!h.pending) return false;
-    if (frame - h.frame > max_age) { h.pending = false; h.valid = false; return false; }
-    if (mode != h.mode) return false;
-    *yaw = h.yaw; h.pending = false; h.valid = false;
+enum Take : int { H_NONE = 0, H_RESTORE, H_RELATCH, H_DROP };
+static const char* const k_take[] = { "none", "restored", "re-latched from the game camera", "dropped" };
+/// At a first-person advance frame (cam = the game camera's yaw now). H_RESTORE (*yaw = the saved heading): same mode and the
+/// same field camera (within tol rad of the saved yaw). H_RELATCH: same mode but another camera (a battle that ends into a
+/// cutscene), or given up after max_age frames in the saved mode (the battle's faced heading must not stay): the caller
+/// latches from the game camera. H_DROP: given up in another mode (its own switch re-latched already). H_NONE: nothing armed,
+/// or another mode within max_age (wait).
+inline int hold_take(Hold& h, int mode, uint32_t frame, float cam, uint32_t max_age, float tol, float* yaw) {
+    if (!h.pending) return H_NONE;
+    if (frame - h.frame > max_age) { h.pending = false; h.valid = false; return mode == h.mode ? H_RELATCH : H_DROP; }
+    if (mode != h.mode) return H_NONE;
+    h.pending = false; h.valid = false;
+    if (!std::isfinite(cam) || std::fabs(wrap_pi(cam - h.cam)) > tol) return H_RELATCH;
+    *yaw = h.yaw;
+    return H_RESTORE;
+}
+
+/// B1: the face request (ffxvr_eye_event 1) waits for first-person frames: it is aged in first-person advance frames, not in
+/// Presents, so a request made while nothing is drawn in 3D (the load, the shards) waits for the first battle frame.
+struct FaceReq {
+    bool     on = false;
+    float    t[3] = {};
+    uint32_t frame = 0;     // g_frames at the request
+    int      fp = 0;        // first-person advance frames seen since (in a mode that does not face)
+};
+enum FaceStep : int { F_NONE = 0, F_WAIT, F_APPLY, F_DROP };
+inline void face_req_set(FaceReq& q, const float t[3], uint32_t frame) { q.on = true; q.t[0] = t[0]; q.t[1] = t[1]; q.t[2] = t[2]; q.frame = frame; q.fp = 0; }
+/// At each first-person advance frame: F_APPLY in a facing view (mode 1 / 3), F_WAIT in another (the diorama), F_DROP after
+/// max_fp such frames, after max_presents Presents, or with battle_face off.
+inline int face_req_tick(FaceReq& q, uint32_t frame, int mode, int face, int max_fp = 30, uint32_t max_presents = 600) {
+    if (!q.on) return F_NONE;
+    if (face == 0 || frame - q.frame > max_presents) { q.on = false; return F_DROP; }
+    if (mode == 1 || mode == 3) { q.on = false; return F_APPLY; }
+    if (++q.fp >= max_fp) { q.on = false; return F_DROP; }
+    return F_WAIT;
+}
+
+/// B1: Btl.battle_state for managed's face request (eye_jump.cs ej_face_tick mirrors this: keep the two equal). The native
+/// battle transition's own reading (bt_running_state, BT-B-1): 4..0x15 and 0x22 the load chain (the 5 Nov log: 4 at frame
+/// 2396, 6, 7, 0x22 for 57 frames, 0x0C..0x14, 0x16 at 2512, the intro drawn at 2513), 0x16 the intro (drawn in 3D), 1 / 2
+/// the battle, 0x17..0x21 its end. BS_LOAD: wait (no countdown, no send); BS_LIVE: count down and send; BS_OTHER: count down.
+enum BattleState : int { BS_OTHER = 0, BS_LOAD, BS_LIVE };
+inline int face_bst(int bst) {
+    if ((bst >= 4 && bst <= 0x15) || bst == 0x22) return BS_LOAD;
+    if (bst == 0x16 || bst == 1 || bst == 2) return BS_LIVE;
+    return BS_OTHER;
+}
+
+/// S4: one blink start per window for the seat view's cut blinks (cut_blink), as for the eye jumps.
+struct Limit { bool started = false; uint32_t start = 0; uint32_t n_held = 0; };
+inline bool limit_start(Limit& l, uint32_t frame, int window) {
+    if (l.started && frame - l.start < static_cast<uint32_t>(window > 0 ? window : 0)) { l.n_held++; return false; }
+    l.started = true; l.start = frame;
     return true;
 }
 

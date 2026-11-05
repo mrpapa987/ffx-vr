@@ -1903,42 +1903,50 @@ static void turn_advance(int64_t T, bool extra) {
 // Eye jumps (roadmap 4.1, ffxvr_eyejump.h). Render thread only: build_override_view's primary advance call, the Present path,
 // and managed's render_imgui (ffxvr_eye_jump_set, ffxvr_eye_event).
 ej::Cfg   g_ej_cfg; int g_ej_face = 1;            // ini eye_jump_blink / eye_jump_units; battle_face: 0 off, 1 body forward, 2 where you look
+bool      g_ej_battle = false;                    // managed: in battle (last frame), for the eye: lines (S5)
 ej::State g_ej; uint32_t g_ej_latch_seq = 0;      // the detector; bumped at every fp heading latch (a latch frame is not a jump)
 bool      g_ej_head_snap = false;                 // a jump: the next ffxvr_player_head_set snaps the head offset (no glide from the old body)
 uint32_t  g_ej_lines = 0, g_ej_face_lines = 0, g_ej_10s[4] = {};   // log budgets; the view: line's counts (jumps, blinks, extended, held back)
 uint32_t  g_ej_turns = 0, g_ej_kept = 0;          // face: heading changes / requests under the dead band (session)
-bool      g_ej_face_req = false; float g_ej_face_t[3] = {}; uint32_t g_ej_face_frame = 0;   // ffxvr_eye_event 1: face this point at the next fp frame
-ej::Hold  g_ej_hold;                              // the field heading kept over a battle (ffxvr_eye_event 2 / 3)
+ej::FaceReq g_ej_face_rq;                         // ffxvr_eye_event 1: face this point at the next fp frame (aged in fp frames, B1)
+ej::Hold  g_ej_hold;                              // the field heading kept over a battle (ffxvr_eye_event 2 / 3; battle_face on only)
+ej::Limit g_cut_lim;                              // S4: cut_blink's one start per 30 frames
+const uint32_t k_ej_hold_age = 600;               // frames after a battle's end the field heading may still be restored
+const float    k_ej_cam_tol = 30.f * 0.0174533f;  // S2: the same field camera = within 30 deg of the saved yaw
 static void ej_blink() { if (g_ej_cfg.blink > g_blink_frames) g_blink_frames = g_ej_cfg.blink; }
 /// The heading changes managed asked for, at the primary advance call right after the latch (so a mode switch's re-latch from
 /// the game's camera is overridden): the field heading after a battle, or the battle heading toward the enemies.
 static void ej_heading() {
-    float y = 0.f;
-    if (ej::hold_take(g_ej_hold, g_fp_mode, g_frames, 600, &y)) {
-        const float from = g_fp_yaw; g_fp_yaw = y; g_sr_epoch++; ej_blink();
-        diag("face: frame %u: field heading restored (%.0f deg; the battle's was %.0f)", g_frames, ej::wrap_pi(y) * 57.29578f, ej::wrap_pi(from) * 57.29578f);
+    float y = 0.f; const float from = g_fp_yaw;
+    const int tk = ej::hold_take(g_ej_hold, g_fp_mode, g_frames, g_yaw_cam, k_ej_hold_age, k_ej_cam_tol, &y);
+    if (tk == ej::H_RESTORE) { g_fp_yaw = y; g_sr_epoch++; ej_blink(); }
+    else if (tk == ej::H_RELATCH) {   // S2: as the latch block does, from this frame's game camera (g_yaw_cam = atan2(R[6], R[8]), the latch's own value)
+        g_fp_yaw = g_yaw_cam; g_seat_latched = false; g_sr_epoch++; g_ej_latch_seq++; ej_blink();
     }
-    if (!g_ej_face_req) return;
-    if (g_frames - g_ej_face_frame > 30 || g_ej_face == 0) { g_ej_face_req = false; return; }   // no first-person frame soon enough: dropped
-    if (g_fp_mode != 1 && g_fp_mode != 3) return;
-    g_ej_face_req = false;
-    float head = 0.f;   // the head's yaw against the recentre reference (the gaze is g_fp_yaw + head)
-    if (g_xr_rotate) { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d); head = atan2f(-d[0], -d[2]); }
-    const float from = g_fp_yaw;
-    const ej::Face f = ej::face_yaw(g_fp_pos, g_ej_face_t, head, g_ej_face, g_fp_yaw);
+    if (tk != ej::H_NONE)
+        diag("face: frame %u: field heading %s (%.0f deg; the battle's was %.0f; game camera %.0f deg, at the start %.0f)", g_frames, ej::k_take[tk], ej::wrap_pi(g_fp_yaw) * 57.29578f,
+             ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_yaw_cam) * 57.29578f, ej::wrap_pi(g_ej_hold.cam) * 57.29578f);
+    const int fs = ej::face_req_tick(g_ej_face_rq, g_frames, g_fp_mode, g_ej_face);
+    if (fs == ej::F_DROP && g_ej_face_lines < 60) { g_ej_face_lines++; diag("face: frame %u: request from frame %u dropped (fp_mode %d, battle_face %d)", g_frames, g_ej_face_rq.frame, g_fp_mode, g_ej_face); }
+    if (fs != ej::F_APPLY) return;
+    // the head's yaw against the recentre reference (the gaze is g_fp_yaw + head); N5: 0 when looking nearly straight up or down
+    float head = 0.f;
+    if (g_xr_rotate) { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d); if (d[0] * d[0] + d[2] * d[2] >= 0.2f * 0.2f) head = atan2f(-d[0], -d[2]); }
+    const float f0 = g_fp_yaw;
+    const ej::Face f = ej::face_yaw(g_fp_pos, g_ej_face_rq.t, head, g_ej_face, g_fp_yaw);
     if (f.turn) { g_fp_yaw = f.yaw; g_sr_epoch++; ej_blink(); g_ej_turns++; } else g_ej_kept++;
     if (g_ej_face_lines < 60) {
         g_ej_face_lines++;
-        diag("face: frame %u: battle follow -> heading %.0f -> %.0f deg (%s, fp_mode %d; the enemies at %.0f deg, head %.0f deg)%s%s", g_frames, ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_fp_yaw) * 57.29578f,
-             g_ej_face == 2 ? "where you look" : "body forward", g_fp_mode, f.target * 57.29578f, head * 57.29578f, f.turn ? "" : ": under 15 deg or no target, kept",
-             g_ej_face_lines == 60 ? " (no more face: lines this session)" : "");
+        diag("face: frame %u: battle follow (request at frame %u) -> heading %.0f -> %.0f deg (%s, fp_mode %d; the enemies at %.0f deg, head %.0f deg)%s%s", g_frames, g_ej_face_rq.frame,
+             ej::wrap_pi(f0) * 57.29578f, ej::wrap_pi(g_fp_yaw) * 57.29578f, g_ej_face == 2 ? "where you look" : "body forward", g_fp_mode, f.target * 57.29578f, head * 57.29578f,
+             f.turn ? "" : ": under 15 deg or no target, kept", g_ej_face_lines == 60 ? " (no more face: lines this session)" : "");
     }
 }
 /// The detector, after fp_eye_base on the primary advance call. latched = the heading was latched before this call.
 static void ej_tick(const float P[3], bool latched) {
     ej::Ctx c; c.frame = g_frames; c.mode = g_fp_mode; c.dragging = g_gest_active; c.latched = latched; c.latch_seq = g_ej_latch_seq; c.blink_left = g_blink_frames;
     const ej::Result r = ej::step(g_ej, P, c, g_ej_cfg);
-    if (!r.jump()) return;
+    if (!r.jump() || r.kind == ej::K_OFF) return;   // S1: eye_jump_blink=0 is off: no head snap, no stickrep reset, no line
     g_ej_head_snap = true; g_sr_epoch++;   // stickrep: a held image of the old place is not a stick turn
     if (r.frames > g_blink_frames) g_blink_frames = r.frames;
     g_ej_10s[0]++; if (r.kind == ej::K_START) g_ej_10s[1]++; else if (r.kind == ej::K_EXTEND) g_ej_10s[2]++; else if (r.kind == ej::K_HELD) g_ej_10s[3]++;
@@ -1948,7 +1956,7 @@ static void ej_tick(const float P[3], bool latched) {
         if (r.kind == ej::K_START) snprintf(k, sizeof(k), "blink %d frames", r.frames);
         else if (r.kind == ej::K_EXTEND) snprintf(k, sizeof(k), "blink extended to %d frames", r.frames);
         else snprintf(k, sizeof(k), "%s", ej::k_kind[r.kind]);
-        diag("eye: frame %u: jump of %.1f units (fp_mode %d) -> %s%s", g_frames, r.dist, g_fp_mode, k,
+        diag("eye: frame %u: jump of %.1f units (the frame before: %.1f; fp_mode %d, %s) -> %s%s", g_frames, r.dist, r.prev_dist, g_fp_mode, g_ej_battle ? "in battle" : "field", k,
              g_ej_lines == 40 ? " (no more eye: lines this session; counts on the view: line, diag_verbose=1)" : "");
     }
 }
@@ -11408,6 +11416,7 @@ static void leave_xr_state() {
     g_xr_want = false; g_xr_active = false;
     g_ovr_suspend = false; g_xr_screen_now = false; g_screen3d_now = false; g_backdrop_room = false;
     g_frames_without_cam = 0; g_blink_frames = 0; g_move_delta = 0.f; g_move_held = false;
+    g_ej_hold = ej::Hold(); g_ej_face_rq.on = false; g_ej_head_snap = false;   // eye jumps (N6): no stale restore, face or head snap across a headset stop
     g_ui_state = UI_IDLE; g_ui_early = g_ui_early_keep = false; g_ui_last_frame_had_pass = false;   // robustness
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
@@ -11480,27 +11489,36 @@ extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, in
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
 }
 /// Eye jumps (ABI 44, roadmap 4.1): ini eye_jump_blink (frames, 0 = off), eye_jump_units, battle_face (0 off, 1 body forward,
-/// 2 where you look). Managed, every frame (render thread). out (may be null): [0] jumps this session, [1] blinks started,
-/// [2] blinks extended, [3] jumps held back by the 30-frame window, [4] battle headings turned, [5] kept (under 15 deg).
-/// Returns how many values exist (6).
-extern "C" __declspec(dllexport) int ffxvr_eye_jump_set(int blink, float units, int face, int* out, int n) {
+/// 2 where you look); flags bit 0 = in battle (managed's last frame; the eye: lines only). Managed, every frame (render
+/// thread). out (may be null): [0] jumps this session, [1] blinks started, [2] blinks extended, [3] jumps held back by the
+/// 30-frame window, [4] battle headings turned, [5] kept (under 15 deg), [6] cut blinks held back by the window.
+/// Returns how many values exist (7).
+extern "C" __declspec(dllexport) int ffxvr_eye_jump_set(int blink, float units, int face, int flags, int* out, int n) {
     g_ej_cfg.blink = blink < 0 ? 0 : blink > 30 ? 30 : blink;
     g_ej_cfg.units = !(units >= 2.f) ? (units == units ? 2.f : 8.f) : units > 100.f ? 100.f : units;   // NaN -> the default
     g_ej_face = face < 0 || face > 2 ? 1 : face;
-    const int v[6] = { static_cast<int>(g_ej.n_jumps), static_cast<int>(g_ej.n_start), static_cast<int>(g_ej.n_ext), static_cast<int>(g_ej.n_held), static_cast<int>(g_ej_turns), static_cast<int>(g_ej_kept) };
-    if (out != nullptr) for (int i = 0; i < n && i < 6; ++i) out[i] = v[i];
-    return 6;
+    g_ej_battle = (flags & 1) != 0;
+    const int v[7] = { static_cast<int>(g_ej.n_jumps), static_cast<int>(g_ej.n_start), static_cast<int>(g_ej.n_ext), static_cast<int>(g_ej.n_held), static_cast<int>(g_ej_turns), static_cast<int>(g_ej_kept),
+                       static_cast<int>(g_cut_lim.n_held) };
+    if (out != nullptr) for (int i = 0; i < n && i < 7; ++i) out[i] = v[i];
+    return 7;
 }
 /// Eye jumps (ABI 44): managed's battle events (render thread, push_player). kind 1: face the point (x, y, z) (render space: the
-/// centre of the live, visible monsters) at the next first-person frame, after a battle follow change; 2: the battle starts:
-/// keep the field heading; 3: the battle ended: restore it at the first frame in the same view mode (within 600 frames).
+/// centre of the live monsters) at the next first-person frame in a facing view, after a battle follow change (sent once the
+/// battle is drawn: managed waits through the load chain); 2: the battle starts: keep the field heading and the game camera's
+/// yaw (battle_face on only); 3: the battle ended: restore it at the first frame in the same view mode and under the same
+/// field camera (within 600 frames), else re-latch from the game camera.
 extern "C" __declspec(dllexport) void ffxvr_eye_event(int kind, float x, float y, float z) {
     if (kind == 1) {
         if (!(std::isfinite(x) && std::isfinite(y) && std::isfinite(z))) return;
-        g_ej_face_t[0] = x; g_ej_face_t[1] = y; g_ej_face_t[2] = z; g_ej_face_req = true; g_ej_face_frame = g_frames;
+        const float t[3] = { x, y, z }; ej::face_req_set(g_ej_face_rq, t, g_frames);
     }
-    else if (kind == 2) { ej::hold_save(g_ej_hold, g_fp_yaw_latched, g_fp_mode, g_fp_yaw); g_ej_face_req = false; }
-    else if (kind == 3) { ej::hold_arm(g_ej_hold, g_frames); g_ej_face_req = false; }
+    else if (kind == 2) {   // S1: battle_face=0 is off: nothing kept, nothing restored
+        if (g_ej_face == 0) g_ej_hold = ej::Hold();
+        else ej::hold_save(g_ej_hold, g_fp_yaw_latched, g_fp_mode, g_fp_yaw, g_yaw_cam, g_frames, k_ej_hold_age);
+        g_ej_face_rq.on = false;
+    }
+    else if (kind == 3) { ej::hold_arm(g_ej_hold, g_frames); g_ej_face_rq.on = false; }
 }
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
@@ -11888,8 +11906,9 @@ static void detect_cut() {
             g_cut_count++;
             g_seat_latched = false; g_sr_epoch++;   // stickrep: a cut is not a stick turn
             if (g_cut_recentre && !g_screen3d_now && !g_xr_screen_now) g_xr_recenter_pending = true;   // a recentre also moves the screen: not on screen cuts
-            if (g_cut_blink) g_blink_frames = 6;
-            if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg", g_cut_count, dist, ang);
+            const bool cb = g_cut_blink && ej::limit_start(g_cut_lim, g_frames, g_ej_cfg.window);   // S4: one cut blink start per 30 frames (battle cuts come several per action)
+            if (cb && g_blink_frames < 6) g_blink_frames = 6;
+            if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg%s", g_cut_count, dist, ang, g_cut_blink ? (cb ? " (blink)" : " (blink held back: one per 30 frames)") : "");
         }
     }
     memcpy(g_cam_prev_pos, pos, sizeof(pos)); memcpy(g_cam_prev_fwd, fwd, sizeof(fwd)); g_cam_prev_valid = true;
@@ -13075,7 +13094,7 @@ static void xr_tick() {
     if (g_bt_hold && e1 != nullptr) { e1 = nullptr; bt_e1src = "held"; }   // frozen world, after the shards: the pinned last frame is re-sent over the load black
     // R15: no early return without an eye image. xr_frame still runs (events, wait, begin, locate) and re-sends the
     // last frame for up to 30 frames; the session never stalls because one Present had nothing to show.
-    if (g_screen3d_now) g_blink_frames = 0;         // the screen shows the game's cuts as cuts
+    if (g_screen3d_now || g_ovr_suspend) g_blink_frames = 0;   // the screen shows the game's cuts as cuts (S4: the virtual screen too; g_ovr_suspend is still the finished frame's decision)
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
