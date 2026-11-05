@@ -69,9 +69,10 @@ $WeightsUrl  = "https://huggingface.co/depth-anything/Video-Depth-Anything-Small
 $WeightsSha256 = ''
 $WeightsMinMB = 50; $WeightsMaxMB = 250     # 28.4M parameters x 4 bytes = ~114 MB; anything else is not the file
 $TorchIndex  = 'https://download.pytorch.org/whl/cu124'
-$TorchPins   = @('torch==2.6.0', 'torchvision==0.21.0')
+$TorchPins   = @('torch==2.6.0+cu124', 'torchvision==0.21.0+cu124')   # the +cu124 local versions exist only on the PyTorch index
+$PyPiIndex   = 'https://pypi.org/simple'   # torch's own dependencies (typing-extensions, sympy, ...) come from PyPI
 $PyPiPins    = @('numpy==2.1.3', 'opencv-python-headless==4.10.0.84', 'einops==0.8.0', 'easydict==1.13', 'tqdm==4.67.1')
-$DepsSpec    = "v2; $($PyPiPins -join ' '); $($TorchPins -join ' ') from $TorchIndex"
+$DepsSpec    = "v3; $($PyPiPins -join ' '); $($TorchPins -join ' ') from $TorchIndex"
 
 $root    = Join-Path $env:LOCALAPPDATA 'ffxvr'
 $venv    = Join-Path $root 'fmvdepth-venv'
@@ -225,10 +226,12 @@ $have = if (Test-Path -LiteralPath $marker) { [IO.File]::ReadAllText($marker).Tr
 if ($have -ne $DepsSpec) {
     Write-Host '  installing the pinned packages (PyTorch with CUDA is a ~2.5 GB download; this takes a while) ...'
     # Binary wheels only (no surprise source build without a compiler): for the big PyPI packages here (easydict may
-    # be an sdist), and for everything on the PyTorch line (the cu124 index serves wheels only).
+    # be an sdist), and for everything on the PyTorch line. torch's dependencies come from PyPI (--extra-index-url):
+    # the PyTorch index alone failed on the owner's PC (no typing-extensions>=4.10 it would accept); the +cu124 pins keep
+    # torch and torchvision on the CUDA build, which only the PyTorch index has.
     & $vpy -m pip install --disable-pip-version-check --no-input '--only-binary=numpy,opencv-python-headless,tqdm' @PyPiPins
     if ($LASTEXITCODE -ne 0) { Fail 'pip could not install numpy / opencv / einops / easydict / tqdm (see above).' }
-    & $vpy -m pip install --disable-pip-version-check --no-input '--only-binary=:all:' @TorchPins --index-url $TorchIndex
+    & $vpy -m pip install --disable-pip-version-check --no-input '--only-binary=:all:' @TorchPins --index-url $TorchIndex --extra-index-url $PyPiIndex
     if ($LASTEXITCODE -ne 0) { Fail "pip could not install PyTorch from $TorchIndex (see above)." }
     [IO.File]::WriteAllText($marker, $DepsSpec, $FfxvrUtf8)
 } else { Write-Host '  packages: as pinned' }
