@@ -12362,7 +12362,7 @@ struct RelFmv {
     float s_now = 0, pivot_now = 0;
     relief::Rect rect = { 0.f, 0.f, 1.f, 1.f }; uint32_t bb_w = 0, bb_h = 0, vw = 0, vh = 0;   // the last relief frame's crop
     bool req = false;                                    // review N3: the file asked for (only once the movie can show a relief)
-    bool fading = false; uint32_t fades = 0, loops = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
+    bool fading = false; uint32_t fades = 0, loops = 0, cut_switches = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
     float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
     bool pop_limited = false, range_limited = false; float pop_used = 0.f, range_used = 0.f;   // review3 SF-2: the comfort limits at this screen distance
 };
@@ -12618,8 +12618,8 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (cuts and returns from flat) %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
-                                      r.uploads, r.ramps, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
+                                      r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
                                       g_rel_gpu_n, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max, relief::grid_cells(r.w), relief::grid_cells(relief::k_h));
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
@@ -12754,13 +12754,14 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     r.ring = fill; r.ring_sum += fill; r.ring_n++;
     LARGE_INTEGER q; QueryPerformanceCounter(&q);
     const double now = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) * 1000.0 / static_cast<double>(g_qpf.QuadPart) : 0.0;
-    const relief::Tcfg tc;
+    relief::Tcfg tc; tc.old_cut_ramp = (g_rel_cfg.flags & 128) != 0;   // Debug: the old ramp at every cut (A/B)
     const relief::Tout o = relief::step(r.t, tc, now, r.want, r.sel, a, g_rel_bits, relief::clampf(g_rel_cfg.amount, 0.f, 1.f), r.n);
     if (o.upload) {   // the temporal filter in display order (reset at a cut / after flat), then the texture
-        if (g_rel_cfg.flags & 64) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.ramp_start);   // the causal filter (Debug since round 7.4)
+        if (g_rel_cfg.flags & 64) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.reset);   // the causal filter (Debug since round 7.4)
         InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w * 2, 0); r.uploads++;
     }
-    if (o.ramp_start) r.ramps++;   // a ramp in started this Present (a cut, or the first depth after flat)
+    if (o.ramp_start) r.ramps++;   // a ramp in started this Present (the first depth after flat; every cut with the old ramp)
+    if (o.cut) r.cut_switches++;   // round 7.3: a cut switched at once
     if (o.fading && !r.fading) r.fades++;
     r.fading = o.fading;
     r.rel_presents++; r.by_why[o.why]++; r.now_why = o.why; r.now_fb = FB_NONE; r.s_now = o.s; r.pivot_now = o.pivot;
@@ -12818,14 +12819,15 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
 /// FMV relief (ABI 42): the settings, from managed every frame. on: ini fmv_depth; amount: 0..1 (ini fmv_depth_amount, default
 /// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
 /// median, 16 the depth as colour (Debug), 32 each frame normalised to its own range (Debug; round 7: the default is the
-/// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
+/// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7), 128 every cut starts flat and ramps in over
+/// 150 ms (Debug: the old behaviour, round 7.3); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
 /// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
 /// default 0.15); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
 /// pop-out ramps to 0 (0..0.15 of the rect, default 0.04; content behind the screen is never feathered: the window rule).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth, float edge) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
-    g_rel_cfg.flags = flags & 127;
+    g_rel_cfg.flags = flags & 255;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
     g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
     g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;

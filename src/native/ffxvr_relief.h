@@ -264,6 +264,7 @@ struct Tcfg {
     float p_alpha = 0.15f;     // the pivot follows the frame's median: this share of the gap per video frame ...
     float p_step = 0.02f;      // ... at most this much per video frame (0..1 units)
     float s_rate = 0.5f;       // the strength setting is followed at most this fast (per second): a slider never pops
+    bool old_cut_ramp = false; // Debug (A/B): every cut starts flat and ramps in over ramp_ms, as before round 7.3
 };
 struct Tstate {
     int32_t bound = -1;        // the frame whose depth is in the texture (-1: none)
@@ -277,8 +278,10 @@ inline void to_flat(Tstate& t) { t.lvl = 0.f; t.shown = false; }
 /// The ring's answer for `want`: ready (decoded, idx == want), error (its decode failed), median (0..255).
 struct Avail { bool ready; bool error; uint8_t median; };
 /// depth: draw the relief with s (false: flat, s = 0); upload: the ring's frame goes into the texture first; ramp_start: the
-/// level was reset to 0 this Present (a cut, or the first depth after flat); fading: depth on the last upload, going to flat.
-struct Tout { bool depth; bool upload; bool ramp_start; bool fading; int why; float s; float pivot; int32_t bound; float level; };
+/// level was reset to 0 this Present (the first depth after flat; with old_cut_ramp every cut too); fading: depth on the
+/// last upload, going to flat; cut: a cut crossed with its depth ready, switched at once; reset: a cut or a return from
+/// flat (the causal filter starts over).
+struct Tout { bool depth; bool upload; bool ramp_start; bool fading; int why; float s; float pivot; int32_t bound; float level; bool cut, reset; };
 /// A cut in (a, b] (frames), by the bit map; a span longer than 64 frames counts as a cut (a jump).
 inline bool cut_between(const Bits& b, int32_t a, int32_t c) {
     if (a < 0 || c <= a) return true;
@@ -291,7 +294,10 @@ inline bool cut_between(const Bits& b, int32_t a, int32_t c) {
 /// frame, so a movie's end and a short file fade out; 0 = no cap).
 /// The level rises toward 1 while the wanted depth is there and falls toward 0 (on the last depth uploaded) while it is
 /// not: a lag, a flat frame, a decode error, past the file's end. Instant flat only when there is no depth that could stand
-/// in: nothing uploaded yet, or the wanted frame starts a new shot (a cut) that is not decoded.
+/// in: nothing uploaded yet, or the wanted frame starts a new shot (a cut) that is not decoded. Round 7.3 (audit 5a): a cut
+/// whose depth is ready switches at once at the level it was at (the picture changes completely there, so a depth change
+/// is hidden; the old "start flat and inflate over 150 ms" pulsed at every cut, and at a flash that tripped the cut flag
+/// mid-shot); the 150 ms ramp stays for returns from flat (the movie's start, a lag, a fallback).
 inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, const Avail& a, const Bits& b, float s_target, uint32_t frames = 0) {
     const double gap = t.have_t ? (now - t.t_prev < 0 ? 0 : now - t.t_prev) : 0.0;   // the level moves by the real time ...
     const double dt = gap > 100 ? 100 : gap;                                             // ... the strength by at most 100 ms a step
@@ -300,16 +306,19 @@ inline Tout step(Tstate& t, const Tcfg& c, double now, int32_t want, int sel, co
     const float ds = static_cast<float>(c.s_rate * dt / 1000.0);
     t.s_cur += clampf(s_target - t.s_cur, -ds, ds);
     const float dl = static_cast<float>(gap / c.ramp_ms);
-    Tout o = { false, false, false, false, W_DEPTH, 0.f, t.pivot, t.bound, 0.f };
+    Tout o = { false, false, false, false, W_DEPTH, 0.f, t.pivot, t.bound, 0.f, false, false };
     enum { OK, FADE, FLAT } act = OK;
     if (want < 0) { o.why = sel == SEL_PAST ? W_PAST : W_NO_FRAME; act = (sel == SEL_PAST && t.bound >= 0) ? FADE : FLAT; }
     else if (want == t.bound) o.why = W_DEPTH;                          // held between video frames: the texture has it
     else if (bit(b.flat, static_cast<uint32_t>(want))) { o.why = W_FLAT_FRAME; act = t.bound >= 0 ? FADE : FLAT; }
     else if (a.ready && !a.error) {
-        const bool cut = !t.shown || t.bound < 0 || want < t.bound || cut_between(b, t.bound, want);
+        const bool cut = t.bound < 0 || want < t.bound || cut_between(b, t.bound, want);
+        const bool from_flat = !t.shown;
         const float m = a.median / 255.f;
-        if (cut) { t.lvl = 0.f; t.pivot = m; o.ramp_start = true; }
+        if (from_flat || (cut && c.old_cut_ramp)) { t.lvl = 0.f; o.ramp_start = true; }
+        if (cut || from_flat) t.pivot = m;
         else t.pivot += clampf(c.p_alpha * (m - t.pivot), -c.p_step, c.p_step);
+        o.cut = cut && !from_flat && !c.old_cut_ramp; o.reset = cut || from_flat;
         t.bound = want; o.upload = true; o.why = W_DEPTH;
     }
     else if (t.bound >= 0 && cut_between(b, t.bound, want)) { o.why = a.ready ? W_DECODE : W_LAG; act = FLAT; }   // a new shot: the old depth must not stand in
