@@ -4486,6 +4486,42 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
     release, no-access, commit) with no plain copy meeting an unreadable page and no read returning bytes from one; guard
     pages met only when PAGE_GUARD was set mid-frame; the probe, the age bound and the clear after a failed copy; nine
     mutations of ffxvr_cpu.h caught.
+- **VirtualQuery cost, round 2 (lean2, 4 Nov 2026).** With fast_reads (session 17:22-17:39) battle went to 13-20 queries
+  and 0.2-0.6 ms a frame, but the mihn0300 virtual screen still took 0.9 ms with 4 queries a frame (11 reads, 7 hits, one
+  base probe, the 104 KB table copy): about 225 us a query, every frame. The runs are kept for one frame only, so each frame
+  pays one long scan per big block it reads again, however stable that block is.
+  - **Cross-frame validity was considered and dropped.** Keeping a run across frames when one VirtualQuery of the
+    allocation's first page shows the same base and size: that query scans from the first page to the end of the first
+    run, which in a uniform committed block is the whole block, as expensive as the probe it would replace (scratch model:
+    959 us a frame in the virtual-screen shape, against 900 us now). One query of the run's last page is cheap (1-3 pages)
+    but proves nothing about the pages before it: a guard page set mid-run, or a release and a new reservation with the
+    same base and end, passes it.
+  - **What we do: QueryWorkingSetEx first where the runs are long.** It answers per page (one page-table look-up each),
+    not per run. Valid = 1 means the page is resident, so a read of it cannot fault, and a guard page (an invalid PTE until
+    its first touch) never reports it. Its Win32Protection is then held to range_readable's rule. A page that is not
+    resident (paged out, never touched, guard, reserved, free) reports Valid = 0, which is "unknown", and the walk asks
+    VirtualQuery as before. So the check answers "readable now" or "ask VirtualQuery", never a refusal. ffxvr_cpu.h
+    `ws_check`, up to 32 pages a read (the actor table is 26-27). Where VirtualQuery answered a run of 1 MB or more (outside
+    the exe's image), the range [allocation base, end) is kept as a hint (`BigHints`, 8, across frames; a cost guess, never
+    a safety claim: a stale one costs one extra call). On the render thread a read starting in a hinted range, outside the
+    exe's image and not covered by this frame's kept runs, gets the check first; resident and readable, its pages are kept
+    for the frame as non-image (copied by the kernel only) and the kernel copies it. The other threads (the main thread's
+    post-join and battle-cursor snapshots in diag7.cs, once per game frame, never counted before; the loader) use the same
+    check before range_readable's walk and keep the plain copy; the window between check and copy is the old path's.
+    `fast_reads=0` turns all of it off. QueryWorkingSetEx failing 8 times before any answer turns it off for the session.
+  - **The cpu: line.** `working-set checks N/M a frame (answered N/M, x/y ms; big-run hints H)`; `reads that queried or
+    checked, by caller (render thread, top 4 by time)`: return address (`ffxvr_native+RVA` from the pdb, `ffx+RVA`, or
+    `JIT 0x...` for a managed call site; read<T> is one site per T), calls / queries / checks a frame, ms a frame, the last
+    read's length and address, and the allocation and answer length of its last query; `other threads' reads`: main and
+    others, with checks, queries and time. safe_read = hits + queried + checked reads.
+  - **Expected (scratch model, c_page calibrated to the 0.9 ms):** virtual screen 900 -> 9 us a frame (1 query, 3 checks);
+    battle shape 2026 -> 161 us (70 checks a frame for 70 reads at random pages of three 112 MB blocks; real reads cluster,
+    so fewer). Unverified: the real per-call cost of QueryWorkingSetEx under WoW64 (the line shows it).
+  - **Tests (container):** lean2_chk/tests/lean2_test.cpp (vq_chk's address space plus residency; its QueryWorkingSetEx
+    reports Valid only for committed, resident, non-guard pages): the check never says yes where range_check says no (300k
+    reads), FastReader's readability identical to range_check with the plain copy iff image only (450k), churn with page
+    trims (540k reads, 0 faults, guard pages met only with PAGE_GUARD set mid-frame, as vq-lean), the cost model, and 13
+    mutations caught; vq-lean's tests and its 9 mutations unchanged.
 
 ## Direct game-state gates and overdrive minigame state (4 Nov 2026)
 
@@ -4565,7 +4601,10 @@ Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratc
   picked actor the one at [0x1300788]? A mismatch seen twice in a row is logged with a diagnostic key on (review N5;
   `first person: the follow pick ... is not the game's player actor ...`; one line per 10 s, the same pair again after
   2 min, 50 a session); counts and the last mismatch in F8 in every profile. The
-  pick is unchanged until play shows whether the game's actor is the better rule.
+  pick is unchanged until play shows whether the game's actor is the better rule. Riding is not a mismatch (lean2): on the
+  chocobo [0x1300788] is the bird (f051) and we follow the rider, attached to it (+0x19C = the bird); such a check counts as
+  `riding` and logs nothing (the owner's 4 Nov logs had 9 such lines from the Mi'ihen ride). A pick attached to another
+  actor still counts as a mismatch.
 - **Not seen in play yet**: a Yes/No box with the tap (the gate should read "a choice box"), the field menu flag over a 3D
   frame, the movie flag with the playing byte (F8: "movie skippable 1, playing 0" after a skippable FMV is B1's case), an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
   ("not located") and research exe-battle-ui.md:296 ("message queues") are corrected by the table above.
