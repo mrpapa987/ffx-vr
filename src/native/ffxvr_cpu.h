@@ -101,6 +101,13 @@ struct RunCache {
         for (int i = 0; i < N; ++i) if (hi[i] > lo[i] && q >= lo[i] && q < hi[i]) return i;
         return -1;
     }
+    /// lean2: every byte of [a, a + len) in kept runs (len > 0, no wrap).
+    bool covers(uintptr_t a, size_t len) const {
+        const uintptr_t e = a + len;
+        if (len == 0 || e < a) return false;
+        for (uintptr_t q = a; q < e;) { const int i = find(q); if (i < 0) return false; q = hi[i]; }
+        return true;
+    }
     /// Keeps [l, h): nothing if an entry already holds it (only its image flag can drop, the safe way); entries it holds are
     /// dropped (a lower query of the same run returns a longer answer with the same end); else a free slot, else the oldest
     /// (round robin).
@@ -138,15 +145,110 @@ struct AllocSeen {
     }
 };
 
-struct FastStats { uint32_t queries = 0, hits = 0, probes = 0; };   // queries include the probes; hits: ranges answered with no query
+// -- lean2 (4 Nov 2026): the working-set check (QueryWorkingSetEx) and the big-run hints ----------------------------------
+// The run cache starts cold at every Present, so a read into one of the game's big committed blocks still costs one long
+// scan a frame however stable the block is (the owner's virtual screen, 17:38: 4 queries a frame, 0.9 ms, ~225 us each).
+// QueryWorkingSetEx answers per page (one page-table look-up each), not per run, so its cost does not grow with the block:
+// Valid = 1 means the page is resident (a hardware-valid PTE), so a read of it cannot fault, and a guard page (an invalid PTE
+// until its first touch) never reports Valid; Win32Protection is then the page's protection, held to range_readable's rule.
+// A page that is not resident (paged out, never touched, guard, reserved, free) reports Valid = 0, which means "unknown": the
+// walk asks VirtualQuery as before. So the check answers only "readable now" or "ask VirtualQuery"; it never refuses a read
+// that VirtualQuery would allow, and it allows only what VirtualQuery would allow at that moment.
+// BigHints: the address ranges where VirtualQuery's answers were long (>= 1 MB from the queried page), which get the
+// working-set check first. A hint is a cost guess only, kept across frames and never trusted for safety: a stale one costs one
+// extra call. (A cached run kept across frames, checked by one VirtualQuery of the allocation's first page, is no cheaper: that
+// query scans the whole first run, which in a uniform block is the whole block; see the notes, lean2.)
+constexpr uintptr_t k_page = 0x1000;
+constexpr int k_ws_max_pages = 32;            // a longer read asks VirtualQuery (the actor table, 104,448 B, spans 26-27 pages)
+constexpr uintptr_t k_big_run = 0x100000;     // a VirtualQuery answer this long (from the queried page) leaves a hint
+
+/// One page's working-set attributes (the low 32 bits of PSAPI_WORKING_SET_EX_BLOCK, the same in 32- and 64-bit code): bit 0
+/// Valid, bits 4..14 Win32Protection, bit 31 Bad. Resident, not bad, and range_readable's protection rule.
+inline bool ws_readable(uint32_t f) {
+    if ((f & 1u) == 0 || (f & 0x80000000u) != 0) return false;
+    Mbi m; m.ok = true; m.state = k_mem_commit; m.protect = (f >> 4) & 0x7FFu;
+    return mbi_readable(m);
+}
+
+/// [a, a + len): every page resident and readable now, by one working-set query ws(va, attrs, n) (QueryWorkingSetEx; true when
+/// it answered, attrs[i] the i-th page's attributes). false = unknown: the caller asks VirtualQuery. The argument checks are
+/// range_check's.
+template <class Ws>
+bool ws_check(uintptr_t a, size_t len, Ws&& ws) {
+    if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return false;
+    const uintptr_t p0 = a & ~(k_page - 1), pl = (a + len - 1) & ~(k_page - 1);
+    const uintptr_t n = (pl - p0) / k_page + 1;
+    if (n > static_cast<uintptr_t>(k_ws_max_pages)) return false;
+    uintptr_t va[k_ws_max_pages]; uint32_t at[k_ws_max_pages];
+    for (uintptr_t i = 0; i < n; ++i) { va[i] = p0 + i * k_page; at[i] = 0; }
+    if (!ws(static_cast<const uintptr_t*>(va), static_cast<uint32_t*>(at), static_cast<int>(n))) return false;
+    for (uintptr_t i = 0; i < n; ++i) if (!ws_readable(at[i])) return false;
+    return true;
+}
+
+/// The ranges [lo, hi) where VirtualQuery answered with a long run (a cost hint, not a claim about the memory).
+template <int H>
+struct BigHints {
+    uintptr_t lo[H] = {}, hi[H] = {}; int next = 0;
+    void clear() { for (int i = 0; i < H; ++i) lo[i] = hi[i] = 0; next = 0; }
+    bool has(uintptr_t q) const {
+        for (int i = 0; i < H; ++i) if (hi[i] > lo[i] && q >= lo[i] && q < hi[i]) return true;
+        return false;
+    }
+    int count() const { int n = 0; for (int i = 0; i < H; ++i) n += hi[i] > lo[i]; return n; }
+    /// Nothing if an entry holds [l, h); an entry it holds grows to it; else a free slot, else the oldest (round robin).
+    void add(uintptr_t l, uintptr_t h) {
+        if (h <= l) return;
+        for (int i = 0; i < H; ++i) if (hi[i] > lo[i] && lo[i] <= l && h <= hi[i]) return;
+        for (int i = 0; i < H; ++i) if (hi[i] > lo[i] && l <= lo[i] && hi[i] <= h) { lo[i] = l; hi[i] = h; return; }
+        for (int i = 0; i < H; ++i) if (hi[i] <= lo[i]) { lo[i] = l; hi[i] = h; return; }
+        lo[next] = l; hi[next] = h; next = (next + 1) % H;
+    }
+};
+
+/// lean2: the guarded reads that cost something (a query or a working-set check), by caller (the return address into the
+/// caller of ffxvr_safe_read / range_readable): the cpu: line names the top ones. Diagnostic only, render thread.
+struct SiteStat { uintptr_t ret = 0; uint32_t calls = 0, queries = 0, ws = 0; int64_t ticks = 0; uint32_t len = 0; uintptr_t addr = 0, alloc = 0, run = 0; };
+template <int S>
+struct SiteTable {
+    SiteStat s[S]; SiteStat other;   // other: the calls of sites that found the table full
+    void clear() { for (int i = 0; i < S; ++i) s[i] = SiteStat{}; other = SiteStat{}; }
+    /// One call: q queries, w working-set checks, t ticks; the read [addr, +len); alloc / run: the last query's allocation base
+    /// and run length (0: no query in this call: the previous values stay).
+    void note(uintptr_t ret, uint32_t q, uint32_t w, int64_t t, uint32_t len, uintptr_t addr, uintptr_t alloc, uintptr_t run) {
+        SiteStat* e = nullptr;
+        for (int i = 0; i < S && e == nullptr; ++i) if (s[i].calls != 0 && s[i].ret == ret) e = &s[i];
+        for (int i = 0; i < S && e == nullptr; ++i) if (s[i].calls == 0) { e = &s[i]; e->ret = ret; }
+        if (e == nullptr) e = &other;
+        e->calls++; e->queries += q; e->ws += w; e->ticks += t; e->len = len; e->addr = addr;
+        if (run != 0) { e->alloc = alloc; e->run = run; }
+    }
+    /// Up to k entries by ticks, largest first; returns how many (the indices into s).
+    int top(int* idx, int k) const {
+        if (k <= 0) return 0;
+        int n = 0;
+        for (int i = 0; i < S; ++i) {
+            if (s[i].calls == 0) continue;
+            if (n >= k && s[i].ticks <= s[idx[k - 1]].ticks) continue;   // not larger than the smallest kept
+            int j = n < k ? n++ : k - 1;                                  // a new place, or the smallest's
+            while (j > 0 && s[idx[j - 1]].ticks < s[i].ticks) { idx[j] = idx[j - 1]; --j; }
+            idx[j] = i;
+        }
+        return n;
+    }
+};
+
+struct FastStats { uint32_t queries = 0, hits = 0, probes = 0, ws = 0, ws_yes = 0; };   // queries include the probes; hits: ranges answered with no query; ws: working-set checks, ws_yes: reads they answered
 enum : int { k_fast_no = 0, k_fast_image = 1, k_fast_other = 2 };
 
 /// ffxvr_safe_read's walk with fast_reads: the same page rule as range_check (every page of [a, a + len) committed and
 /// readable when last queried), each address answered from a run kept this frame or by a query whose readable answer is kept.
 /// Returns k_fast_no (not readable), k_fast_image (every byte in runs of FFX.exe's image: a plain copy is safe) or
 /// k_fast_other (the copy must be the kernel's).
-template <class Query, int N, int P>
-int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, AllocSeen<P>& seen, uintptr_t image_base, FastStats* st) {
+/// lean2: with hints, every long answer outside the exe's image (>= k_big_run from the queried page) is noted there as
+/// [allocation base, end of the run) (a cost hint only; the answer itself is used exactly as before).
+template <class Query, int N, int P, int H = 8>
+int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, AllocSeen<P>& seen, uintptr_t image_base, FastStats* st, BigHints<H>* hints = nullptr) {
     if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return k_fast_no;
     const uintptr_t e = a + len;
     bool all_img = true, queried = false;
@@ -163,6 +265,7 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
             if (mbi_readable(b) && b.base == ab && be > ab) {
                 const bool bim = image_base != 0 && b.type == k_mem_image && b.alloc_base == image_base;
                 c.add(b.base, be, bim);
+                if (hints && !bim && be - b.base >= k_big_run) hints->add(b.base, be);
                 if (q < be) { all_img = all_img && bim; q = be; continue; }   // its run holds q: answered
             }
         }
@@ -175,6 +278,7 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
         c.add(m.base, end, im);
         all_img = all_img && im;
         if (!im) seen.note(m.alloc_base, m.base);
+        if (hints && !im && end - m.base >= k_big_run) hints->add(m.alloc_base != 0 && m.alloc_base <= m.base ? m.alloc_base : m.base, end);
         q = end;
     }
     if (!queried && st) st->hits++;
@@ -185,17 +289,34 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
 /// plain(): the copy as before (memcpy under __try), used only when every byte lies in the exe's image; kernel(): the
 /// kernel's copy (ReadProcessMemory), true when every byte was copied. A failed kernel copy means the map changed under a
 /// kept run: everything kept is dropped, so the next reads query afresh.
-template <int N, int P>
+/// lean2: hints (kept across frames, cost only): a read that starts in a hinted range, touches nothing of the exe's image
+/// [image_base, image_end) and is not all in kept runs gets the working-set check first; resident and readable, its pages are
+/// kept for the rest of the frame (never as image: the copy out of them is always the kernel's) and the kernel copies it.
+/// Otherwise (unknown, or no hint) the walk is the one above, unchanged.
+template <int N, int P, int H = 8>
 struct FastReader {
-    RunCache<N> runs; AllocSeen<P> seen; FastStats st;
+    RunCache<N> runs; AllocSeen<P> seen; FastStats st; BigHints<H> hints;
     int64_t t0 = 0; bool armed = false;   // when the kept runs were started (the first read after a clear)
     uint32_t copies = 0, fails = 0;       // kernel copies, of them failed (this frame; the caller rolls them)
-    void clear() { runs.clear(); seen.clear(); armed = false; }
-    /// 1: copied; 0: not readable or the copy failed. now / max_age in the caller's clock (QPC ticks).
-    template <class Query, class Plain, class Kernel>
-    int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, Query&& query, Plain&& plain, Kernel&& kernel) {
+    void clear() { runs.clear(); seen.clear(); armed = false; }   // (not the hints: they are no claim about the memory)
+    /// 1: copied; 0: not readable or the copy failed. now / max_age in the caller's clock (QPC ticks). ws: the working-set
+    /// query (ws_check's); one that always returns false is the vq-lean reader exactly.
+    template <class Query, class Ws, class Plain, class Kernel>
+    int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, uintptr_t image_end, Query&& query, Ws&& ws, Plain&& plain, Kernel&& kernel) {
         if (!armed || now - t0 > max_age || now < t0) { clear(); armed = true; t0 = now; }
-        const int k = range_check_fast(a, len, query, runs, seen, image_base, &st);
+        if (hints.has(a) && !(a < image_end && a + len > image_base) && !runs.covers(a, len)) {
+            st.ws++;
+            if (ws_check(a, len, ws)) {
+                st.ws_yes++;
+                runs.add(a & ~(k_page - 1), ((a + len - 1) & ~(k_page - 1)) + k_page, false);
+                copies++;
+                if (kernel()) return 1;
+                fails++;
+                clear();
+                return 0;
+            }
+        }
+        const int k = range_check_fast(a, len, query, runs, seen, image_base, &st, &hints);
         if (k == k_fast_no) return 0;
         if (k == k_fast_image) return plain() ? 1 : 0;
         copies++;
@@ -203,6 +324,11 @@ struct FastReader {
         fails++;
         clear();
         return 0;
+    }
+    /// vq-lean's call: no working-set query, no image end.
+    template <class Query, class Plain, class Kernel>
+    int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, Query&& query, Plain&& plain, Kernel&& kernel) {
+        return read(a, len, now, max_age, image_base, 0, query, [](const uintptr_t*, uint32_t*, int) { return false; }, plain, kernel);
     }
 };
 
