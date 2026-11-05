@@ -53,6 +53,37 @@ class TagTest(unittest.TestCase):
         t = tags_of(fr, flash_len=4)
         self.assertEqual([i for i, x in enumerate(t) if x.cut], [0, 10, 16])   # 6 frames: longer than a flash
 
+    def test_similar_layout_with_a_brightness_change_is_still_a_cut(self):
+        """The review's S-2 case: two different sky-over-ground shots, the second 40 levels darker with its subject
+        elsewhere (64x36 lumas correlate ~0.95), are a cut; the same picture 40 % darker (a fade step) is not."""
+        def sky_ground(seed, bright, subj_x):
+            rng = np.random.default_rng(seed)
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+            img = np.where(yy < 0.55 * H, 200 - 80 * yy / (0.55 * H), 70 - 30 * (yy - 0.55 * H) / (0.45 * H))
+            img = img + rng.normal(0, 6, (H // 12 + 1, W // 12 + 1)).repeat(12, 0).repeat(12, 1)[:H, :W]
+            m = ((xx - subj_x) ** 2 / 15 ** 2 + (yy - 0.6 * H) ** 2 / 25 ** 2) < 1
+            img = np.where(m, 120 + 40 * np.sin(xx / 3), img) + bright
+            return np.clip(np.repeat(img[:, :, None], 3, 2), 0, 255).astype(np.uint8)
+        a, b = sky_ground(1, 0, 60), sky_ground(2, -40, 140)
+        t = tags_of([a] * 8 + [b] * 8)
+        self.assertEqual([i for i, x in enumerate(t) if x.cut], [0, 8])
+        dark = (a.astype(np.float32) * 0.6).astype(np.uint8)
+        det = dp.CutDetector(1280, 720)
+        self.assertEqual([det(f)[0] for f in [a] * 3 + [dark]], [True, False, False, True])   # the detector fires...
+        t = tags_of([a] * 8 + [dark] * 8)
+        self.assertEqual([i for i, x in enumerate(t) if x.cut], [0])             # ...the rule drops it
+        self.assertTrue(dp.same_picture(dp.area_resize(dp.luma(a), 64, 36), dp.area_resize(dp.luma(dark), 64, 36)))
+
+    def test_same_picture_needs_an_affine_fit(self):
+        """Highly correlated is not enough: sky and ground changing brightness by different amounts (another shot of
+        the same layout) correlates >= 0.98 but is no brightness change of one picture."""
+        yy = np.mgrid[0:36, 0:64][0].astype(np.float64)
+        a = np.where(yy < 20, 200 - 4 * yy, 70 - yy) + np.random.default_rng(0).normal(0, 2, (36, 64))
+        b = np.where(yy < 20, a * 0.9 + 10, a * 0.35)
+        self.assertGreaterEqual(dp._corr(a, b), 0.98)
+        self.assertFalse(dp.same_picture(a, b))
+        self.assertTrue(dp.same_picture(a, a * 0.5 + 3))
+
     def test_guide(self):
         t = tags_of([scene_img(1)], guide_size=(OW, OH))
         self.assertEqual(t[0].guide.shape, (OH, OW))
@@ -163,6 +194,35 @@ class RangeTest(unittest.TestCase):
         self.assertTrue(np.all(np.diff(lo[24:37]) >= 0))          # cross-faded, no jump
         self.assertTrue(info['blend'][25:36].all() and not info['blend'][24] and not info['blend'][36])
 
+    def test_dissolve_frames_left_out_of_the_range(self):
+        """Blend frames are mixtures of two pictures: their depth can leave both end ranges; they must not widen them."""
+        buf = dp.ShotBuffer()
+        tags = []
+        for t in range(60):
+            d = np.linspace(0, 1, 400, dtype=np.float32).reshape(20, 20)
+            buf.append(d * 5 if 25 <= t < 36 else d)
+            tags.append(_tag(small=np.zeros((36, 64), np.float32)))
+        tr = [{'kind': 'dissolve', 'a': 24, 'b': 36, 'boundary': 30, 'alpha': np.linspace(0, 1, 13)[1:-1]}]
+        lo, hi, _info = dp.shot_ranges(buf, tags, transitions=tr)
+        self.assertLess(float(hi.max()), 1.1)
+        self.assertGreater(float(lo.min()), -0.1)
+
+    def test_headroom_widens(self):
+        """The range is the 0.1 / 99.9 percentiles widened by 2 % at each end: nothing but the outer 0.1 % clips."""
+        buf = dp.ShotBuffer()
+        tags = []
+        rng = np.random.default_rng(3)
+        for t in range(20):
+            buf.append(rng.uniform(1, 2, (40, 40)).astype(np.float32))
+            tags.append(_tag(small=np.zeros((36, 64), np.float32)))
+        lo, hi, _info = dp.shot_ranges(buf, tags, sample=1)
+        pool = np.concatenate([buf[i].ravel() for i in range(20)])
+        p_lo, p_hi = np.percentile(pool, (0.1, 99.9))
+        self.assertAlmostEqual(lo[0], p_lo - 0.02 * (p_hi - p_lo), places=5)
+        self.assertAlmostEqual(hi[0], p_hi + 0.02 * (p_hi - p_lo), places=5)
+        q = np.concatenate([dp.quantise(buf[i], lo[i], hi[i]).ravel() for i in range(20)])
+        self.assertEqual(int(((q == 0) | (q == 255)).sum()), 0)
+
     def test_all_blank_segment_is_flat(self):
         buf = dp.ShotBuffer()
         tags = []
@@ -171,6 +231,20 @@ class RangeTest(unittest.TestCase):
             tags.append(_tag(blank=True, small=np.zeros((36, 64), np.float32)))
         lo, hi, info = dp.shot_ranges(buf, tags)
         self.assertTrue(np.all(hi - lo == 0) and info['flat'].all())
+
+    def test_stale_spills_removed(self):
+        import os
+        import time
+        with tempfile.TemporaryDirectory() as d:
+            old, new, other = (os.path.join(d, n) for n in ('fvdshot-abc', 'fvdshot-def', 'opn_us.fvd'))
+            for p in (old, new, other):
+                with open(p, 'wb') as f:
+                    f.write(b'x')
+            past = time.time() - 4 * 3600
+            os.utime(old, (past, past))
+            os.utime(other, (past, past))
+            self.assertEqual(convert.remove_stale_spills(d), 1)
+            self.assertEqual(sorted(os.listdir(d)), ['fvdshot-def', 'opn_us.fvd'])
 
     def test_buffer_spills_to_a_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -228,6 +302,25 @@ class TemporalTest(unittest.TestCase):
         self.assertAlmostEqual(float(out[4].mean()), 0.5, places=2)
         for i in (3, 5):
             self.assertAlmostEqual(float(out[i].mean()), 0.5, places=5)   # the flash leaks into nobody
+
+    def test_flash_junk_close_in_depth_does_not_leak(self):
+        """A flash frame whose junk depth is near its neighbours' (so the depth weight would let it in) still gives
+        them no weight."""
+        maps = [np.full((3, 3), 0.5, np.float32) for _ in range(9)]
+        maps[4] = np.full((3, 3), 0.52, np.float32)
+        rel = [i != 4 for i in range(9)]
+        out = self.run_filter(maps, rel=rel, passes=2)
+        for i in (2, 3, 5, 6):
+            np.testing.assert_array_equal(out[i], maps[i])
+
+    def test_no_weight_across_a_segment_start(self):
+        maps = [np.full((2, 2), 0.50 if i < 5 else 0.53, np.float32) for i in range(10)]
+        items = [(maps[i], None, True, 0 if i < 5 else 1) for i in range(10)]
+        out = list(dp.temporal_bilateral(iter(items)))
+        for i in range(10):
+            np.testing.assert_allclose(out[i], maps[i], atol=1e-6)
+        mixed = self.run_filter(maps)                      # the same frames as one segment do mix
+        self.assertGreater(float(mixed[4][0, 0]), 0.501)
 
     def test_short_shots(self):
         for n in (1, 2, 5):

@@ -116,6 +116,16 @@ class EdgeTest(unittest.TestCase):
             cross = int(np.argmax(row < 0.65))
             self.assertLessEqual(abs(cross - 60.3), 1.0, (sigma, cross))      # the step at the 50 % crossing
 
+    def test_leftover_band_snaps_to_the_nearer_side(self):
+        """With no rounds left to settle the band (iters=0), every mixed pixel takes the nearer of its 11x11 min / max."""
+        d = soft_step(sigma=2.5)
+        s = dp.sharpen_edges(d, iters=0, rng=0.7)
+        row, src = s[20], d[20]
+        changed = np.flatnonzero(row != src)
+        self.assertGreater(len(changed), 3)
+        for x in changed:
+            self.assertEqual(row[x] > 0.65, src[x] > 0.65, (x, src[x], row[x]))
+
     def test_sharp_step_slope_and_flat_untouched(self):
         d = soft_step(sigma=0)
         np.testing.assert_array_equal(dp.sharpen_edges(d, rng=0.7), d)
@@ -134,8 +144,15 @@ class EdgeTest(unittest.TestCase):
         v = d.T.copy()                                    # a horizontal step: near on top
         gv = dp.grow_near(v, 2, 1, thr=0.05)
         self.assertEqual(int(np.argmax(gv[:, 20] < 0.65)), int(np.argmax(v[:, 20] < 0.65)) + 1)
+        # slopes are not steps, whichever way they run: up or down to the right, and up or down the rows
         ramp = np.tile(np.linspace(0, 1, 120, dtype=np.float32), (10, 1))
-        np.testing.assert_array_equal(dp.grow_near(ramp, 2, 1, thr=0.05), ramp)
+        for r in (ramp, ramp[:, ::-1], ramp.T, ramp.T[::-1]):
+            r = np.ascontiguousarray(r)
+            np.testing.assert_array_equal(dp.grow_near(r, 2, 1, thr=0.05), r)
+        # a step with the near side on the right grows to the left
+        m = np.ascontiguousarray(d[:, ::-1])
+        gm = dp.grow_near(m, 2, 1, thr=0.05)
+        self.assertEqual(int(np.argmax(gm[20] > 0.65)), int(np.argmax(m[20] > 0.65)) - 2)
 
     def test_edge_shrink(self):
         d = soft_step(w=924, h=36, x0=402.6, sigma=0)                 # a step inside output texel 139
@@ -146,6 +163,16 @@ class EdgeTest(unittest.TestCase):
         self.assertGreater(len(np.unique(np.round(a, 5))), 2)
         ramp = np.tile(np.linspace(0, 3, 924, dtype=np.float32), (36, 1))
         np.testing.assert_allclose(dp.edge_shrink(ramp, 320, 12, thr=0.005), dp.area_resize(ramp, 320, 12), atol=1e-6)
+
+    def test_edge_shrink_takes_the_larger_group(self):
+        """Texel 139 covers model columns 401-403. A step after column 402 (2 near, 1 far): the texel is near; after
+        column 401 (1 near, 2 far): far. So the step lands in the texel the larger part of it is in."""
+        for x0, want in ((402.6, 1.0), (401.6, 0.3)):
+            d = soft_step(w=924, h=36, x0=x0, sigma=0)
+            o = dp.edge_shrink(d, 320, 12, thr=0.05)
+            self.assertAlmostEqual(float(o[5, 139]), want, places=5, msg=x0)
+            self.assertAlmostEqual(float(o[5, 138]), 1.0, places=5)
+            self.assertAlmostEqual(float(o[5, 140]), 0.3, places=5)
 
     def test_refine_and_shrink(self):
         d = soft_step(w=924, h=518, x0=400.6, sigma=2.5)

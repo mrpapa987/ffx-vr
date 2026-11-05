@@ -134,6 +134,28 @@ def check_out_dir(out, vbf_path):
         raise ConvertError(f'--out {out} is inside the game\'s data folder: never write there.')
 
 
+def remove_stale_spills(folder, min_age_s=3 * 3600):
+    """Delete leftover shot spill files (depthproc.SPILL_PREFIX*) older than min_age_s: a spill file lives only while
+    one shot is being converted and is deleted when closed, also on Ctrl+C or a killed process, but not after a power
+    cut or a crash of Windows. (The age test leaves alone a file another converter run is using right now.)"""
+    now = time.time()
+    n = 0
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    for f in names:
+        if f.startswith(depthproc.SPILL_PREFIX):
+            p = os.path.join(folder, f)
+            try:
+                if os.path.isfile(p) and now - os.path.getmtime(p) > min_age_s:
+                    os.remove(p)
+                    n += 1
+            except OSError:
+                pass
+    return n
+
+
 def write_private_note(folder):
     os.makedirs(folder, exist_ok=True)
     p = os.path.join(folder, 'PRIVATE-do-not-share.txt')
@@ -173,7 +195,7 @@ def settings_of(a, model, weights_sha):
         'attention': a.attention,
         'norm': {'mode': 'segment', 'pcts': list(NORM_PCTS), 'headroom': NORM_HEADROOM, 'transitions': 1},
         'cut': {'threshold': a.cut_threshold, 'ratio': a.cut_ratio, 'flash_len': FLASH_LEN, 'blank_std': BLANK_STD,
-                'same_corr': 0.9},
+                'same_picture': [0.98, 0.1]},
         'edge_filter': a.edge_filter,
         'edges': {'tau': EDGES['tau'], 'sigma': EDGES['sigma'], 'grow': list(EDGES['grow'])} if a.edge_filter == 'refine'
         else 'area',
@@ -348,7 +370,7 @@ def process_video(frames, model, c, stats=None):
       and 1 px up/down, shrink without averaging across a step) inside tag_frames (cuts with the flash test, blank frames) -> shot_windows (VDA restarted at every cut) -> ShotBuffer ->
       find_transitions + shot_ranges (one range per segment; dissolves cross-faded) -> normalised n ->
       temporal_bilateral (centred +-3 frames, 2 passes, inside the shot only; c.temporal None: off) -> 8 bits.
-    stats (a dict), if given, collects counts: frames, cuts, flash_frames, blank_frames, dissolves, fades, dips,
+    stats (a dict), if given, collects counts: frames, shots, flash_frames, blank_frames, dissolves, fades, dips,
     segments, flat_frames, clipped (pixels at 0 or 255)."""
     det = depthproc.CutDetector(c.src_w, c.src_h, c.cut_threshold, c.cut_ratio)
     tags = {}
@@ -377,20 +399,25 @@ def _process(frames, model, c, stats, det, tags):
                 pp.append(np.percentile(buf[len(buf) - 1], (2.0, 98.0)))
             st = [tags.pop(start + k) for k in range(len(buf))]
             lo, hi, info = depthproc.shot_ranges(buf, st, c.pcts, c.headroom)
-            _count(stats, 'cuts')
+            _count(stats, 'shots')
             _count(stats, 'segments', len(info['starts']))
             for tr in info['transitions']:
                 _count(stats, tr['kind'] + 's')
+            seg_of = np.searchsorted(np.asarray(info['starts']), np.arange(len(buf)), side='right') - 1
+
             def normalised():
                 for k in range(len(buf)):
                     rng = max(hi[k] - lo[k], depthproc.range_eps(hi[k]))
                     yield ((buf[k] - np.float32(lo[k])) * np.float32(1.0 / rng), st[k].guide,
-                           not (st[k].blank or st[k].flash))
+                           not (st[k].blank or st[k].flash), seg_of[k])
             ns = (depthproc.temporal_bilateral(normalised(), **c.temporal) if c.temporal else
-                  (n for n, _g, _r in normalised()))
+                  (x[0] for x in normalised()))
             for k, n in enumerate(ns):
                 t = st[k]
-                q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
+                if info['flat'][k]:       # an all-blank segment: flat (lo = hi), written as a constant 0
+                    q = np.zeros((c.out_h, c.out_w), np.uint8)
+                else:
+                    q = np.clip(n * np.float32(255.0) + np.float32(0.5), 0, 255).astype(np.uint8)
                 fl = fvd.FF_CUT if k == 0 else 0
                 if info['blend'][k]:
                     fl |= fvd.FF_BLEND
@@ -430,7 +457,8 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     w = fvd.FvdWriter(part, out_w, out_h, info['fps_num'], info['fps_den'], codec=a.codec_id, predictor=fvd.PRED_LEFT,
                       model_id=fvd.MODEL_VDA_SMALL if model.model_name == 'vda-small' else fvd.MODEL_FAKE,
                       input_w=in_w, input_h=in_h, settings_hash=settings_hash, src_name=entry.name.split('/')[-1].lower(),
-                      src_size=entry.size, src_offset=entry.offset, thumb_w=tw, thumb_h=th)
+                      src_size=entry.size, src_offset=entry.offset, thumb_w=tw, thumb_h=th,
+                      segment_range=ALGO_VERSION >= 2)
     ok = False
     reader = None
     vs = {}
@@ -452,7 +480,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
             reader.close()
         if not ok:
             w.abort()
-    n_cuts = vs.get('cuts', 0)
+    n_shots = vs.get('shots', 0)
     # check the finished file before it counts
     try:
         with fvd.FvdReader(part) as r:
@@ -469,7 +497,7 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
         raise
     secs = time.perf_counter() - t0
     st = {'frames': h.frame_count, 'seconds': round(secs, 1), 'fvd_bytes': os.path.getsize(final),
-          'width': out_w, 'height': out_h, 'input': [in_w, in_h], 'cuts': n_cuts,
+          'width': out_w, 'height': out_h, 'input': [in_w, in_h], 'shots': n_shots,
           'src': [sw, sh], 'fps': [info['fps_num'], info['fps_den']], 'peak_vram_mb': model.peak_vram() // 2**20,
           'estimated_frames': est}
     if progress:
@@ -480,10 +508,10 @@ def convert_one(arc, entry, out_dir, model, a, settings_hash, ff, log, progress=
     for k in ('segments', 'dissolves', 'fades', 'dips', 'flash_frames', 'blank_frames', 'flat_frames'):
         st[k] = vs.get(k, 0)
     st['clipped_pct'] = round(100.0 * vs.get('clipped', 0) / max(h.frame_count * out_w * out_h, 1), 3)
-    log(f'  done: {h.frame_count} frames, {n_cuts} cuts, {secs:.0f} s ({h.frame_count / max(secs, 1e-6):.1f} frames/s), '
+    log(f'  done: {h.frame_count} frames, {n_shots} shots ({max(n_shots - 1, 0)} cuts), {secs:.0f} s ({h.frame_count / max(secs, 1e-6):.1f} frames/s), '
         f'{st["fvd_bytes"] / 2**20:.1f} MB ({st["fvd_bytes"] / h.frame_count / 1024:.1f} KB a frame), '
         f'VRAM peak {model.peak_vram() / 2**30:.2f} GB')
-    log(f'    shots {n_cuts}, segments {st["segments"]} (dissolves {st["dissolves"]}, dips {st["dips"]}), fades '
+    log(f'    segments {st["segments"]} (dissolves {st["dissolves"]}, dips {st["dips"]}), fades '
         f'{st["fades"]}, flash frames {st["flash_frames"]}, blank frames {st["blank_frames"]}, flat frames '
         f'{st["flat_frames"]}, pixels clipped {st["clipped_pct"]:.3f} %')
     return st
@@ -637,6 +665,7 @@ def main(argv=None):
     if not a.list:                      # --list writes nothing
         os.makedirs(out, exist_ok=True)
         write_private_note(out)
+        remove_stale_spills(out)
     log = Log(None if a.list else os.path.join(out, 'convert.log'))
     if a.preview_note:
         log(f'  note: {a.preview_note}')
@@ -720,10 +749,10 @@ def main(argv=None):
             prog.done_bytes += e.size
             continue
         rec.update(status='done', frames=st['frames'], seconds=st['seconds'], fvd_bytes=st['fvd_bytes'],
-                   width=st['width'], height=st['height'], input=st['input'], cuts=st['cuts'], src=st['src'],
+                   width=st['width'], height=st['height'], input=st['input'], shots=st['shots'], src=st['src'],
                    fps=st['fps'], peak_vram_mb=st['peak_vram_mb'],
-                   shots={k: st[k] for k in ('segments', 'dissolves', 'fades', 'dips', 'flash_frames', 'blank_frames',
-                                             'flat_frames', 'clipped_pct')},
+                   transitions={k: st[k] for k in ('segments', 'dissolves', 'fades', 'dips', 'flash_frames',
+                                                   'blank_frames', 'flat_frames', 'clipped_pct')},
                    finished=datetime.datetime.now().isoformat(timespec='seconds'))
         save_manifest(out, man)
         prog.done_bytes += e.size

@@ -94,6 +94,7 @@ class PipelineTest(unittest.TestCase):
                 self.assertEqual((r.h.width, r.h.height), wh)
                 self.assertEqual((r.h.fps_num, r.h.fps_den), (30000, 1001))
                 self.assertEqual(r.h.codec, fvd.CODEC_ZLIB)
+                self.assertTrue(r.h.flags & fvd.HF_SEGMENT_RANGE)           # v2: lo/hi per shot segment
                 self.assertEqual(r.h.src_size, rec['source_size'])
                 # src_name: as the VBF stores it (lower case); compare with the game's names case-insensitively
                 self.assertEqual(r.h.src_name, rec['source'].lower())

@@ -19,6 +19,7 @@ SPDX-License-Identifier: MIT (part of the FFX VR repository).
 import numpy as np
 
 OUT_H = 180
+SPILL_PREFIX = 'fvdshot-'     # ShotBuffer's temporary files (convert.remove_stale_spills deletes leftovers)
 
 
 def _round_multiple(x, m, min_val):
@@ -181,7 +182,23 @@ def _corr(a, b):
     return float((x * y).sum()) / den if den > 0 else 1.0
 
 
-def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, same_corr=0.9):
+def same_picture(a, b, min_corr=0.98, max_resid=0.1):
+    """Is b the picture a, only brighter or darker? Both 64x36 lumas must correlate >= min_corr AND b must be an
+    affine map of a (b ~ g a + o, least squares) to within max_resid x their mean absolute difference. A fade step
+    fits almost exactly; two different shots with the same coarse layout (sky over ground) and a brightness change
+    correlate highly too (0.93-0.95), but leave a residual of a quarter of the step."""
+    x = np.asarray(a, np.float64).ravel()
+    y = np.asarray(b, np.float64).ravel()
+    if _corr(x, y) < min_corr:
+        return False
+    xc = x - x.mean()
+    den = float(xc @ xc)
+    g = float(xc @ (y - y.mean())) / den if den > 0 else 0.0
+    resid = float(np.abs(y - y.mean() - g * xc).mean())
+    return resid <= max_resid * float(np.abs(y - x).mean())
+
+
+def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, same_corr=0.98):
     """Yield (frame, Tag) for every frame, `flash_len` + 1 frames late (the flash test looks ahead).
 
     blank: the 64x36 luma's standard deviation < blank_std levels (nothing a depth model can read).
@@ -189,8 +206,9 @@ def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, sa
     mean |small[u] - small[t-1]| < half the cut threshold and < half the cut's own step): frames t..u-1 are a flash,
     and the cuts at t..u are dropped (the shot goes on; the model's windows are not restarted; the frames are left out
     of the shot's depth range). A cut into or out of a run of blank frames that does not come back stays a cut.
-    A detector cut between two non-blank frames whose 64x36 lumas correlate >= same_corr is the same picture
-    brighter or darker (a fast fade steps past the threshold every frame): not a cut.
+    A detector cut between two non-blank frames where the second is the first brighter or darker (same_picture:
+    correlation >= same_corr and an affine fit to 10 % of the step; a fast fade steps past the threshold every frame)
+    is not a cut.
     guide_size (w, h): also make each frame's luma at that size (Tag.guide, uint8)."""
     pend = []                     # [frame, Tag], oldest first
     prev_small = None
@@ -200,7 +218,8 @@ def tag_frames(frames, detector, flash_len=4, blank_std=2.5, guide_size=None, sa
         cut, thumb = detector(f)
         small = detector.small
         blank = float(small.std()) < blank_std
-        if cut and prev_small is not None and not blank and not prev_blank and _corr(small, prev_small) >= same_corr:
+        if cut and prev_small is not None and not blank and not prev_blank and \
+                same_picture(prev_small, small, same_corr):
             cut = False           # the same picture, brighter or darker (a quick fade): not a new shot
         t = Tag(cut=cut, raw_cut=cut, blank=blank, flash=False, small=small, pre=prev_small,
                 diff=detector.last_diff, thumb=thumb)
@@ -325,7 +344,7 @@ class ShotBuffer:
         else:
             if self.file is None:
                 import tempfile
-                self.file = tempfile.TemporaryFile(prefix='fvdshot-', dir=self.spill_dir)
+                self.file = tempfile.TemporaryFile(prefix=SPILL_PREFIX, dir=self.spill_dir)
             self.file.seek((self.n - self.ram_frames) * d.nbytes)
             self.file.write(d.tobytes())
         self.n += 1
@@ -435,26 +454,26 @@ def _guide01(g):
 
 
 def _tbil_pass(items, radius, sigma_t, sigma_n, sigma_y):
-    """One pass of temporal_bilateral over a stream of (n, guide, reliable); yields the same triples, filtered."""
+    """One pass of temporal_bilateral over a stream of (n, guide, reliable, segment); yields the same, filtered."""
     a_n = np.float32(0.5 / (sigma_n * sigma_n))
     a_y = np.float32(0.5 / (sigma_y * sigma_y)) if sigma_y > 0 else None
     tw = {d: float(0.5 * d * d / (sigma_t * sigma_t)) for d in range(-radius, radius + 1)}
-    buf = []                  # (n, guide float or None, reliable)
+    buf = []                  # (n, guide float or None, reliable, segment)
     base = 0                  # stream index of buf[0]
     t = 0                     # next output
 
     def out(t):
-        c_n, c_g, c_rel = buf[t - base]
+        c_n, c_g, c_rel, c_seg = buf[t - base]
         acc = np.zeros_like(c_n)
         wsum = np.zeros_like(c_n)
         for s in range(max(base, t - radius), min(base + len(buf), t + radius + 1)):
-            n, g, rel = buf[s - base]
+            n, g, rel, seg = buf[s - base]
             if s == t:
                 w = np.float32(1.0 if c_rel else 1e-3)
                 acc += w * n
                 wsum += w
                 continue
-            if not rel:
+            if not rel or seg != c_seg:   # a flash / blank frame, or another segment (past a dissolve or dip)
                 continue
             if not c_rel:             # this frame's own value is junk: its reliable neighbours by time alone
                 w = np.float32(np.exp(-tw[s - t]))
@@ -467,10 +486,11 @@ def _tbil_pass(items, radius, sigma_t, sigma_n, sigma_y):
             w = np.exp(-e)
             acc += w * n
             wsum += w
-        return acc / wsum, c_g, c_rel
+        return acc / wsum, c_g, c_rel, c_seg
 
-    for n, g, rel in items:
-        buf.append((np.asarray(n, np.float32), _guide01(g), bool(rel)))
+    for x in items:
+        n, g, rel = x[:3]
+        buf.append((np.asarray(n, np.float32), _guide01(g), bool(rel), x[3] if len(x) > 3 else 0))
         while t + radius < base + len(buf):
             yield out(t)
             t += 1
@@ -485,19 +505,20 @@ def _tbil_pass(items, radius, sigma_t, sigma_n, sigma_y):
 def temporal_bilateral(items, radius=3, passes=2, sigma_t=2.0, sigma_n=8.0 / 255, sigma_y=0.05):
     """A centred (zero-phase, no lag) edge-preserving temporal filter over one shot.
 
-    items: (n, guide, reliable) per frame in order: n the normalised depth (float, 1 = the segment's range), guide the
+    items: (n, guide, reliable[, segment]) per frame in order: n the normalised depth (float, 1 = the segment's range), guide the
     frame's luma at the same size (uint8 or 0..1 float; None to filter by depth alone), reliable False for a flash or
-    blank frame. Each output pixel is the weighted mean of the same pixel in frames t-radius .. t+radius, the weight
+    blank frame, segment the frame's normalisation segment inside the shot (frames of another segment, past a
+    dissolve or a dip through black, get no weight; default 0). Each output pixel is the weighted mean of the same pixel in frames t-radius .. t+radius, the weight
     exp(-dt^2 / 2 sigma_t^2 - dn^2 / 2 sigma_n^2 - dY^2 / 2 sigma_y^2): steady depth averages, while a pixel whose depth
     or luma changes (something moving across it) keeps its own value, so motion passes without a trail. Unreliable
     frames give no weight to others and take theirs from their neighbours. `passes` passes (each one needs `radius`
     frames more on each side). Run it per shot: nothing crosses a cut. Yields the filtered n per frame, in order,
     radius x passes frames late."""
-    it = ((np.asarray(n, np.float32), g, rel) for n, g, rel in items)
+    it = iter(items)
     for _ in range(passes):
         it = _tbil_pass(it, radius, sigma_t, sigma_n, sigma_y)
-    for n, _g, _rel in it:
-        yield n
+    for x in it:
+        yield x[0]
 
 
 # ==================================================================== depth edges at the model's resolution
@@ -567,8 +588,10 @@ def sharpen_edges(d, tau=0.05, sigma=0.2, beta=0.1, slope=2.1, iters=4, thr=None
       mixed: a pixel within 4 px of a step core whose value lies inside the middle (1 - 2 beta) of its 11x11
       min..max (the band the model's soft edge leaves between the two surfaces; a sharp step has none);
       each mixed pixel becomes the weighted median of its 5x5 neighbours that are not mixed, weights
-      exp(-(v - v_centre)^2 / 2 (sigma x range)^2), so it joins the side its own value is closer to, at that side's
-      local value. Repeated `iters` times, resolved pixels counting as settled, so the two sides grow into a wide
+      exp(-(v - v_centre)^2 / 2 (sigma x range)^2), at that side's local value. Which side wins is mostly decided by
+      how many settled neighbours each side has there (the geometry: the sides grow in at the same speed and meet in
+      the band's middle); the value only tips it for steps above ~0.3 of the frame's range, where the weights differ
+      much (for a step of 0.05-0.2 of the range they differ by 1.03-1.2x). Repeated `iters` times, resolved pixels counting as settled, so the two sides grow into a wide
       soft edge from both ends and meet in its middle; what is left then takes the nearer of its 11x11 min and max.
 
     Pixels that are not mixed keep their value exactly. Returns a new float32 array."""

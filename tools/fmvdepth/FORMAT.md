@@ -44,7 +44,7 @@ so it should never be seen; treat it as missing).
 | 24 | u8 | codec | 0 stored, 1 zlib (tests only), **2 XPRESS_HUFF** (what the converter writes on Windows) |
 | 25 | u8 | predictor | 0 none, **1 left** (see below) |
 | 26 | u8 | model_id | 0 fake (pipeline test, not depth: ignore such a file), 1 Video-Depth-Anything-Small |
-| 27 | u8 | flags | bit 0 HF_COMPLETE, bit 1 HF_THUMBS; other bits: ignore |
+| 27 | u8 | flags | bit 0 HF_COMPLETE, bit 1 HF_THUMBS, bit 2 HF_SEGMENT_RANGE (converter 0.2: lo / hi are already one fixed range per shot segment, see "How lo / hi are chosen"); other bits: ignore |
 | 28 | u16 | input_w | the model's input size, e.g. 924 x 518 (information only) |
 | 30 | u16 | input_h | |
 | 32 | u64 | settings_hash | the converter's settings (the manifest's `settings_hash`, hex) |
@@ -118,8 +118,17 @@ its frames' pixels together (flash, blank and transition frames left out) widene
 only true outliers clip and a value means the same depth for the whole segment. A segment is a shot (FF_CUT to FF_CUT)
 or, inside a shot, the part before / after a dissolve or a dip through black; across a dissolve's FF_BLEND frames lo /
 hi move linearly from one segment's range to the next. So within a run of frames without FF_BLEND, lo / hi only change
-at a segment start; a reader that re-normalises per shot should treat a change of (lo, hi) as a segment start. A
-segment whose frames are all blank is written flat (lo = hi). p2 / p98 stay the raw per-frame percentiles.
+at a segment start (a reader can find segments that way; HF_SEGMENT_RANGE below says it need not re-normalise). A
+segment whose frames are all blank is written flat (lo = hi, every value 0). p2 / p98 stay the raw per-frame
+percentiles.
+
+**HF_SEGMENT_RANGE** (header byte 27, bit 2, value 0x04) says the file was made this way. A reader that re-normalises
+per shot (a robust L / H over each FF_CUT-to-FF_CUT run, short runs folded into the one before) must skip that for such
+a file and use lo / hi as they are (n' = n): v2 restarts the model's windows at every cut, so a short shot's raw
+values have their own scale and folding it maps it through another shot's range, and a shot with a dissolve has two
+ranges that one shot-wide L / H would squash or clip. The flat test (hi - lo < eps) is the same either way. A file
+without the bit is converter 0.1 (per-frame EMA lo / hi on one continuous chain), where per-shot re-normalisation is
+right. Old readers ignore the bit (it is one of the "other bits").
 
 ## Thumbnails
 
