@@ -5787,24 +5787,49 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
     InterlockedExchange(&g_od_active, od::active(r) ? 1 : 0);
 }
 
-// FMV sync probe (S2 of the FMV depth plan, 4 Nov 2026; ffxvr_fmv.h has the addresses with their evidence): read-only. Every
-// Present: the manager pointer (exe image) and its playing word (one guarded 4-byte read of the heap). Only while a movie may
-// be up (the playing byte or the skippable flag set, or an FMV being tracked) the rest: the state, the player's fields and the
-// name (three guarded reads, 0x80 + 0x5C + 0x84 bytes), the skip byte, the flag and the event's movie id (exe image). One
-// fmv: line at each start and end (ffxvr_fmv.h's Log limit); the .fvd header is read once at a start (CreateFileW, ReadFile of
-// 128 bytes, closed at once; FILE_SHARE_READ | FILE_SHARE_DELETE as FORMAT.md asks). No rendering change. F8's FMV line is
-// managed's own read (fmv_sync.cs).
+// FMV sync probe (S2 of the FMV depth plan, 4 Nov 2026; ffxvr_fmv.h has the addresses with their evidence): read-only, and
+// only with a diagnostic profile (diag_profile_on: Dev / Verbose; Release does nothing here; F8's line is managed's own).
+// Every Present: the manager pointer (exe image) and its playing word (one guarded 4-byte read of the heap). Only while the
+// playing byte is set or an FMV is being tracked (review SF2: the skippable flag lingers, so it opens nothing) the rest:
+// the state, the player's fields and the name (three guarded reads, 0x80 + 0x5C + 0x84 bytes), the skip byte, the flag and
+// the event's movie id (exe image). One fmv: line at each start and end (ffxvr_fmv.h's Log limit), kept and retried with
+// diag_try until the log takes them (review N1). The .fvd header is checked by a worker thread (review SF1: no file I/O on
+// the render thread): the start line says "checking...", a "fmv: depth file" line follows with the result; a cloud-only
+// file (offline / recall on open / recall on data access) is not opened. No rendering change.
+#ifndef FILE_ATTRIBUTE_RECALL_ON_OPEN
+#define FILE_ATTRIBUTE_RECALL_ON_OPEN 0x00040000
+#endif
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
 static fmv::Fmv g_fmv;
 static fmv::Log g_fmv_log;
-static fmv::FvdInfo g_fmv_fvd;                 // the current FMV's depth file (its end line compares with it)
+static fmv::FvdInfo g_fmv_fvd;                 // the current FMV's depth file (FVD_CHECKING until the worker answers)
 static uint32_t g_fmv_cam3d_prev = 0;          // g_cam3d_total at the last Present: a real 3D camera came during this frame
 static uint32_t g_fmv_read_fail = 0;           // the playing word was not readable (that Present is skipped)
+static char g_fmv_pend[6144]; static size_t g_fmv_pend_len = 0; static uint32_t g_fmv_pend_tries = 0, g_fmv_pend_lost = 0;   // lines the log has not taken yet
+// the worker: one request slot and one result slot (g_fmvw_mx), a kick and a stop event, started at the first request
+static std::mutex g_fmvw_mx;
+static HANDLE g_fmvw_thread = nullptr, g_fmvw_kick = nullptr, g_fmvw_stop = nullptr; static bool g_fmvw_failed = false;
+static char g_fmvw_req[fmv::k_name_len + 1]; static uint32_t g_fmvw_req_gen = 0;   // the name to check and its number
+static fmv::FvdInfo g_fmvw_res; static uint32_t g_fmvw_res_gen = 0; static double g_fmvw_res_ms = 0;
+static std::atomic<uint32_t> g_fmvw_done{ 0 };   // the number of the last result (the render thread polls it: no lock when nothing is new)
+static uint32_t g_fmv_gen = 0;                 // the number of the current FMV's request (render thread)
+/// The header check (worker thread only): never a cloud-only file (no hydration), one 128-byte ReadFile.
 static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
     v = fmv::FvdInfo{};
     if (!fmv::fvd_file_name(name, v.file, sizeof(v.file))) { v.status = fmv::FVD_NO_NAME; return; }
     wchar_t wf[sizeof(v.file)] = {};
     for (size_t i = 0; i + 1 < sizeof(wf) && v.file[i]; ++i) wf[i] = static_cast<wchar_t>(v.file[i]);   // [a-z0-9_.] only (fvd_file_name)
     wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\fmvdepth\\%s", g_dir, wf);
+    const DWORD at = GetFileAttributesW(path);
+    if (at == INVALID_FILE_ATTRIBUTES) {
+        const DWORD e = GetLastError();
+        v.status = (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) ? fmv::FVD_ABSENT : fmv::FVD_READ;
+        return;
+    }
+    if (at & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS)) { v.status = fmv::FVD_CLOUD; return; }
+    if (at & FILE_ATTRIBUTE_DIRECTORY) { v.status = fmv::FVD_READ; return; }
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         const DWORD e = GetLastError();
@@ -5817,7 +5842,68 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
     if (!ok || sz.QuadPart < 0) { v.status = fmv::FVD_READ; return; }
     fmv::fvd_parse(b, got, static_cast<uint64_t>(sz.QuadPart), name, v);
 }
+static DWORD WINAPI fmvw_thread(LPVOID) {
+    HANDLE ev[2] = { g_fmvw_stop, g_fmvw_kick };
+    for (;;) {
+        if (WaitForMultipleObjects(2, ev, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) return 0;   // the stop event (or a failure)
+        char name[fmv::k_name_len + 1]; uint32_t gen;
+        { std::lock_guard<std::mutex> lk(g_fmvw_mx); memcpy(name, g_fmvw_req, sizeof(name)); gen = g_fmvw_req_gen; }
+        LARGE_INTEGER f, a, b; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&a);
+        fmv::FvdInfo v; fmv_fvd_check(name, v);
+        QueryPerformanceCounter(&b);
+        { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_fmvw_res = v; g_fmvw_res_gen = gen; g_fmvw_res_ms = f.QuadPart ? (b.QuadPart - a.QuadPart) * 1000.0 / f.QuadPart : 0.0; }
+        g_fmvw_done.store(gen);   // a newer request kicked meanwhile is taken at the next wait (the kick event stays set)
+    }
+}
+/// Render thread: asks for the check of `name`; false when the worker could not start (then the result is FVD_READ).
+static bool fmvw_request(const char* name, uint32_t gen) {
+    if (g_fmvw_failed) return false;
+    if (!g_fmvw_thread) {
+        g_fmvw_kick = CreateEventA(nullptr, FALSE, FALSE, nullptr); g_fmvw_stop = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+        if (g_fmvw_kick && g_fmvw_stop) g_fmvw_thread = CreateThread(nullptr, 64 * 1024, fmvw_thread, nullptr, 0, nullptr);
+        if (!g_fmvw_thread) {
+            g_fmvw_failed = true;
+            if (g_fmvw_kick) CloseHandle(g_fmvw_kick); if (g_fmvw_stop) CloseHandle(g_fmvw_stop);
+            g_fmvw_kick = g_fmvw_stop = nullptr;
+            return false;
+        }
+    }
+    { std::lock_guard<std::mutex> lk(g_fmvw_mx); memcpy(g_fmvw_req, name, sizeof(g_fmvw_req)); g_fmvw_req_gen = gen; }
+    SetEvent(g_fmvw_kick);
+    return true;
+}
+/// ffxvr_shutdown: the worker stops at its next wait; one blocked in a file call is left to the process exit (it only
+/// writes its own slots).
+static void fmvw_stop() {
+    if (!g_fmvw_thread) return;
+    SetEvent(g_fmvw_stop);
+    if (WaitForSingleObject(g_fmvw_thread, 500) != WAIT_OBJECT_0) return;
+    CloseHandle(g_fmvw_thread); CloseHandle(g_fmvw_kick); CloseHandle(g_fmvw_stop);
+    g_fmvw_thread = g_fmvw_kick = g_fmvw_stop = nullptr;
+}
+/// A line for the log: kept with the others not yet written (in order); written by fmv_flush.
+static void fmv_put(const char* line) {
+    const size_t n = strlen(line);
+    if (g_fmv_pend_len + n + 2 > sizeof(g_fmv_pend)) { g_fmv_pend_lost++; return; }
+    if (g_fmv_pend_len > 0) g_fmv_pend[g_fmv_pend_len++] = '\n';
+    memcpy(g_fmv_pend + g_fmv_pend_len, line, n); g_fmv_pend_len += n; g_fmv_pend[g_fmv_pend_len] = 0;
+}
+static void fmv_flush() {
+    if (g_fmv_pend_len == 0) return;
+    if (diag_try(g_fmv_pend) || ++g_fmv_pend_tries > 600) {   // the render thread never waits for the log; a busy log is tried again next Present
+        if (g_fmv_pend_tries > 600) g_fmv_pend_lost++;
+        g_fmv_pend_len = 0; g_fmv_pend[0] = 0; g_fmv_pend_tries = 0;
+    }
+}
 static void fmv_frame() {
+    fmv_flush();
+    if (g_fmvw_done.load() == g_fmv_gen && g_fmv_gen != 0 && g_fmv_fvd.status == fmv::FVD_CHECKING) {   // the worker's answer for the current FMV
+        double ms; char name[fmv::k_name_len + 1]; uint32_t id = g_fmv.id;
+        { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_fmv_fvd = g_fmvw_res; ms = g_fmvw_res_ms; }
+        memcpy(name, g_fmv.name, sizeof(name));
+        char b[512]; fmv::fvd_line(b, sizeof(b), name, id, g_fmv_fvd, ms); fmv_put(b);
+    }
+    if (!diag_profile_on()) return;   // review SF3: Release reads and writes nothing here
     static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     auto at = [](uint32_t va) { return reinterpret_cast<const void*>(base + (va - 0x400000u)); };
     const uint32_t cam = g_cam3d_total; const bool cam3d = cam != g_fmv_cam3d_prev; g_fmv_cam3d_prev = cam;
@@ -5829,8 +5915,8 @@ static void fmv_frame() {
         if (!ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(mgr) + fmv::k_playing), pw, 4)) { g_fmv_read_fail++; return; }
         s.mgr = true; s.playing = pw[0]; s.open = pw[2];
     }
+    if (!g_fmv.on && s.playing == 0) return;   // no movie plays: nothing more is read
     if (!ffxvr_safe_read(at(fmv::k_skippable_va), &flag, 4)) flag = 0;
-    if (!g_fmv.on && s.playing == 0 && flag == 0) return;   // no movie can be up: nothing more is read
     s.skippable = flag;
     if (mgr != 0) {
         const uintptr_t m = static_cast<uintptr_t>(mgr);
@@ -5848,16 +5934,23 @@ static void fmv_frame() {
     const int ev = fmv::step(g_fmv, s, now, mode, cam3d, done);
     if ((ev & fmv::EV_END) && g_fmv_log.want_end(now)) {
         char b[1600]; fmv::end_line(b, sizeof(b), done, g_fmv_fvd);
-        diag("%s%s", b, g_fmv_read_fail ? " | the playing word was unreadable on some Presents this session" : "");
+        const size_t n = strlen(b);
+        if (g_fmv_read_fail || g_fmv_pend_lost) snprintf(b + n, sizeof(b) - n, " | this session: the playing word unreadable on %u Presents, fmv: lines lost %u", g_fmv_read_fail, g_fmv_pend_lost);
+        fmv_put(b);
     }
     if (ev & fmv::EV_START) {
+        g_fmv_gen++; if (g_fmv_gen == 0) g_fmv_gen = 1;   // this FMV's request number (a stale answer for an earlier one is ignored)
         if (g_fmv_log.want_start(g_fmv.name, g_fmv.id, now)) {
-            fmv_fvd_check(g_fmv.name, g_fmv_fvd);   // file I/O only for a logged start (a flapping byte reads nothing)
+            g_fmv_fvd = fmv::FvdInfo{};
+            if (!fmv::fvd_file_name(g_fmv.name, g_fmv_fvd.file, sizeof(g_fmv_fvd.file))) g_fmv_fvd.status = fmv::FVD_NO_NAME;   // nothing to look for
+            else if (fmvw_request(g_fmv.name, g_fmv_gen)) g_fmv_fvd.status = fmv::FVD_CHECKING;   // file I/O only for a logged start
+            else g_fmv_fvd.status = fmv::FVD_READ;
             char b[1024]; fmv::start_line(b, sizeof(b), g_fmv, g_fmv_fvd, g_fmv_log.reported);
-            diag("%s", b);
+            fmv_put(b);
         }
-        else if (g_fmv_log.cap_line()) diag("fmv: %u lines this session: no more fmv: lines", g_fmv_log.lines);
+        else { g_fmv_fvd = fmv::FvdInfo{}; if (g_fmv_log.cap_line()) { char b[96]; snprintf(b, sizeof(b), "fmv: %u lines this session: no more fmv: lines", g_fmv_log.lines); fmv_put(b); } }
     }
+    fmv_flush();
 }
 
 // (b) DLL loads and unloads after init (LdrRegisterDllNotification). The callback runs under the loader lock on the loading
@@ -11422,6 +11515,7 @@ extern "C" __declspec(dllexport) void ffxvr_shutdown() {
     pf_shutdown();     // load lock build: the profiler's watcher stops (its last block written); the lock release needs no teardown
     if (g_wd_stop) { SetEvent(g_wd_stop); if (g_wd_thread) WaitForSingleObject(g_wd_thread, 200); }   // build 7: no stall capture during exit
     pdh_stop();            // od-guard (g): no GPU snapshot during exit
+    fmvw_stop();           // fmv-sync: the depth file worker
     dll_notify_remove();   // od-guard (b)
     InterlockedExchange(&g_va_on, 0);   // the reservation log: nothing recorded during exit (the patch stays: the DLL is never unloaded)
     {   // SR-1: an extra frame already past its checks finishes (or stops at its next OpenXR call) before the session goes away

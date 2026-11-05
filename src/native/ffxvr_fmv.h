@@ -6,9 +6,13 @@
 //
 // The movie player (our exe, VA with the image at 0x400000; each fact re-checked in scratchpad/ffxexe/text.txt):
 //   [0xCDED3C]      sFMVPlayerManager* (made at 0x6D717E, 0 at 0x6D738B), 0x750 bytes (push 0x750 at 0x6D715C)
-//   mgr+0x6D0 u8    playing: 1 at the end of start 0x6D8FC0 (0x6D9159); 0 at the natural end 0x6D7884 (with +0x6D8 =
-//                   0xFFFE at 0x6D787A), at a skip 0x6D9559, in stop 0x6D71C7 (word 0x100: +0x6D1 = 1 "destroying"),
-//                   at load 0x6D9D83 (word 0). The update 0x6D7680 uploads a frame only while it is set (0x6D77A2).
+//   mgr+0x6D0 u8    playing: 1 at the end of start 0x6D8FC0 (0x6D9159) and in 0x6DA9B0 (0x6DAB51: opens a video by path,
+//                   +0x6D8 = 0, sets neither the name nor the id nor 0xCDED31; no call, jump or data reference to it was
+//                   found: probably dead; if it ever runs, the probe names the previous video); 0 in the constructor
+//                   0x6D6A89, at the natural end 0x6D7884 (with +0x6D8 = 0xFFFE at 0x6D787A), at a skip 0x6D9559, in stop
+//                   0x6D71C7 (word 0x100: +0x6D1 = 1 "destroying"), at load 0x6D9D83 (word 0), and at 0x6DAC40 (from the
+//                   event command 0x76EA60 via 0x643E50: playing alone cleared, the probe's "stopped before its end").
+//                   The update 0x6D7680 uploads a frame only while it is set (0x6D77A2).
 //   mgr+0x6D2 u8    open: the update and draw run only with it (0x6D768A, 0x6D7576); 1 at 0x6D8F6C, 0 in close 0x6D91A3
 //   mgr+0x4F0       char[0x80] the file name: load 0x6D9C80 empties it (strcpy "" 0x6D9CC3), 0x6D93E0 fills it with
 //                   snprintf(buf, 0x80, "%s", map[id]) (0x6D9436..0x6D943E); unknown id: stays "" ("didn't find FMV")
@@ -18,7 +22,8 @@
 //                   0xA27BD0 = trunc((count + 1) * ms_per_frame); 0xFFFE = ended (0x6D787A, skip 0x6D9528); +0x6E0 the
 //                   previous value
 //   mgr+0x6E4 u8    a frame was uploaded (1 at 0x6D7828 / 0x6DAE9D; 0 at load)
-//   mgr+0x6FC u8    paused (the toggle 0x6DA4B0: player pause 0xA27E90 and +0x6FC = !+0x6FC; the update skips while set)
+//   mgr+0x6FC u8    paused (the toggle 0x6DA4B0: player pause 0xA27E90 and +0x6FC = !+0x6FC; also 1 from the update itself
+//                   at 0x6D785D when +0x6FD is set and the skippable flag is 0; the update skips while set)
 //   mgr+0x570 u8    the upload runs on the render thread (0x6D9DC8: ids 0x20 / 0x2E / 0x48 or +0x6FE)
 //   mgr+0x74C u8    the skip prompt is up (pad 0x800 at 0x6D94A9 while +0x74D; a second press 0x80 skips, 0x6D94E3)
 //   mgr+0x74D u8    skipping is allowed for this id (0x6D9D6A: 0 for the 16 ids of the table 0xB49B08: 2 4 6 18 24 32 38
@@ -99,10 +104,11 @@ inline double ms_from_frames(double n) { return n * 1001.0 / 30.0; }
 
 // -- the .fvd header (tools/fmvdepth/FORMAT.md, "Reader validation" 1-5) ------------------------------------------------
 enum FvdStatus : int { FVD_UNCHECKED = 0, FVD_OK, FVD_ABSENT, FVD_NO_NAME, FVD_READ, FVD_SHORT, FVD_MAGIC, FVD_VERSION, FVD_INCOMPLETE,
-                       FVD_HEADER, FVD_CODEC, FVD_INDEX, FVD_THUMBS, FVD_N };
+                       FVD_HEADER, FVD_CODEC, FVD_INDEX, FVD_THUMBS, FVD_CHECKING, FVD_CLOUD, FVD_N };
 static const char* const k_fvd[FVD_N] = { "not checked", "present", "absent", "absent (the name has no depth file form)", "unreadable",
     "invalid (shorter than a header)", "invalid (not an .fvd file)", "invalid (a version this build does not know)", "invalid (unfinished)",
-    "invalid (header size or frame size)", "invalid (codec or predictor)", "invalid (index out of the file)", "invalid (thumbnails out of the file)" };
+    "invalid (header size or frame size)", "invalid (codec or predictor)", "invalid (index out of the file)", "invalid (thumbnails out of the file)",
+    "checking...", "not checked (cloud-only)" };
 inline const char* fvd_text(int st) { return st >= 0 && st < FVD_N ? k_fvd[st] : "?"; }
 struct FvdInfo {
     int status = FVD_UNCHECKED;
@@ -213,7 +219,7 @@ inline void fmv_update(Fmv& f, const Snap& s, double now, int mode, bool cam3d) 
         }
         if (s.dur_ms != 0) f.dur_ms = s.dur_ms;
     }
-    if (s.frame < k_frame_end) {
+    if (s.s_ok && s.frame < k_frame_end) {
         if (!f.have_f) { f.have_f = true; f.f_first = f.f_last = s.frame; }
         else if (s.frame > f.f_last) { const uint32_t j = s.frame - f.f_last; if (j > f.f_jump_max) f.f_jump_max = j; f.f_last = s.frame; }
         else if (s.frame < f.f_last) f.f_back++;
@@ -281,7 +287,7 @@ inline const char* model_name(uint8_t m) { return m == 0 ? "fake model: a pipeli
 inline size_t add_fvd(char* b, size_t cap, size_t len, const FvdInfo& v) {
     if (v.file[0] == 0) return add(b, cap, len, "%s", fvd_text(v.status));
     len = add(b, cap, len, "%s (fmvdepth\\%s", fvd_text(v.status), v.file);
-    if (v.status == FVD_OK || v.status >= FVD_HEADER)
+    if (v.status == FVD_OK || (v.status >= FVD_HEADER && v.status <= FVD_THUMBS))
         len = add(b, cap, len, ": %u frames %ux%u, %s%s", v.frames, v.w, v.h, model_name(v.model), v.name_match ? "" : ", its source name differs");
     return add(b, cap, len, ")");
 }
@@ -292,6 +298,12 @@ inline void start_line(char* b, size_t cap, const Fmv& f, const FvdInfo& v, uint
                    static_cast<unsigned long long>(f.dur_ms), frames_from_ms(f.dur_ms), f.u_start);
     n = add_fvd(b, cap, n, v);
     if (suppressed) add(b, cap, n, " | %u fmv starts not logged before this one (the limit)", suppressed);
+}
+/// fmv: depth file ... (the worker's result for a logged start, one line).
+inline void fvd_line(char* b, size_t cap, const char* name, uint32_t id, const FvdInfo& v, double ms) {
+    size_t n = add(b, cap, 0, "fmv: depth file for '%s' id %u: ", name, id);
+    n = add_fvd(b, cap, n, v);
+    add(b, cap, n, " (checked off the render thread in %.0f ms)", ms);
 }
 /// fmv: end ... (one line): the counts, the timing, the comparison with the file, the views.
 inline void end_line(char* b, size_t cap, const Fmv& f, const FvdInfo& v) {
