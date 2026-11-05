@@ -20,7 +20,7 @@ namespace FFXVR;
 //   fmv_depth_median     0 / 1 (default 1; Debug): a 3x3 median on each decoded depth frame (speckle);
 //   fmv_depth_edges      0 / 1 (default 1; Debug): the edge fill: a triangle stretched across a depth edge shows the colour of
 //                        the far side instead of a smear;
-//   fmv_depth_edge_band  0..0.15 (default 0.04; Debug): the band at the border over which content in front of the screen is
+//   fmv_depth_edge_band  0.01..0.15 (default 0.04; Debug; never 0, review3 N-5): the band at the border over which content in front of the screen is
 //                        brought back to the screen plane; content behind it is never feathered (the window rule, owner
 //                        test round 3: the old feather on everything made a "shelf" at the top edge);
 //   depth as colour      Debug, session-only: the depth drawn as colour (red near, green middle, blue far) to judge it;
@@ -66,6 +66,18 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     /// <summary>The angular disparity (degrees) against the screen plane of a point at distance z, eyes 63 mm apart.</summary>
+    /// <summary>The pop-out and range the native side applies at this screen distance: relief::make_map's comfort limits
+    /// (review3 SF-2: crossed at most 1 deg, uncrossed at most 1.5 deg, eyes 63 mm apart; the nearest at least 0.5 m away).</summary>
+    private void fmv3d_limits(out float pop, out float range, out bool pop_limited, out bool range_limited) {
+        float ds = Math.Max(_xr_screen_dist, 0.6f);
+        pop = Math.Clamp(_fmv_depth_pop, 0f, ds - 0.5f); range = Math.Clamp(_fmv_depth_range, 0f, 50f);
+        float c = 1.0f / 57.29578f / 0.063f, u = 1.5f / 57.29578f / 0.063f;
+        float zn_min = 1f / (1f / ds + c);
+        pop_limited = ds - pop < zn_min; if (pop_limited) pop = ds - zn_min;
+        range_limited = false;
+        if (1f / ds - u > 0f) { float zf_max = 1f / (1f / ds - u); if (ds + range > zf_max) { range = zf_max - ds; range_limited = true; } }
+    }
+
     private float fmv3d_disparity(float z) {
         float ds = Math.Max(_xr_screen_dist, 0.6f);
         return 0.063f * (1f / z - 1f / ds) * 57.29578f;
@@ -92,8 +104,9 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("depth range: the farthest, behind the screen##fmv3d", ref _fmv_depth_range, 0.5f, 10f, "%.1f m");
         ImGui.SameLine(); ImGui.SetNextItemWidth(160); ImGui.SliderFloat("pop-out: the nearest, in front##fmv3d", ref _fmv_depth_pop, 0f, 0.5f, "%.2f m");
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("smoothing (less shimmer, within a shot)##fmv3d", ref _fmv_depth_smooth, 0f, 0.95f, "%.2f");
+        fmv3d_limits(out float pop, out float range, out bool pl, out bool rl);
         float ds = Math.Max(_xr_screen_dist, 0.6f);
-        ImGui.SameLine(); ImGui.TextDisabled(esc(FormattableString.Invariant($"disparity {fmv3d_disparity(Math.Max(ds - _fmv_depth_pop, 0.5f)):+0.00;-0.00} deg in front, {fmv3d_disparity(ds + _fmv_depth_range):+0.00;-0.00} deg behind (comfortable within about 1)")));
+        ImGui.SameLine(); ImGui.TextDisabled(esc(FormattableString.Invariant($"disparity {fmv3d_disparity(ds - pop):+0.00;-0.00} deg in front{(pl ? $" (pop-out limited to {pop:0.00} m: 1 deg at this screen distance)" : "")}, {fmv3d_disparity(ds + range):+0.00;-0.00} deg behind{(rl ? $" (range limited to {range:0.0} m: 1.5 deg)" : "")}")));
         string note = fmv3d_text(1);
         if (note.Length > 0) ImGui.TextDisabled("  " + esc(note));
     }
@@ -106,7 +119,7 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.Checkbox("FMV 3D: depth as colour (red near, blue far)##fmv3d", ref _fmv_depth_colour); ImGui.SameLine();
             ImGui.Checkbox("edge fill##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
-            ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0f, 0.15f, "%.3f");
+            ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");
             ImGui.Checkbox("FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)##fmv3d", ref _fmv_depth_tight_fov);
             ImGui.SameLine(); ImGui.SetNextItemWidth(100);
             ImGui.SliderInt("depth frame offset (sync test, not saved)##fmv3d", ref _fmv_depth_offset, -3, 3);

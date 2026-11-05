@@ -1070,7 +1070,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "fmv_depth_smooth":  pf(k, v, ref _fmv_depth_smooth, 0f, 0.95f); break;  // the temporal filter within a shot (default 0.6)
                 case "fmv_depth_median":  pb(k, v, ref _fmv_depth_median); break;            // Debug: the 3x3 median (default 1)
                 case "fmv_depth_edges":   pb(k, v, ref _fmv_depth_edges); break;             // Debug: the edge fill (default 1)
-                case "fmv_depth_edge_band": pf(k, v, ref _fmv_depth_edge_band, 0f, 0.15f); break;   // Debug: where pop-out ramps to the screen plane at the border (default 0.04)
+                case "fmv_depth_edge_band": pf(k, v, ref _fmv_depth_edge_band, 0.01f, 0.15f); break;   // Debug: where pop-out ramps to the screen plane at the border (default 0.04)
                 case "fmv_depth_flat_subs": pb(k, v, ref _fmv_depth_flat_subs); break;  // the bottom 15 % flat (subtitles; default 0)
                 case "fmv_depth_tight_fov": pb(k, v, ref _fmv_depth_tight_fov); break;  // Debug: the relief's projection narrowed to the screen (default 1; review SF-1)
                 case "fmv_depth_offset":  break;                                         // session-only since review N6: an old line is ignored (the offset starts at 0)
