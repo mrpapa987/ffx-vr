@@ -289,7 +289,11 @@ inline int press_hook(PressHook& h, bool pressed, uint32_t pkt, int32_t el_ms, i
     return 1 | count;
 }
 constexpr int k_sh_min_polls = 2;
-inline int32_t clamp_press_ms(int ms) { return ms < 0 ? 0 : ms > 300 ? 300 : ms; }
+/// grip_tap_press_ms: 0..150. Longer trips the game's repeat (0x630D30 / 0x6313A0: true on the edge and again once the hold
+/// passes 0.2333 s, the double at 0xB41380), so one squeeze in the switch list would step two entries; the hold is about
+/// max(press_ms, 2 polls) + one poll, at most about 183 ms at 150.
+constexpr int32_t k_press_ms_max = 150;
+inline int32_t clamp_press_ms(int ms) { return ms < 0 ? 0 : ms > k_press_ms_max ? k_press_ms_max : ms; }
 
 /// Quick squeezes waiting for the input thread's press slot (render thread only): at most 3 per hand, oldest first,
 /// alternating fairly when both hands queued.

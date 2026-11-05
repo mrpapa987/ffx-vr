@@ -13,7 +13,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool _move_walk_only = true;     // ini move_remap_walk_only (1): the remap only while walking; 0 = in every first-person view (the old behaviour, for an A/B)
     private int  _grip_lbrb = 1;             // ini grip_lbrb: 0 the grips are LB / RB at once (old), 1 a quick squeeze in battle and the seat / diorama, 2 everywhere
     private int  _grip_tap_ms = 300;         // ini grip_tap_ms (150..500): a quick squeeze is released within this
-    private int  _grip_tap_press_ms = 0;     // ini grip_tap_press_ms (0..300): the LB / RB press lasts 2 game polls and at least this (0: one CTB row a squeeze)
+    private int  _grip_tap_press_ms = 0;     // ini grip_tap_press_ms (0..150): the LB / RB press lasts 2 game polls and at least this (0: one CTB row a squeeze; over ~200 the game's repeat doubles it)
     private bool _vd_overlay_mask = true;    // ini vd_overlay_mask (1): both stick clicks send neither Back nor R3
     private int  _imgui_vrpad = 1;           // ini imgui_vrpad: 0 off, 1 the Quest controllers in Fahrenheit's save screen (default), 2 in all of ImGui
     private bool _imgui_vrpad_strict = false;   // ini imgui_vrpad_strict (0): 1 = refuse when the game's XInput import resolves into ImGui's DLL (at the install)
@@ -35,7 +35,7 @@ public sealed unsafe partial class FFXVRModule {
             case "move_remap_walk_only": pb(k, v, ref _move_walk_only); return true;
             case "grip_lbrb":            pe(k, v, ref _grip_lbrb, 0, 1, 2); return true;
             case "grip_tap_ms":          pi(k, v, ref _grip_tap_ms, 150, 500); return true;
-            case "grip_tap_press_ms":    pi(k, v, ref _grip_tap_press_ms, 0, 300); return true;
+            case "grip_tap_press_ms":    pi(k, v, ref _grip_tap_press_ms, 0, 150); return true;
             case "vd_overlay_mask":      pb(k, v, ref _vd_overlay_mask); return true;
             case "imgui_vrpad":          pe(k, v, ref _imgui_vrpad, 0, 1, 2); return true;
             case "imgui_vrpad_strict":   pb(k, v, ref _imgui_vrpad_strict); return true;

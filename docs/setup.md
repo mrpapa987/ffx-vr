@@ -185,7 +185,8 @@ stick).
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
 behaviour; 2 = quick squeeze everywhere), `grip_tap_ms` (300, 150..500), `grip_tap_press_ms` (0: the LB / RB press lasts 2
-game polls, one turn-order row; raise it, e.g. 100, if a squeeze is ever missed), `vd_overlay_mask` (1: also delays Back
+game polls, one turn-order row; raise it, e.g. 100, if a squeeze is ever missed; at most 150, as a longer press trips the
+game's key repeat), `vd_overlay_mask` (1: also delays Back
 and R3 by 80 ms, so the chord is seen first), `imgui_vrpad` (1 = the Quest controllers in Fahrenheit's save screen; 0 =
 off, also not installed at the next launch; 2 = in every ImGui window, Start and Back too, so both grips + menu is
 Fahrenheit's soft reset, a game over in battle), `imgui_vrpad_strict` (0; 1 = do not install when the game's XInput
