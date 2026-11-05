@@ -3934,7 +3934,7 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
   PowerShell before the install and asks the converter (`--check-out`) before its write test. A video name that is
   not `[A-Za-z0-9_]+.webm` (or is a Windows device name) is skipped with a warning. `$FfxvrFmvDepthDir` in paths.ps1 names the folder for all of them.
 - **For the runtime later** (static analysis of FFX.exe, not yet confirmed in game): manager `*(void**)0xCDED3C`
-  (FhUtil 0x8DED3C); playing = byte mgr+0x6D2; file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, mixed case as in
+  (FhUtil 0x8DED3C); playing = byte mgr+0x6D2 (corrected by the sync probe below: playing is +0x6D0, +0x6D2 is "open"); file name `char[0x80]` at mgr+0x4F0 (`OPN_us.webm`, mixed case as in
   FFX_VideoList.txt, "" when idle; the .fvd's src_name is lower-case: compare case-insensitively); id =
   int mgr+0x6DC; the player object is embedded at mgr+0x38 and its u32 +0x100 counts uploaded frames, so the frame on
   screen is that count - 1 = the .fvd frame index (clamp to the frame count). Depth file: `fmvdepth\<name lower-cased
@@ -3951,6 +3951,70 @@ mod code yet. Setup and use: docs/setup.md, "FMV depth". Format: tools/fmvdepth/
 - **Next**: S0 exit = the owner judges SIN_us / BTS_us depth plausible and notes VRAM and frames/s; S1 exit = the whole US
   list converted with total time, peak VRAM and GB measured (pin the weights hash then); S2 = the read-only sync probe in
   the mod.
+
+## FMV sync probe (S2, 4 Nov 2026)
+
+Branch `fmv-sync`. Stage S2 of the FMV depth plan: a read-only probe that knows which video plays and which of its frames
+is on screen. Diagnostics only: no rendering change, no export change (ABI 40). Native: src/native/ffxvr_fmv.h (pure: the
+fields, the tracker, the lines, the .fvd header check) and `fmv_frame` in ffxvr_native.cpp; managed: src/managed/fmv_sync.cs
+(F8's line). Notes and test results: scratchpad fixes/fmv-sync-impl.md.
+
+- **The fields** (re-verified in our exe's disassembly, VA with the image at 0x400000; ffxvr_fmv.h lists every writer):
+  manager `[0xCDED3C]` (0x750 bytes, `push 0x750` at 0x6D715C); **playing = byte +0x6D0** (1 at the end of start
+  0x6D9159; 0 at the natural end 0x6D7884, at a skip 0x6D9559, in stop 0x6D71C7, at load 0x6D9D83; the update 0x6D7680
+  uploads only while it is set, 0x6D77A2), +0x6D2 = open (the update and draw run only with it; 0 in close 0x6D91A3);
+  name `char[0x80]` +0x4F0 (emptied at load, filled by `snprintf(.., 0x80, "%s", ..)` at 0x6D943E; not cleared at stop),
+  id +0x6DC, frame number +0x6D8 (0xFFFE = ended), paused +0x6FC (the toggle 0x6DA4B0), render-thread upload +0x570,
+  skip prompt +0x74C, skip allowed +0x74D (0 for the 16 ids of the table 0xB49B08: 2 4 6 18 24 32 38 42 44 46 50 60 62
+  70 72 84). The player is embedded at +0x38: its duration in ms at player+0xF8 (from the WebM's ns, 0xA28148), the
+  uploaded count at player+0x100 (0 at open 0xA27F4B, `inc` after the Y/U/V upload 0xA28826, no other writer), ms per frame
+  at player+0x108, the size at +0x14C/+0x150. New: **byte 0xCDED31 = the user skipped** (1 only at the skip 0x6D9548, 0 at
+  every load 0x6D9D27); the game's frame number is `ftol(float(trunc((count + 1) * ms_per_frame)) * 29.97 * 0.001)`, which
+  equals the count for every count 0..30,000 at 30000/1001 fps (checked by emulating the exact arithmetic), so the frame on
+  screen is index count - 1 = frame number - 1. 0x76EFC0 returns 1 for event movie ids 0x20/0x2E/0x46/0x48 (= 32, 46, 70,
+  72, the hybrid candidates; ten callers).
+- **Cost.** Every Present: the manager pointer (exe image) and its playing word (one 4-byte guarded read of the heap).
+  Only while the playing byte or the skippable flag 0x112A008 is set (or an FMV is being tracked): three guarded reads of
+  the manager (0x80 + 0x5C + 0x84 bytes) and three small exe reads. At a logged start, the depth file's 128-byte header
+  (`CreateFileW` with `FILE_SHARE_READ | FILE_SHARE_DELETE`, one `ReadFile`, closed at once).
+- **The lines** (ffxvr_diag.log; at most 240 a session, a start keeps room for its end; a restart of the same video within
+  1 s is not logged and is counted on the next start line):
+  `fmv: start '<name>' id N (event movie id, skippable flag, skip allowed, render-thread / inline upload), view <v> | video
+  WxH, ms a frame (fps), duration ms (frames at 29.97) | count at start | depth file: present (fmvdepth\<file>: N frames
+  WxH, model) / absent / invalid (why)`.
+  `fmv: end '<name>' id N: ended / SKIPPED by the user / stopped before its end / replaced / the movie player went away |
+  s, Presents (per view), a 3D camera on K, paused on P, skip prompt on Q | uploaded a..b (changes seen, largest step,
+  frames never presented), first upload after ms, longest gap ms | s from the first to the last upload vs s at 29.97
+  (uploads/s) | frame number a..b (largest step, back), number - count range, at the end | expected: the game's duration
+  ms = frames, the file N frames = s | final count EQUALS the file's frame count / SHORT by k / OVER by k` (without a file:
+  the final count against the game's duration).
+- **F8** (Debug header): `FMV: <name> id N frame F/total uploaded U, mode screen/3D, depth file: present (N frames) /
+  absent`; total is the file's frame count, or `~` the game's duration at 29.97. Idle: `FMV: none playing (last ...)`.
+  Managed's own guarded reads, only while the Debug header is drawn; the depth file checked at most every 5 s per name.
+- **Exit criteria (S2)**: for OPN_us and END_us the end line says "final count EQUALS the file's frame count" (with the
+  .fvd present; without it, the count against the game's duration, `+0` expected); a skipped FMV ends "SKIPPED by the
+  user" with a count short of the file; for the hybrid ids the end line's views and "a 3D camera on K" say whether the
+  game draws a 3D camera while the movie plays (K close to the Presents: a movie backdrop behind 3D; the relief must then
+  stay off). If the count ends short of the file on a natural end, the player stops at the duration before the last frame
+  (the update's `(count + 1) * ms >= duration` test, 0x6D76D2..0x6D76F4) and S3 clamps to the last frame.
+- **Verified here** (container): ffxvr_fmv.h's unit test (offsets on a synthetic 0x750-byte manager, the frame number
+  formula, the file name rule, 23 .fvd files written by tools/fmvdepth/fvd.py incl. damaged copies with the same verdicts as
+  fvd.py's FvdReader, the tracker on a simulated OPN_us at 72 Hz / a 20 Hz monitor / skip / stop / replace / gone / hybrid /
+  paused, the limits, truncation; mutations caught); FmvSync's C# test (the same files and verdicts, the F8 text); the
+  native syntax check and the managed compile check unchanged. **Not verified**: anything in game.
+
+Owner test steps (ffxvr_diag.log, lines starting `fmv:`; F8 > Debug shows the FMV line live):
+1. The opening FMV (start a new game): watch it to the end without skipping. Expect a `fmv: start
+   'OPN_us.webm' ...` line and an `fmv: end ... ended ...` line; note "final count ..." and the uploads/s (about 29.97).
+   With F8 open during it, the FMV line's frame should run up to the total.
+2. Skip one FMV (one that shows the skip prompt: the game's own two presses, the prompt button and then the confirm;
+   in the code pad bit 0x800 opens the prompt, 0x80 confirms, 0x6D94A9 / 0x6D94E3). Expect `SKIPPED by the
+   user` and the count where you skipped. If no prompt ever comes, its id is in the no-skip table (the start line says
+   "skip allowed 0").
+3. If you know a scene where an FMV plays behind real-time characters (ids 32 MST_us, 46 FAR_us, 70 GGM_us, 72 SNS_jp:
+   which story scenes these are is not known here), play it with the headset on: the end line's views ("3D N" / "screen N") and
+   "a 3D camera on K" tell how it was shown. Say whether it looked right in the headset.
+4. Send the `fmv:` lines (and, if you converted any videos, which .fvd files you have).
 
 ## Slow-GPU guard and overdrive freeze diagnostics (3 Nov 2026)
 
