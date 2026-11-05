@@ -4175,16 +4175,25 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   upload, in display order, a per-pixel temporal filter (relief::ema, 8.8 fixed point): the depth follows (1 - smooth) of
   the gap per video frame (fmv_depth_smooth, default 0.6: 40 %), but a change of more than 24 of 255 is taken at once
   (motion, not noise: no ghost behind a moving edge); reset at every cut and after a flat stretch. 115 KB with the upload
-  copy. (c) The rubber sheet: a triangle across a depth edge stretches from the near to the far side; seen from E it is
-  edge-on (invisible), from an eye a few centimetres off it shows a smear. The pixel shader takes its triangle's
-  disparity slope from ddx / ddy of 1/Z and of the uv (constant over a triangle: SM4, no geometry shader): slope =
-  |d(1/Z) / d screen| in 1/m per m (review3 SF-1: the first build used metres of depth per metre, which grows with Z^2, so
-  at a 10 m range one or two 8-bit levels of the far background filled and blotched; in disparity a step fills the same
-  near and far, and the width an eye b off E sees is b x the step, which is what makes a sheet visible), and blends its
-  colour toward the video two cells further to the far side (the background the edge would uncover), from 0.738 (none) to
-  2.305 (full), the first build's 8 / 25 m/m at the default map's middle depth (3.29 m): at range 3 m a step of 12 levels
-  between neighbouring vertices starts the fill (13 before, at n = 0.5), at 10 m about 9 levels; one level never does
-  (fmv_depth_edges, default 1). That sample uses SampleLevel (no gradient in a varying branch). (d) Debug, session-
+  copy. (c) The rubber sheet and the edge fill (**Debug, off by default since round 6**, ini `fmv_depth_edge_fill`; the old
+  key `fmv_depth_edges`, saved as 1 by every earlier build, is ignored). A triangle across a depth edge stretches from the
+  near to the far side; from an eye a few centimetres off E it shows a smear. The first fill (rounds 3-5) took each
+  triangle's slope from ddx / ddy (constant over the triangle) and recoloured the whole triangle from two cells toward the
+  far side. It first ran in the owner's build of 636c7f7 (review3 B-1 had left its constants unbound) and drew "a tetris
+  game" around faces: seen from E every triangle covers exactly its own cell of the picture (each vertex is on its
+  pixel's ray), so the fill repainted the picture itself, cell-sized triangle by triangle, switching on and off between
+  neighbours and biting into the face. Reproduced in relief_test (test_fill_blocks: his settings, a face disc on a far
+  background, the worker's median): 235 triangles filled over half, 163 of them touching the face, 294 hard steps between
+  neighbouring triangles; noise was not the cause. The rework (relief::fill_vertex, the VS): per vertex, the slope of 1/Z
+  as a central difference over the four neighbours one cell away (1/m per m: the same at any range; thresholds 0.369 /
+  1.153 with a smoothstep ramp, the round-5 one-cell 0.738 / 2.305 halved for the two-cell difference: at range 3 m a
+  step of about 12 levels starts it, one level never does), gated by where the vertex lies in its neighbourhood's depth
+  (0 at the near side's own depth: the near object is never recoloured; 1 on the far side), and a sample offset toward the
+  far side of up to two cells (shrinking with the slope below the ramp; cells now from the video rect, so 4:3 is right too,
+  review3 N-2). Both are vertex outputs, interpolated: the weight is continuous across every triangle edge by construction,
+  and the pixel shader only lerps. Same test: 104 vertices over half, 0 face vertices over 0.25, 0 at the face's own depth.
+  It still alters the picture seen from E in the cell beside a silhouette (the background there is drawn from up to two
+  cells further out), which is why it stays an experiment for an A/B in the headset. (d) Debug, session-
   only: `depth as colour` (red near, green middle, blue far) to judge the depth itself in the headset.
 - **Would converter changes help?** (not done; estimates)
   - Per-shot constant lo / hi (a second pass over each shot, ~35 MB of float16 maps for a 300-frame shot): with the depth
@@ -4223,7 +4232,7 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
   amount 1.00, 3.0 m behind / 0.15 m in front, 1.80 rows a video row (tight fov) | decode avg 0.31 / max 2.10 ms (1241 decoded, 0 errors),
   ring 8/8 | in 3D on 2900 of 2950 Presents` (or `, flat screen (<reason>)`; `FMV 3D: off (fmv_depth 0)`; `FMV 3D: no movie
   playing (last movie ...)`), the checkboxes `FMV 3D: depth as colour (red near, blue far)` (session-only), `edge fill`
-  and `3x3 median` (ini fmv_depth_edges / fmv_depth_median), `edge band (pop-out only)` (ini fmv_depth_edge_band, 0.01..0.15 (review3 N-5: never 0),
+  and `3x3 median` (ini fmv_depth_edge_fill (default 0) / fmv_depth_median), `edge band (pop-out only)` (ini fmv_depth_edge_band, 0.01..0.15 (review3 N-5: never 0),
   default 0.04), `FMV 3D: tight field of view (sharper; off = the eye's whole, A/B)` (ini
   `fmv_depth_tight_fov`) and `depth frame offset (sync test, not saved)` (-3..3: session-only, 0 at every start, not in the
   ini; review N6).
@@ -4280,7 +4289,7 @@ or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
 4. Depth: the defaults (amount 1, range 3 m, pop-out 0.15 m) should read as clearly 3D (the farthest content 3 m behind the
    screen). Try range 1.5 and 6 m, pop-out 0 and 0.3 m, and say what is comfortable over a whole movie. F8 > Debug `depth as
    colour` shows the depth itself (red near, blue far): say whether it follows the objects, and whether it shimmers;
-   compare `smoothing` 0, 0.6 and 0.9, and `3x3 median` / `edge fill` off and on (edge fill: look at silhouettes from a
+   compare `smoothing` 0, 0.6 and 0.9, and `3x3 median` and `edge fill (experimental)` off and on (it is off by default; look at silhouettes from a
    little to the side). With subtitles on, try `flatten the bottom 15% (subtitles)` (the bottom 15 % lies flat).
    The top edge (round 3's "shelf"): far content should now go back right up to the frame's edge, like a window; say
    whether anything near the edges looks cut or doubled, and try `edge band (pop-out only)` 0 and 0.1 in F8 > Debug.

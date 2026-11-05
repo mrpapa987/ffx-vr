@@ -327,18 +327,38 @@ inline Weights weights(float a, float b, float band, bool flat_bottom) {
     if (flat_bottom) w.all = 1.f - smooth01((b - (1.f - k_band - k_band_ramp)) / k_band_ramp);
     return w;
 }
-/// The rubber sheet (the triangles stretched across a depth edge): the pixel shader measures its triangle's disparity slope
-/// (from ddx / ddy of 1/Z and the uv) and blends its colour toward the colour two cells further toward the far side (the
-/// background, roughly what the edge uncovers), fully at k_edge_hi.
-/// Review3 SF-1: the slope is in disparity, |d(1/Z) / d(screen)| in 1/m per m, so it means the same at any range: the
-/// parallax a step shows (an eye b off E sees it b d(1/Z) wide) is what makes a rubber sheet visible. The thresholds are the
-/// first build's 8 / 25 m of depth per metre of screen at Z(0.5) of the default map (3.29 m): / 3.29^2.
-constexpr float k_edge_lo = 0.738f, k_edge_hi = 2.305f, k_edge_cells = 2.f;
+/// The edge fill (Debug, off by default; round 6). The first version measured each triangle's disparity slope in the pixel
+/// shader (ddx / ddy: constant over a triangle) and recoloured the whole triangle from two cells toward the far side: but
+/// seen from the nominal eye every triangle covers exactly its own cell of the picture (each vertex is on its pixel's ray),
+/// so that recoloured the picture itself in cell-sized triangles along every silhouette, switching triangle by triangle:
+/// the owner's "tetris" blocks. Now the weight is per vertex and interpolated (continuous across every triangle edge): the
+/// slope is a central difference of 1/Z over the vertex's neighbours one cell away (the same in x and y, any range), ramped
+/// softly, and gated by how far the vertex lies toward the far side of its neighbourhood (0 on the near side of a depth
+/// edge, so the near object is never recoloured; 1 on the far side); the fill sample is offset from the vertex toward
+/// the far side by up to two cells, the offset shrinking with the slope below the ramp. It still changes the picture seen
+/// from the nominal eye in the cell next to a silhouette, so it stays an experiment.
+/// Thresholds in 1/m per m of |grad(1/Z)|: a central difference sees a sharp step over two cells, so these are half the
+/// one-cell 0.738 / 2.305 (round 5): a step of about 12 levels between neighbours starts the fill at range 3 m.
+constexpr float k_edge_lo = 0.369f, k_edge_hi = 1.153f, k_edge_cells = 2.f;
 inline float edge_fill(float slope) { return smooth01((slope - k_edge_lo) / (k_edge_hi - k_edge_lo)); }
-/// The edge fill between two neighbouring vertices (n0, n1 at weight 1) a cell of `cell_m` metres apart (the CPU copy of
-/// the pixel shader's slope).
+/// One vertex's fill (the VS's copy): n and its neighbours left / right / up / down one cell away (disparity 0..1), the
+/// vertex's weights, the cell in metres (cu, cv) and in the colour texture's uv (tu, tv). f: the fill amount 0..1; du, dv:
+/// the sample's uv offset.
+struct FillV { float f, du, dv, slope; };
+inline FillV fill_vertex(const Map& m, float n, float nl, float nr, float nu, float nd, float w_pop, float w_all, float cu, float cv, float tu, float tv) {
+    auto q = [&](float x) { return 1.f / map_z(m, x, w_pop, w_all); };
+    const float q0 = q(n), ql = q(nl), qr = q(nr), qu = q(nu), qd = q(nd);
+    const float gu = (qr - ql) / (2.f * cu), gv = (qd - qu) / (2.f * cv);   // v down, as the uv
+    const float sl = sqrtf(gu * gu + gv * gv);
+    const float qmax = fmaxf(fmaxf(fmaxf(ql, qr), fmaxf(qu, qd)), q0), qmin = fminf(fminf(fminf(ql, qr), fminf(qu, qd)), q0);
+    const float farside = qmax - qmin > 1e-9f ? clampf((qmax - q0) / (qmax - qmin), 0.f, 1.f) : 0.f;
+    const float sc = k_edge_cells / fmaxf(sl, k_edge_lo);
+    return { edge_fill(sl) * farside, -gu * sc * tu, -gv * sc * tv, sl };
+}
+/// The fill a sharp step from n0 to n1 between neighbouring vertices a cell of `cell_m` apart gives (its slope as the
+/// central difference sees it: the step over two cells).
 inline float edge_fill_between(const Map& m, float n0, float n1, float cell_m) {
-    return edge_fill(fabsf(1.f / map_z(m, n0, 1.f) - 1.f / map_z(m, n1, 1.f)) / cell_m);
+    return edge_fill(fabsf(1.f / map_z(m, n0, 1.f) - 1.f / map_z(m, n1, 1.f)) / (2.f * cell_m));
 }
 
 // -- noise ------------------------------------------------------------------------------------------------------------

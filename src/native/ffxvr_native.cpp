@@ -12348,15 +12348,16 @@ static uint16_t* g_rel_ema = nullptr;                    // the temporal filter'
 // viewer; W x W * 9/16 for the whole backbuffer, as the flat screen shows it), each vertex moved along the ray from the
 // nominal eye (X.x, 0, Ds) (the midpoint between the eyes, review3 N-1) through its pixel to distance Z = 1 / (1/Ds + k D'), D = 1/Zf + n (1/Zn - 1/Zf) - 1/Ds, D' = D x
 // (the edge weight when D > 0: only pop-out is feathered at the border, the window rule) x (the subtitle band). The pixel
-// shader samples the video; on a triangle whose disparity slope |d(1/Z) / d(screen)| exceeds k_edge_lo (1/m per m; review3
-// SF-1: the same at any range) it blends toward the colour two cells further to the far side (relief::edge_fill, from ddx /
-// ddy of 1/Z and the uv: constant over a triangle, SM4, no geometry shader); E.w: the depth as colour.
+// shader samples the video; with the edge fill (Debug, off by default) it blends toward the colour up to two cells further
+// to the far side by a weight the VS computes per vertex from the neighbouring depths (relief::fill_vertex; round 6: the
+// first version's per-triangle ddx / ddy weight recoloured whole cells: blocks); E.w: the depth as colour.
 // R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: the edge band (pop-out only), band, band ramp, flatten the bottom;
 // E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m).
 static const char k_rel_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; float4 X; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
-    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float q : TEXCOORD1; float n : TEXCOORD2; };\n"
+    "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float n : TEXCOORD1; float3 fo : TEXCOORD2; };\n"
+    "float qof(float n, float wp, float wa) { float inv0 = 1 / Z.x; float dd = Z.z + n * (Z.y - Z.z) - inv0; dd *= (dd > 0 ? wp : 1) * wa; return inv0 + Z.w * dd; }\n"
     "VO vs(uint id : SV_VertexID) {\n"
     "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
     "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
@@ -12366,25 +12367,26 @@ static const char k_rel_hlsl[] =
     "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
     "    float wp = F.x > 0 ? smoothstep(0, 1, e / F.x) : 1;\n"
     "    float wa = F.w > 0.5 ? 1 - smoothstep(0, 1, (b - (1 - F.y - F.z)) / F.z) : 1;\n"
-    "    float inv0 = 1 / Z.x; float dd = Z.z + n * (Z.y - Z.z) - inv0; dd *= (dd > 0 ? wp : 1) * wa;\n"
-    "    float inv = inv0 + Z.w * dd;\n"
+    "    float inv = qof(n, wp, wa);\n"
     "    float t = 1 / (inv * Z.x);\n"
     "    float u = R.x + a * R.z, v = R.y + b * R.w;\n"
-    "    VO o; o.p = mul(MVP, float4(X.x + ((u - 0.5) * G.x - X.x) * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.q = inv; o.n = n; return o;\n"
+    "    VO o; o.p = mul(MVP, float4(X.x + ((u - 0.5) * G.x - X.x) * t, (0.5 - v) * G.y * t, Z.x * (1 - t), 1)); o.t = float2(u, v); o.n = n; o.fo = 0;\n"
+    "    if (E.x > 0.5) {   // the edge fill, per vertex (relief::fill_vertex): interpolated, so continuous across every triangle edge\n"
+    "        float2 c1 = float2(1 / G.z, 1 / G.w);\n"
+    "        float ql = qof(saturate(D.SampleLevel(S, float2(a - c1.x, b), 0)), wp, wa), qr = qof(saturate(D.SampleLevel(S, float2(a + c1.x, b), 0)), wp, wa);\n"
+    "        float qu = qof(saturate(D.SampleLevel(S, float2(a, b - c1.y), 0)), wp, wa), qd = qof(saturate(D.SampleLevel(S, float2(a, b + c1.y), 0)), wp, wa);\n"
+    "        float2 cm = float2(G.x * R.z / G.z, G.y * R.w / G.w), tc = float2(R.z / G.z, R.w / G.w);\n"
+    "        float2 g = float2((qr - ql) / (2 * cm.x), (qd - qu) / (2 * cm.y)); float sl = length(g);\n"
+    "        float qx = max(max(max(ql, qr), max(qu, qd)), inv), qn = min(min(min(ql, qr), min(qu, qd)), inv);\n"
+    "        float fs = qx - qn > 1e-9 ? saturate((qx - inv) / (qx - qn)) : 0;\n"
+    "        float2 off = -g * (2 / max(sl, E.y)) * tc;\n"
+    "        o.fo = float3(off, smoothstep(0, 1, (sl - E.y) / (E.z - E.y)) * fs);\n"
+    "    }\n"
+    "    return o;\n"
     "}\n"
     "float4 ps(VO i) : SV_Target {\n"
     "    float3 c = T.Sample(S, i.t).rgb;\n"
-    "    if (E.x > 0.5) {\n"
-    "        float2 tx = ddx(i.t), ty = ddy(i.t); float zx = ddx(i.q), zy = ddy(i.q);\n"
-    "        float det = tx.x * ty.y - tx.y * ty.x; float ok = abs(det) > 1e-14 ? 1.0 : 0.0; det = ok > 0 ? det : 1.0;\n"
-    "        float2 g = float2((zx * ty.y - zy * tx.y) / det, (zy * tx.x - zx * ty.x) / det);\n"
-    "        float2 gm = float2(g.x / G.x, g.y / G.y);\n"
-    "        float s = length(gm);\n"
-    "        float f = ok * smoothstep(0, 1, (s - E.y) / (E.z - E.y));\n"
-    "        float2 dir = -gm / max(s, 1e-6); float L = 2 * G.x / G.z;\n"
-    "        float3 b = T.SampleLevel(S, i.t + float2(dir.x * L / G.x, dir.y * L / G.y), 0).rgb;   // no gradient in a varying branch (SM4)\n"
-    "        c = lerp(c, b, f);\n"
-    "    }\n"
+    "    c = lerp(c, T.SampleLevel(S, i.t + i.fo.xy, 0).rgb, i.fo.z);   // the edge fill (0 when off: fo = 0)\n"
     "    if (E.w > 0.5) { float n = i.n; c = saturate(float3(2 * n - 1, 1 - abs(2 * n - 1), 1 - 2 * n) + 0.1); }\n"
     "    return float4(c, 1);\n"
     "}\n";
