@@ -653,6 +653,27 @@ template <class L> inline float jbu_ref(const float* sn, const float* orig, cons
     const float b = smooth01(k_jbu_edge, 2.f * k_jbu_edge, mx - mn) * smooth01(k_jbu_c0, k_jbu_c1, static_cast<float>(fabs(G[1] - G[0])));
     return static_cast<float>(lin + b * (lay - lin));
 }
+// -- round 10b: the grid as a Debug choice, and the edge softening ---------------------------------------------------------
+// The owner's first look (v2 files, amount 1, range 4.7 m): the guided grid streaks and distorts; round 7's grid shows v2's
+// sharp edges as a texel staircase. The grid is now a three-way choice (ffxvr_fmv3d_set flags bits 8-9): round 7's 320
+// grid (the default), the 640 grid on the plain depth map (bilinear at each vertex: no snap, no luma pick), and the guided
+// upsample. The edge softening (bits 10-13, tenths of a depth texel, 0..1.5) averages 4 bilinear taps at +-half its width
+// in the vertex shader's depth fetch (depth_at): a box of that width on the bilinear hat, separable.
+enum GridMode : int { GRID_320 = 0, GRID_SMOOTH = 1, GRID_GUIDED = 2 };
+inline int grid_mode(int flags) { const int m = (flags >> 8) & 3; return m == GRID_SMOOTH || m == GRID_GUIDED ? m : GRID_320; }
+inline float soft_texels(int flags) { return static_cast<float>((flags >> 10) & 15) / 10.f; }
+inline int soft_flags(float texels) { return (static_cast<int>(clampf(texels, 0.f, 1.5f) * 10.f + 0.5f) & 15) << 10; }
+/// The vertex shader's depth fetch (dsamp): map d (w x h, 0..1) at (u, v) with the softening (texels; 0: one bilinear tap).
+inline float depth_at(const float* d, uint32_t w, uint32_t h, float u, float v, float soft) {
+    auto bil = [&](float a, float b) {
+        const float x = a * w - 0.5f, y = b * h - 0.5f; const int x0 = static_cast<int>(floorf(x)), y0 = static_cast<int>(floorf(y)); const float fx = x - x0, fy = y - y0;
+        auto at = [&](int xx, int yy) { xx = (std::min)((std::max)(xx, 0), static_cast<int>(w) - 1); yy = (std::min)((std::max)(yy, 0), static_cast<int>(h) - 1); return d[static_cast<size_t>(yy) * w + xx]; };
+        return (at(x0, y0) * (1 - fx) + at(x0 + 1, y0) * fx) * (1 - fy) + (at(x0, y0 + 1) * (1 - fx) + at(x0 + 1, y0 + 1) * fx) * fy;
+    };
+    if (soft <= 0.f) return bil(u, v);
+    const float ou = 0.5f * soft / w, ov = 0.5f * soft / h;
+    return 0.25f * (bil(u - ou, v - ov) + bil(u + ou, v + ov) + bil(u + ou, v - ov) + bil(u - ou, v + ov));
+}
 /// The fine grid's indices: one triangle strip per row of cells, the rows cut by 0xFFFFFFFF (D3D11's strip cut for 32-bit
 /// indices). Vertex id = row x (cx + 1) + column (cx / cy: cells across / down); the VS takes the id (SV_VertexID is the
 /// index) apart. Each cell: (0,0) (0,1) (1,0), then (0,1) (1,0) (1,1): the same diagonal as the round 7 list.

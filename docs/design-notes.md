@@ -4561,6 +4561,34 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
     0.1). Left as notes: a failed constant-buffer Map in the upsample (removed device only) keeps the previous output for
     that Present; the worker's snap scratch (460 KB) stays allocated for the process; with the Debug causal filter the
     snapped copy is unfiltered; k_jbu_hlsl's one-time fxc compile time is in the "relief pass ready" diag line.
+- Round 10b (6 Nov 2026), the owner's first look (v2 files, amount 1, range 4.7 m, pop 0.2 m): the guided grid "streaks and
+  distorts"; round 7's grid has "a blocky appearance around edges". So the grid is a Debug choice, round 7's by default:
+  - `320 grid (round 7)` (default), `640 grid, smooth depth` (the fine grid on the plain depth map, bilinear at each vertex:
+    no snap, no luma pick), `640 grid, guided (round 10)`; and `edge softening (depth texels)` 0-1.5 (default 0): the vertex
+    shader's depth fetch averages 4 bilinear taps at +- half that (relief::depth_at), in every mode. On the 640 grid
+    anything up to 0.5 changes nothing (its vertices sit a quarter texel from the texel centres, where bilinear is
+    linear); 1.0 is the useful setting. All session-only (ffxvr_fmv3d_set flags bits 8-9 and 10-13: no ABI change).
+  - Measured (relief_test's test_grid_modes: a v2-like silhouette at 20 deg, near side grown 2.8 px, texels binary as the
+    worst case of v2's sharpening / area means; staircase = the 50 % line's wobble about the true edge, rms; 10-90 width;
+    stretch = how much each eye's image of the transition is stretched by the disocclusion, which at the owner's settings
+    is 7.2 video px an eye for a 0.2 -> 0.8 step, 11.9 for the full range):
+    | mode | staircase rms (binary / area) | 10-90 px | stretch an eye | fg flips on texture |
+    |---|---|---|---|---|
+    | 320 grid | 1.22 / 0.43 | 4.4 / 6.1 | x2.6 / x2.2 | 0 |
+    | 320 grid, softening 1.0 | 0.52 / 0.13 | 9.7 / 10.1 | x1.7 | 0 |
+    | 640 smooth | 0.87 / 0.25 | 5.2 / 6.3 | x2.4 / x2.1 | 0 |
+    | 640 smooth, softening 1.0 | 0.51 / 0.02 | 7.8 / 8.5 | x1.9 / x1.8 | 0 |
+    | 640 guided | 0.51 | 2.4 | x4.0 | 25 % |
+    The guided grid is the only one that undoes v2's 2.8 px growth (bias +0.4 against +2.8), but it pays with the stretch
+    and the flips. Ranked causes of its streaks (round 10 notes): (1) the disocclusion concentrated in one 2-px cell: each
+    eye stretches ~2.4 px of picture over ~9.6 px, a horizontal smear of one or two source pixels per row (with the
+    triangle diagonal, a comb) along every silhouette, where the old ramp spread it into a blur; (2) the per-pixel layer
+    pick on textured foregrounds (hair, cloth, foliage) whose dark or light details resemble the background: 25 % of the
+    foreground vertices within 12 px of the edge flip to the far side at +-0.2 texture, spikes the mesh tears around;
+    (3) no temporal filtering after the pick: compression noise changes the flips every frame (shimmer); (4) in fast
+    motion the depth frame and the picture disagree beyond the pass's +-2 texels; (5) the snap's plateaus (measured
+    harmless on slopes: the pass falls back to the bilinear map there); (6) the tight field of view: not a cause (the
+    guide reads the game's backbuffer copy, not the eye images).
 
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
