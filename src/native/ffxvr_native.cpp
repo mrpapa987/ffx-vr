@@ -12383,7 +12383,7 @@ struct RelFmv {
     bool fading = false; uint32_t fades = 0, loops = 0, cut_switches = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
     float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
     bool pop_limited = false, range_limited = false; float pop_used = 0.f, range_used = 0.f;   // review3 SF-2: the comfort limits at this screen distance
-    uint32_t grid_w = 0, grid_h = 0, jbu_runs = 0, fine_n = 0; bool guided = false;   // round 10: the grid drawn (cells), the upsample's runs, Presents on the fine grid
+    uint32_t grid_w = 0, grid_h = 0, jbu_runs = 0, fine_n = 0, smooth_n = 0; bool guided = false;   // round 10: the grid drawn (cells), the upsample's runs, Presents on the fine grid
 };
 static RelFmv g_rel;
 static uint32_t g_rel_gen = 0, g_rel_lines = 0;
@@ -12423,12 +12423,18 @@ static relief::Rect g_rel_jrect = { -1.f, -1.f, -1.f, -1.f };   // the rect the 
 // R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: the edge band (pop-out only), band, band ramp, flatten the bottom;
 // E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m), the depth map's texels across / down;
 // Y: half a backbuffer texel in uv (the colour's inset at the rect's edges, round 7.5), the grid indexed (round 10: SV_VertexID
-// is then the index, row x (cells across + 1) + column; else 6 a cell, round 7's list).
+// is then the index, row x (cells across + 1) + column; else 6 a cell, round 7's list). X.w / Y.w (round 10b): the edge
+// softening, half its width in uv across / down (the depth fetch averages 4 bilinear taps at +-that; 0: one tap).
 static const char k_rel_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; float4 X; float4 Y; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
     "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float n : TEXCOORD1; float3 fo : TEXCOORD2; };\n"
     "float qof(float n, float wp, float wa) { float inv0 = 1 / Z.x; float dd = Z.z + n * (Z.y - Z.z) - inv0; dd *= (dd > 0 ? wp : 1) * wa; return inv0 + Z.w * dd; }\n"
+    "float dsamp(float2 p) {   // round 10b: the edge softening (X.w, Y.w: half its width in uv; 0: one bilinear tap; relief::depth_at)\n"
+    "    if (X.w <= 0) return D.SampleLevel(S, p, 0);\n"
+    "    float2 o = float2(X.w, Y.w);\n"
+    "    return 0.25 * (D.SampleLevel(S, p - o, 0) + D.SampleLevel(S, p + o, 0) + D.SampleLevel(S, p + float2(o.x, -o.y), 0) + D.SampleLevel(S, p + float2(-o.x, o.y), 0));\n"
+    "}\n"
     "VO vs(uint id : SV_VertexID) {\n"
     "    uint nx = (uint)G.z; float cx, cy;\n"
     "    if (Y.z > 0.5) { cx = (float)(id % (nx + 1u)); cy = (float)(id / (nx + 1u)); }   // round 10: the fine grid, indexed strips (relief::strip_indices)\n"
@@ -12436,7 +12442,7 @@ static const char k_rel_hlsl[] =
     "        cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
     "        cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0); }\n"
     "    float a = saturate((cx - 0.5) / X.y), b = saturate((cy - 0.5) / X.z);   // a vertex per depth texel centre (relief::grid_coord)\n"
-    "    float n = saturate(D.SampleLevel(S, float2(a, b), 0));\n"
+    "    float n = saturate(dsamp(float2(a, b)));\n"
     "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
     "    float wp = F.x > 0 ? smoothstep(0, 1, e / F.x) : 1;\n"
     "    float wa = F.w > 0.5 ? 1 - smoothstep(0, 1, (b - (1 - F.y - F.z)) / F.z) : 1;\n"
@@ -12628,6 +12634,7 @@ static void rel_gpu_release() {
     drop(g_rel_ssrv); drop(g_rel_stex); drop(g_rel_grtv); drop(g_rel_gsrv); drop(g_rel_gtex); delete[] g_rel_sup; g_rel_sup = nullptr; g_rel_snap_ok = false;
     drop(g_rel_ib); g_rel_ib_cx = g_rel_ib_cy = g_rel_ib_n = 0;
 }
+static bool rel_gpu_ib(uint32_t dw);
 /// Round 10: the upsample's target (k_up dw x k_up 180) and the fine grid's indices; false: round 7's grid this frame.
 static bool rel_gpu_hi(uint32_t dw) {
     auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
@@ -12641,7 +12648,12 @@ static bool rel_gpu_hi(uint32_t dw) {
             || FAILED(g_device->CreateRenderTargetView(g_rel_htex, nullptr, &g_rel_hrtv))) { drop(g_rel_hrtv); drop(g_rel_hsrv); drop(g_rel_htex); return false; }
         g_rel_hw = hw; g_rel_jdue = relief::k_jbu_runs;   // new: filled before its first use
     }
-    const uint32_t cx = relief::grid_cells(hw), cy = relief::grid_cells(hh);
+    return rel_gpu_ib(dw);
+}
+/// The fine grid's index buffer (k_up dw x k_up 180 texels: 641 x 361 cells); false: round 7's list this frame.
+static bool rel_gpu_ib(uint32_t dw) {
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
+    const uint32_t cx = relief::grid_cells(relief::k_up * dw), cy = relief::grid_cells(relief::k_up * relief::k_h);
     if (g_rel_ib == nullptr || g_rel_ib_cx != cx || g_rel_ib_cy != cy) {
         drop(g_rel_ib); g_rel_ib_cx = g_rel_ib_cy = g_rel_ib_n = 0;
         std::vector<uint32_t> idx; relief::strip_indices(cx, cy, idx);
@@ -12746,7 +12758,7 @@ static ID3D11ShaderResourceView* rel_color_srv(ID3D11Texture2D* t) {
 }
 /// Both eyes: clear black, the grid with that eye's view and projection. Saves and restores what it touches.
 /// dsrv / tw x th: the depth the grid samples (round 10: the upsample's output, drawn indexed; else the depth map, round 7's list).
-static void rel_draw(ID3D11ShaderResourceView* color, ID3D11ShaderResourceView* dsrv, bool indexed, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
+static void rel_draw(ID3D11ShaderResourceView* color, ID3D11ShaderResourceView* dsrv, bool indexed, float soft_u, float soft_v, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
                      uint32_t tw, uint32_t th, const relief::Map& mp, int flags, uint32_t bw, uint32_t bh) {
     const uint32_t nx = relief::grid_cells(tw), ny = relief::grid_cells(th);
     RelGpuQ* tq = rel_time_begin(g_rel_tm[0]);   // round 7: the pass's GPU time (both eyes), read back a few frames later
@@ -12779,6 +12791,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, ID3D11ShaderResourceView* 
         cb.X[0] = mp.ex; cb.X[1] = static_cast<float>(tw); cb.X[2] = static_cast<float>(th);
         cb.Y[0] = 0.5f / static_cast<float>(bw); cb.Y[1] = 0.5f / static_cast<float>(bh);   // round 7.5: no blend with the 4:3 bars
         cb.Y[2] = indexed ? 1.f : 0.f;
+        cb.X[3] = soft_u; cb.Y[3] = soft_v;   // round 10b: the edge softening (0: off)
         D3D11_MAPPED_SUBRESOURCE ms = {};
         if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
         memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
@@ -12801,7 +12814,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, ID3D11ShaderResourceView* 
     uid_restore(s);
 }
 /// The worker's processing settings (RelReq::cfg; an output slot made with another word is made again).
-static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, (g_rel_cfg.flags & 32) != 0, (g_rel_cfg.flags & 64) == 0, g_rel_cfg.smooth, (g_rel_cfg.flags & 256) == 0 && g_rel_jok); }   // round 10: the snap only for the guided upsample
+static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, (g_rel_cfg.flags & 32) != 0, (g_rel_cfg.flags & 64) == 0, g_rel_cfg.smooth, relief::grid_mode(g_rel_cfg.flags) == relief::GRID_GUIDED && g_rel_jok); }   // round 10: the snap only for the guided upsample
 /// The worker's request: this movie (gen 0 = none) and the frame wanted now.
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
@@ -12829,9 +12842,9 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (the mesh, both eyes, %u timed) avg %.3f ms, max %.3f ms, the fine grid (%ux%u cells, indexed strips) on %u Presents, round 7's list on the rest | guided upsample GPU (%u runs timed) avg %.3f ms, max %.3f ms",
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (the mesh, both eyes, %u timed) avg %.3f ms, max %.3f ms, the fine grid (%ux%u cells, indexed strips) guided on %u Presents, smooth (plain depth) on %u, round 7's list on the rest, edge softening %.1f texels | guided upsample GPU (%u runs timed) avg %.3f ms, max %.3f ms",
                                       r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.made, r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
-                                      g_rel_tm[0].n, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, relief::grid_cells(relief::k_up * r.w), relief::grid_cells(relief::k_up * relief::k_h), r.fine_n,
+                                      g_rel_tm[0].n, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, relief::grid_cells(relief::k_up * r.w), relief::grid_cells(relief::k_up * relief::k_h), r.fine_n, r.smooth_n, relief::soft_texels(g_rel_cfg.flags),
                                       g_rel_tm[1].n, g_rel_tm[1].n ? g_rel_tm[1].sum / g_rel_tm[1].n : 0.0, g_rel_tm[1].max);
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
@@ -13033,8 +13046,10 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     XrFovTan draw_fov[2];
     for (int e = 0; e < 2; ++e) draw_fov[e] = XrFovTan{ use[e].l, use[e].r, use[e].u, use[e].d };
     rel_gpu_poll();
-    // round 10: the guided upsample (Debug flag 256 off: round 7's grid on the depth map itself)
-    const bool want_guided = (g_rel_cfg.flags & 256) == 0 && g_rel_jok;
+    // round 10: the grid (Debug, flags bits 8-9, relief::grid_mode): round 7's 320 grid (the default since round 10b), the
+    // 640 grid on the plain depth map (bilinear: no snap, no luma pick), or the guided upsample (snap + luma pick)
+    const int gmode = relief::grid_mode(g_rel_cfg.flags);
+    const bool want_guided = gmode == relief::GRID_GUIDED && g_rel_jok;
     const bool guided = want_guided && g_rel_snap_ok && rel_gpu_hi(r.w);   // until a snapped frame is up (just switched on): round 7's grid
     if (guided && !r.guided) g_rel_jdue = relief::k_jbu_runs;   // switched on (or first): its output is stale
     if (want_guided && g_rel_snap_ok && !guided && !r.guided && g_rel_lines < k_rel_lines_max && diag_profile_on()) { static bool said = false; if (!said) { said = true; g_rel_lines++; fmv_put("fmv3d: the guided upsample's target could not be made: round 7's grid"); } }
@@ -13044,9 +13059,11 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     // review10 N-3: a flat relief (k 0: a ramp's first Present, a fade's tail, a not-ready cut, amount 0) lies on the screen
     // plane whatever the grid: round 7's 116k-triangle list shows the same picture as the 925k-triangle fine mesh
     const bool fine = guided && mp.k > 0.f;
-    const uint32_t gw = fine ? relief::k_up * r.w : r.w, gh = fine ? relief::k_up * relief::k_h : relief::k_h;
-    r.grid_w = relief::grid_cells(gw); r.grid_h = relief::grid_cells(gh); if (fine) r.fine_n++;
-    rel_draw(color, fine ? g_rel_hsrv : g_rel_dsrv, fine, views, draw_fov, sc, rc, gw, gh, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
+    const bool smooth = !fine && gmode == relief::GRID_SMOOTH && mp.k > 0.f && rel_gpu_ib(r.w);   // round 10b: the 640 grid on the plain map
+    const uint32_t gw = fine || smooth ? relief::k_up * r.w : r.w, gh = fine || smooth ? relief::k_up * relief::k_h : relief::k_h;
+    r.grid_w = relief::grid_cells(gw); r.grid_h = relief::grid_cells(gh); if (fine) r.fine_n++; if (smooth) r.smooth_n++;
+    const float soft = relief::soft_texels(g_rel_cfg.flags);   // round 10b: the edge softening, depth-map texels
+    rel_draw(color, fine ? g_rel_hsrv : g_rel_dsrv, fine || smooth, 0.5f * soft / static_cast<float>(r.w), 0.5f * soft / static_cast<float>(relief::k_h), views, draw_fov, sc, rc, gw, gh, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
     *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
@@ -13055,15 +13072,16 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
 /// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
 /// median, 16 the depth as colour (Debug), 32 each frame normalised to its own range (Debug; round 7: the default is the
 /// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7), 128 every cut starts flat and ramps in over
-/// 150 ms (Debug: the old behaviour, round 7.3), 256 the guided upsample and the edge snap off (Debug: round 7's 320 x 180
-/// grid, round 10); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
+/// 150 ms (Debug: the old behaviour, round 7.3); bits 8-9 the grid (Debug, round 10b, relief::grid_mode: 0 round 7's 320
+/// grid, the default; 256 the 640 grid on the plain depth map; 512 the guided upsample with the edge snap); bits 10-13 the edge
+/// softening in tenths of a depth texel (0..15: 0..1.5, relief::soft_texels); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
 /// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
 /// default 0.15); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
 /// pop-out ramps to 0 (0..0.15 of the rect, default 0.04; content behind the screen is never feathered: the window rule).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth, float edge) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
-    g_rel_cfg.flags = flags & 511;
+    g_rel_cfg.flags = flags & 16383;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
     g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
     g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;
@@ -13099,7 +13117,8 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
     if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), filter avg %.2f / max %.2f ms, ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; the mesh, both eyes, %ux%u cells), %s", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors,
                                     r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring, relief::k_ring, g_rel_tm[0].last, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, r.grid_w, r.grid_h,
-                                    r.guided ? "guided upsample" : (g_rel_cfg.flags & 256) ? "guided upsample off" : "guided upsample not available");
+                                    r.guided ? "640 grid, guided" : relief::grid_mode(g_rel_cfg.flags) == relief::GRID_SMOOTH ? "640 grid, smooth depth" : relief::grid_mode(g_rel_cfg.flags) == relief::GRID_GUIDED ? "guided upsample not ready / not available" : "320 grid (round 7)");
+    if (r.file == 1 && relief::soft_texels(g_rel_cfg.flags) > 0.f) n = fmv::add(buf, c, n, ", edge softening %.1f texels", relief::soft_texels(g_rel_cfg.flags));
     if (r.file == 1 && r.guided) n = fmv::add(buf, c, n, " %.3f ms (avg %.3f, max %.3f; %u runs)", g_rel_tm[1].last, g_rel_tm[1].n ? g_rel_tm[1].sum / g_rel_tm[1].n : 0.0, g_rel_tm[1].max, r.jbu_runs);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
     return static_cast<int>(n);
