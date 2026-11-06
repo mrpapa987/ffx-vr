@@ -4,10 +4,10 @@
 // thread (file I/O and the codec come in through callbacks, so a unit test drives it with files fvd.py wrote with the zlib
 // or stored codecs), the frame selection, the hold / cut ramp and the relief's shape on the render thread at Present.
 //
-// The relief: the video frame (the eye-1 backbuffer copy, cropped to the video rect) on a 160 x 90 cell grid (120 x 90 for
-// 4:3) at the virtual screen's pose and size; the vertex shader samples the frame's depth map (R8, 320 x 180 / 240 x 180)
-// and moves each vertex along the ray from the nominal eye through its pixel to a distance given by the "3D movie"
-// mapping (map_z below: the shot's nearest content slightly in front of the screen, its farthest a few metres behind,
+// The relief: the video frame (the eye-1 backbuffer copy, cropped to the video rect) on a grid with a vertex per depth
+// texel (round 7: 321 x 181 cells on the 320 x 180 map; round 10: 641 x 361 on the guided upsample's 640 x 360, below) at
+// the virtual screen's pose and size; the vertex shader samples the depth (R16) and moves each vertex along the ray
+// from the nominal eye through its pixel to a distance given by the "3D movie" mapping (map_z below: the shot's nearest content slightly in front of the screen, its farthest a few metres behind,
 // linear in disparity); only the part in front of the screen is feathered to the screen plane at the edges (the window
 // rule), and as an option the bottom 15 % lies flat (the subtitles).
 // map_point / weights / edge_fill below are the CPU copy of the shader's maths (the test checks them).
@@ -187,10 +187,10 @@ inline uint32_t shot_norm(File& f) {
     return shots;
 }
 /// The worker's processing settings as one word (an output frame made with another word is made again): bit 0 the 3x3
-/// median, bit 1 each frame to its own range (Debug), bit 2 the centred temporal filter (round 7.4), bits 8-15 its smoothing
-/// (x 100).
-inline int cfg_word(bool median, bool per_frame, bool centred, float smooth) {
-    return (median ? 1 : 0) | (per_frame ? 2 : 0) | (centred ? 4 | (static_cast<int>(clampf(smooth, 0.f, 0.95f) * 100.f + 0.5f) << 8) : 0);
+/// median, bit 1 each frame to its own range (Debug), bit 2 the centred temporal filter (round 7.4), bit 3 the edge snap
+/// (round 10, with the guided upsample), bits 8-15 the filter's smoothing (x 100).
+inline int cfg_word(bool median, bool per_frame, bool centred, float smooth, bool snap = false) {
+    return (median ? 1 : 0) | (per_frame ? 2 : 0) | (snap ? 8 : 0) | (centred ? 4 | (static_cast<int>(clampf(smooth, 0.f, 0.95f) * 100.f + 0.5f) << 8) : 0);
 }
 /// The decoded frames an output frame needs on each side (0: itself only).
 inline int filter_radius(int cfg) { return (cfg & 4) ? k_trad : 0; }
@@ -549,6 +549,121 @@ inline void ema(uint16_t* acc, uint16_t* io, uint32_t n, float smooth, bool rese
 /// (0 .. texels + 1). The VS copy: saturate((c - 0.5) / texels).
 inline float grid_coord(uint32_t c, uint32_t texels) { return clampf((static_cast<float>(c) - 0.5f) / static_cast<float>(texels), 0.f, 1.f); }
 inline uint32_t grid_cells(uint32_t texels) { return texels + 1; }
+
+// -- round 10 (audit plan 5): the edge snap, the guided upsample, the fine grid ----------------------------------------------
+// The model's edges are soft, and the area downscale to 320 x 180 leaves mixed texels between a silhouette and what is
+// behind it: the rubber sheet's material (7-11 video px wide on round 7's grid). Three parts:
+// (1) The worker snaps each texel on a depth edge to the nearer of its 5 x 5 neighbourhood's min and max (a tie to the far
+// side: the snap never grows the near side, so a converter v2 file, sharp and grown 2 model px on the near side, keeps its
+// edges where they are: on average +-0 texels, at most half a texel). A texel is on an edge when its 3 x 3 range is over
+// k_snap_levels and its 5 x 5 range at most 15/8 of that: a ramp up to ~3 texels is a step; any linear slope (5 x 5 range
+// exactly twice the 3 x 3 one), a parabola or an exponential (>= 2) is a surface and stays, but for the texel or two next
+// to a kink (where a steep slope meets a plateau: a 5-texel ramp between plateaus comes out about 2 texels wide, a longer
+// one keeps its middle). The outer 2 texels of the map are never snapped. The snapped map is a second output (snap_out);
+// the original stays for round 7's grid and for the fallback below.
+// (2) At each depth upload a GPU pass upsamples to twice the size (640 x 360, 480 x 360 for 4:3) guided by the video frame
+// on screen (k_jbu_hlsl in ffxvr_native.cpp; guide_ref / jbu_ref below are its CPU copy, and the unit test runs the
+// shader's own text against them). A first pass makes the guide: each depth texel's footprint luma (4 bilinear samples at
+// its quarter points: a 4 x 4 video px mean at 720p). Then, per output texel, the 5 x 5 snapped texels around it split
+// at the middle of their range into a near and a far layer; each layer's depth is a spatially weighted mean (sigma
+// k_jbu_sigma_s texels) and its luma the plain mean of its texels, and the output takes the layers by how close its own
+// luma (its 2 x 2 video px) is to each layer's (sigma k_jbu_sigma_r), times the layer's spatial weight. A two-layer
+// joint bilateral filter: where a per-texel filter gives a texel of the grown near side that shows the background's
+// colour full weight (a 3-4 px halo on v2 files), the near layer's mean colour stays the foreground's (unweighted: the
+// texel next to the output, the one most likely mislabelled, does not dominate it). Where the depth range is small (< k_jbu_edge) or the layers' lumas are close (< k_jbu_c0 .. c1)
+// it fades to the original map, bilinear (round 7's value): no snap crawl where the picture has no edge to follow.
+// (3) A vertex per output texel (641 x 361 cells), drawn as indexed triangle strips (strip_indices).
+constexpr int k_snap_levels = 12;            // the 3 x 3 range (8-bit levels) over which a texel may be on an edge
+constexpr int k_snap_r5 = 15, k_snap_r3 = 8; // ... and its 5 x 5 range at most 15/8 of that (a 3-texel ramp: <= 5/3; a slope: 2)
+constexpr uint32_t k_up = 2;                 // the upsample's factor (both ways)
+constexpr int k_jbu_runs = 2;                // runs a depth upload: that Present and the next (the copy may show the video a Present late)
+constexpr int k_jbu_r = 2;                   // the filter's radius (low-res texels): 5 x 5
+constexpr float k_jbu_sigma_s = 1.0f, k_jbu_sigma_r = 0.05f;
+constexpr float k_jbu_edge = 0.05f;          // the 5 x 5 depth range (n') where the layers start (full at twice that)
+constexpr float k_jbu_c0 = 0.05f, k_jbu_c1 = 0.15f;   // the layers' luma difference over which the guide takes over
+constexpr float k_luma_r = 0.2126f, k_luma_g = 0.7152f, k_luma_b = 0.0722f;
+/// The snap: out = in with each edge texel snapped (16-bit n', w x h; scratch: 4 w h values, the separable min / max).
+inline void snap_out(const uint16_t* in, uint16_t* out, uint32_t w, uint32_t h, std::vector<uint16_t>& scratch, int thr_levels = k_snap_levels) {
+    if (w == 0 || h == 0) return;
+    const size_t n = static_cast<size_t>(w) * h;
+    scratch.resize(4 * n);
+    uint16_t *mn3 = scratch.data(), *mx3 = mn3 + n, *mn5 = mx3 + n, *mx5 = mn5 + n;
+    for (uint32_t y = 0; y < h; ++y) {   // across: 3 and 5 wide (clamped at the borders)
+        const uint16_t* r = in + static_cast<size_t>(y) * w;
+        for (uint32_t x = 0; x < w; ++x) {
+            int a3 = 65535, b3 = 0, a5 = 65535, b5 = 0;
+            for (int d = -2; d <= 2; ++d) {
+                const int xx = std::min(std::max(static_cast<int>(x) + d, 0), static_cast<int>(w) - 1); const int v = r[xx];
+                a5 = std::min(a5, v); b5 = std::max(b5, v);
+                if (d >= -1 && d <= 1) { a3 = std::min(a3, v); b3 = std::max(b3, v); }
+            }
+            const size_t k = static_cast<size_t>(y) * w + x;
+            mn3[k] = static_cast<uint16_t>(a3); mx3[k] = static_cast<uint16_t>(b3); mn5[k] = static_cast<uint16_t>(a5); mx5[k] = static_cast<uint16_t>(b5);
+        }
+    }
+    const int thr = thr_levels * 257;
+    for (uint32_t y = 0; y < h; ++y) for (uint32_t x = 0; x < w; ++x) {   // down, then the rule
+        int a3 = 65535, b3 = 0, a5 = 65535, b5 = 0;
+        for (int d = -2; d <= 2; ++d) {
+            const size_t k = static_cast<size_t>(std::min(std::max(static_cast<int>(y) + d, 0), static_cast<int>(h) - 1)) * w + x;
+            a5 = std::min(a5, static_cast<int>(mn5[k])); b5 = std::max(b5, static_cast<int>(mx5[k]));
+            if (d >= -1 && d <= 1) { a3 = std::min(a3, static_cast<int>(mn3[k])); b3 = std::max(b3, static_cast<int>(mx3[k])); }
+        }
+        const size_t k = static_cast<size_t>(y) * w + x;
+        const int v = in[k], r3 = b3 - a3, r5 = b5 - a5;
+        const bool border = x < 2 || y < 2 || x + 2 >= w || y + 2 >= h;   // the clamped window looks like a kink there: kept
+        if (border || r3 <= thr || r5 * k_snap_r3 > r3 * k_snap_r5) { out[k] = static_cast<uint16_t>(v); continue; }
+        out[k] = static_cast<uint16_t>(v - a5 <= b5 - v ? a5 : b5);   // the nearer; a tie to the far side (0 is far)
+    }
+}
+inline float smooth01(float a, float b, float x) { const float t = clampf((x - a) / (b - a), 0.f, 1.f); return t * t * (3.f - 2.f * t); }
+/// The guide (the first pass): depth texel (x, y)'s footprint luma. luma(u, v): the picture's luma, bilinear, at a point of
+/// the rect (0..1 both ways; the shader samples the backbuffer copy at R.xy + (u, v) R.zw).
+template <class L> inline float guide_ref(L luma, uint32_t w, uint32_t h, uint32_t x, uint32_t y) {
+    const float u0 = (x + 0.25f) / w, u1 = (x + 0.75f) / w, v0 = (y + 0.25f) / h, v1 = (y + 0.75f) / h;
+    return 0.25f * (luma(u0, v0) + luma(u1, v0) + luma(u0, v1) + luma(u1, v1));
+}
+/// The upsample (the second pass) at output texel (i, j) of (k_up w) x (k_up h): sn the snapped map, orig the original,
+/// guide guide_ref's (all w x h, 0..1).
+template <class L> inline float jbu_ref(const float* sn, const float* orig, const float* guide, uint32_t w, uint32_t h, L luma, uint32_t i, uint32_t j) {
+    const float ox = (static_cast<float>(i) + 0.5f) / static_cast<float>(k_up * w), oy = (static_cast<float>(j) + 0.5f) / static_cast<float>(k_up * h);
+    const float px = ox * w - 0.5f, py = oy * h - 0.5f;
+    const int bx = static_cast<int>(floorf(px + 0.5f)), by = static_cast<int>(floorf(py + 0.5f));
+    auto at = [&](const float* a, int x, int y) { return a[static_cast<size_t>(std::min(std::max(y, 0), static_cast<int>(h) - 1)) * w + std::min(std::max(x, 0), static_cast<int>(w) - 1)]; };
+    float mn = 1.f, mx = 0.f;
+    for (int dj = -k_jbu_r; dj <= k_jbu_r; ++dj) for (int di = -k_jbu_r; di <= k_jbu_r; ++di) { const float d = at(sn, bx + di, by + dj); mn = std::min(mn, d); mx = std::max(mx, d); }
+    const float mid = 0.5f * (mn + mx);
+    double S[2] = { 0, 0 }, D[2] = { 0, 0 }, G[2] = { 0, 0 }, C[2] = { 0, 0 };   // [1] the near layer
+    for (int dj = -k_jbu_r; dj <= k_jbu_r; ++dj) for (int di = -k_jbu_r; di <= k_jbu_r; ++di) {
+        const int qx = std::min(std::max(bx + di, 0), static_cast<int>(w) - 1), qy = std::min(std::max(by + dj, 0), static_cast<int>(h) - 1);
+        const float d = at(sn, qx, qy), dx = qx - px, dy = qy - py;
+        const double s = exp(-(dx * dx + dy * dy) / (2.0 * k_jbu_sigma_s * k_jbu_sigma_s));
+        const int l = d > mid ? 1 : 0;
+        S[l] += s; D[l] += s * d; G[l] += at(guide, qx, qy); C[l] += 1.0;   // the luma unweighted (above)
+    }
+    // the original map, bilinear (D3D's sampler: texel centres at (k + 0.5) / w, clamped)
+    const float tx = ox * w - 0.5f, ty = oy * h - 0.5f; const int x0 = static_cast<int>(floorf(tx)), y0 = static_cast<int>(floorf(ty)); const float fx = tx - x0, fy = ty - y0;
+    const float lin = (at(orig, x0, y0) * (1 - fx) + at(orig, x0 + 1, y0) * fx) * (1 - fy) + (at(orig, x0, y0 + 1) * (1 - fx) + at(orig, x0 + 1, y0 + 1) * fx) * fy;
+    if (S[1] <= 0.0 || S[0] <= 0.0) return lin;
+    for (int l = 0; l < 2; ++l) { D[l] /= S[l]; G[l] /= C[l]; }
+    const double lp = luma(ox, oy), e0 = (lp - G[0]) * (lp - G[0]), e1 = (lp - G[1]) * (lp - G[1]), m = std::min(e0, e1);
+    const double k = 1.0 / (2.0 * k_jbu_sigma_r * k_jbu_sigma_r);
+    const double w0 = S[0] * exp(-(e0 - m) * k), w1 = S[1] * exp(-(e1 - m) * k);   // relative to the nearer layer: never both 0
+    const double lay = (w0 * D[0] + w1 * D[1]) / (w0 + w1);
+    const float b = smooth01(k_jbu_edge, 2.f * k_jbu_edge, mx - mn) * smooth01(k_jbu_c0, k_jbu_c1, static_cast<float>(fabs(G[1] - G[0])));
+    return static_cast<float>(lin + b * (lay - lin));
+}
+/// The fine grid's indices: one triangle strip per row of cells, the rows cut by 0xFFFFFFFF (D3D11's strip cut for 32-bit
+/// indices). Vertex id = row x (cx + 1) + column (cx / cy: cells across / down); the VS takes the id (SV_VertexID is the
+/// index) apart. Each cell: (0,0) (0,1) (1,0), then (0,1) (1,0) (1,1): the same diagonal as the round 7 list.
+inline void strip_indices(uint32_t cx, uint32_t cy, std::vector<uint32_t>& out) {
+    out.clear(); out.reserve(static_cast<size_t>(cy) * (2 * (cx + 1) + 1));
+    for (uint32_t j = 0; j < cy; ++j) {
+        for (uint32_t i = 0; i <= cx; ++i) { out.push_back(j * (cx + 1) + i); out.push_back((j + 1) * (cx + 1) + i); }
+        out.push_back(0xFFFFFFFFu);
+    }
+}
+inline uint32_t strip_index_count(uint32_t cx, uint32_t cy) { return cy * (2 * (cx + 1) + 1); }
 
 /// The video's rect in the backbuffer (uv, the game letterboxes / pillarboxes it centred): vw x vh into bw x bh.
 struct Rect { float u0, v0, du, dv; };
