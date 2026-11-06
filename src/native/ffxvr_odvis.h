@@ -15,7 +15,8 @@
 //                    diamond of four dots, the one to press lit in its Quest place and colour: Y top yellow, B right red, A bottom
 //                    green, X left blue); done ones grey, the current one larger and ringed
 // Sizes (x the size setting, 0.5-2): trail 1 cm wide, bursts up to 7 cm, ring 6 mm wide, digits 3.5 cm, blade 55 cm x 1.6 cm, bar
-// 22 x 1.8 cm 16 cm above the hand, glyphs 3.5 cm in a row 0.5 m ahead and 22 cm below the eyes (at most 9 shown).
+// 22 x 1.8 cm 16 cm above the hand, glyphs 3.5 cm in a row 0.5 m ahead and 22 cm below the eyes (at most 9 shown; the row
+// follows the head's yaw in 0.3 s and never its pitch). Comfort: every vertex fades out between 30 and 20 cm from either eye.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -102,9 +103,9 @@ inline void face_axes(V3 p, V3 eye, V3 view_up, V3* R, V3* U) {
 
 // -- glyphs (Auron) -----------------------------------------------------------------------------------------------------
 enum Glyph { G_NONE = 0, G_UP, G_RIGHT, G_DOWN, G_LEFT, G_L1, G_R1, G_Y, G_B, G_A, G_X, G_N };
-/// The glyph for a sequence value (the capture's map: odg::k_auron_map).
-inline int glyph_of(uint16_t v) {
-    switch (odg::button_of_value(v)) {
+/// The glyph for a sequence value by the map in use (odg::Driver::map: the game's bindings or the built-in k_auron_map).
+inline int glyph_of(const odg::AuronMap& m, uint16_t v) {
+    switch (m.button_of(v)) {
         case odg::B_DPAD_UP: return G_UP; case odg::B_DPAD_RIGHT: return G_RIGHT; case odg::B_DPAD_DOWN: return G_DOWN; case odg::B_DPAD_LEFT: return G_LEFT;
         case odg::B_LSHOULDER: return G_L1; case odg::B_RSHOULDER: return G_R1;
         case odg::B_Y: return G_Y; case odg::B_B: return G_B; case odg::B_A: return G_A; case odg::B_X: return G_X;
@@ -173,9 +174,29 @@ struct In {
     // Tidus
     int cursor = 0, zone_lo = 0, zone_hi = 0, start = 0, blen = 0;
     // Auron
-    uint16_t seq[odg::k_seq_max] = {}; int seq_n = 0; int prog = 0;
+    uint16_t seq[odg::k_seq_max] = {}; int seq_n = 0; int prog = 0; odg::AuronMap map = odg::k_auron_map;
 };
 inline float clamp01(float x) { return x < 0.f ? 0.f : x > 1.f ? 1.f : x; }
+inline float smoothstep(float e0, float e1, float x) { const float t = clamp01((x - e0) / (e1 - e0)); return t * t * (3.f - 2.f * t); }
+/// Comfort (od-visual review S4): each vertex's alpha x smoothstep(0.20, 0.30, its distance to the nearer eye), so geometry
+/// that comes within 20 cm of an eye (Tidus's blade on a wind-up over the shoulder, a hand's trail at the face, the bar) fades
+/// out instead of filling the view. Vertices [from, o.n) of o, in the XR space the eyes are given in. No geometry is added.
+constexpr float k_near0 = 0.20f, k_near1 = 0.30f, k_half_ipd = 0.032f;
+inline void near_eye_fade(Vtx* v, int from, int to, V3 e0, V3 e1) {
+    for (int i = from; i < to; ++i) {
+        const V3 p = v3(v[i].p[0], v[i].p[1], v[i].p[2]);
+        const float d0 = len(p - e0), d1 = len(p - e1), d = d0 < d1 ? d0 : d1;
+        v[i].c[3] *= smoothstep(k_near0, k_near1, d);
+    }
+}
+/// The head's yaw direction (unit, horizontal) from its orientation: the forward's horizontal part, plus the up vector's when
+/// the head pitches (looking straight down the forward has none; the up then points ahead), so a pitch alone never turns it.
+inline V3 head_yaw(const float* q) {
+    const V3 fw = qrot(q, v3(0.f, 0.f, -1.f)), up = qrot(q, v3(0.f, 1.f, 0.f));
+    V3 h = v3(fw.x, 0.f, fw.z) - v3(up.x, 0.f, up.z) * fw.y;
+    if (!finite3(h) || len(h) < 1e-3f) return v3(0.f, 0.f, -1.f);
+    return norm(h);
+}
 /// The Tidus bar's 0..1 position of a game value v (the bar spans [start, start + len]).
 inline float bar_x(int v, int start, int blen) { return blen > 0 ? clamp01(static_cast<float>(v - start) / static_cast<float>(blen)) : 0.f; }
 
@@ -183,6 +204,7 @@ struct Vis {
     Trail trail[2]; Flash fl[k_flash_n]; int fl_next = 0; Mark mk[k_mark_n]; int mk_next = 0;
     In last; bool have_last = false; double close_t = -1e300; int last_win = odg::OD_NONE;
     V3 bar_anchor; bool bar_have = false; double bar_t = 0.0;
+    V3 row_f; bool row_have = false; double row_t = 0.0;   // Auron's row: its yaw direction, following the head's slowly (0.3 s; review N5)
     double t_now = 0.0;
     /// Events (the render tick).
     void flash(V3 p, bool sent, double t, float r0 = 0.02f) { Flash& f = fl[fl_next]; fl_next = (fl_next + 1) % k_flash_n; f.p = p; f.t0 = t; f.sent = sent; f.r0 = r0; }
@@ -198,13 +220,13 @@ struct Vis {
         t_now = in.t;
         const bool live = in.on && in.win != odg::OD_NONE && in.inject;
         if (live) { last = in; have_last = true; close_t = in.t + k_fade; last_win = in.win; }   // close_t: the fade ends k_fade after the last live frame
-        else if (have_last && in.t >= close_t) { have_last = false; for (Trail& tr : trail) tr.clear(); bar_have = false; }
+        else if (have_last && in.t >= close_t) { have_last = false; for (Trail& tr : trail) tr.clear(); bar_have = false; row_have = false; }
         if (!in.on) { have_last = false; return 0; }
         const int n0 = o.n;
         // the fade: the last live frame's picture, its hands and head now
         float k = 1.f; In s = in;
         if (!live) {
-            if (!have_last) { draw_flashes(in, o, odg::clampf(in.size, 0.5f, 2.f)); return o.n - n0; }
+            if (!have_last) { draw_flashes(in, o, odg::clampf(in.size, 0.5f, 2.f)); fade_near(in, o, n0); return o.n - n0; }
             k = static_cast<float>(clamp01(static_cast<float>((close_t - in.t) / k_fade)));
             s = last; s.t = in.t; s.eye = in.eye; std::memcpy(s.head_q, in.head_q, sizeof(s.head_q)); s.hand[0] = in.hand[0]; s.hand[1] = in.hand[1];
         }
@@ -220,7 +242,13 @@ struct Vis {
         else if (s.win == odg::OD_TIDUS) draw_tidus(s, o, S, k, view_up, live);
         else if (s.win == odg::OD_AURON) draw_auron(s, o, S, k);
         draw_flashes(s, o, S);
+        fade_near(s, o, n0);
         return o.n - n0;
+    }
+    /// The near-eye fade over this build's vertices, the eyes half an IPD either side of s.eye along the head's right.
+    static void fade_near(const In& s, Out& o, int n0) {
+        const V3 r = qrot(s.head_q, v3(1.f, 0.f, 0.f)) * k_half_ipd;
+        near_eye_fade(o.v, n0, o.n, s.eye - r, s.eye + r);
     }
     void draw_trail(const Trail& tr, const In& s, Out& o, float w, float k, V3) const {
         for (int i = 0; i + 1 < tr.n; ++i) {
@@ -298,9 +326,18 @@ struct Vis {
             rect(o, bar_anchor, R, U, mx - 0.003f * S, -1.2f * H, mx + 0.003f * S, 1.2f * H, m.in_zone ? col(0.4f, 1.f, 0.45f, u * k) : col(1.f, 0.3f, 0.25f, u * k));
         }
     }
-    void draw_auron(const In& s, Out& o, float S, float k) const {
+    void draw_auron(const In& s, Out& o, float S, float k) {
         if (s.seq_n <= 0) return;
-        V3 f = qrot(s.head_q, v3(0.f, 0.f, -1.f)); f.y = 0.f; if (len(f) < 1e-3f) f = v3(0.f, 0.f, -1.f); f = norm(f);
+        // the row's direction: the head's yaw (never its pitch: looking down at the hands does not move it), followed in 0.3 s
+        const V3 want = head_yaw(s.head_q);
+        if (!row_have) { row_f = want; row_have = true; }
+        else {
+            const float a = static_cast<float>(1.0 - std::exp(-(s.t - row_t > 0.0 ? s.t - row_t : 0.0) / 0.3));
+            const V3 m = row_f + (want - row_f) * a;
+            row_f = len(m) > 1e-3f ? norm(m) : want;   // a half turn in one step: take the new yaw
+        }
+        row_t = s.t;
+        const V3 f = row_f;
         const V3 R = v3(-f.z, 0.f, f.x), U = v3(0.f, 1.f, 0.f);
         const V3 A = s.eye + f * 0.5f + v3(0.f, -0.22f, 0.f);
         const int n = s.seq_n > odg::k_seq_max ? odg::k_seq_max : s.seq_n;
@@ -313,7 +350,7 @@ struct Vis {
             const bool done = j < s.prog, cur = j == s.prog;
             const Col base = done ? col(0.5f, 0.5f, 0.5f, 0.3f * k) : cur ? col(1.f, 1.f, 1.f, k) : col(0.85f, 0.9f, 1.f, 0.7f * k);
             if (cur) arc(o, c, R, U, 0.62f * gs * 1.25f, 0.07f * gs, 0.f, odg::k_two_pi, col(1.f, 0.85f, 0.3f, 0.9f * k), 24);
-            const int g = glyph_of(s.seq[j]);
+            const int g = glyph_of(s.map, s.seq[j]);
             if (g == G_NONE) { disc(o, c, R, U, 0.1f * gs, base, base, 8); continue; }   // a value off the map: a small dot
             glyph(o, g, c, R, U, cur ? gs * 1.25f : gs, base);
         }

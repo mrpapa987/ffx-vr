@@ -6062,17 +6062,41 @@ static bool odg_squeeze_may_send(int h) {
 }
 static bool odg_grips_are_gestures() { return g_odg.grips_are_gestures(); }
 }  // namespace
-/// Auron's expected sequence: one guarded read of u16[len] at the pointer (1 <= len <= 32), when the window opens or the pair changes.
+/// Auron's value -> button map (od-visual review S1): from the game's own pad bindings (ffxvr_odgest.h auron_map_from_bindings:
+/// the table at [0xCCB214], its pad part at +0x70), else the built-in map; set on the driver (allow_mask, the cross-check) and
+/// passed to the glyph row. Returns the source for the window's line; a line of its own when the result changes.
+static const char* odg_read_map() {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    static int s_last_src = -1; static odg::AuronMap s_last_map = odg::k_auron_map;
+    uint32_t ptr = 0; uint32_t pairs[odg::k_bind_pad_n][2] = {};
+    const bool rd = ffxvr_safe_read(reinterpret_cast<const void*>(base + (odg::k_bind_ptr_va - 0x400000u)), &ptr, 4) && ptr >= 0x10000u
+                 && ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(ptr) + odg::k_bind_pad_off), pairs, sizeof(pairs));
+    odg::AuronMap m; char why[96]; int changed = 0;
+    const bool ok = odg::auron_map_from_bindings(rd ? pairs : nullptr, odg::k_bind_pad_n, &m, why, sizeof(why), &changed);
+    g_odg.map = m;
+    const int src = ok ? 1 : 0;
+    if ((src != s_last_src || memcmp(&m, &s_last_map, sizeof(m)) != 0) && odg_line_ok()) {
+        char mt[200]; odg::map_text(mt, sizeof(mt), m);
+        if (ok) diag("odg: frame %u: Auron's button map: the game's pad bindings (at 0x%08X+0x70)%s: %s", g_frames, ptr,
+                     changed ? " -- REMAPPED: differs from the built-in map" : ", the same as the built-in map", mt);
+        else diag("odg: frame %u: Auron's button map: the built-in map (the game's bindings: %s): %s", g_frames, why, mt);
+    }
+    s_last_src = src; s_last_map = m;
+    return ok ? (changed ? "the game's bindings (remapped)" : "the game's bindings") : "built-in (the bindings did not read)";
+}
+/// Auron's expected sequence: one guarded read of u16[len] at the pointer (1 <= len <= 32), when the window opens or the pair
+/// changes; the button map with it.
 static void odg_read_seq(const odg::Extra& x) {
     if (x.auron_ptr == g_odg_seq_ptr && x.auron_len == g_odg_seq_len) return;
+    const char* msrc = odg_read_map();
     g_odg_seq_ptr = x.auron_ptr; g_odg_seq_len = x.auron_len; g_odg_seq_n = 0;
     const bool ok = odg::seq_len_ok(x.auron_len) && x.auron_ptr >= 0x10000u
                  && ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(x.auron_ptr)), g_odg_seq, static_cast<unsigned>(x.auron_len) * 2u);
     if (ok) g_odg_seq_n = x.auron_len;
     char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n);
-    if (odg_line_ok()) diag("odg: frame %u: Auron (Bushido) input: the expected sequence (u16[%ld] at 0x%08X): %s | progress %d | gestures %s",
+    if (odg_line_ok()) diag("odg: frame %u: Auron (Bushido) input: the expected sequence (u16[%ld] at 0x%08X): %s | progress %d | gestures %s | button map: %s",
                             g_frames, static_cast<long>(x.auron_len), x.auron_ptr, ok ? sq : "not readable", x.auron_prog,
-                            g_odg.cfg.on && g_odg.cfg.auron ? "on" : "off (od_gest_auron=0: logged only)");
+                            g_odg.cfg.on && g_odg.cfg.auron ? "on" : "off (od_gest_auron=0: logged only)", msrc);
 }
 static void od_gest_tick() {
     static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -6150,16 +6174,16 @@ static void od_gest_tick() {
              have ? static_cast<unsigned>(g_odg_seq[pr]) : 0u, have ? (in.game_press == g_odg_seq[pr] ? ", a match" : ", not the expected one") : " (the sequence was not read)",
              g_odg.last_btn ? odg::button_name(g_odg.last_btn) : "none (a controller or pad button)", g_odg.last_btn && ago < 400.0 ? "" : g_odg.last_btn ? " (more than 400 ms ago)" : "");
     }
-    if (o.disagree && odg_line_ok()) {   // the cross-check of the capture's map (k_auron_map): only a disagreement is worth a line
+    if (o.disagree && odg_line_ok()) {   // the cross-check of the map in use (Driver::map): only a disagreement is worth a line
         const int bi = odg::Driver::bit_of(g_odg.last_btn);
-        diag("odg: frame %u: Auron: DISAGREEMENT: the game saw 0x%04X right after our %s, the capture's map says 0x%04X (%u so far; the map is kept)",
-             g_frames, bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, odg::button_name(g_odg.last_btn), static_cast<unsigned>(odg::value_of_button(g_odg.last_btn)), g_odg.disagree_n);
+        diag("odg: frame %u: Auron: DISAGREEMENT: the game saw 0x%04X right after our %s, the map in use says 0x%04X (%u so far; the map is kept)",
+             g_frames, bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, odg::button_name(g_odg.last_btn), static_cast<unsigned>(g_odg.map.value_of(g_odg.last_btn)), g_odg.disagree_n);
     }
     if (o.closed && g_odg.last.od == odg::OD_AURON && g_odg.learned_n && odg_line_ok()) {   // the cross-check so far
         char m[300] = ""; int k = 0;
         for (int i = 0; i < 16; ++i) if (g_odg.learned[i]) k = odg::fmt_append(m, sizeof(m), k, "%s%s=0x%04X%s", k ? " " : "", odg::button_name(static_cast<uint16_t>(1u << i)),
-                                                                           static_cast<unsigned>(g_odg.learned[i]), odg::value_of_button(static_cast<uint16_t>(1u << i)) == g_odg.learned[i] ? "" : " (the map: differs)");
-        diag("odg: frame %u: Auron: our buttons -> the game's values seen: %s | %u disagreement(s) with the capture's map", g_frames, m, g_odg.disagree_n);
+                                                                           static_cast<unsigned>(g_odg.learned[i]), g_odg.map.value_of(static_cast<uint16_t>(1u << i)) == g_odg.learned[i] ? "" : " (the map: differs)");
+        diag("odg: frame %u: Auron: our buttons -> the game's values seen: %s | %u disagreement(s) with the map in use", g_frames, m, g_odg.disagree_n);
     }
     if (o.closed) {
         char b[640]; odg::summary(b, sizeof(b), g_odg.last);
@@ -10402,9 +10426,11 @@ static double odv_now() {
     if (g_vrpad.time > 0) return static_cast<double>(g_vrpad.time) * 1e-9;
     LARGE_INTEGER q; QueryPerformanceCounter(&q); return g_qpf.QuadPart ? static_cast<double>(q.QuadPart) / static_cast<double>(g_qpf.QuadPart) : 0.0;
 }
-/// Anything of the visuals to draw now (a window open with its gestures on, a fade, a burst): the headset only.
+/// Anything of the visuals to draw now (a window open with its gestures on, a fade, a burst): the headset only, and only on a
+/// frame the headset shows as the 3D scene (od-visual review S2: not on the virtual screen, which the od-guard forces during a
+/// GPU-slow Slice & Dice, nor with xr_screen_mode, the 3D screen or a suspended frame; the finished frame's decision).
 static bool odv_wanted() {
-    if (!g_odv_on || !g_xr_active) return false;
+    if (!g_odv_on || !g_xr_active || g_xr_screen_now || g_screen3d_now || g_ovr_suspend) return false;
     return (g_odg.open && g_odg.inject_now != odg::OD_NONE && g_odg.inject_now == g_odg.sess.od) || g_odv.active(odv_now());
 }
 /// Builds this Present's geometry in the XR space of the poses and maps it to render space with the VR hands' map (the base the
@@ -10432,7 +10458,7 @@ static void odv_build() {
         in.atlas = g_c3_srv != nullptr; in.flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
     }
     else if (in.win == odg::OD_TIDUS) { in.cursor = g_od.cursor; in.zone_lo = g_od.zone_lo; in.zone_hi = g_od.zone_hi; in.start = x.tidus_start; in.blen = x.tidus_len; }
-    else if (in.win == odg::OD_AURON) { in.seq_n = g_odg_seq_n; memcpy(in.seq, g_odg_seq, sizeof(in.seq)); in.prog = x.auron_prog; }
+    else if (in.win == odg::OD_AURON) { in.seq_n = g_odg_seq_n; memcpy(in.seq, g_odg_seq, sizeof(in.seq)); in.prog = x.auron_prog; in.map = d.map; }
     odv::Out o; o.v = g_odv_raw; o.max = odv::k_max_verts;
     g_odv.build(in, o);
     g_odv_dropped += static_cast<uint32_t>(o.dropped);

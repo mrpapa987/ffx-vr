@@ -8,7 +8,8 @@
 //                         whether its gestures may inject now (the settings, the headset, the VR pad)
 //   Circle / CircleMix    Lulu's Fury: a hand's circles in any plane -> an unwrapped angle (the turns the hand made)
 //   Stick                 the input thread's right-stick vector: the game's quadrant centres, one quadrant at a time toward
-//                         that angle, each held for 2 new packets and 60 ms (never a skipped quadrant); backlog under a turn
+//                         that angle, each held for 1 new packet and 40 ms (the spin's end 2 and 60 ms): no skip with a
+//                         regular 30 Hz logic clock; a logic hitch over 40 ms can lose a turn; backlog under a turn
 //   Stroke / classify     Auron's slashes (left / right / up / down on the head's yaw axes, diagonals refused) and punches
 //                         (thrust, mapped to the hand's shoulder); Tidus's swing (any fast stroke, fired at its onset)
 //   PressQ                the recognised presses waiting for the press slot (one button at a time: Auron's compare is an
@@ -166,9 +167,11 @@ struct CircleMix {
 // Round 3 (the owner's play2 Fury: 18.8 hand turns, 13.2 stick turns with 5.0 dropped by this cap, 13 spins counted: the
 // chain held, the cap was the loss): a quadrant is held for 1 new packet and k_hold_ms (40 ms, a 30 Hz logic frame with
 // margin, on a precise clock), and every 4th step since the stick came on (the spin's end, counted from the quadrant it came
-// on at, which the game's chain starts at) for 2 packets and 60 ms. 40 ms between any two changes keeps one 30 Hz logic read
-// between them even with jittered polls (30 ms let two changes fall between two reads: a skip, in the unit test's jittered
-// 30 Hz polls). Polls a spin: 5 at 24 polls a second (4.8 spins a second; it was 8 polls, 3 a second), 8 at 30 (as before),
+// on at, which the game's chain starts at) for 2 packets and 60 ms. With a regular 30 Hz logic clock, 40 ms between any two
+// changes keeps one logic read between them even with jittered polls (30 ms let two changes fall between two reads: a skip,
+// in the unit test's jittered 30 Hz polls): no skip. A logic hitch over 40 ms (a frame that reads late) can let two changes
+// fall between two reads and lose that turn (the od-visual review's probe6: 3-16 lost turns in 80 s of free-running polls
+// with a hitching clock, against 10-30 % more spins than round 2's 60 ms; 45 / 50 ms holds lose about as many and cost spins). Polls a spin: 5 at 24 polls a second (4.8 spins a second; it was 8 polls, 3 a second), 8 at 30 (as before),
 // 13 at 60 (4.6 a second; it was 3.75); if the game's chain started elsewhere (a pause mid-window) a spin takes one quadrant more, 6 polls: still
 // no mismatch, never slower than before. A quarter-quadrant hysteresis keeps a hand resting on a boundary from flickering. A
 // backlog of a whole turn or more is dropped in whole turns (the game could not count them in time; the angle is unchanged).
@@ -224,7 +227,7 @@ struct Stick {
 // 8.5 % of the path: 10 % of the big step); only strokes under about 55 ms at 30 Hz look like a snap.
 // The bring-back (review S2, round 2 S2): after a stroke that fired, the same hand's next stroke starting within return_s
 // (0.3 s) of its end is refused when it points back (cosine under -0.5 with the fired path), unless the caller allows that
-// class now (Auron: the game's expected next input is that stroke's button by the capture's map k_auron_map: Shooting
+// class now (Auron: the game's expected next input is that stroke's button by the map in use (Driver::map): Shooting
 // Star's Left, Right and Banishing Blade's Right, Left, from the first Bushido); for the swing any stroke within swing_return_s (0.5 s) is refused (one A per swing).
 enum Cls { C_NONE = 0, C_LEFT, C_RIGHT, C_UP, C_DOWN, C_THRUST, C_SWING, C_N };
 static const char* const k_cls[C_N] = { "none", "left", "right", "up", "down", "thrust", "swing" };
@@ -333,16 +336,25 @@ struct Stroke {
 // -- the buttons ---------------------------------------------------------------------------------------------------------
 enum : uint16_t { B_DPAD_UP = 0x0001, B_DPAD_DOWN = 0x0002, B_DPAD_LEFT = 0x0004, B_DPAD_RIGHT = 0x0008, B_LSHOULDER = 0x0100, B_RSHOULDER = 0x0200, B_A = 0x1000,
                   B_B = 0x2000, B_X = 0x4000, B_Y = 0x8000 };
-/// Auron's sequence values (u16 [[0x133D704]]) -> XInput buttons, from the owner's play2 capture (7 Nov: Dragon Fang u16[8]
-/// 0x4000 0x8000 0x1000 0x2000 0x0004 0x0008 0x0040 0x0020 and Shooting Star u16[7] 0x0010 0x0040 0x0080 0x0020 0x8000 0x2000
-/// 0x0020, every press matched): the PS2 pad word with its bytes swapped (Up 0x1000, Right 0x2000, Down 0x4000, Left 0x8000,
-/// L1 0x0004, R1 0x0008, Triangle 0x0010, Circle 0x0020, Cross 0x0040, Square 0x0080); the PC port's A is Cross (the tap's
-/// 0x62DBA0 slot), so Triangle = Y, Circle = B, Cross = A, Square = X, each in its Quest position.
+/// Auron's sequence values (u16 [[0x133D704]]) -> XInput buttons. The values are the game's raw pad word (the word the
+/// pad record keeps at +4, 0x888D70; Bushido's new-press word 0x25D09D4 is built from it with no remap): the owner's play2
+/// capture (7 Nov: Dragon Fang u16[8] 0x4000 0x8000 0x1000 0x2000 0x0004 0x0008 0x0040 0x0020 and Shooting Star u16[7]
+/// 0x0010 0x0040 0x0080 0x0020 0x8000 0x2000 0x0020, every press matched) fixes the d-pad and shoulder half (Up 0x1000, Right
+/// 0x2000, Down 0x4000, Left 0x8000, L1 0x0004, R1 0x0008). The face half: 0x0020 is the confirm bit (Tidus's state 4 tests
+/// it at 0x8923C8 and our tap's A confirms), 0x0040 cancel (B); jegged's lists against the capture put Triangle at 0x0010 and
+/// Square at 0x0080 (Y and X in their Quest places). The od-visual review (S1) found A and B swapped in round 3's table.
+/// AuronMap is what the Driver and the glyph row use: k_auron_map (that built-in fallback) until a window's open reads the
+/// game's own bindings (auron_map_from_bindings below), which also follows a player's remap.
 struct ValBtn { uint16_t v, b; };
-static const ValBtn k_auron_map[10] = { { 0x1000, B_DPAD_UP }, { 0x2000, B_DPAD_RIGHT }, { 0x4000, B_DPAD_DOWN }, { 0x8000, B_DPAD_LEFT },
-                                        { 0x0004, B_LSHOULDER }, { 0x0008, B_RSHOULDER }, { 0x0010, B_Y }, { 0x0020, B_B }, { 0x0040, B_A }, { 0x0080, B_X } };
-inline uint16_t value_of_button(uint16_t b) { for (const ValBtn& m : k_auron_map) if (m.b == b) return m.v; return 0; }
-inline uint16_t button_of_value(uint16_t v) { for (const ValBtn& m : k_auron_map) if (m.v == v) return m.b; return 0; }
+struct AuronMap {
+    ValBtn e[10];
+    uint16_t value_of(uint16_t b) const { for (const ValBtn& m : e) if (b != 0 && m.b == b) return m.v; return 0; }
+    uint16_t button_of(uint16_t v) const { for (const ValBtn& m : e) if (v != 0 && m.v == v) return m.b; return 0; }
+};
+static constexpr AuronMap k_auron_map = { { { 0x1000, B_DPAD_UP }, { 0x2000, B_DPAD_RIGHT }, { 0x4000, B_DPAD_DOWN }, { 0x8000, B_DPAD_LEFT },
+                                            { 0x0004, B_LSHOULDER }, { 0x0008, B_RSHOULDER }, { 0x0010, B_Y }, { 0x0020, B_A }, { 0x0040, B_B }, { 0x0080, B_X } } };
+inline uint16_t value_of_button(uint16_t b) { return k_auron_map.value_of(b); }   // the fallback's (tests, the logs' "built-in")
+inline uint16_t button_of_value(uint16_t v) { return k_auron_map.button_of(v); }
 /// The XInput button for a recognised gesture (0: none): Auron's slashes the d-pad, a punch the shoulder of its hand (L1 / R1);
 /// Tidus's swing A (GUESS: the PC port's confirm; the game tests its confirm bit 0x20 of 0x888E80).
 inline uint16_t button_for(int od, int cls, int hand) {
@@ -361,6 +373,59 @@ inline const char* button_name(uint16_t b) {
         case B_DPAD_UP: return "DPAD_UP"; case B_DPAD_DOWN: return "DPAD_DOWN"; case B_DPAD_LEFT: return "DPAD_LEFT"; case B_DPAD_RIGHT: return "DPAD_RIGHT";
         case B_LSHOULDER: return "LB"; case B_RSHOULDER: return "RB"; case B_A: return "A"; case B_B: return "B"; case B_X: return "X"; case B_Y: return "Y";
         case 0: return "none"; default: return "?";
+    }
+}
+/// The game's gamepad bindings (CHECKED in re/dis_full.txt): the raw pad word (dword [0xCCB170], read by 0x630C80 and 0x8898A0
+/// into the pad record) is built each frame by 0x632A30 from a heap table, its pointer at [0xCCB214] (freed at exit,
+/// 0xB06718): pairs { u32 id, u32 bits } at +0x70..+0xDF (14 of them) for the pad (0x632DF2: 0x629CA0 tests the pad's button
+/// byte id - 0x0B, then bits are ORed in), others for the keyboard. The pad's bytes are the poll's order (0x62DBA0 slot
+/// +0x398..+0x3A7): X A B Y LB RB LT RT Back Start LS RS Up Right Down Left, so id 0x0B is X, 0x0C A, ... 0x1A Left. (The
+/// per-pad table 0x1330488, which 0x888C40 applies, is not on this path: the pad init sets it to identity, and only some menu
+/// code (0x85xxxx, 0x8677EA) maps through it; Bushido does not.)
+constexpr uint32_t k_bind_ptr_va = 0xCCB214, k_bind_pad_off = 0x70; constexpr int k_bind_pad_n = 14;
+inline int pad_byte_of(uint16_t b) {   // the poll's byte index of an XInput button (-1: not one of Auron's ten)
+    switch (b) {
+        case B_X: return 0; case B_A: return 1; case B_B: return 2; case B_Y: return 3; case B_LSHOULDER: return 4; case B_RSHOULDER: return 5;
+        case B_DPAD_UP: return 12; case B_DPAD_RIGHT: return 13; case B_DPAD_DOWN: return 14; case B_DPAD_LEFT: return 15;
+        default: return -1;
+    }
+}
+/// pairs: the n { id, bits } pairs read at the table's pad part (nullptr: not readable). The pad's byte order above is
+/// INFERRED (the copy from the poll's slot into the pad device's bytes was not traced), so the d-pad and shoulders, whose
+/// values the capture proves, must read exactly those values: that is the check that the reading is right. The four face
+/// buttons must get the four face bits (0x10 / 0x20 / 0x40 / 0x80) in any order, one each: a player's remap (confirm and
+/// cancel swapped) is followed; a d-pad or shoulder remap is not (the built-in map, with the reason). True: *out = the game's
+/// map. False: *out = k_auron_map and why says what failed. changed: how many buttons differ from the built-in map.
+inline bool auron_map_from_bindings(const uint32_t (*pairs)[2], int n, AuronMap* out, char* why, size_t why_n, int* changed = nullptr) {
+    *out = k_auron_map; if (changed) *changed = 0;
+    if (why && why_n) why[0] = 0;
+    if (pairs == nullptr || n <= 0) { if (why && why_n) snprintf(why, why_n, "the bindings are not readable"); return false; }
+    AuronMap m = k_auron_map; uint16_t seen = 0; int diff = 0;
+    for (ValBtn& e : m.e) {
+        const int byte = pad_byte_of(e.b);
+        uint32_t bits = 0;
+        for (int i = 0; i < n; ++i) if (pairs[i][0] == static_cast<uint32_t>(0x0B + byte)) bits |= pairs[i][1];
+        const char* bad = nullptr;
+        if (bits == 0) bad = "no binding";
+        else if (bits > 0xFFFFu || k_auron_map.button_of(static_cast<uint16_t>(bits)) == 0) bad = "not one of the ten game bits";
+        else if (seen & bits) bad = "a game bit bound twice";
+        else if (e.b != B_A && e.b != B_B && e.b != B_X && e.b != B_Y && bits != e.v) bad = "not the capture's value: a d-pad / shoulder remap is not followed";
+        if (bad) { if (why && why_n) snprintf(why, why_n, "%s: 0x%X (%s)", button_name(e.b), static_cast<unsigned>(bits), bad); return false; }
+        seen = static_cast<uint16_t>(seen | bits);
+        if (e.v != bits) diff++;
+        e.v = static_cast<uint16_t>(bits);
+    }
+    *out = m; if (changed) *changed = diff;
+    return true;
+}
+/// The map as text: "Up 0x1000 Right 0x2000 ... X 0x0080".
+inline void map_text(char* s, size_t n, const AuronMap& m) {
+    if (!s || !n) return;
+    s[0] = 0; size_t k = 0;
+    for (const ValBtn& e : m.e) {
+        const int w = snprintf(s + k, n - k, "%s%s 0x%04X", k ? " " : "", button_name(e.b), static_cast<unsigned>(e.v));
+        if (w < 0 || static_cast<size_t>(w) >= n - k) { s[n - 1] = 0; return; }
+        k += static_cast<size_t>(w);
     }
 }
 /// The presses waiting for the press slot (render thread): at most 3, oldest first; one older than max_age (300 ms) when the
@@ -488,7 +553,7 @@ struct FrameOut {
     bool learned = false;                               // Auron: the learned map changed this tick (logged)
     bool spin = false;                                  // Lulu: the game counted a spin this tick (the visuals' flash)
     bool refused[2] = { false, false };                 // a deliberate stroke was refused this tick (diagonal, mixed, pulled back, the bring-back, a reach up)
-    bool disagree = false;                              // ... and the value differs from k_auron_map (logged as a disagreement)
+    bool disagree = false;                              // ... and the value differs from the map in use (logged as a disagreement)
     void pulse(int hand, float amp, float sec) { if (nh < 6) { hap[nh].hand = hand; hap[nh].amp = amp; hap[nh].sec = sec; nh++; } }
 };
 struct Driver {
@@ -498,18 +563,19 @@ struct Driver {
     int16_t prog = 0; uint8_t sub = 0, cnt = 0; uint16_t gp = 0; double second_at = -1.0, circ_t = -1e300;
     bool have_cur = false; int16_t cur = 0; double cur_t = 0.0;   // Tidus's cursor last tick and when (the restart test)
     uint16_t learned[16] = {};                          // Auron: our button (XInput bit index) -> the game's new-press value seen right after we sent it
-    uint32_t learned_n = 0, disagree_n = 0;            // ... a cross-check of k_auron_map (play2's capture): values that differ from it
+    uint32_t learned_n = 0, disagree_n = 0;            // ... a cross-check of map: values that differ from it
+    AuronMap map = k_auron_map;                         // Auron's value -> button map in use (the caller sets it at a window's open: the game's bindings or the fallback)
     double thrust_t[2] = { -1e300, -1e300 };            // the last punch queued per hand (the quick squeeze's clash test)
     static constexpr double k_stick_linger = 0.25;   // s: the stick channel stays on this long after the circling stops
     uint32_t stick_sent0 = 0, stick_dropped0 = 0; uint32_t windows = 0;
     void apply_cfg() { cc.r_min = clampf(cfg.circle_r, 0.01f, 0.20f); sc.start = clampf(cfg.slash_speed, 0.8f, 5.f); sc.end = sc.start * 0.375f; sc.swing_peak = sc.start * 1.25f; }
     static int bit_of(uint16_t b) { for (int i = 0; i < 16; ++i) if (b == (1u << i)) return i; return -1; }
-    /// The classes whose button the game expects next (seq[progress]) by the capture's map (k_auron_map): allowed as a bring-back.
+    /// The classes whose button the game expects next (seq[progress]) by the map in use: allowed as a bring-back.
     int allow_mask(const FrameIn& in, int hand) const {
         if (in.seq == nullptr || in.x.auron_prog < 0 || in.x.auron_prog >= in.seq_n) return 0;
         const uint16_t want = in.seq[in.x.auron_prog]; if (want == 0) return 0;
         int m = 0;
-        for (int c = C_LEFT; c <= C_THRUST; ++c) { const uint16_t b = button_for(OD_AURON, c, hand); if (b && value_of_button(b) == want) m |= 1 << c; }
+        for (int c = C_LEFT; c <= C_THRUST; ++c) { const uint16_t b = button_for(OD_AURON, c, hand); if (b && map.value_of(b) == want) m |= 1 << c; }
         return m;
     }
     /// A quick squeeze of hand h now (t: this clock) is the same shoulder as a punch just queued in an injecting Bushido window:
@@ -604,7 +670,7 @@ struct Driver {
                     const int bi = bit_of(last_btn);
                     if (bi >= 0 && in.t - last_btn_t < 0.3 && learned[bi] != g) {
                         learned[bi] = g; learned_n++; o.learned = true;
-                        if (value_of_button(last_btn) != g) { disagree_n++; o.disagree = true; }   // the capture's map says otherwise: logged
+                        if (map.value_of(last_btn) != g) { disagree_n++; o.disagree = true; }   // the map in use says otherwise: logged
                     }
                 }
                 gp = g;
