@@ -167,6 +167,8 @@ shows the experimental VR-hands section.
 The Quest controllers are the gamepad (`vrpad=1`), merged with an Xbox pad if one is connected (buttons OR, the stick
 pushed further wins). Mapping: right A / B = A / B, left X / Y = X / Y, triggers = LT / RT, grips = LB / RB (below), left
 menu = Start, left stick click = Back, right stick click = R3, sticks = sticks.
+The triggers count as pressed from about 12 % of their travel (30 / 255, XInput's standard threshold) and as let go below
+about 8 %, so a finger resting on a trigger presses nothing; a very light half-pull does not register.
 
 | Where | Grips | Left stick |
 |---|---|---|

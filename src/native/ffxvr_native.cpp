@@ -1311,6 +1311,7 @@ const char* g_bt_user_why = nullptr;
 static inline void bt_user(const char* what) { if (g_bt_phase != BT_IDLE && g_bt_user_why == nullptr) g_bt_user_why = what; }   // BT-6, per window: capture-sampling draws by case (the shard rule; slot 1-3; with a camera image; no depth)
 static inline bool bt_no_split() { return g_bt_mode >= 1 && g_bt_phase != BT_IDLE; }   // no UI pass, the screen mode held
 float g_xr_raw_q[4] = { 0, 0, 0, 1 }, g_xr_raw_p[3] = {};
+float g_xr_raw_p1[3] = {};   // the right eye's position (view 1; g_xr_raw_p is view 0, the left eye): the overdrive visuals' head centre
 
 // Dream overlay (research dream-overlay.md; design-notes "Dream overlay"). The HD port's dream filter (0x63DF70: film grain
 // Noise.dds 1024x1024, a sepia quad without texture, Vignette.dds 1024x512, and 16x16 dust specks every third frame) is drawn
@@ -1369,7 +1370,7 @@ static void gesture_tick();
 /// relative pose the override uses.
 static void xr_apply_poses(const XrFrameOut& f) {
     if (!f.have_views) { g_xr_active = false; return; }
-    memcpy(g_xr_raw_q, f.view[0].q, sizeof(g_xr_raw_q)); memcpy(g_xr_raw_p, f.view[0].p, sizeof(g_xr_raw_p));
+    memcpy(g_xr_raw_q, f.view[0].q, sizeof(g_xr_raw_q)); memcpy(g_xr_raw_p, f.view[0].p, sizeof(g_xr_raw_p)); memcpy(g_xr_raw_p1, f.view[1].p, sizeof(g_xr_raw_p1));
     if (g_xr_recenter_pending) {
         // Reference = the head's yaw and position now, so "forward" is where the user looks.
         const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d);
@@ -10459,7 +10460,11 @@ static void odv_build() {
         o.ok = g_vrpad.ready && hd.grip_valid && hd.grip_tracked; o.p = odg::v3(hd.grip_p[0], hd.grip_p[1], hd.grip_p[2]); memcpy(o.q, hd.grip_q, sizeof(o.q));
         o.aim_ok = o.ok && hd.aim_valid; o.aim_p = odg::v3(hd.aim_p[0], hd.aim_p[1], hd.aim_p[2]); memcpy(o.aim_q, hd.aim_q, sizeof(o.aim_q));
     }
-    in.eye = odg::v3(g_xr_raw_p[0], g_xr_raw_p[1], g_xr_raw_p[2]); memcpy(in.head_q, g_xr_raw_q, sizeof(in.head_q));
+    // the head centre: the midpoint of the two eye views (od-visual round 2 R2-N1: view 0 alone is the left eye, which put the
+    // near-eye fade's points 32 mm left and Auron's row 3 cm left of centre); its right vector from the head's orientation
+    in.eye = odg::v3(0.5f * (g_xr_raw_p[0] + g_xr_raw_p1[0]), 0.5f * (g_xr_raw_p[1] + g_xr_raw_p1[1]), 0.5f * (g_xr_raw_p[2] + g_xr_raw_p1[2]));
+    if (!odv::finite3(in.eye)) in.eye = odg::v3(g_xr_raw_p[0], g_xr_raw_p[1], g_xr_raw_p[2]);
+    memcpy(in.head_q, g_xr_raw_q, sizeof(in.head_q));
     const bool fresh = g_odg_blk_frame != 0xFFFFFFFFu && g_frames - g_odg_blk_frame <= 2u;
     const odg::Extra x = fresh ? odg::parse_extra(g_odg_blk) : odg::Extra{};
     if (in.win == odg::OD_LULU) {

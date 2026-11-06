@@ -168,7 +168,7 @@ struct HandIn { bool ok = false; V3 p; float q[4] = { 0.f, 0.f, 0.f, 1.f }; bool
 struct In {
     double t = 0.0; bool on = true; float size = 1.f;
     int win = odg::OD_NONE; bool inject = false;              // the window open and whether its gestures are on (the visuals need both)
-    HandIn hand[2]; V3 eye = v3(0.f, 1.6f, 0.f); float head_q[4] = { 0.f, 0.f, 0.f, 1.f };
+    HandIn hand[2]; V3 eye = v3(0.f, 1.6f, 0.f); float head_q[4] = { 0.f, 0.f, 0.f, 1.f };   // eye: the head centre (between the eyes)
     // Lulu
     int lead = 1; bool ring_ok = false; V3 c, n; float radius = 0.f; int hist_n = 0; int spins = 0; bool atlas = false, flip = false;
     // Tidus
@@ -245,7 +245,8 @@ struct Vis {
         fade_near(s, o, n0);
         return o.n - n0;
     }
-    /// The near-eye fade over this build's vertices, the eyes half an IPD either side of s.eye along the head's right.
+    /// The near-eye fade over this build's vertices, the eyes half an IPD either side of s.eye (the head centre: the caller
+    /// passes the midpoint of the two eye views) along the head's right.
     static void fade_near(const In& s, Out& o, int n0) {
         const V3 r = qrot(s.head_q, v3(1.f, 0.f, 0.f)) * k_half_ipd;
         near_eye_fade(o.v, n0, o.n, s.eye - r, s.eye + r);
