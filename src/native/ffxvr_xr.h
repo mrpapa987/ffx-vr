@@ -81,6 +81,7 @@ struct XrHand {
     // VR hands v2 (S2): the capacitive touch sensors of the Touch controllers (oculus/touch_controller only; false elsewhere)
     bool  trigger_touch;                                    // the index finger on the trigger
     bool  thumb_stick, thumb_rest, thumb_face;              // the thumb on the stick / on the thumbrest / on A-B (right) or X-Y (left)
+    bool  grip_tracked;                                     // the grip's position is tracked (POSITION_TRACKED), not inferred (overdrive gestures)
 };
 struct XrInput { bool ready; XrHand hand[2]; char profile[2][64]; int64_t time; bool touch; };   // 0 left, 1 right; profile: the bound interaction profile per hand;
                                                             // time: the XrTime the poses were located at (predictedDisplayTime); touch: the touch actions are bound

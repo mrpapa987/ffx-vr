@@ -171,6 +171,7 @@ public sealed unsafe partial class FFXVRModule {
         o();
         if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Debug: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
         sg_join_install();   // the shadow pool guard, once, on the main thread between frames (shadow_cam.cs)
+        dmg3d_join();        // 3D damage numbers: the nodes the battle UI just drew (dmg3d.cs; one bool read while off)
         if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
     }
     private void h7_rsz(nint self, int w, int h) {
@@ -272,10 +273,11 @@ public sealed unsafe partial class FFXVRModule {
                     if (_fn_safe_read((void*)j.parent, q, 0x20C) != 0) { j.ppos = *(Vector3*)(q + 0x0C); j.poff = *(Vector3*)(q + 0x6C); j.ptd = *(Vector3*)(q + 0x200); j.pvalid = 1; }
                 }
                 if (*(uint*)(b + 0x10C) != 0) j.flags |= 2;   // an override matrix replaces the root
-                // the head as push_player picks it: the highest sub-position (lowest y, game y down) not at the origin; folded with
-                // the actor position if it ever looks relative
-                float hy = float.MaxValue;
-                for (int k = 0; k < 26; k++) { Vector4 sp = *(Vector4*)(b + 0x524 + 16 * k); if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; j.head = new Vector3(sp.X, sp.Y, sp.Z); j.head_ok = 1; } }
+                // the head as push_player picks it: the shared rule (FphWalk.HeadPick) with push_player's reach for this frame
+                // (published before _d7_follow_actor; sa_apply puts this head in the view on almost every frame, review of 9b406b9 B);
+                // folded with the actor position if it ever looks relative
+                int hk = FphWalk.HeadPick(new ReadOnlySpan<Vector4>(b + 0x524, 26), System.Threading.Volatile.Read(ref _fp_reach_live), out _);
+                if (hk >= 0) { Vector4 sp = *(Vector4*)(b + 0x524 + 16 * hk); j.head = new Vector3(sp.X, sp.Y, sp.Z); j.head_ok = 1; }
                 if (j.head_ok != 0 && (j.flags & 1) == 0 && MathF.Abs(j.head.X - j.pos.X) + MathF.Abs(j.head.Z - j.pos.Z) > 100f) { j.head += j.pos; j.flags |= 4; }   // never for an attached actor (world already); flag 4: folded (sa_apply undoes it for a displaced body, eye review SF1)
             }
         }

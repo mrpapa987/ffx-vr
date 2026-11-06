@@ -306,16 +306,17 @@ void input_sync(XrTime t) {
         const bool grip_active = XR_SUCCEEDED(p_xrGetActionStatePose(g_session, &gi, &ps)) && ps.isActive;
         active |= grip_active;
         hd.active = active;
-        auto locate = [&](XrSpace sp, bool& valid, float* q, float* p) {
-            valid = false; if (sp == XR_NULL_HANDLE) return;
+        auto locate = [&](XrSpace sp, bool& valid, float* q, float* p, bool* tracked = nullptr) {
+            valid = false; if (tracked) *tracked = false; if (sp == XR_NULL_HANDLE) return;
             XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
             if (XR_FAILED(p_xrLocateSpace(sp, g_space, t, &loc))) return;
             const bool o = (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0, pp = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
             if (!o || !pp) return;
             q[0] = loc.pose.orientation.x; q[1] = loc.pose.orientation.y; q[2] = loc.pose.orientation.z; q[3] = loc.pose.orientation.w;
             p[0] = loc.pose.position.x; p[1] = loc.pose.position.y; p[2] = loc.pose.position.z; valid = true;
+            if (tracked) *tracked = (loc.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
         };
-        locate(g_grip_space[h], hd.grip_valid, hd.grip_q, hd.grip_p);
+        locate(g_grip_space[h], hd.grip_valid, hd.grip_q, hd.grip_p, &hd.grip_tracked);
         locate(g_aim_space[h],  hd.aim_valid,  hd.aim_q,  hd.aim_p);
         // Which profile the runtime bound (for the overlay), refreshed every 2 s.
         static ULONGLONG next_profile = 0; const ULONGLONG now = GetTickCount64();

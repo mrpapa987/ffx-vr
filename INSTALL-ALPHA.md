@@ -201,6 +201,9 @@ on by default). A normal gamepad works too.
 | Change view: first person → third person → diorama | **Right grip + right stick click** | **End** |
 | Reset the view (third person / diorama) | **Left grip + left stick click** | |
 | Battle: look through the next party member | **Left grip + right stick click** | **Insert** |
+| Battle: switch characters (LB) / scroll the turn order back (RB) | A **quick squeeze** of the left / right grip (in the diorama a held grip still grabs) | |
+| Battle: Defend | **Y** | |
+| Fahrenheit's save / load screen | Left stick, **A** / **B**, grips page the list | |
 | The overlay | | **F8** |
 
 ### What to expect

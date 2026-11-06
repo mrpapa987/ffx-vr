@@ -771,7 +771,7 @@ in" view switch, diorama on the fight centroid, floor.
 
 To do, by layer:
 - Eyes: face the enemies at battle start and on every eye switch (slot ->
-  monster centroid); a blink on eye jumps (`cut_blink` path); on a summon
+  monster centroid); a blink on eye jumps (`cut_blink` path) [done 5 Nov: "Eye jumps" at the end]; on a summon
   the eyes go to YUNA (she stays on the field to command the Aeon while the
   others walk off) - implemented on the assumption that the Aeon is a
   visible party entry with chr_id 8+ (logged as `aeon out:` when first seen;
@@ -1253,17 +1253,45 @@ units) too high; the other characters are fine. Suspect the head point
 picked for his model (tall hair?). Needs a battle census, actor table and
 motion log while viewing as Wakka.
 
-Controls, Quest controllers only (owner, 4 Nov 2026): not fully solved yet; the controls map is in the
-artifact "FFX VR Quest Controls". (1) The save/load screen can't be used with the Quest controllers: it is
-Fahrenheit's own replacement save UI (FhSaveUiX / FhSaveUiSelector), drawn with ImGui. ImGui's Win32
-backend reads the gamepad through XInput itself (imgui_impl_win32 loads its own XInput DLL, xinput1_4
-first), while our VR pad is merged only into the game's XINPUT9_1_0 import. So the save screen never sees
-the VR pad. Fix: also feed the VR pad to ImGui (its gamepad key events), or hook the XInput DLL ImGui
-uses. (2) In battle the stick axes sometimes seem rotated: left/right moves up/down in the battle menus.
-Rule (owner): the stick must act like a gamepad's, whatever the view's angle; a made-for-VR UI comes later.
-(3) Every significant battle action must be reachable from the Quest controllers: defend, switch
-characters, scroll the CTB window, overdrives. Auron's button inputs and Lulu's stick spin are left for
-later VR gestures, not buttons; the owner keeps an Xbox pad nearby meanwhile.
+Controls, Quest controllers only (owner, 4 Nov 2026; design research/quest-controls-design.md, built 5 Nov on branch
+quest-ctl, ABI 44; the pure rules in src/native/ffxvr_pad.h with a unit test; owner test pending). Done:
+(1) **Save / load screen**: Fahrenheit's save UI is ImGui, and ImGui's Win32 backend reads pad 0 through its own XInput
+DLL (xinput1_4 first), not the game's XINPUT9_1_0 import. imgui_pad.cs detours that DLL's XInputGetState /
+XInputGetCapabilities (FhCallHandle, like the D3D11 detours); native merges the VR pad in (ffxvr_imgui_xstate: buttons OR,
+the stronger stick, no rotation, no tap, no Start / Back: Start is Fahrenheit's soft reset with L1 + R1; buttons already
+held when the screen opens stay masked until released) and posts one WM_DEVICECHANGE (DBT_DEVNODES_CHANGED) so the backend
+asks the capabilities again. It logs the functions' first bytes (another hooker shows as a jump). If the game's import
+resolves into the same DLL (xinput9_1_0 forwarding into xinput1_4) it installs anyway and logs so: the game's own calls
+pass through untouched (a thread-local re-entry guard set around the game's call; the managed shim throttles only
+ImGui's render-thread reads); `imgui_vrpad_strict=1` refuses instead. It always refuses when ImGui picked xinput9_1_0
+without our import hook (no guard). Pushing ImGui key events from our module instead was rejected: with an Xbox pad connected the
+backend re-adds the pad's state every packet and the two sources fight (repeated presses). The game gets nothing more:
+Fahrenheit locks its input while the save screen is open. ini `imgui_vrpad` 0 / 1 (default: the save screen only) / 2 (all
+of ImGui, Start and Back too). (2) **Rotated stick in battle**: the cause was our first-person movement remap
+(`g_move_delta` = the view's yaw, head included, minus the game camera's), applied in every view but the seat, battle
+included. The walk gate: the remap now applies only while the player can walk (not battle, a field menu, no player
+control, a choice box, the save screen, the sphere grid; riding and blitzball keep it; game bits older than 250 ms mean
+raw). ini `move_remap_walk_only` (default 1; 0 = the old behaviour for an A/B). (3) **Battle actions**: verified in our exe
+(design 3.1): Defend = **Y** (bit 0x10; our exe-analysis tables label 0x10 Square and 0x80 Triangle: that looks swapped,
+the owner's test confirms), switch = LB, CTB scroll = RB / RT held, overdrive = stick left and Weapon / Armor / Escape =
+stick right at the command menu, help = Back. The grips were lost to the seat / diorama grab and the left-grip chords
+leaked an LB press: now a **quick squeeze** (released within `grip_tap_ms`, 300 ms; the hand moved < 3 cm and turned
+< 10 degrees; no stick click meanwhile; the other grip not down) is LB / RB, sent on release as a press of 2 new packets
+(`grip_tap_press_ms`, default 0, can lengthen it up to 150 ms: a hold past 0.2333 s trips the game's repeat query
+0x630D30, the switch list's next / previous), and a grab's nudge during it is undone. Why 2: the CTB scroll
+(0x89F021) steps a row when R1 is held and the list is at rest, then slides 11 px (half a row) a tick, so R1 seen on 1 or 2
+UI ticks is one row and the tap's 3 polls / 100 ms would be two; the game polls once per logic frame (about 24 polls a
+second in the owner's 4 Nov log), so 2 polls is one row when the UI ticks once per poll or slower (unit test against a
+model of the handler); a held grip stays the grab and the chord modifier and
+the game never sees it. In battle (all views) and the seat / diorama only (`grip_lbrb` 1; 0 = the old behaviour, 2 =
+everywhere); in the field's first / third person the grips are LB / RB at once as before (the main menu's character pages
+hold L1 / R1). `vd_overlay_mask` (1): both stick clicks (Virtual Desktop's overlay) send neither Back nor R3. Left: Auron's
+button sequence and Lulu's stick spin as VR gestures (meanwhile the Xbox pad; Lulu's spin works with the raw stick);
+whether blitzball's pass / shoot menus want the raw stick (owner test); RB held (continuous CTB back-scroll) is now one row
+per squeeze in battle; a follow-up: the game's own walk direction g_PlayerDirFix (0x13007C4 flag / 0x13007C8 yaw, read by
+Sg_ControlPlayer at 0x82D795 instead of the latched camera yaw 0x130079C) could walk the player relative to the headset
+with no stick rotation at all, but event scripts also set it (0x82D990, called from 0x83B519 and 0xA77C07), so we would
+have to own it only in our first-person views and give the script's value back; untested.
 
 Field / modes: per-area diorama memory by event_id; swimming / underwater
 eye height and the distortion pass; blitzball and chocobo (doc only);
@@ -5274,3 +5302,100 @@ Branch `gates` (on grid-timer 839d7e5, ABI 40: no export changed). Notes: scratc
 - **Not seen in play yet**: a Yes/No box with the tap (the gate should read "a choice box"), the field menu flag over a 3D
   frame, the movie flag with the playing byte (F8: "movie skippable 1, playing 0" after a skippable FMV is B1's case), an `od:` sequence for a real overdrive, the pick check's counts. The exe-analysis.md mislabel
   ("not located") and research exe-battle-ui.md:296 ("message queues") are corrected by the table above.
+
+## Eye jumps: the blink in battle, and facing the enemies (branch `eye-blink`, 5 Nov 2026)
+
+Roadmap 4.1 (scratchpad research/roadmap-design.md), review fixes from eye-blink-review.md. Logic in `ffxvr_eyejump.h`
+(pure, unit-tested), managed in `eye_jump.cs`, ABI 44 (`ffxvr_eye_jump_set`, `ffxvr_eye_event`).
+
+- **The blink now works on frames with a UI pass.** It used to blank only the plain backbuffer copy, so every battle frame
+  and every field frame with a text box skipped it. It now also clears eye 1's final image (both eyes black); the UI panel
+  (command window, text box) stays. **`cut_blink` therefore now also blinks in battle** (seat view, battle camera cuts),
+  and the first-person head-switch blink ("eye: from the drawn head") shows with a text box up. Cut blinks are limited to
+  one start per 30 frames, and no blink is drawn on frames shown on the virtual screen or the stereo screen.
+- **Eye jumps** (first person and third person): a move of the eye base of more than `eye_jump_units` (8, about 0.7 m)
+  in one frame blinks for `eye_jump_blink` frames (6; 0 = off, and then nothing else changes either). Not while
+  dragging, on the heading's latch frame, after a gap of 3+ frames, on the first frame or on NaN. One start per 30
+  frames; a jump inside the window extends a running blink by at most 2 frames. A jump snaps the head smoothing (at the
+  next head update) and resets the stick reprojection's heading. `eye:` lines (40 a session) give the move, the frame
+  before's move and field / in battle; counts on the `view:` line (diag_verbose=1).
+- **Facing the enemies** (`battle_face` 1 body forward (default), 2 where you look, 0 off): on a battle follow change
+  (start, swap, summon, dismissal, manual) the heading turns to the centre of the monsters (no turn under 15 deg; with the
+  blink). The request waits through the load chain (battle_state 4..0x15, 0x22; the first follow change comes at state
+  4, about 2-3 s before the battle is drawn) and is then sent once a monster counts: 11 monster slots (the allocator
+  0x793530), Chr+0x10 set (0x79F380's per-Chr gate), actor live, stat_visible, not stat_hide, HP > 0, not at (0, 0, 0),
+  within 400 units of the followed character. Native applies it at the next first-person frame (aged in such frames).
+- **The field heading** is kept over a battle (battle_face on only) with the game camera's yaw, and restored at the first
+  first-person frame after the battle in the same view and under the same field camera (30 deg). Another camera waits
+  (the battle's end can still be drawn with the battle camera for a few frames); the heading re-latches from the game
+  camera after 20 such frames in a row, at once after a first-person gap of 3+ Presents (a load passed: a battle ending
+  into a cutscene), or after 600 frames.
+- Not done (review notes): the manual yaw offset (`g_ovr_yaw`) is not folded into the facing (N4, default 0); the ini
+  ranges differ (managed 0-15 / 4-40, native clamps 0-30 / 2-100, N8); third person with anchor smoothing above 0 glides
+  past the blink (N9, default 0); a run of over-threshold frames (a battle dash, if one exceeds 8 units a frame) is not
+  yet treated as motion (S5: measure first from the `eye:` lines).
+
+## Battle swaps hand the eyes on where the two cross (5 Nov 2026)
+
+The owner: on a swap of the character who has the first-person view, "our character runs far off in the distance with me
+watching for a bit, then the view switches"; wanted: "the view switches when they kind of cross paths, almost like they
+are tagging in / out". The follow waited for the incoming character to run in and stand still (15 frames), or 300 frames:
+about 2 s. Logic in `ffxvr_tag.h` (pure, unit-tested), managed in `bt_tag.cs`, ABI 46 (`ffxvr_bt_tag_step`,
+`ffxvr_bt_tag_hold`).
+
+- **The tag.** While a swap-in is pending ("Tidus joined the field", "N left the field"), the horizontal distance between
+  the outgoing character (the one followed) and the incoming one is measured every frame. Tag when it is under
+  `bt_tag_dist` (6 units; party models are 15-22 tall), or when it has closed in by 2 and then grown 2 past its minimum
+  (they passed further apart). The first 4 frames, and any frame before both have moved 1 unit from where they stood,
+  are ignored. No tag (the wait as before) when the followed character stays on the field (Tidus joining for someone
+  else), when either cannot be read or the outgoing one is already gone, or when they have not crossed by the arrival.
+- **`bt_tag`** (F8 > First person / follow, "a swap hands the eyes on:"): 0 "wait until he arrives" (as before; the
+  crossing is still measured for the log), 1 "tag and wait on the spot" (default), 2 "tag and ride in with him".
+- **Tag and wait on the spot.** At the tag the follow goes to the incoming character and the outgoing one shows again.
+  In first person the eye stays on the outgoing character's spot (his position when the swap began: the slot the incoming
+  one runs to; a swap that begins during a hold keeps that spot) at the incoming one's eye height, until he arrives and
+  stands still (the same arrival rule, one set of constants in bt_tag.cs) or 300 frames from the swap's start; then it
+  follows him. The hold is native: `ffxvr_player_set` stays his position and only the eye base is moved, by spot - his
+  position (his head by the shared rule, his smoothing). Refreshed every frame; it lapses after 2 frames without one. In
+  third person a tag just switches the follow.
+- **You see him run in** (review of 1442290, SF). The battle body hide is the radius test around `ffxvr_player_set`'s
+  position alone (no other roots are sent outside the field), which hid him all the way in. While the eye is held its
+  centre is the spot (nothing stands there: the outgoing one has left), and his own position again once he is within the
+  usual hide radius + step margin + 2 units of the spot, horizontally (`tag::hide_centre`). The 2 units cover where he
+  stops against the recorded spot and his body's width, so his head is never drawn through the held eye.
+- **A tag blinks** through the eye-jump blink (`eye_jump_blink` frames; 0 = none) and snaps the head offset, whatever
+  the distance (the jump at a tag can be under `eye_jump_units`). The enemies are faced through the usual battle follow
+  change (`battle_face`), measured from the spot.
+- **Log:** one `battle tag:` line per swap (100 a session): the mode, the frames until the tag, why (distance or passed)
+  and the distance then, the closest distance, and how it ended (held N frames until he stood still, the 300-frame
+  limit, interrupted by a summon or a manual pick, ...). Native: `tag:` lines (40 a session) at each tag.
+- With `eye_jump_blink=0` a tag does not blink (the eye snaps from the crossing to the spot), as for every eye jump.
+- Not done: the held eye bobs with his running head height (smoothed); the release, when he stands a unit or two off
+  the recorded spot, is a small step without a glide; while he is away from the spot the body hide's bone capture (the
+  VR hands' bones) finds none of his.
+
+## The first-person head rule in one place (5 Nov 2026, review of 9b406b9)
+
+9b406b9 left out sub-positions more than `fp_head_reach` (8) units sideways from sub-position 0 (Wakka's battle model
+carries the ball he holds up 14.5 units out, 8-12 units above his head). But the smooth anchor's post-join snapshot kept
+its own copy of the old rule and replaces push_player's head on almost every frame, so the view did not change. The rule
+is now one function, `FphWalk.HeadPick`, for push_player, the optpos log and the snapshot (the main thread reads the
+reach push_player published that frame). The reach applies in battle only: the field, riding, cutscenes and blitzball
+keep the old rule exactly; `FphWalk.HeadOf` (the npc-anchor ties, field only) uses it with reach 0. A `head: skipped
+index N, X units out, for model cNNN` line (a new model / index pair, 6 a battle) shows it live. The F8 slider ("head,
+in battle: ignore points further out than") shows in every eye-height mode.
+
+## 3D damage numbers (branch `dmg3d`, 6 Nov 2026; roadmap 4.2)
+
+Off by default for the first build (`dmg3d=0`; F8 main page, under "battle start (glass break)": "3D damage numbers"). The damage, heal and MP digits are drawn at each target in the world, in both eyes, with the game's own hop, fade and colour. "Miss" and the other three words (texture 600) and the Doom countdown stay on the panel (v1).
+- **Source.** The game's damage-number nodes (pool `[0x11360B8]`, 128 x 0x14 B; list `[0x11360BC]`, link +0x10), read on the main thread at the first job join after the frame counter moved (`h7_join`, always installed). Sg_MainLoop runs the battle ticks (the node update 0x79F5E0), then the battle UI (the queue push 0x79F660 and the draw 0x893290), then the counter, then that join: the pool there is exactly what the game drew this frame. The push's own gates are kept: battle state != 0 and `[0x133C948]` != 0 (0x780CC0 / 0x89B360). 0x79F660's test of battle state 0x1F-0x21 jumps to the head of the node loop (0x79F845): it skips only the Doom countdown, the digits go on being drawn while a battle ends (the design and exe-battle-ui.md had read it as stopping both; review S1). The main loop's three UI-draw gates are kept too (`[0x12FB8FB]` == 0, `[0x12FBBB4]` != 0, `[0x12FB7D0]` == 0 at 0x8214F4..0x821533; review S3): on a frame without the UI nothing is published, the last snapshot holds as the game's panel image does, and the live rule clears it after 3 such frames. No new hook for this.
+- **Placement.** `ffxvr_dmg3d.h` (pure, unit-tested against a transcription of 0x79F86A..0x79F973): step = counter - 1, j = step - digit index; damage hops by the table at 0xC424B0 (12 px, then a 3 px bounce), heals rise 1 px per 2 frames, MP 1 px per frame; the fade formula (len - step) << 5 takes over at step 26 (still 0x80 there) and shows in the last 3 drawn frames (0x60, 0x40, 0x20). **Correction to the design:** offsets are PS2 px (512 x 416 over the whole screen), the digit is 34 x 45 UI px (0x8FB840 converts both sizes down to PS2 px), so offsets are scaled by 3.75 / 2.596 to UI px before C3's 14 px per unit.
+- **Anchor.** optpos[Chr+0x442] (d7_anchor's rule, with the 30 Hz correction) lifted by Chr+0x4E8, as 0x79F380; Chr+0x442 = 0xFF: optpos[1] (the game uses 0x794AB0), and Chr+0x442 above 25 or d7_anchor's fallback for an empty sub-position: stand-ins, counted, drawn, never hidden from the panel (review N2). Then `dmg3d_lift` units up, and pulled toward the head by C3-13's rule.
+- **First person** (C3's rule, `c3_is_self`: fp_mode 1, headset on, the actor we look out of): that actor's digits go to C3's self spot, 0.5 m ahead along the view's horizontal forward and 0.35 m below the eyes (`bb[6..8]`, no lift, no pull), instead of our own eyes (review S2). With the hide on they leave the panel like every other target's: they are drawn, just in front of you, and one rule for all targets keeps the panel from showing half of a hit's numbers.
+- **Size.** C3's 14 UI px per unit times `dmg3d_scale`, with the digit's height kept between 1 and 4 degrees. The base size is 3.2 units tall: about 1.5-2 degrees at the diorama's usual 100-140 units (94 units/m), close to the monitor's; in first person (11.4 units/m) it is 28 cm, which would pass 4 degrees nearer than 46 units (4 m), so it is capped there instead of filling the view.
+- **No depth test** (as every marker): the game draws its numbers over everything, and the anchor is on or inside the body.
+- **Drawn** in the marker pass at Present (`dmg_build` once per Present from eye 1's billboard frame, appended to each eye's marker draw; battle.dds from C3's held atlas, whose search now also runs in battle while dmg3d is on).
+- **Lifetime.** C2's live rule on the snapshot's game-frame stamp (within 3 frames, not older than the switch-on or the battle start, 180-Present backstop): the digits come and go with the game's nodes.
+- **The flat numbers** stay on the panel by default. `dmg3d_hide2d=1` (ini, its hook installed at launch only then; off by default) hooks the queue draw 0x893290 (single call site 0x89B3CB; prologue `57 E8` checked first): the detour records there and, while native draws the digits (`ffxvr_dmg_skip`, decided beside C2's skip), takes exactly those entries off the queue, only when every entry of this frame matches the placement predicted from the nodes; on any doubt nothing changes. Digits at a stand-in anchor, or past the 64 we draw, stay on the panel.
+- **Logs.** One `dmg3d:` line per new number for the first 40 (value, kind, target, the game's anchor and screen point against ours through the game's camera, where the quad went, its distance and size); a 10 s `dmg3d:` line in battle (snapshots, cut walks, stand-in anchors, the queue check: our predicted entries against the game's own, still in memory after the draw).
+- ini: `dmg3d` (0), `dmg3d_scale` (1.0, 0.3-3), `dmg3d_lift` (0, -10..20 units), `dmg3d_hide2d` (0). ABI 47: `ffxvr_dmg_walk`, `ffxvr_dmg_queue`, `ffxvr_dmg_set`, `ffxvr_dmg_cfg`, `ffxvr_dmg_skip`, `ffxvr_dmg_status`.

@@ -30,12 +30,17 @@
 #include <Xinput.h>
 #include "ffxvr_xr.h"
 #include "ffxvr_hands.h"   // VR hands v2: the CPU half (box mesh, placement, calibration)
+#include "ffxvr_pad.h"     // Quest-only controls: the VR pad's mapping and merge, the ImGui feed, the walk gate, quick-squeeze grips (pure logic)
 #include "ffxvr_slow.h"    // od-guard: the slow-GPU guard's decisions (pure logic)
 #include "ffxvr_cpu.h"     // cpu-lean: the cpu: line's accumulators and range_readable's page rule / region cache (pure logic)
 #include "ffxvr_fpown.h"   // the body hide's ownership test and step-margin cap (pure logic; NPCs vanishing in first-person cutscenes)
 #include "ffxvr_gates.h"   // gates: the tap gate's reasons from the game bits, the hands' game hide rule, the overdrive minigame tracker (pure logic)
 #include "ffxvr_fmv.h"     // fmv-sync (S2): the movie player's fields, the per-FMV tracker and lines, the .fvd header check (pure logic)
 #include "ffxvr_relief.h"  // fmv-relief (S3): the .fvd reader, the frame selection, the hold / cut ramp, the relief's shape (pure logic)
+#include "ffxvr_eyejump.h" // eye jumps (4.1): the blink on a one-step eye move, the battle heading toward the enemies (pure logic)
+#include "ffxvr_tag.h"     // battle tag: a swap hands the eyes on where the two cross; the eye held on the spot (pure logic)
+#include "ffxvr_dmg3d.h"   // 3D damage numbers (4.2): the node walk, the game's placement and fade, the queue check, the quads (pure logic)
+#include "ffxvr_odgest.h"  // overdrive gestures (4.3): Lulu's circles, Auron's slashes and punches, Tidus's swing (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -800,6 +805,10 @@ static void ride_d2(const float* w, float* dr, float* dm) {
     *dr = ax*ax + ay*ay + az*az; *dm = 1e30f;
     if (g_ride_flags & 2) { const float bx = w[0] - g_ride_mount[0], by = w[1] - g_ride_mount[1], bz = w[2] - g_ride_mount[2]; *dm = bx*bx + by*by + bz*bz; }
 }
+// Battle tag (ffxvr_tag.h, ABI 46): managed's swap watch (ffxvr_bt_tag_step) and the eye held on the outgoing character's spot
+// while the incoming one runs in (ffxvr_bt_tag_hold). Render thread only. Here, before the body hide (fp_part_of): the hold moves its centre.
+tag::State g_tag; tag::Cfg g_tag_cfg; tag::Hold g_tag_hold; uint32_t g_tag_lines = 0;
+static bool tag_hold_live() { return g_fp_mode == 1 && tag::live(g_tag_hold, g_frames); }
 /// The body hide's test for one draw's world translation: 0 not the player's, 1 one of the player's own parts (the rider's
 /// while riding), 2 one of the mount's (riding only). The rules are in ffxvr_fpown.h.
 /// On foot: within hide_radius + min(1.5 * step, 4) of g_fp_pos (the margin was unbounded until 4 Nov 2026: scripted moves under
@@ -812,7 +821,9 @@ static void ride_d2(const float* w, float* dr, float* dm) {
 /// Nothing else is at the seat's height within 6 units: an NPC's root is on the ground, a seat height (15 units) below.
 static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
     if ((g_ride_flags & 1) == 0) {
-        fpown::Foot f; f.centre = g_fp_pos; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        fpown::Foot f; f.radius = g_fp_hide_radius; f.step_hide = g_fp_step_hide;
+        // g_fp_pos; battle tag: while the eye is held on the spot, the spot, so the incoming runner shows until he is near it (ffxvr_tag.h)
+        f.centre = tag::hide_centre(g_tag_hold, tag_hold_live(), g_fp_pos, g_fp_hide_radius + fpown::margin(g_fp_step_hide) + tag::k_near_extra);
         if (fp_others_live()) {   // nearest-root ownership; none sent this frame = the radius test alone, as before
             f.others = g_fp_others; f.n = g_fp_others_n;
             if (g_fp_self_ok && g_frames - g_fp_self_frame <= 1u) { f.self = g_fp_self_root; f.self_exact = g_fp_self_exact; }
@@ -1237,6 +1248,7 @@ static inline int uid_slot() { return g_uid_proj == 1 ? 0 : g_uid_proj == 2 ? 1 
 // Cursor stage C2: the game's two battle cursors are skipped while our 3D markers are what the headset shows. g_c2_on comes
 // from managed (cursor_source=game, hooks live, markers on); g_c2_skip is decided once per frame at begin_frame on the render
 // thread and published with an interlocked store; the detours read it on the game's main thread (ffxvr_cursor_skip).
+volatile LONG g_dmg_skip = 0; static void dmg_skip_decide(bool view3d);   // 3D damage numbers (dmg3d, ffxvr_dmg3d.h): the queue-draw detour's skip, decided beside C2's
 bool g_c2_on = false; volatile LONG g_c2_skip = 0; uint32_t g_c2_skip_frames = 0; uint32_t g_c2_nopass = 0; const uint32_t k_c2_nopass = 2;   // C2-8: 3D frames in a row without the UI pass before the skip lets go
 // Cursor stage C3: the game's look. g_c3_look (managed, cursor_look=game) turns on the search for battle.dds among the UI
 // pass's textures: a square power-of-two atlas of 1024 or more whose slot-3 UVs (the CPU's UV stream, exe-verify 6) hold
@@ -1450,44 +1462,123 @@ static void view_reset() {
     view_defaults(g_fp_mode);
     if (g_fp_mode == 3 && g_fp_yaw_latched && g_fp_move_dir_valid) g_fp_yaw = atan2f(-g_fp_move_dir[0], -g_fp_move_dir[2]);
 }
-static SHORT stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return (SHORT)(v * 32767.f); }
+// -- Quest-only controls (design-notes "Quest controllers only"; the pure parts in ffxvr_pad.h, unit-tested) -------------
+// The walk gate (ini move_remap_walk_only): the first-person stick remap below rotates the left stick only while the player
+// can walk; battle, menus, choice boxes, the save screen and the sphere grid get the raw stick, as a gamepad. Managed pushes
+// the tap gate's game bits every frame (ffxvr_move_gate_set, render thread); the hook reads them on the game's input
+// thread (aligned 32-bit stores; a torn pair of bits and stamp is harmless: stale means raw).
+volatile LONG g_mg_on = 1, g_mg_bits = 0, g_mg_tick = 0, g_mg_have = 0;   // walk_only; the bits; GetTickCount at the push; a push arrived
+volatile LONG g_mg_why = pad::W_STALE;                                       // the hook's last reason (F8)
+// Quick-squeeze grips (ini grip_lbrb, grip_tap_ms): gesture_tick (render thread) decides per squeeze; the hook passes the grips
+// in g_grip_pass at once and presses a quick squeeze's LB / RB through g_sh_press (hv_tap_hook's rules, as the tap's press).
+// ini vd_overlay_mask: both stick clicks (Virtual Desktop's overlay) send neither Back nor R3.
+int      g_grip_mode = pad::G_BATTLE_GRAB; uint32_t g_grip_tap_ms = 300; bool g_vd_mask = true;
+volatile LONG g_grip_press_ms = 0;                                       // grip_tap_press_ms: the press's least length (0: just 2 new packets, ffxvr_pad.h press_hook)
+pad::GripTap g_grip[2]; pad::ShQueue g_sh_queue;
+float    g_grip_snap[2][3] = {}; int g_grip_snap_mode[2] = { -1, -1 };   // the grab offset at each squeeze (restored after a quick one)
+uint32_t g_grip_lines = 0;
+volatile LONG g_grip_pass = 3;                                           // 1 left, 2 right: the grips the hook passes to the game as LB / RB now
+volatile LONG g_sh_press = 0, g_sh_press_t0 = 0, g_sh_press_polls = 0;   // the shoulder held now (0 none), GetTickCount at the press, new packets with it
+pad::PressHook g_sh_hook;                                                // input thread only
+pad::VdGate g_vd_gate;                                                   // vd_overlay_mask: the stick clicks 80 ms late, none while both are down (input thread only)
+thread_local bool t_in_game_xi = false;   // the game's own XInputGetState is running on this thread (the ImGui feed's re-entry guard)
+static bool vrpad_live() { return g_vrpad_enabled && g_xr_active && g_vrpad.ready; }
+static pad::In vrpad_in() {
+    pad::In in;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& s = g_vrpad.hand[h]; pad::Hand& d = in.h[h];
+        d.primary = s.primary; d.secondary = s.secondary; d.menu = s.menu; d.stick_click = s.stick_click;
+        d.trigger = s.trigger; d.squeeze = s.squeeze; d.stick[0] = s.stick[0]; d.stick[1] = s.stick[1];
+    }
+    return in;
+}
+/// A quick squeeze's LB / RB (input thread): held for 2 new packets and at least grip_tap_press_ms, then one clear packet
+/// (ffxvr_pad.h press_hook: one CTB row per squeeze). touched: this poll carries the press or its release (its packet
+/// must reach the game).
+static_assert(HV_HOOK_HOLD == 1 && HV_HOOK_RELEASE == 2 && HV_HOOK_COUNT == 4, "pad::press_hook returns the HV_HOOK_* values");
+static WORD vrpad_sh_bits(bool* touched) {
+    const LONG sb = g_sh_press;
+    const LONG el = sb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_sh_press_t0)) : 0;
+    const int hk = pad::press_hook(g_sh_hook, sb != 0, g_vrpad_packet, el, g_grip_press_ms, g_sh_press_polls, pad::k_sh_min_polls);
+    if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_sh_press_polls);
+    *touched = (hk & (HV_HOOK_HOLD | HV_HOOK_RELEASE)) != 0;
+    if (hk & HV_HOOK_HOLD) return static_cast<WORD>(sb);
+    if (hk & HV_HOOK_RELEASE) InterlockedCompareExchange(&g_sh_press, 0, sb);
+    return 0;
+}
+// Overdrive gestures (roadmap 4.3; the logic in ffxvr_odgest.h, unit-tested): od_gest_tick (render thread, after perf_tick) publishes
+// Lulu's circle angle while a hand circles and Auron's / Tidus's presses; this merges them into the game's pad on its input
+// thread, the stick by the larger-magnitude rule, the press ORed, so the controllers keep working. The render side clears
+// both the frame the overdrive's input window closes; a channel the render thread has not refreshed for 100 ms is ignored.
+volatile LONG g_odg_stick_on = 0, g_odg_stick_target = 0, g_odg_tick = 0, g_odg_lulu_stick = 0;   // the stick channel, GetTickCount of the last tick, od_lulu_stick
+volatile LONG g_odg_press = 0, g_odg_press_t0 = 0, g_odg_press_polls = 0;                          // the press slot (pad::press_hook's rule, as the quick squeeze)
+volatile LONG g_odg_stick_sent = 0, g_odg_stick_dropped = 0, g_odg_stick_q = 0;                    // the input thread's counters and quadrant (F8, the odg: line)
+static odg::Stick s_odg_stick; static pad::PressHook s_odg_hook;                                    // input thread only
+static bool odg_squeeze_may_send(int h);   // render thread (grip_tick): a quick squeeze that a punch already sent is dropped (review S3)
+static bool odg_grips_are_gestures();      // render thread (gesture_tick): an injecting Bushido window: the grips do not grab (review S4)
+/// Into the game's pad (input thread). True when this poll carries a gesture input (its packet must reach the game).
+static bool odg_input(XINPUT_GAMEPAD& g) {
+    const DWORD now = GetTickCount();
+    const bool fresh = now - static_cast<DWORD>(g_odg_tick) < 100u;
+    bool touched = false;
+    float v[2] = { 0.f, 0.f };
+    const bool on = g_odg_stick_on != 0;          // the flag first, then the target: the render side writes the target first (review N4)
+    const LONG target = g_odg_stick_target;
+    if (s_odg_stick.step(fresh && on, target, g_vrpad_packet, now, v[0], v[1])) {
+        const LONG w = g_odg_lulu_stick;   // 0 the right stick, 1 the left, 2 both
+        if (w != 1) pad::merge_stick(g.sThumbRX, g.sThumbRY, v);
+        if (w != 0) pad::merge_stick(g.sThumbLX, g.sThumbLY, v);
+        touched = true;
+        g_odg_stick_q = s_odg_stick.q;
+    }
+    g_odg_stick_sent = static_cast<LONG>(static_cast<uint32_t>(s_odg_stick.sent)); g_odg_stick_dropped = static_cast<LONG>(static_cast<uint32_t>(s_odg_stick.dropped));
+    const LONG pb = g_odg_press;
+    const LONG el = pb ? static_cast<LONG>(now - static_cast<DWORD>(g_odg_press_t0)) : 0;
+    const int hk = pad::press_hook(s_odg_hook, pb != 0 && fresh, g_vrpad_packet, el, odg::k_press_ms, g_odg_press_polls, odg::k_press_polls);
+    if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_odg_press_polls);
+    if (hk & HV_HOOK_HOLD) { g.wButtons = static_cast<WORD>(g.wButtons | static_cast<WORD>(pb)); touched = true; }
+    if (hk & HV_HOOK_RELEASE) { InterlockedCompareExchange(&g_odg_press, 0, pb); touched = true; }
+    return touched;
+}
 static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
     if (!had_pad) memset(st, 0, sizeof(*st));
     XINPUT_GAMEPAD& g = st->Gamepad;
-    if (g_vrpad_suppress) { if (!had_pad) st->dwPacketNumber = g_vrpad_packet; return; }
-    WORD b = 0;
-    if (R.primary) b |= XINPUT_GAMEPAD_A;  if (R.secondary) b |= XINPUT_GAMEPAD_B;
-    if (L.primary) b |= XINPUT_GAMEPAD_X;  if (L.secondary) b |= XINPUT_GAMEPAD_Y;
+    bool sh_touched = false;
+    const WORD sh = vrpad_sh_bits(&sh_touched);   // a quick squeeze is a game input of ours: it goes in even while a gesture holds the rest back
+    if (g_vrpad_suppress) { g.wButtons |= sh; const bool ot = odg_input(g); if (!had_pad || sh_touched || ot) st->dwPacketNumber = g_vrpad_packet; return; }   // overdrive gestures: ours too
+    int pass;
     {   // tap build, "don't pass the grip to the game while a tap can fire" (opt-in): a grip squeezed while that holds is held back until
-        // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits
+        // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits.
+        // Quick-squeeze grips: only the grips gesture_tick passes at once (a deferred squeeze reaches the game only as g_sh_press)
         const bool gd[2] = { L.squeeze > 0.5f, R.squeeze > 0.5f };
         const bool hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
-        const int pass = hv_grip_strip(s_tap_grip_back, gd, hold);
-        if (pass & 1) b |= XINPUT_GAMEPAD_LEFT_SHOULDER; if (pass & 2) b |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        pass = hv_grip_strip(s_tap_grip_back, gd, hold) & static_cast<int>(g_grip_pass);
     }
-    if (L.menu) b |= XINPUT_GAMEPAD_START; if (L.stick_click) b |= XINPUT_GAMEPAD_BACK; if (R.stick_click) b |= XINPUT_GAMEPAD_RIGHT_THUMB;
+    pad::In in = vrpad_in();
+    if (g_vd_mask) {   // Virtual Desktop's overlay chord (both stick clicks): neither Back nor R3 reaches the game (ffxvr_pad.h VdGate)
+        const int ck = g_vd_gate.step(L.stick_click, R.stick_click, GetTickCount());
+        in.h[0].stick_click = (ck & 1) != 0; in.h[1].stick_click = (ck & 2) != 0;
+    }
+    pad::Out o = pad::compose(in, pass, g_vd_mask ? pad::C_VD_MASK : 0);   // the mapping (ffxvr_pad.h): faces, Start / Back / R3, triggers, sticks
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
         const LONG tb = g_tap_press;
         const LONG el = tb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_tap_press_t0)) : 0;
         const int hk = hv_tap_hook(&g_tap_hook, tb != 0, g_vrpad_packet, el, g_tap_press_ms, g_tap_press_polls);
         if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_tap_press_polls);
-        if (hk & HV_HOOK_HOLD) b |= static_cast<WORD>(tb);
+        if (hk & HV_HOOK_HOLD) o.buttons = static_cast<uint16_t>(o.buttons | static_cast<WORD>(tb));
         else if ((hk & HV_HOOK_RELEASE) && InterlockedCompareExchange(&g_tap_press, 0, tb) == tb) { g_tap_released_ms = el; g_tap_released_polls = g_tap_press_polls; InterlockedIncrement(&g_tap_released_n); }
     }
-    g.wButtons |= b;
-    const BYTE lt = (BYTE)(L.trigger * 255.f), rt = (BYTE)(R.trigger * 255.f);
-    if (lt > g.bLeftTrigger) g.bLeftTrigger = lt; if (rt > g.bRightTrigger) g.bRightTrigger = rt;
-    auto merge = [](SHORT& x, SHORT& y, const float* v) {
-        const float m_pad = (float)x * (float)x + (float)y * (float)y, m_vr = (v[0]*v[0] + v[1]*v[1]) * 32767.f * 32767.f;
-        if (m_vr > m_pad) { x = stick_s(v[0]); y = stick_s(v[1]); }
-    };
-    merge(g.sThumbLX, g.sThumbLY, L.stick); merge(g.sThumbRX, g.sThumbRY, R.stick);
+    o.buttons = static_cast<uint16_t>(o.buttons | sh);
+    pad::merge(o, g);   // buttons OR, triggers max, the stick with more deflection wins
+    odg_input(g);       // overdrive gestures: the circle's stick, the gesture's press (only inside their overdrive's window)
     st->dwPacketNumber = g_vrpad_packet;
 }
 static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
+    t_in_game_xi = true;   // if the game's XInput DLL forwards into the one ImGui detoured, the ImGui feed passes this call through
     DWORD r = g_xi_orig(idx, st);
+    t_in_game_xi = false;
     g_xi_hook_calls_all++;
     if (idx < 4 && st != nullptr) { g_xi_seen[idx].res = r; g_xi_seen[idx].rx = st->Gamepad.sThumbRX; g_xi_seen[idx].tick = GetTickCount(); }
     const bool vr = g_vrpad_enabled && g_xr_active && g_vrpad.ready && idx == 0 && st != nullptr;
@@ -1508,6 +1599,11 @@ static DWORD WINAPI xi_get_state_hook(DWORD idx, XINPUT_STATE* st) {
             if (pushed) delta = g_move_delta_hold;
         }
         else g_move_held = false;
+        if (g_mg_on && g_move_remap && g_fp_mode != 0) {   // the walk gate: rotated only while the player can walk (ffxvr_pad.h walk_why)
+            const int why = pad::walk_why(static_cast<int>(g_mg_bits), GetTickCount() - static_cast<DWORD>(g_mg_tick), g_mg_have != 0);
+            if (g_mg_why != why) g_mg_why = why;
+            if (why != pad::W_OPEN) { delta = 0.f; g_move_held = false; }   // the third-person latch starts again when the gate opens
+        }
         if (g_move_remap && g_fp_mode != 0 && g_xr_active && g_ovr_enabled && delta != 0.f) {
             const float d = g_move_sign * delta;
             const float c = cosf(d), sn = sinf(d);
@@ -1533,9 +1629,59 @@ static float grip_pitch(const float* q) {
     const float fwd[3] = { 0.f, 0.f, -1.f }; float d[3]; quat_rotate(qr, fwd, d);
     return asinf(fmaxf(-1.f, fminf(1.f, d[1])));
 }
+/// Quick-squeeze grips: no controllers (no sync, the VR pad off, the session gone): a squeeze in progress ends without a press,
+/// nothing queued is sent later, the grips pass as before (nothing is merged without the VR pad anyway).
+static void grip_idle() {
+    for (int h = 0; h < 2; ++h) pad::grip_reset(g_grip[h]);
+    g_sh_queue.clear();
+    if (g_grip_pass != 3) InterlockedExchange(&g_grip_pass, 3);
+}
+/// Quick-squeeze grips, once a frame after the grabs (render thread). seat: this frame's grab view (the seat or the diorama).
+/// A squeeze that defers (ffxvr_pad.h grip_defers: battle, or a grab view, in grip_lbrb=1) is never passed as LB / RB; at its
+/// release grip_step says whether it was a quick one: then the shoulder is queued for the hook's press slot, and the grab's
+/// nudge since the squeeze is undone (a one-hand grab moves only g_gest_move; two hands never make a quick squeeze).
+static void grip_tick(const float hp[2][3], bool seat) {
+    const DWORD now = GetTickCount();
+    const LONG bits = g_mg_bits;
+    const bool battle = g_mg_have != 0 && now - static_cast<DWORD>(g_mg_tick) < 1000u && (bits & gates::GB_BATTLE) != 0;
+    const bool grab_view = seat && g_gest_enabled;
+    pad::GripCfg c; c.mode = g_grip_mode; c.tap_ms = g_grip_tap_ms;
+    LONG pass = 0;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& hd = g_vrpad.hand[h];
+        pad::GripSample s;
+        s.down = hd.squeeze > 0.5f; s.pose_ok = hd.grip_valid;
+        for (int i = 0; i < 3; ++i) s.p[i] = hp[h][i];
+        for (int i = 0; i < 4; ++i) s.q[i] = hd.grip_q[i];
+        s.any_click = g_vrpad.hand[0].stick_click || g_vrpad.hand[1].stick_click;
+        s.other_down = g_vrpad.hand[h ^ 1].squeeze > 0.5f;
+        s.battle = battle; s.grab_view = grab_view;
+        const int r = pad::grip_step(g_grip[h], c, s, now);
+        if (r & pad::GT_BEGIN) { memcpy(g_grip_snap[h], g_gest_move, sizeof(g_gest_move)); g_grip_snap_mode[h] = g_fp_mode; }
+        if ((r & pad::GT_FIRE) && odg_squeeze_may_send(h)) {
+            g_sh_queue.push(h);
+            if ((r & pad::GT_RESTORE) && g_grip_snap_mode[h] == g_fp_mode) memcpy(g_gest_move, g_grip_snap[h], sizeof(g_gest_move));
+        }
+        if ((r & pad::GT_END) && g_grip[h].defer && g_grip_lines < 300) {
+            const pad::GripTap& t = g_grip[h];
+            g_grip_lines++;
+            diag("grips: %s grip %u ms, %.1f cm, %.0f deg (%s%s): %s%s%s", h ? "right" : "left", t.last_ms, t.last_d * 100.f, t.last_deg,
+                 battle ? "battle" : "", grab_view ? (battle ? ", grab view" : "grab view") : (battle ? "" : "everywhere"),
+                 t.last == pad::GV_SENT ? (h ? "RB" : "LB") : "", t.last == pad::GV_SENT ? " sent" : pad::k_grip_verdict[t.last],
+                 (t.last == pad::GV_SENT && t.grab0) ? ", the grab undone" : "");
+            if (g_grip_lines == 300) diag("grips: no more grip lines this session");
+        }
+        if (r & pad::GT_PASS) pass |= 1 << h;
+    }
+    if (g_grip_pass != pass) InterlockedExchange(&g_grip_pass, pass);
+    if (g_sh_press == 0 && g_odg_press == 0) {   // the hook let the last press go (and no gesture press is held: one slot at a time, review S3): the next quick squeeze
+        const uint16_t b = g_sh_queue.pop();
+        if (b) { g_sh_press_t0 = static_cast<LONG>(now); g_sh_press_polls = 0; InterlockedExchange(&g_sh_press, static_cast<LONG>(b)); }
+    }
+}
 static void gesture_tick() {
     g_vrpad_suppress = false; g_gest_active = false;
-    if (!g_vrpad.ready || !g_vrpad_enabled || !g_xr_active) { g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = false; return; }
+    if (!g_vrpad.ready || !g_vrpad_enabled || !g_xr_active) { g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = false; grip_idle(); return; }
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
     // Chord: right grip + right stick click -> toggle first person (on the press edge).
     // (Both stick clicks is Virtual Desktop's own performance overlay.)
@@ -1561,12 +1707,16 @@ static void gesture_tick() {
     float& yaw_ref = diorama ? g_fp_yaw : g_seat_yaw;
     float& pitch_ref = diorama ? g_gest_pitch : g_seat_pitch;
     const float ovr[3] = { diorama ? 0.f : g_ovr_move[0], diorama ? 0.f : g_ovr_move[1], diorama ? 0.f : g_ovr_move[2] };
-    bool grab[2] = { seat && g_gest_enabled && L.squeeze > 0.5f && L.grip_valid, seat && g_gest_enabled && R.squeeze > 0.5f && R.grip_valid };
+    const bool odg_grips = odg_grips_are_gestures();   // overdrive gestures: in an injecting Bushido window a clenched punch is a punch
+    static bool s_odg_held[2] = { false, false };       // ... and a grip squeezed there grabs nothing until it is let go (round 2 N1)
+    for (int h = 0; h < 2; ++h) { const float sq = h ? R.squeeze : L.squeeze; if (sq <= 0.5f) s_odg_held[h] = false; else if (odg_grips) s_odg_held[h] = true; }
+    const bool grip_grab = seat && g_gest_enabled && !odg_grips;
+    bool grab[2] = { grip_grab && !s_odg_held[0] && L.squeeze > 0.5f && L.grip_valid, grip_grab && !s_odg_held[1] && R.squeeze > 0.5f && R.grip_valid };
     float hp[2][3]; hand_to_ref(L.grip_p, hp[0]); hand_to_ref(R.grip_p, hp[1]);
     const bool was[2] = { g_gest_grab[0], g_gest_grab[1] };
     const int n = (grab[0] ? 1 : 0) + (grab[1] ? 1 : 0), nwas = (was[0] ? 1 : 0) + (was[1] ? 1 : 0);
     if (n > 0) { g_gest_active = true; g_vrpad_suppress = true; }
-    if (seat && g_gest_enabled && (L.squeeze > 0.5f || R.squeeze > 0.5f)) g_vrpad_suppress = true;   // the grips are the grab, not LB/RB, in the seat
+    if (grip_grab && ((L.squeeze > 0.5f && !s_odg_held[0]) || (R.squeeze > 0.5f && !s_odg_held[1]))) g_vrpad_suppress = true;   // the grips are the grab, not LB/RB, in the seat
     for (int h = 0; h < 2; ++h) if (grab[h] && !was[h]) xr_haptic(h, 0.3f, 0.04f);
     if (n == 2 && nwas < 2) g_gest_last_tilt = (grip_pitch(L.grip_q) + grip_pitch(R.grip_q)) * 0.5f;
     if (n > 0 && n == nwas && grab[0] == was[0] && grab[1] == was[1]) {
@@ -1635,6 +1785,7 @@ static void gesture_tick() {
     }
     memcpy(g_gest_last_p, hp, sizeof(hp));
     g_gest_grab[0] = grab[0]; g_gest_grab[1] = grab[1];
+    grip_tick(hp, seat);   // quick-squeeze grips (after the grab: a quick squeeze's nudge is undone at its release)
 }
 
 /// Replace the game's XInputGetState import with ours (import address table).
@@ -1899,6 +2050,67 @@ static void turn_advance(int64_t T, bool extra) {
     if (deg != 0.f) turn_by(deg);
 }
 
+// Eye jumps (roadmap 4.1, ffxvr_eyejump.h). Render thread only: build_override_view's primary advance call, the Present path,
+// and managed's render_imgui (ffxvr_eye_jump_set, ffxvr_eye_event).
+ej::Cfg   g_ej_cfg; int g_ej_face = 1;            // ini eye_jump_blink / eye_jump_units; battle_face: 0 off, 1 body forward, 2 where you look
+bool      g_ej_battle = false;                    // managed: in battle (last frame), for the eye: lines (S5)
+ej::State g_ej; uint32_t g_ej_latch_seq = 0;      // the detector; bumped at every fp heading latch (a latch frame is not a jump)
+bool      g_ej_head_snap = false;                 // a jump: the next ffxvr_player_head_set snaps the head offset (no glide from the old body)
+uint32_t  g_ej_lines = 0, g_ej_face_lines = 0, g_ej_10s[4] = {};   // log budgets; the view: line's counts (jumps, blinks, extended, held back)
+uint32_t  g_ej_turns = 0, g_ej_kept = 0;          // face: heading changes / requests under the dead band (session)
+ej::FaceReq g_ej_face_rq;                         // ffxvr_eye_event 1: face this point at the next fp frame (aged in fp frames, B1)
+ej::Hold  g_ej_hold;                              // the field heading kept over a battle (ffxvr_eye_event 2 / 3; battle_face on only)
+ej::Limit g_cut_lim;                              // S4: cut_blink's one start per 30 frames
+const uint32_t k_ej_hold_age = 600;               // frames after a battle's end the field heading may still be restored
+const float    k_ej_cam_tol = 30.f * 0.0174533f;  // S2: the same field camera = within 30 deg of the saved yaw
+static void ej_blink() { if (g_ej_cfg.blink > g_blink_frames) g_blink_frames = g_ej_cfg.blink; }
+/// The heading changes managed asked for, at the primary advance call right after the latch (so a mode switch's re-latch from
+/// the game's camera is overridden): the field heading after a battle, or the battle heading toward the enemies.
+static void ej_heading() {
+    float y = 0.f; const float from = g_fp_yaw;
+    const int tk = ej::hold_take(g_ej_hold, g_fp_mode, g_frames, g_yaw_cam, k_ej_hold_age, k_ej_cam_tol, &y);
+    if (tk == ej::H_RESTORE) { g_fp_yaw = y; g_sr_epoch++; ej_blink(); }
+    else if (tk == ej::H_RELATCH) {   // S2: as the latch block does, from this frame's game camera (g_yaw_cam = atan2(R[6], R[8]), the latch's own value)
+        g_fp_yaw = g_yaw_cam; g_seat_latched = false; g_sr_epoch++; g_ej_latch_seq++; ej_blink();
+    }
+    if (tk != ej::H_NONE)
+        diag("face: frame %u: field heading %s (%.0f deg; the battle's was %.0f; game camera %.0f deg, at the start %.0f; %u frames after the battle, %d under another camera)", g_frames, ej::k_take[tk],
+             ej::wrap_pi(g_fp_yaw) * 57.29578f, ej::wrap_pi(from) * 57.29578f, ej::wrap_pi(g_yaw_cam) * 57.29578f, ej::wrap_pi(g_ej_hold.cam) * 57.29578f, g_frames - g_ej_hold.frame, g_ej_hold.miss);
+    const int fs = ej::face_req_tick(g_ej_face_rq, g_frames, g_fp_mode, g_ej_face);
+    if (fs == ej::F_DROP && g_ej_face_lines < 60) { g_ej_face_lines++; diag("face: frame %u: request from frame %u dropped (fp_mode %d, battle_face %d)", g_frames, g_ej_face_rq.frame, g_fp_mode, g_ej_face); }
+    if (fs != ej::F_APPLY) return;
+    // the head's yaw against the recentre reference (the gaze is g_fp_yaw + head); N5: 0 when looking nearly straight up or down
+    float head = 0.f;
+    if (g_xr_rotate) { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_q, fwd, d); if (d[0] * d[0] + d[2] * d[2] >= 0.2f * 0.2f) head = atan2f(-d[0], -d[2]); }
+    const float f0 = g_fp_yaw;
+    const ej::Face f = ej::face_yaw(tag_hold_live() ? g_tag_hold.base : g_fp_pos, g_ej_face_rq.t, head, g_ej_face, g_fp_yaw);   // battle tag: from the spot the eye is held on
+    if (f.turn) { g_fp_yaw = f.yaw; g_sr_epoch++; ej_blink(); g_ej_turns++; } else g_ej_kept++;
+    if (g_ej_face_lines < 60) {
+        g_ej_face_lines++;
+        diag("face: frame %u: battle follow (request at frame %u) -> heading %.0f -> %.0f deg (%s, fp_mode %d; the enemies at %.0f deg, head %.0f deg)%s%s", g_frames, g_ej_face_rq.frame,
+             ej::wrap_pi(f0) * 57.29578f, ej::wrap_pi(g_fp_yaw) * 57.29578f, g_ej_face == 2 ? "where you look" : "body forward", g_fp_mode, f.target * 57.29578f, head * 57.29578f,
+             f.turn ? "" : ": under 15 deg or no target, kept", g_ej_face_lines == 60 ? " (no more face: lines this session)" : "");
+    }
+}
+/// The detector, after fp_eye_base on the primary advance call. latched = the heading was latched before this call.
+static void ej_tick(const float P[3], bool latched) {
+    ej::Ctx c; c.frame = g_frames; c.mode = g_fp_mode; c.dragging = g_gest_active; c.latched = latched; c.latch_seq = g_ej_latch_seq; c.blink_left = g_blink_frames;
+    const ej::Result r = ej::step(g_ej, P, c, g_ej_cfg);
+    if (!r.jump() || r.kind == ej::K_OFF) return;   // S1: eye_jump_blink=0 is off: no head snap, no stickrep reset, no line
+    g_ej_head_snap = true; g_sr_epoch++;   // stickrep: a held image of the old place is not a stick turn
+    if (r.frames > g_blink_frames) g_blink_frames = r.frames;
+    g_ej_10s[0]++; if (r.kind == ej::K_START) g_ej_10s[1]++; else if (r.kind == ej::K_EXTEND) g_ej_10s[2]++; else if (r.kind == ej::K_HELD) g_ej_10s[3]++;
+    if (g_ej_lines < 40) {
+        g_ej_lines++;
+        char k[64];
+        if (r.kind == ej::K_START) snprintf(k, sizeof(k), "blink %d frames", r.frames);
+        else if (r.kind == ej::K_EXTEND) snprintf(k, sizeof(k), "blink extended to %d frames", r.frames);
+        else snprintf(k, sizeof(k), "%s", ej::k_kind[r.kind]);
+        diag("eye: frame %u: jump of %.1f units (the frame before: %.1f; fp_mode %d, %s) -> %s%s", g_frames, r.dist, r.prev_dist, g_fp_mode, g_ej_battle ? "in battle" : "field", k,
+             g_ej_lines == 40 ? " (no more eye: lines this session; counts on the view: line, diag_verbose=1)" : "");
+    }
+}
+
 /// The first-person eye's base from the player's position and head (fy = the view heading's forward, render space).
 /// fp_head_anchor 1: the head's height over the actor's horizontal position; 2: the full head offset plus a head-length along
 /// the lean; 0: a fixed eye height. Round 3: with the body drawn away from its root (g_fp_head_disp) modes 1 and 0 take the
@@ -1954,12 +2166,15 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     const bool primary = (g_eye_shift == 0.f);
     if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
+        const bool ej_latched = g_fp_yaw_latched;      // eye jumps: the latch frame is not a jump
         if (!g_fp_yaw_latched) {                        // heading: where the authored camera looked when toggled
             const float f[3] = { -R[6], 0.f, -R[8] };
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
             g_sr_epoch++;                               // stickrep: a new heading, not a stick turn
+            g_ej_latch_seq++;
         }
+        if (primary && advance) ej_heading();          // eye jumps: face the enemies (battle follow), or the field heading back after a battle
         if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
             // travel. Proportional with a rate cap, and weighted by how far
@@ -1977,6 +2192,8 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
         fp_eye_base(fy, P);
+        if (tag_hold_live()) tag::apply(g_tag_hold, g_fp_pos, P);   // battle tag: the eye on the outgoing character's spot, at the incoming one's eye height (first person)
+        if (primary && advance) ej_tick(P, ej_latched);   // eye jumps: a one-step move of the eye base blinks
         if (g_fp_mode >= 2) {
             // Diorama / third person: anchored to the player (smoothed), the offset
             // lives in the heading frame as g_gest_move (right, up, forward; behind =
@@ -4894,7 +5111,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 43;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered)
+constexpr int FFXVR_ABI = 48;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5755,6 +5972,7 @@ static void slow_dump_build() {
 static od::Raw g_od;                 // this Present's read (ok = false outside battle)
 static od::Log g_od_log;
 static volatile LONG g_od_active = 0;   // "an overdrive minigame is up" (the game's own test, 0x89B38D), for later users; 0 outside battle
+static uint8_t g_odg_blk[od::k_blk_len]; static uint32_t g_odg_blk_frame = 0xFFFFFFFFu;   // overdrive gestures: the last good block and its frame
 static void od_frame(uintptr_t base, LONG bst, double now) {
     od::Raw r;
     if (bst > 0) {
@@ -5762,6 +5980,7 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
         if (ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_blk_va - 0x400000u)), blk, od::k_blk_len)
             && ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_wakka_va - 0x400000u)), &wk, 1)) {
             od::parse_state(r, blk, wk);
+            memcpy(g_odg_blk, blk, sizeof(g_odg_blk)); g_odg_blk_frame = g_frames;   // overdrive gestures: Auron's progress, Lulu's counters (odg::parse_extra)
             uint8_t tb[od::k_timer_len];
             if ((od::active(r) || (g_od.timer_ok && g_od.timer != 0)) && ffxvr_safe_read(reinterpret_cast<const void*>(base + (od::k_timer_va - 0x400000u)), tb, od::k_timer_len))
                 od::parse_timer(r, tb);
@@ -5786,6 +6005,171 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
     }
     g_od = r;
     InterlockedExchange(&g_od_active, od::active(r) ? 1 : 0);
+}
+
+// -- Overdrive gestures (roadmap 4.3; ffxvr_odgest.h) ------------------------------------------------------------------------
+// od_gest_tick, once a Present right after perf_tick (render thread: the od block od_frame just read, the controllers synced
+// in this Present's xr_tick; review N1), whether or not the headset is on (off: nothing may inject, and a held press is
+// cleared at once, review N8): the driver opens a window when exactly one of Lulu / Auron / Tidus is at state 4 with the shared timer
+// running, classifies the hands, and its outputs go to the input thread (g_odg_stick_*, g_odg_press: odg_input) only while
+// that window is open, the overdrive's setting is on, the headset shows the game and the VR pad is merged; otherwise both
+// channels are cleared at once. One press slot at a time with the quick squeeze's (g_sh_press; review S3), and a punch and the
+// same hand's quick squeeze within 0.3 s send that shoulder once. A hand grabbing the world gestures nothing; in an injecting
+// Bushido window the grips do not grab (review S4). The odg: lines (not tied to a diagnostic profile): one summary per window
+// (100 a session) and up to 399 others plus a last "no more" line (Auron's capture, the gestures, Tidus's bar restarts):
+// Auron's expected sequence as raw values when its window opens, each gesture and
+// what was sent, each new press the game saw (u16 0x25D09D4; the bit -> button map for stage 2), the summary at the close.
+static odg::Driver g_odg;
+static uint32_t g_odg_lines = 0;
+static char g_odg_last_line[700] = "";   // the last summary (F8)
+static uint16_t g_odg_seq[odg::k_seq_max]; static int g_odg_seq_n = 0; static uint32_t g_odg_seq_ptr = 0; static int32_t g_odg_seq_len = -1;
+static double g_odg_t_last = -1.0; static int64_t g_odg_xt_last = 0;
+static double g_odg_squeeze_t[2] = { -1e300, -1e300 };   // the last quick squeeze sent per hand (the driver's clock)
+static bool odg_line_ok() {
+    if (g_odg_lines >= 400) return false;
+    if (++g_odg_lines == 400) { diag("odg: 400 lines this session (the window summaries apart): no more odg: lines"); return false; }
+    return true;
+}
+namespace {   // the globals' anonymous namespace (line 113), where grip_tick's and gesture_tick's forward declarations are
+static bool odg_squeeze_may_send(int h) {
+    if (h < 0 || h > 1) return true;
+    if (g_odg.squeeze_clashes(h, g_odg_t_last)) { if (odg_line_ok()) diag("odg: frame %u: Auron: the %s grip's quick squeeze dropped: that hand's punch already sent %s", g_frames, h ? "right" : "left", h ? "RB" : "LB"); return false; }
+    g_odg_squeeze_t[h] = g_odg_t_last;
+    return true;
+}
+static bool odg_grips_are_gestures() { return g_odg.grips_are_gestures(); }
+}  // namespace
+/// Auron's expected sequence: one guarded read of u16[len] at the pointer (1 <= len <= 32), when the window opens or the pair changes.
+static void odg_read_seq(const odg::Extra& x) {
+    if (x.auron_ptr == g_odg_seq_ptr && x.auron_len == g_odg_seq_len) return;
+    g_odg_seq_ptr = x.auron_ptr; g_odg_seq_len = x.auron_len; g_odg_seq_n = 0;
+    const bool ok = odg::seq_len_ok(x.auron_len) && x.auron_ptr >= 0x10000u
+                 && ffxvr_safe_read(reinterpret_cast<const void*>(static_cast<uintptr_t>(x.auron_ptr)), g_odg_seq, static_cast<unsigned>(x.auron_len) * 2u);
+    if (ok) g_odg_seq_n = x.auron_len;
+    char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n);
+    if (odg_line_ok()) diag("odg: frame %u: Auron (Bushido) input: the expected sequence (u16[%ld] at 0x%08X): %s | progress %d | gestures %s",
+                            g_frames, static_cast<long>(x.auron_len), x.auron_ptr, ok ? sq : "not readable", x.auron_prog,
+                            g_odg.cfg.on && g_odg.cfg.auron ? "on" : "off (od_gest_auron=0: logged only)");
+}
+static void od_gest_tick() {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    odg::FrameIn in;
+    in.r = g_od; in.battle = g_slow_bst > 0;
+    in.fresh = g_odg_blk_frame != 0xFFFFFFFFu && g_frames - g_odg_blk_frame <= 2u;
+    if (in.fresh) in.x = odg::parse_extra(g_odg_blk);
+    in.headset = g_xr_active && xr_running();
+    in.vrpad = vrpad_live();
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& hd = g_vrpad.hand[h];
+        // a tracked position only (an inferred one can snap when the controller is re-acquired: review S1); a grabbing hand gestures nothing (S4)
+        in.valid[h] = g_vrpad.ready && hd.grip_valid && hd.grip_tracked; in.p[h] = odg::v3(hd.grip_p[0], hd.grip_p[1], hd.grip_p[2]);
+        in.grab[h] = g_gest_grab[h]; in.squeeze_t[h] = g_odg_squeeze_t[h];
+        in.inferred[h] = g_vrpad.ready && hd.grip_valid && !hd.grip_tracked;   // counted per window (round 2 S3: a runtime without the bit)
+    }
+    { const float fw[3] = { 0.f, 0.f, -1.f }; float d[3]; quat_rotate(g_xr_raw_q, fw, d); in.head_fwd = odg::v3(d[0], d[1], d[2]); }
+    // the poses' own time (XrTime, ns) when the runtime gives it: a sample synced twice (no new xrSyncActions) waits
+    if (g_vrpad.time > 0) { in.sample_new = g_vrpad.time != g_odg_xt_last; g_odg_xt_last = g_vrpad.time; in.t = static_cast<double>(g_vrpad.time) * 1e-9; }
+    else { LARGE_INTEGER q; QueryPerformanceCounter(&q); in.t = g_qpf.QuadPart ? static_cast<double>(q.QuadPart) / static_cast<double>(g_qpf.QuadPart) : g_odg_t_last + 1.0 / 60.0; }
+    if (in.sample_new && in.t <= g_odg_t_last) in.sample_new = false;
+    if (in.sample_new) g_odg_t_last = in.t;
+    in.press_free = g_odg_press == 0 && g_sh_press == 0;   // one slot at a time: the quick squeeze's LB / RB and ours never share a poll (review S3)
+    in.stick_sent = static_cast<uint32_t>(g_odg_stick_sent); in.stick_dropped = static_cast<uint32_t>(g_odg_stick_dropped);
+    const int w = odg::window(in.r, in.battle, in.fresh);
+    if (w == odg::OD_AURON) {   // the capture: the game's new-press word, and the sequence (once a window, or when it changes)
+        uint16_t gp = 0;
+        if (ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x25D09D4u - 0x400000u)), &gp, 2)) { in.game_press_ok = true; in.game_press = gp; }
+        odg_read_seq(in.x);
+        in.seq = g_odg_seq; in.seq_n = g_odg_seq_n;   // the bring-back exception: the game's expected next input (round 2 S2)
+    }
+    else { g_odg_seq_ptr = 0; g_odg_seq_len = -1; }
+    odg::FrameOut o; g_odg.tick(in, o);
+    // the channels: cleared whenever nothing may inject
+    if (o.stick_on) g_odg_stick_target = o.target;
+    g_odg_stick_on = o.stick_on ? 1 : 0;
+    if (o.inject == odg::OD_NONE) { if (g_odg_press != 0) InterlockedExchange(&g_odg_press, 0); }
+    else if (o.press) { g_odg_press_t0 = static_cast<LONG>(GetTickCount()); g_odg_press_polls = 0; InterlockedExchange(&g_odg_press, static_cast<LONG>(o.press)); }
+    g_odg_tick = static_cast<LONG>(GetTickCount());
+    for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
+    // the lines
+    for (int h = 0; h < 2; ++h) {
+        if (o.fired[h] == odg::C_NONE || (w != odg::OD_AURON && w != odg::OD_TIDUS) || !odg_line_ok()) continue;
+        const odg::Stroke& k = g_odg.st[h];
+        const char* sent = o.queued[h] ? "queued" : o.inject == w ? "dropped (3 already waiting)" : "not sent (gestures off: logged only)";
+        if (w == odg::OD_TIDUS)
+            diag("odg: frame %u: Tidus: %s-hand swing (%.0f cm, %.1f m/s) -> A %s | the cursor %d %s %d..%d%s", g_frames, h ? "right" : "left",
+                 k.last_len * 100.f, k.last_peak, sent, in.r.cursor, od::in_zone(in.r) ? "in" : "outside", in.r.zone_lo, in.r.zone_hi,
+                 od::in_zone(in.r) ? "" : " (outside now: a press there restarts the bar)");
+        else
+            diag("odg: frame %u: Auron: %s-hand %s (%.0f cm, %.1f m/s) -> %s %s | progress %d of %ld", g_frames, h ? "right" : "left", odg::k_cls[o.fired[h]],
+                 k.last_len * 100.f, k.last_peak, odg::button_name(o.fired_btn[h]), sent, in.x.auron_prog, static_cast<long>(in.x.auron_len));
+    }
+    if (o.tidus_restart && odg_line_ok()) {   // review B1: what a false A costs
+        const double ago = (in.t - g_odg.last_btn_t) * 1000.0;
+        diag("odg: frame %u: Tidus: the bar restarted (a press outside the zone: the cursor back to the start %d, the timer still running, %.2f s left) | our last A: %s",
+             g_frames, static_cast<int>(in.x.tidus_start), in.r.left, g_odg.last_btn && ago < 400.0 ? "just before (ours)" : "none in the last 400 ms (a controller or pad button)");
+    }
+    if (o.game_press_new && odg_line_ok()) {
+        const int pr = in.x.auron_prog;
+        const bool have = pr >= 0 && pr < g_odg_seq_n;
+        const double ago = (in.t - g_odg.last_btn_t) * 1000.0;
+        diag("odg: frame %u: Auron: the game saw press 0x%04X at progress %d (expected 0x%04X)%s | our last press: %s%s", g_frames, static_cast<unsigned>(in.game_press), pr,
+             have ? static_cast<unsigned>(g_odg_seq[pr]) : 0u, have ? (in.game_press == g_odg_seq[pr] ? ", a match" : ", not the expected one") : " (the sequence was not read)",
+             g_odg.last_btn ? odg::button_name(g_odg.last_btn) : "none (a controller or pad button)", g_odg.last_btn && ago < 400.0 ? "" : g_odg.last_btn ? " (more than 400 ms ago)" : "");
+    }
+    if (o.learned && odg_line_ok()) {
+        const int bi = odg::Driver::bit_of(g_odg.last_btn);
+        diag("odg: frame %u: Auron: learned our %s = the game's 0x%04X (%u so far; an opposite pair may then follow at once when the game expects it)",
+             g_frames, odg::button_name(g_odg.last_btn), bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, g_odg.learned_n);
+    }
+    if (o.closed && g_odg.last.od == odg::OD_AURON && g_odg.learned_n && odg_line_ok()) {   // the map so far (the capture stage 2 needs)
+        char m[300] = ""; int k = 0;
+        for (int i = 0; i < 16; ++i) if (g_odg.learned[i]) k = odg::fmt_append(m, sizeof(m), k, "%s%s=0x%04X", k ? " " : "", odg::button_name(static_cast<uint16_t>(1u << i)), static_cast<unsigned>(g_odg.learned[i]));
+        diag("odg: frame %u: Auron: our buttons -> the game's values so far: %s", g_frames, m);
+    }
+    if (o.closed) {
+        char b[640]; odg::summary(b, sizeof(b), g_odg.last);
+        snprintf(g_odg_last_line, sizeof(g_odg_last_line), "%s", b);
+        if (g_odg.windows <= 100) diag("odg: frame %u: %s", g_frames, b);
+    }
+}
+/// Overdrive gestures (ABI 47): the settings, every frame from managed's push (render thread). flags: 1 od_gestures, 2 od_gest_lulu,
+/// 4 od_gest_auron, 8 od_gest_tidus, 16 od_gest_haptics; circle_cm: od_circle_cm (1..20); slash_speed: od_slash_speed (m/s,
+/// 0.8..5); lulu_stick: od_lulu_stick (0 right, 1 left, 2 both).
+extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, float slash_speed, int lulu_stick) {
+    odg::Cfg& c = g_odg.cfg;
+    c.on = (flags & 1) != 0; c.lulu = (flags & 2) != 0; c.auron = (flags & 4) != 0; c.tidus = (flags & 8) != 0; c.haptics = (flags & 16) != 0;
+    c.circle_r = odg::clampf(circle_cm, 1.f, 20.f) * 0.01f; c.slash_speed = odg::clampf(slash_speed, 0.8f, 5.f);
+    c.lulu_stick = lulu_stick < 0 || lulu_stick > 2 ? 0 : lulu_stick; g_odg_lulu_stick = c.lulu_stick;
+}
+/// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
+/// expected sequence (raw); 3: a warning ("" none: a hand's poses mostly inferred in the open window). Returns the length written.
+extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    int k = 0;
+    const odg::Driver& d = g_odg;
+    if (which == 0) {
+        const int w = odg::window(g_od, g_slow_bst > 0, g_odg_blk_frame != 0xFFFFFFFFu && g_frames - g_odg_blk_frame <= 2u);
+        if (!d.open || w == odg::OD_NONE) k = snprintf(out, n, "no overdrive input window open (%u so far this session)", d.windows);
+        else if (w == odg::OD_LULU)
+            k = snprintf(out, n, "%s: circles left %.1f turns, right %.1f | the stick %s, quadrant %ld, turned %.1f", odg::k_od_name[w], d.circ[0].turns, d.circ[1].turns,
+                         g_odg_stick_on ? "ON" : "off", static_cast<long>((static_cast<uint32_t>(g_odg_stick_q) >> 14) & 3u),
+                         static_cast<double>(static_cast<uint32_t>(g_odg_stick_sent) - d.stick_sent0) / odg::k_turn);
+        else {
+            uint32_t strokes = 0; for (int c = odg::C_LEFT; c < odg::C_N; ++c) strokes += d.sess.cls_n[c];
+            k = snprintf(out, n, "%s: gestures %u, presses sent %u | last stroke: left %s (%s, %.0f cm), right %s (%s, %.0f cm)%s", odg::k_od_name[w], strokes, d.sess.sent,
+                         odg::k_cls[d.st[0].last_cls], odg::k_why[d.st[0].last_why], d.st[0].last_len * 100.f, odg::k_cls[d.st[1].last_cls], odg::k_why[d.st[1].last_why],
+                         d.st[1].last_len * 100.f, d.sess.inject ? "" : " | not injecting (logged only)");
+        }
+    }
+    else if (which == 1) k = snprintf(out, n, "%s", g_odg_last_line[0] ? g_odg_last_line : "no overdrive window closed yet");
+    else if (which == 2) { char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n); k = snprintf(out, n, "%s", g_odg_seq_n ? sq : "not read yet"); }
+    else if (which == 3) {   // round 2 S3: the F8 warning ("" none)
+        const int h = d.untracked_hand();
+        if (h < 0) out[0] = 0;
+        else k = snprintf(out, n, "WARNING: the %s controller's position was untracked (inferred) in %u %% of this window's poses: its gestures are ignored (gestures need a tracked pose)",
+                          h ? "right" : "left", d.sess.samples[h] ? 100u * d.sess.inferred[h] / d.sess.samples[h] : 0u);
+    }
+    return k < 0 ? 0 : (k >= n ? n - 1 : k);
 }
 
 // FMV sync probe (S2 of the FMV depth plan, 4 Nov 2026; ffxvr_fmv.h has the addresses with their evidence): read-only, and
@@ -6700,11 +7084,13 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (!base || g_ui_last_frame_had_pass) g_c2_nopass = 0; else if (g_c2_nopass < 1000) g_c2_nopass++;
         const bool skip = base && g_c2_nopass <= k_c2_nopass;
         InterlockedExchange(&g_c2_skip, skip ? 1 : 0); if (skip) g_c2_skip_frames++;
+        dmg_skip_decide(g_xr_want && xr_active() && g_markers_3d && g_ui_enabled && !g_ovr_suspend && !g_xr_screen_now && !g_screen3d_now);   // 3D damage numbers: the same view rule, for dmg3d_hide2d
     }
     ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
     fmv_frame();                    // fmv-sync (S2): which video plays and which frame is on screen (read-only; after xr_tick decided the view)
     g_cpu_slow_acc = 0;
     perf_tick();
+    od_gest_tick();                 // overdrive gestures (4.3): after od_frame (in perf_tick) read this Present's state, with the hands xr_tick synced
     const LONGLONG cq4 = cpu_q(), cslow = g_cpu_slow_acc;
     g_overlay_phase = true;
     g_first_draw_pending = true;
@@ -6758,8 +7144,9 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (now >= next) {
             next = now + 10000; const uint32_t nf = g_frames - f0; f0 = g_frames;
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
-                diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early);
-            g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0;
+                diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u; eye jumps %u (blinks %u, extended %u, held back %u)", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early,
+                      g_ej_10s[0], g_ej_10s[1], g_ej_10s[2], g_ej_10s[3]);
+            g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0; g_ej_10s[0] = g_ej_10s[1] = g_ej_10s[2] = g_ej_10s[3] = 0;
         }
     }
     g_scene_tex = g_scene_live_tex; g_scene_draws = g_scene_live_draws; g_scene_live_tex = nullptr; g_scene_live_draws = 0; g_draws_per_target.clear();
@@ -9770,8 +10157,203 @@ static void c3_emit(MkVertex* verts, int& nv, const Marker& m, const float bb[12
     put(a, c, 0, 0, 0); put(tip, c, 0, 0, 0); put(b, c, 0, 0, 0);      // both windings: no culling surprises
 }
 
+// ---------------------------------------------------------------------------
+// 3D damage numbers (roadmap 4.2; the pure half is ffxvr_dmg3d.h, managed dmg3d.cs; ABI 47; dmg3d=0 by default). Managed reads the
+// game's damage-number nodes on the main thread at the point of the frame where the game has just drawn them (the job join after
+// the battle UI draw, or the queue draw's own detour with dmg3d_hide2d) and hands the latest snapshot over here once per Present
+// (ffxvr_dmg_set, render thread): every node and its target (the game's anchor, roots and screen anchors). The digits are drawn
+// in the marker pass, after the markers: head-facing quads from battle.dds (C3's held atlas), with the game's own hop, fade and
+// colour (dmg::place), at the target's anchor pulled toward the head by C3-13's rule (first person's own actor: C3's self spot,
+// 0.5 m ahead at chest height, dmg::site), sized at C3's 14 UI px per unit with the
+// height kept between 1 and 4 degrees (times dmg3d_scale). No depth test, as every marker: the game draws its numbers over
+// everything, and the anchor is inside or on the body (a tested number would lose its lower half in the fiend). The quads are
+// built once per Present (dmg_build, eye 1's billboard frame for both eyes: no stereo shear) and appended to each eye's
+// marker draw. Nothing runs while dmg3d is off: the set is not called and g_dmg_n stays 0.
+// The flat numbers: kept on the panel unless dmg3d_hide2d (its hook at launch); then g_dmg_skip (decided here at begin_frame
+// like C2's skip, read by the main thread) lets the detour take exactly the digits we draw off the queue (ffxvr_dmg_queue).
+// Logging: one dmg3d: line per new number for the first k_dmg_log_n (value, target, the game's anchor and screen point against
+// ours through the game's camera, where the quad was drawn and how big); managed writes the 10 s summary.
+static bool g_dmg_on = false; static float g_dmg_size = 1.f, g_dmg_lift = 0.f;
+static dmg::Table g_dmg_T = dmg::table_from(nullptr); static bool g_dmg_T_set = false, g_dmg_T_checked = true;
+static dmg::Node g_dmg_nodes[dmg::k_pool_n]; static int g_dmg_nn = 0, g_dmg_n = 0;   // render thread: the live snapshot (all its nodes; drawable ones)
+static dmg::Chr g_dmg_chrs[dmg::k_chr_max]; static int g_dmg_nc = 0;
+static uint32_t g_dmg_stamp = 0; static bool g_dmg_have = false;
+static MkVertex g_dmg_verts[dmg::k_max * 12]; static int g_dmg_nv = 0;           // built once per Present, copied into each eye
+static float g_dmg_cam[32] = {};                                                  // the game's camera at the build (log only)
+static uint32_t g_dmg_nopass = 0;
+static uint32_t g_dmg_cnt[18] = {};   // ffxvr_dmg_status: see there
+enum { DC_SETS = 0, DC_LIVE, DC_SNAPS, DC_FRAME, DC_GLYPHS, DC_NOATLAS, DC_BADANCHOR, DC_OVER, DC_SKIPF, DC_NUMBERS, DC_LOGGED, DC_LOGDROP, DC_BUILDS };
+struct DmgPend { dmg::Group g; uint32_t stamp; int age, no; };
+static DmgPend g_dmg_pend[8]; static int g_dmg_pend_n = 0;
+static dmg::Tracker g_dmg_track;
+static double g_dmg_log_sec_t = 0.0; static int g_dmg_log_sec_n = 0;
+static const int k_dmg_log_n = 40, k_dmg_log_per_s = 4, k_dmg_pend_age = 30;
+
+/// Writes (or drops: the session's first k_dmg_log_n, at most k_dmg_log_per_s a second) one number's line. placed: the 3D result.
+static void dmg_log_number(const DmgPend& p, const char* drawn) {
+    const double t = (double)GetTickCount64() * 0.001;
+    if (t - g_dmg_log_sec_t >= 1.0) { g_dmg_log_sec_t = t; g_dmg_log_sec_n = 0; }
+    if (g_dmg_cnt[DC_LOGGED] >= (uint32_t)k_dmg_log_n || g_dmg_log_sec_n >= k_dmg_log_per_s) { g_dmg_cnt[DC_LOGDROP]++; return; }
+    g_dmg_cnt[DC_LOGGED]++; g_dmg_log_sec_n++;
+    const dmg::Chr* c = dmg::chr_of(g_dmg_chrs, g_dmg_nc, p.g.chr);
+    static const char* const k_kind[] = { "damage", "heal", "MP" };
+    char a[360] = "no target read";
+    if (c) {   // the game projects the logic optpos (no 30 Hz correction) lifted by Chr+0x4E8 with its own camera: so do we, for the comparison
+        const float r[3] = { -c->opt[0], -(c->opt[1] - c->h4e8), c->opt[2] }; float px = 0.f, py = 0.f;
+        const bool pr = c->ok && c->src <= 1 && dmg::finite3(r) && dmg::project_ps2(g_dmg_cam, r, &px, &py);
+        snprintf(a, sizeof(a), "anchor game (%.2f %.2f %.2f) idx442 %u%s h4E8 %.2f%s | screen PS2 px: game (%d %d) ours %s(%.1f %.1f) diff (%.1f %.1f)",
+                 c->opt[0], c->opt[1], c->opt[2], c->idx442, c->src == 1 ? " (0xFF: optpos[1], the game uses 0x794AB0)" : c->src == 2 ? " (NO ANCHOR)" : "", c->h4e8,
+                 (c->aflags & 3) ? " (attached / override: no 30 Hz correction)" : "", c->f44, c->f48, pr ? "" : "(not projected) ", px, py, pr ? px - c->f44 : 0.f, pr ? py - c->f48 : 0.f);
+    }
+    diag("dmg3d: #%d %s %u (%d digit%s%s) on chr 0x%02X (%s), game frame %u | %s | %s", p.no, p.g.kind >= 0 && p.g.kind <= 2 ? k_kind[p.g.kind] : "?", p.g.value,
+         p.g.digits, p.g.digits == 1 ? "" : "s", p.g.word ? " + a word, on the panel" : "", p.g.chr, p.g.chr < 0x14 ? "party" : "monster", p.stamp, a, drawn);
+}
+
+/// Render thread, at begin_frame (beside C2's skip): may the main thread's queue-draw detour take the digits off the panel
+/// this frame? Only while we draw them: dmg3d on, the headset showing the 3D view with the UI pass and the 3D markers, the
+/// atlas held and the marker pass working; sticky on the UI pass as C2-8.
+namespace {   // declared in the globals' anonymous namespace (beside g_c2_skip) for begin_frame
+void dmg_skip_decide(bool view3d) {
+    const bool base = g_dmg_on && view3d && g_c3_srv != nullptr && (!g_mk_tried || g_mk_vs != nullptr);
+    if (!base || g_ui_last_frame_had_pass) g_dmg_nopass = 0; else if (g_dmg_nopass < 1000) g_dmg_nopass++;
+    const bool skip = base && g_dmg_nopass <= k_c2_nopass;
+    InterlockedExchange(&g_dmg_skip, skip ? 1 : 0); if (skip) g_dmg_cnt[DC_SKIPF]++;
+}
+}  // namespace
+
+/// Once per Present, before the eyes (draw_markers_both): the digit quads. bb = the billboard frame (right, up, ..., the head centre).
+static void dmg_build(const float bb[12]) {
+    g_dmg_nv = 0; g_dmg_cnt[DC_FRAME] = 0;
+    if (!g_dmg_on || g_dmg_n == 0) return;
+    if (!g_c3_srv) { g_dmg_cnt[DC_NOATLAS]++; return; }
+    g_dmg_cnt[DC_BUILDS]++;
+    const float* right = bb; const float* up = bb + 3; const float* head = bb + 9;
+    const bool flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
+    float A[dmg::k_chr_max][3], S[dmg::k_chr_max], D[dmg::k_chr_max]; bool ok[dmg::k_chr_max];
+    for (int i = 0; i < g_dmg_nc; ++i) {
+        ok[i] = dmg::site(g_dmg_chrs[i], g_dmg_lift, head, bb + 6, A[i]);   // first person's own actor: C3's self spot
+        if (!ok[i]) continue;
+        const float dx = head[0] - A[i][0], dy = head[1] - A[i][1], dz = head[2] - A[i][2];
+        D[i] = sqrtf(dx * dx + dy * dy + dz * dz); S[i] = dmg::units_per_px(g_dmg_size, D[i]);
+        ok[i] = dmg::finite3(A[i]) && std::isfinite(S[i]);
+    }
+    bool placed[dmg::k_chr_max] = {};
+    for (int i = 0; i < g_dmg_nn; ++i) {
+        const dmg::Node& n = g_dmg_nodes[i];
+        if (!dmg::drawable(n)) continue;
+        int ci = -1; for (int k = 0; k < g_dmg_nc; ++k) if (g_dmg_chrs[k].chr == n.chr) { ci = k; break; }
+        if (ci < 0 || !ok[ci]) { g_dmg_cnt[DC_BADANCHOR]++; continue; }
+        if (g_dmg_nv + 12 > dmg::k_max * 12) { g_dmg_cnt[DC_OVER]++; continue; }
+        const dmg::Quad q = dmg::place(n, g_dmg_T); if (!q.ok) continue;
+        float P[4][3]; dmg::corners(A[ci], right, up, S[ci], q, P);
+        float t[4]; dmg::uv(n.glyph, flip, t);
+        auto put = [&](int k, float u, float v) { MkVertex x = { { P[k][0], P[k][1], P[k][2] }, { q.c[0], q.c[1], q.c[2], q.c[3] }, { u, v, 1.f } }; g_dmg_verts[g_dmg_nv++] = x; };
+        put(0, t[0], t[1]); put(1, t[2], t[1]); put(2, t[0], t[3]);   put(2, t[0], t[3]); put(1, t[2], t[1]); put(3, t[2], t[3]);
+        put(0, t[0], t[1]); put(2, t[0], t[3]); put(1, t[2], t[1]);   put(2, t[0], t[3]); put(3, t[2], t[3]); put(1, t[2], t[1]);   // both windings
+        g_dmg_cnt[DC_FRAME]++; g_dmg_cnt[DC_GLYPHS]++; placed[ci] = true;
+    }
+    for (int p = 0; p < g_dmg_pend_n; ) {   // the new numbers' lines, now that we know where they went
+        int ci = -1; for (int k = 0; k < g_dmg_nc; ++k) if (g_dmg_chrs[k].chr == g_dmg_pend[p].g.chr) { ci = k; break; }
+        if (ci < 0 || !placed[ci]) { ++p; continue; }
+        const float upm = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f);
+        const float hgt = dmg::k_glyph_h * S[ci];
+        char d[320]; snprintf(d, sizeof(d), "3D: drawn at (%.1f %.1f %.1f) render%s, %.1f units = %.2f m from the head, digit %.2f units = %.3f m tall (%.2f deg; size %.2f, lift %.1f), %.1f units/m",
+                              A[ci][0], A[ci][1], A[ci][2], (g_dmg_chrs[ci].aflags & dmg::k_self) ? " (first person's own: the self spot, 0.5 m ahead at chest height)" : "", D[ci], upm > 0.f ? D[ci] / upm : 0.f, hgt, upm > 0.f ? hgt / upm : 0.f, D[ci] > 0.f ? hgt / D[ci] * 57.29578f : 0.f, g_dmg_size, g_dmg_lift, upm);
+        dmg_log_number(g_dmg_pend[p], d);
+        g_dmg_pend[p] = g_dmg_pend[--g_dmg_pend_n];
+    }
+}
+/// Each eye: the digits after the markers (returns the vertices appended).
+static int dmg_emit(MkVertex* verts, int room) {
+    if (g_dmg_nv == 0 || room <= 0) return 0;
+    const int n = g_dmg_nv <= room ? g_dmg_nv : room - room % 12;
+    memcpy(verts, g_dmg_verts, sizeof(MkVertex) * n);
+    return n;
+}
+
+/// Pure: the list walk over a copy of the pool (main thread; ffxvr_dmg3d.h walk). Returns the nodes written.
+extern "C" __declspec(dllexport) int ffxvr_dmg_walk(const uint8_t* pool, uint32_t base, uint32_t head, dmg::Node* out, int max, uint32_t* why) {
+    if (!out || max < 0) { if (why) *why = dmg::W_NOPOOL; return 0; }
+    return dmg::walk(pool, base, head, out, max > (int)dmg::k_pool_n ? (int)dmg::k_pool_n : max, why);
+}
+/// Pure: the queue check against the nodes (compact 0: verify only; 1: also take the drawn digits off, in place, only on a full
+/// match). table = the 96 bytes at 0xC424B0. info[12]: new count (or -1), matched, dropped, expected, at, why, the predicted
+/// entry at a mismatch (4 words). Returns the new count, or -1 when nothing was changed for a doubt.
+extern "C" __declspec(dllexport) int ffxvr_dmg_queue(dmg::Entry* q, int count, int compact, const dmg::Node* n, int nn, const dmg::Chr* c, int nc, const uint8_t* table, uint32_t* info) {
+    const dmg::Table T = dmg::table_from(table);
+    if (!n) nn = 0; if (nn > (int)dmg::k_pool_n) nn = (int)dmg::k_pool_n; if (!c) nc = 0;
+    const dmg::QueueResult r = dmg::queue_check(q, count, compact != 0, n, nn, c, nc, T);
+    if (info) {
+        info[0] = (uint32_t)r.count; info[1] = (uint32_t)r.matched; info[2] = (uint32_t)r.dropped; info[3] = (uint32_t)r.expected; info[4] = (uint32_t)r.at; info[5] = r.why;
+        info[6] = info[7] = info[8] = info[9] = 0;
+        if (r.why == dmg::Q_MISMATCH && r.at >= 0) {   // the prediction the entry at `at` was compared with
+            int j = 0; for (int i = 0; i < nn; ++i) {
+                if (!dmg::visible(n[i])) continue; const dmg::Chr* ci = dmg::chr_of(c, nc, n[i].chr); dmg::Entry e; bool inb = false;
+                if (!ci || !dmg::predict(n[i], T, *ci, &e, &inb) || !inb) continue;
+                if (j++ == (int)r.matched) { memcpy(&info[6], &e, sizeof(e)); break; }
+            }
+        }
+    }
+    return r.count;
+}
+/// Render thread, once per Present while dmg3d is on: the latest snapshot (all its nodes, every target), its game-frame stamp,
+/// the counter now, the floor (the frame dmg3d / the battle began) and the Presents since the snapshot last changed. A snapshot
+/// that is not live (dmg::live) clears the numbers.
+extern "C" __declspec(dllexport) void ffxvr_dmg_set(const dmg::Node* n, int nn, const dmg::Chr* c, int nc, uint32_t stamp, uint32_t frame, uint32_t floor, int since) {
+    g_dmg_cnt[DC_SETS]++;
+    for (int p = 0; p < g_dmg_pend_n; ) {   // numbers never drawn (no atlas, no headset frame...): their line says so
+        if (++g_dmg_pend[p].age <= k_dmg_pend_age) { ++p; continue; }
+        dmg_log_number(g_dmg_pend[p], !g_c3_srv ? "3D: NOT DRAWN (battle.dds not held yet: the number stays on the panel)" : "3D: NOT DRAWN within 30 frames (no headset 3D frame, 3D markers off, or no anchor)");
+        g_dmg_pend[p] = g_dmg_pend[--g_dmg_pend_n];
+    }
+    if (!g_dmg_on || !n || !c || nn < 0 || nc < 0 || !dmg::live(stamp, frame, floor, since)) { g_dmg_nn = g_dmg_nc = g_dmg_n = 0; g_dmg_have = false; return; }
+    g_dmg_cnt[DC_LIVE]++;
+    g_dmg_nn = nn > (int)dmg::k_pool_n ? (int)dmg::k_pool_n : nn; memcpy(g_dmg_nodes, n, sizeof(dmg::Node) * g_dmg_nn);
+    g_dmg_nc = nc > dmg::k_chr_max ? dmg::k_chr_max : nc;        memcpy(g_dmg_chrs, c, sizeof(dmg::Chr) * g_dmg_nc);
+    g_dmg_n = 0; for (int i = 0; i < g_dmg_nn; ++i) if (dmg::drawable(g_dmg_nodes[i]) && g_dmg_nodes[i].slot < dmg::k_pool_n) g_dmg_n++;
+    if (!g_dmg_have || stamp != g_dmg_stamp) {   // a new snapshot: the new numbers in it (for the log)
+        g_dmg_cnt[DC_SNAPS]++;
+        dmg::Group gs[32]; const int ng = dmg::groups(g_dmg_nodes, g_dmg_nn, gs, 32);
+        for (int i = 0; i < ng; ++i) {
+            if (!g_dmg_track.fresh(gs[i])) continue;
+            g_dmg_cnt[DC_NUMBERS]++;
+            if (g_dmg_cnt[DC_LOGGED] + (uint32_t)g_dmg_pend_n >= (uint32_t)k_dmg_log_n) continue;
+            if (g_dmg_pend_n < 8) { DmgPend& p = g_dmg_pend[g_dmg_pend_n++]; p.g = gs[i]; p.stamp = stamp; p.age = 0; p.no = (int)g_dmg_cnt[DC_NUMBERS]; }
+            else g_dmg_cnt[DC_LOGDROP]++;
+        }
+        g_dmg_track.update(g_dmg_nodes, g_dmg_nn);
+    }
+    g_dmg_stamp = stamp; g_dmg_have = true;
+}
+/// Render thread: on (dmg3d), the size (dmg3d_scale) and lift (dmg3d_lift, units), and once the 96 bytes of the hop table.
+/// Returns 1 while battle.dds is held (the digits' art).
+extern "C" __declspec(dllexport) int ffxvr_dmg_cfg(int on, float size, float lift, const uint8_t* table) {
+    g_dmg_on = on != 0;
+    g_dmg_size = std::isfinite(size) ? (size < 0.3f ? 0.3f : size > 3.f ? 3.f : size) : 1.f;
+    g_dmg_lift = std::isfinite(lift) ? (lift < -10.f ? -10.f : lift > 20.f ? 20.f : lift) : 0.f;
+    if (table && !g_dmg_T_set) {
+        g_dmg_T_set = true; g_dmg_T = dmg::table_from(table); g_dmg_T_checked = dmg::table_is_checked(table);
+        diag("dmg3d: the hop table at 0xC424B0 %s", g_dmg_T_checked ? "matches the one checked on 6 Nov" : "DIFFERS from the one checked on 6 Nov (another exe?): its bytes are used as read");
+    }
+    if (!g_dmg_on) { g_dmg_nn = g_dmg_nc = g_dmg_n = 0; g_dmg_have = false; g_dmg_nv = 0; g_dmg_pend_n = 0; }
+    return g_c3_srv ? 1 : 0;
+}
+/// Main thread (the queue-draw detour): may the drawn digits go off the panel this frame (dmg_skip_decide)?
+extern "C" __declspec(dllexport) int ffxvr_dmg_skip() { return static_cast<int>(InterlockedCompareExchange(&g_dmg_skip, 0, 0)); }
+/// Render thread: u[0] on, [1] battle.dds held, [2] sets, [3] live sets, [4] snapshots, [5] digits this frame, [6] digits drawn
+/// (Presents x digits), [7] Presents with digits but no atlas, [8] digits without an anchor, [9] over the cap, [10] frames the panel's
+/// may be hidden, [11] numbers seen, [12] lines written, [13] lines dropped, [14] the hop table as checked, [15] drawable now,
+/// [16] the skip now, [17] builds.
+extern "C" __declspec(dllexport) void ffxvr_dmg_status(uint32_t* u, int n) {
+    if (!u) return;
+    const uint32_t v[18] = { g_dmg_on ? 1u : 0u, g_c3_srv ? 1u : 0u, g_dmg_cnt[DC_SETS], g_dmg_cnt[DC_LIVE], g_dmg_cnt[DC_SNAPS], g_dmg_cnt[DC_FRAME], g_dmg_cnt[DC_GLYPHS],
+                             g_dmg_cnt[DC_NOATLAS], g_dmg_cnt[DC_BADANCHOR], g_dmg_cnt[DC_OVER], g_dmg_cnt[DC_SKIPF], g_dmg_cnt[DC_NUMBERS], g_dmg_cnt[DC_LOGGED], g_dmg_cnt[DC_LOGDROP],
+                             g_dmg_T_checked ? 1u : 0u, (uint32_t)g_dmg_n, (uint32_t)InterlockedCompareExchange(&g_dmg_skip, 0, 0), g_dmg_cnt[DC_BUILDS] };
+    for (int i = 0; i < n && i < 18; ++i) u[i] = v[i];
+}
+
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12]) {
-    if (g_marker_n == 0 || dst == nullptr || !marker_pass_init()) return;
+    if ((g_marker_n == 0 && g_dmg_nv == 0) || dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
     P[0] = 2.f / (f.r - f.l); P[2] = (f.r + f.l) / (f.r - f.l);
@@ -9784,6 +10366,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
         if (with_sprite & (1u << i)) continue;
         c3_emit(verts, nv, g_markers[i], bb);
     }
+    nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
@@ -9850,9 +10433,9 @@ extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_sc
 
 /// Draws the markers into both eye images, each with its own view and FOV.
 static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
-    if (g_marker_n == 0 || !g_cam_valid) return;
+    if ((g_marker_n == 0 && g_dmg_n == 0) || !g_cam_valid) { g_dmg_nv = 0; return; }
     float v[12];
-    { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); }
+    { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); if (g_dmg_n > 0) memcpy(g_dmg_cam, g_cam, sizeof(g_dmg_cam)); }
     float V1[16], V2[16], I[16], Pn[3];
     g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn, false);   // read-only (the markers are drawn at Present)
     g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn, false);
@@ -9870,6 +10453,8 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
         const float m = g_xr_scale;
         bb[6] = C[0] + fx / fl * 0.5f * m; bb[7] = C[1] - 0.35f * m; bb[8] = C[2] + fz / fl * 0.5f * m;
     }
+    dmg_build(bb);   // 3D damage numbers: once for both eyes
+    if (g_marker_n == 0 && g_dmg_nv == 0) return;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb); }
     if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb); }
@@ -11355,6 +11940,7 @@ static void leave_xr_state() {
     g_xr_want = false; g_xr_active = false;
     g_ovr_suspend = false; g_xr_screen_now = false; g_screen3d_now = false; g_backdrop_room = false;
     g_frames_without_cam = 0; g_blink_frames = 0; g_move_delta = 0.f; g_move_held = false;
+    g_ej_hold = ej::Hold(); g_ej_face_rq.on = false; g_ej_head_snap = false;   // eye jumps (N6): no stale restore, face or head snap across a headset stop
     g_ui_state = UI_IDLE; g_ui_early = g_ui_early_keep = false; g_ui_last_frame_had_pass = false;   // robustness
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
     g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false;
@@ -11425,6 +12011,73 @@ extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pendin
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
+}
+/// Eye jumps (ABI 44, roadmap 4.1): ini eye_jump_blink (frames, 0 = off), eye_jump_units, battle_face (0 off, 1 body forward,
+/// 2 where you look); flags bit 0 = in battle (managed's last frame; the eye: lines only). Managed, every frame (render
+/// thread). out (may be null): [0] jumps this session, [1] blinks started, [2] blinks extended, [3] jumps held back by the
+/// 30-frame window, [4] battle headings turned, [5] kept (under 15 deg), [6] cut blinks held back by the window.
+/// Returns how many values exist (7).
+extern "C" __declspec(dllexport) int ffxvr_eye_jump_set(int blink, float units, int face, int flags, int* out, int n) {
+    g_ej_cfg.blink = blink < 0 ? 0 : blink > 30 ? 30 : blink;
+    g_ej_cfg.units = !(units >= 2.f) ? (units == units ? 2.f : 8.f) : units > 100.f ? 100.f : units;   // NaN -> the default
+    g_ej_face = face < 0 || face > 2 ? 1 : face;
+    g_ej_battle = (flags & 1) != 0;
+    const int v[7] = { static_cast<int>(g_ej.n_jumps), static_cast<int>(g_ej.n_start), static_cast<int>(g_ej.n_ext), static_cast<int>(g_ej.n_held), static_cast<int>(g_ej_turns), static_cast<int>(g_ej_kept),
+                       static_cast<int>(g_cut_lim.n_held) };
+    if (out != nullptr) for (int i = 0; i < n && i < 7; ++i) out[i] = v[i];
+    return 7;
+}
+/// Eye jumps (ABI 44): managed's battle events (render thread, push_player). kind 1: face the point (x, y, z) (render space: the
+/// centre of the live monsters) at the next first-person frame in a facing view, after a battle follow change (sent once the
+/// battle is drawn: managed waits through the load chain); 2: the battle starts: keep the field heading and the game camera's
+/// yaw (battle_face on only); 3: the battle ended: restore it at the first frame in the same view mode and under the same
+/// field camera (within 600 frames), else re-latch from the game camera.
+extern "C" __declspec(dllexport) void ffxvr_eye_event(int kind, float x, float y, float z) {
+    if (kind == 1) {
+        if (!(std::isfinite(x) && std::isfinite(y) && std::isfinite(z))) return;
+        const float t[3] = { x, y, z }; ej::face_req_set(g_ej_face_rq, t, g_frames);
+    }
+    else if (kind == 2) {   // S1: battle_face=0 is off: nothing kept, nothing restored
+        if (g_ej_face == 0) g_ej_hold = ej::Hold();
+        else ej::hold_save(g_ej_hold, g_fp_yaw_latched, g_fp_mode, g_fp_yaw, g_yaw_cam, g_frames, k_ej_hold_age);
+        g_ej_face_rq.on = false;
+    }
+    else if (kind == 3) { ej::hold_arm(g_ej_hold, g_frames); g_ej_face_rq.on = false; }
+}
+/// Battle tag (ABI 46, ffxvr_tag.h): managed's push_player (render thread) while a swap-in is pending. op 0: the swap begins
+/// (ox, oz the outgoing character, the one followed; ix, iz the incoming one; game space, horizontal); op 1: a frame of it.
+/// dist = ini bt_tag_dist (1..30 units). Returns tag::Verdict: 0 waiting, 1 tag (closer than dist), 2 tag (passed: closed
+/// in, then grew past the minimum), 3 not watched or not finite (managed then waits for the arrival as before). out (may be
+/// null): [0] this frame's distance, [1] the closest since both moved (-1 before), [2] frames, [3] the closest's frame.
+extern "C" __declspec(dllexport) int ffxvr_bt_tag_step(int op, float ox, float oz, float ix, float iz, float dist, float* out, int n) {
+    g_tag_cfg.dist = tag::clamp_dist(dist);
+    const float o[2] = { ox, oz }, i[2] = { ix, iz };
+    const int v = op == 0 ? (tag::begin(g_tag, o, i) ? tag::T_WAIT : tag::T_BAD) : tag::step(g_tag, o, i, g_tag_cfg);
+    const float r[4] = { g_tag.d, g_tag.armed ? g_tag.min : -1.f, static_cast<float>(g_tag.frames), static_cast<float>(g_tag.min_frame) };
+    if (out != nullptr) for (int k = 0; k < n && k < 4; ++k) out[k] = r[k];
+    return v;
+}
+/// Battle tag (ABI 46): on 1: hold the first-person eye on the spot (x, y, z) (render space: the outgoing character's position
+/// when the swap began) this frame. The eye is the followed (incoming) character's moved by spot - his position, so his own eye
+/// height (the shared head rule) and head offset stay; the body hide is centred on the spot, so he shows running in and hides
+/// once he is near it (tag::hide_centre). Refreshed every frame; lapses after 2
+/// frames without a call; fp_mode 1 only (the face toward the enemies is measured from the spot too). on 2: a tag without a
+/// hold ("tag and ride in with him", or another view). on 0: release. The first frame of a hold, and every on 2, is a tag: the
+/// eye-jump blink (eye_jump_blink frames; 0 = none, as for every eye jump) and a head-offset snap, in fp_mode 1 or 3.
+/// Returns the tags this session.
+extern "C" __declspec(dllexport) int ffxvr_bt_tag_hold(int on, float x, float y, float z) {
+    const float b[3] = { x, y, z };
+    const bool tagged = tag::set(g_tag_hold, on, b, g_frames);
+    if (tagged && (g_fp_mode == 1 || g_fp_mode == 3)) {
+        ej_blink(); g_ej_head_snap = true; g_sr_epoch++;   // the eye-jump blink path; stickrep: a new place, not a stick turn
+        if (g_tag_lines < 40) {
+            g_tag_lines++;
+            diag("tag: frame %u: %s (fp_mode %d) -> blink %d frames%s", g_frames,
+                 on == 1 ? "the eye held on the outgoing character's spot until the incoming one arrives" : "the eyes to the incoming character",
+                 g_fp_mode, g_ej_cfg.blink, g_tag_lines == 40 ? " (no more tag: lines this session)" : "");
+        }
+    }
+    return static_cast<int>(g_tag_hold.n_tags);
 }
 extern "C" __declspec(dllexport) void ffxvr_turn_set(int stick, int mode, float snap_deg, float rate_deg, int blink) {
     g_turn_stick = stick != 0; g_turn_mode = mode; g_turn_snap = snap_deg; g_turn_rate = rate_deg; g_turn_blink = blink != 0;
@@ -11505,6 +12158,177 @@ extern "C" __declspec(dllexport) void ffxvr_move_status(float* yaw_view_deg, flo
     if (yaw_view_deg) *yaw_view_deg = g_yaw_view * 57.29578f; if (yaw_cam_deg) *yaw_cam_deg = g_yaw_cam * 57.29578f;
     if (delta_deg) *delta_deg = g_move_delta * 57.29578f; if (hook_calls) *hook_calls = g_xi_hook_calls; if (hooked) *hooked = g_xi_hooked ? 1 : 0;
 }
+// -- Quest-only controls: settings, the ImGui feed, F8 text (ABI 44) ------------------------------------------------------
+/// The walk gate (ini move_remap_walk_only) and managed's game bits for it (the tap gate's gates::GB_*: battle, the sphere
+/// grid, the save screen, a field menu, no player control, a choice box, blitzball, not readable), every frame.
+extern "C" __declspec(dllexport) void ffxvr_move_gate_set(int walk_only, int bits) {
+    g_mg_on = walk_only != 0 ? 1 : 0; g_mg_bits = bits;
+    const DWORD t = GetTickCount(); g_mg_tick = static_cast<LONG>(t); g_mg_have = 1;
+}
+/// Quick-squeeze grips (ini grip_lbrb 0 / 1 / 2, grip_tap_ms 150..500, grip_tap_press_ms 0..150) and vd_overlay_mask.
+extern "C" __declspec(dllexport) void ffxvr_grip_set(int mode, int tap_ms, int press_ms, int vd_mask) {
+    g_grip_mode = mode < pad::G_OFF ? pad::G_OFF : mode > pad::G_ALWAYS ? pad::G_ALWAYS : mode;
+    g_grip_tap_ms = pad::clamp_tap_ms(tap_ms); g_vd_mask = vd_mask != 0;
+    const LONG pm = pad::clamp_press_ms(press_ms); if (g_grip_press_ms != pm) g_grip_press_ms = pm;
+}
+// The ImGui feed (ini imgui_vrpad, design-notes "Quest controllers only" 1): Fahrenheit's save screen is ImGui, and ImGui's
+// Win32 backend reads pad 0 through its own XInput DLL (xinput1_4 first), not the game's import. Managed (imgui_pad.cs)
+// detours that DLL's XInputGetState / XInputGetCapabilities with Fahrenheit's hooking and calls the two functions below
+// after the originals. All on the render thread (the backend's NewFrame inside Present), as g_vrpad's sync: no race.
+int      g_im_mode = pad::IM_SAVE; uint32_t g_im_save = 0;
+pad::ImguiFeed g_im_feed;
+bool     g_im_installed = false, g_im_avail_posted = false, g_im_posted_once = false, g_im_was_on = false;
+ULONGLONG g_im_post_at = 0; uint32_t g_im_posts = 0, g_im_caps_faked = 0, g_im_calls0 = 0, g_im_merged0 = 0, g_im_reentry = 0;
+HWND     g_im_hwnd = nullptr;
+bool     g_im_shared = false;   // ImGui's XInput DLL is the one the game's import resolves into (detoured anyway: the re-entry guard)
+volatile LONG g_im_tid = 0;    // the render thread (ffxvr_imgui_pad_set's caller, ImGui's NewFrame's thread): only its calls get the VR pad
+uint32_t g_im_other = 0;       // calls from any other thread, passed through (the game's polls through a shared DLL, with or without our import hook)
+char     g_im_text[320] = "imgui pad: not installed (imgui_vrpad=0 at the first frame, or not tried yet)";
+/// ImGui's chosen DLL, the way its backend chose it (the first of its list that is loaded; its LoadLibraryA keeps it loaded).
+/// 0: found (the two addresses out, their first bytes logged); 1 none loaded; 2 refused: it is the game's own XInput DLL
+/// with the game's import hook not in (no re-entry guard for its calls), or, with strict (ini imgui_vrpad_strict=1), whenever
+/// the game's XInputGetState import resolves into it; 3 an export is missing. Without strict a shared DLL (xinput9_1_0
+/// forwarding into xinput1_4) is detoured anyway: the game's calls pass through untouched (t_in_game_xi, the re-entry guard).
+extern "C" __declspec(dllexport) int ffxvr_imgui_pad_find(void** get_state, void** get_caps, int strict) {
+    static const wchar_t* const k_dll[5] = { L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll", L"xinput1_2.dll", L"xinput1_1.dll" };
+    static const char* const k_name[5] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll" };
+    if (get_state) *get_state = nullptr;
+    if (get_caps) *get_caps = nullptr;
+    HMODULE m = nullptr; int k = 0;
+    for (; k < 5; ++k) if ((m = GetModuleHandleW(k_dll[k])) != nullptr) break;
+    if (m == nullptr) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: not installed: no XInput DLL is loaded (ImGui's backend has no gamepad)");
+        diag("%s", g_im_text); return 1;
+    }
+    HMODULE game = nullptr;
+    if (g_xi_orig) GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(g_xi_orig), &game);
+    const bool shared = game != nullptr && m == game;
+    if ((shared && strict) || (g_xi_orig == nullptr && k == 2)) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: REFUSED: ImGui reads the pad through %s, %s; the save screen keeps ignoring the Quest controllers",
+                 k_name[k], g_xi_orig ? "the DLL the game's own XInputGetState import resolves into (imgui_vrpad_strict=1)" : "the game's own XInput DLL (its import hook is not in)");
+        diag("%s", g_im_text); return 2;
+    }
+    g_im_shared = shared;
+    if (shared) diag("imgui pad: the game's XInputGetState import resolves into %s too (a forwarded export): detoured anyway, the game's calls pass through untouched (the re-entry guard; imgui_vrpad_strict=1 refuses instead)", k_name[k]);
+    void* gs = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetState"));
+    void* gc = reinterpret_cast<void*>(GetProcAddress(m, "XInputGetCapabilities"));
+    if (gs == nullptr || gc == nullptr) {
+        snprintf(g_im_text, sizeof(g_im_text), "imgui pad: not installed: %s has no %s", k_name[k], gs == nullptr ? "XInputGetState" : "XInputGetCapabilities");
+        diag("%s", g_im_text); return 3;
+    }
+    uint8_t b1[8] = {}, b2[8] = {};
+    const bool r1 = ffxvr_safe_read(gs, b1, 8) != 0, r2 = ffxvr_safe_read(gc, b2, 8) != 0;
+    auto hooked = [](const uint8_t* b) { return b[0] == 0xE9 || b[0] == 0xEB || (b[0] == 0xFF && b[1] == 0x25) || b[0] == 0x68; };   // jmp rel32 / rel8, jmp [m], push-ret
+    char h1[32] = "?", h2[32] = "?";
+    if (r1) snprintf(h1, sizeof(h1), "%02X %02X %02X %02X %02X %02X %02X %02X", b1[0], b1[1], b1[2], b1[3], b1[4], b1[5], b1[6], b1[7]);
+    if (r2) snprintf(h2, sizeof(h2), "%02X %02X %02X %02X %02X %02X %02X %02X", b2[0], b2[1], b2[2], b2[3], b2[4], b2[5], b2[6], b2[7]);
+    const bool other = (r1 && hooked(b1)) || (r2 && hooked(b2));
+    snprintf(g_im_text, sizeof(g_im_text), "imgui pad: detouring %s (XInputGetState %p: %s, XInputGetCapabilities %p: %s)%s", k_name[k], gs, h1, gc, h2,
+             other ? "; a jump at the start: another program hooks it too (Fahrenheit's detour chains over it)" : "");
+    diag("%s", g_im_text);
+    if (get_state) *get_state = gs;
+    if (get_caps) *get_caps = gc;
+    return 0;
+}
+/// The process's largest visible unowned top-level window (the game's), when ImGui's main viewport gave no handle.
+static BOOL CALLBACK im_find_window_cb(HWND h, LPARAM lp) {
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(h) || GetWindow(h, GW_OWNER) != nullptr) return TRUE;
+    RECT r = {}; if (!GetClientRect(h, &r)) return TRUE;
+    auto* best = reinterpret_cast<std::pair<HWND, LONG>*>(lp);
+    const LONG area = (r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) { best->first = h; best->second = area; }
+    return TRUE;
+}
+/// Every frame (render thread, push_all): the mode, Fahrenheit's save-screen state (0x8CB994, 0 = closed), ImGui's window and
+/// whether managed's detours are in. ImGui asks XInputGetCapabilities only after a WM_DEVICECHANGE (DBT_DEVNODES_CHANGED):
+/// one is posted once the detours are in and again at every edge of "the VR pad is there for ImGui" (at most once a second),
+/// so the backend re-asks and finds our pad (without an Xbox pad it said "no gamepad" at its first frame and never asks again).
+extern "C" __declspec(dllexport) void ffxvr_imgui_pad_set(int mode, uint32_t save_state, void* hwnd, int installed) {
+    g_im_mode = mode < pad::IM_OFF ? pad::IM_OFF : mode > pad::IM_ALWAYS ? pad::IM_ALWAYS : mode;
+    g_im_save = save_state; g_im_installed = installed != 0;
+    const LONG tid = static_cast<LONG>(GetCurrentThreadId()); if (g_im_tid != tid) g_im_tid = tid;
+    if (hwnd != nullptr) g_im_hwnd = static_cast<HWND>(hwnd);
+    const bool on = g_im_installed && vrpad_live() && pad::imgui_feed_on(g_im_mode, g_im_save);
+    if (on != g_im_was_on) {
+        if (on) { g_im_calls0 = g_im_feed.calls; g_im_merged0 = g_im_feed.merged; diag("imgui pad: feed on (%s)", g_im_mode == pad::IM_ALWAYS ? "imgui_vrpad=2: always" : "the save / load screen opened"); }
+        else diag("imgui pad: feed off: %u ImGui pad reads, %u with the Quest controllers merged, last packet %u; held when it opened (masked until released): 0x%04X%s",
+                  g_im_feed.calls - g_im_calls0, g_im_feed.merged - g_im_merged0, g_im_feed.last_packet, g_im_feed.masked_at_open,
+                  g_im_feed.merged == g_im_merged0 ? " (NO merged reads: ImGui did not read the pad, or not through the detour)" : "");
+        g_im_was_on = on;
+    }
+    if (!g_im_installed) return;
+    const bool avail = g_im_mode != pad::IM_OFF && vrpad_live();
+    if (g_im_posted_once && avail == g_im_avail_posted) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_im_post_at) return;
+    g_im_post_at = now + 1000;
+    HWND w = g_im_hwnd;
+    if (w == nullptr || !IsWindow(w)) { std::pair<HWND, LONG> best(nullptr, 0); EnumWindows(im_find_window_cb, reinterpret_cast<LPARAM>(&best)); w = best.first; }
+    if (w == nullptr) { if (g_im_posts++ < 50) diag("imgui pad: no game window found for the device-change message (retrying each second)"); return; }
+    const BOOL ok = PostMessageW(w, WM_DEVICECHANGE, 0x0007 /* DBT_DEVNODES_CHANGED */, 0);
+    g_im_posted_once = true; g_im_avail_posted = avail;
+    if (g_im_posts++ < 50) diag("imgui pad: device change %s to window 0x%p (the Quest controllers %s for ImGui)", ok ? "posted" : "NOT posted", static_cast<void*>(w), avail ? "available" : "gone");
+}
+/// After the real XInputGetState(idx, st) of ImGui's DLL returned real: the VR pad merged in while the feed is on (pad 0
+/// only; ffxvr_pad.h imgui_apply: no Start / Back unless mode 2, buttons held at the open masked, no remap / tap / quick
+/// squeeze). Returns what the call returns.
+extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_xstate(uint32_t idx, XINPUT_STATE* st, uint32_t real) {
+    if (idx != 0 || st == nullptr) return real;
+    if (t_in_game_xi) { g_im_reentry++; return real; }   // the game's own poll, forwarded into this DLL: untouched
+    if (static_cast<LONG>(GetCurrentThreadId()) != g_im_tid) { g_im_other++; return real; }   // not ImGui's thread (R2-N2: holds without our import hook too)
+    const bool real_ok = real == ERROR_SUCCESS;
+    XINPUT_STATE s = {};
+    if (real_ok) s = *st;
+    uint32_t pk = s.dwPacketNumber;
+    if (!pad::imgui_apply(g_im_feed, g_im_mode, g_im_save, vrpad_live(), g_vrpad_suppress, vrpad_in(), g_vrpad_packet, real_ok, s.Gamepad, pk)) return real;
+    s.dwPacketNumber = pk; *st = s;
+    return ERROR_SUCCESS;
+}
+/// After the real XInputGetCapabilities(idx, flags, caps): pad 0 is a gamepad while the VR pad is there for ImGui (ImGui
+/// only asks at a device change; the state call above decides what it reads).
+extern "C" __declspec(dllexport) uint32_t ffxvr_imgui_xcaps(uint32_t idx, XINPUT_CAPABILITIES* caps, uint32_t real) {
+    if (real == ERROR_SUCCESS || idx != 0 || caps == nullptr || t_in_game_xi || g_im_mode == pad::IM_OFF || !vrpad_live()) return real;
+    if (static_cast<LONG>(GetCurrentThreadId()) != g_im_tid) { g_im_other++; return real; }
+    memset(caps, 0, sizeof(*caps));
+    caps->Type = XINPUT_DEVTYPE_GAMEPAD; caps->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+    caps->Gamepad.wButtons = 0xF3FF; caps->Gamepad.bLeftTrigger = caps->Gamepad.bRightTrigger = 0xFF;
+    caps->Gamepad.sThumbLX = caps->Gamepad.sThumbLY = caps->Gamepad.sThumbRX = caps->Gamepad.sThumbRY = static_cast<SHORT>(0xFFC0);
+    g_im_caps_faked++;
+    return ERROR_SUCCESS;
+}
+/// F8 text: 0 the walk gate, 1 the grips, 2 the ImGui feed. Returns the length.
+extern "C" __declspec(dllexport) int ffxvr_ctl_text(int which, char* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    int k = 0;
+    if (which == 0) {
+        const LONG bits = g_mg_bits; const DWORD age = GetTickCount() - static_cast<DWORD>(g_mg_tick);
+        const int why = pad::walk_why(static_cast<int>(bits), age, g_mg_have != 0);
+        if (!g_move_remap) k = snprintf(out, n, "left stick: never rotated (the remap is off)");
+        else if (!g_mg_on) k = snprintf(out, n, "left stick: rotated in every first-person view (walk gate off: the old behaviour)");
+        else if (g_fp_mode == 0) k = snprintf(out, n, "left stick: raw (the seat view)");
+        else k = snprintf(out, n, "left stick: %s%s (game bits 0x%04lX, %lu ms old)", why == pad::W_OPEN ? "" : "raw: ", pad::k_walk_why[why],
+                          static_cast<unsigned long>(bits), static_cast<unsigned long>(age > 99999u ? 99999u : age));
+    }
+    else if (which == 1) {
+        const char* m = g_grip_mode == pad::G_OFF ? "LB / RB at once everywhere (grip_lbrb=0: the old behaviour)"
+                      : g_grip_mode == pad::G_ALWAYS ? "a quick squeeze = LB / RB everywhere" : "a quick squeeze = LB / RB in battle and the seat / diorama";
+        k = snprintf(out, n, "grips: %s (within %u ms; the press: 2 polls, at least %ld ms: grip_tap_press_ms, 0..150)", m, g_grip_tap_ms, static_cast<long>(g_grip_press_ms));
+        for (int h = 0; h < 2 && k >= 0 && k < n; ++h) {
+            const pad::GripTap& t = g_grip[h];
+            const int j = snprintf(out + k, n - k, " | %s: %u sent of %u squeezes, last %s (%u ms, %.1f cm, %.0f deg)%s", h ? "R" : "L", t.fired, t.squeezes,
+                                   pad::k_grip_verdict[t.last], t.last_ms, t.last_d * 100.f, t.last_deg, t.down ? (t.defer ? ", HELD (deferred)" : ", HELD (to the game)") : "");
+            if (j > 0) k += j;
+        }
+    }
+    else if (which == 2) {
+        k = snprintf(out, n, "%s | feed %s, %u reads, %u merged, capabilities answered %u, device changes posted %u%s%s", g_im_text,
+                     g_im_was_on ? "ON" : "off", g_im_feed.calls, g_im_feed.merged, g_im_caps_faked, g_im_posts, g_im_shared ? " | shared with the game's import" : "",
+                     (g_im_reentry || g_im_other) ? " | other threads' reads came through here: passed through" : "");
+    }
+    if (k < 0) { out[0] = 0; return 0; }
+    return k < n ? k : n - 1;
+}
 extern "C" __declspec(dllexport) int  ffxvr_cut_count() { return static_cast<int>(g_cut_count); }
 extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float follow_dist, float follow_h, int hide_body, float hide_radius) {
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; g_sr_epoch++; }
@@ -11575,6 +12399,7 @@ extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, fl
         g_fp_head_disp = disp; g_fp_head_hold = 0;
         if (g_blink_frames < 4) g_blink_frames = 4;   // eye review N2: the switch is a cut of at least 6 units: blinked like a camera cut
     }
+    if (g_ej_head_snap) { g_ej_head_snap = false; g_fp_head_s_valid = false; }   // eye jumps (4.1): after a jump the head offset snaps to the new body (no glide, no spike hold)
     if (!g_fp_have_head) { g_fp_head_s_valid = false; return; }
     // Stored and smoothed as the offset from the actor origin (player_set is called first).
     const float nh[3] = { x - g_fp_pos[0], y - g_fp_pos[1], z - g_fp_pos[2] };
@@ -11811,8 +12636,9 @@ static void detect_cut() {
             g_cut_count++;
             g_seat_latched = false; g_sr_epoch++;   // stickrep: a cut is not a stick turn
             if (g_cut_recentre && !g_screen3d_now && !g_xr_screen_now) g_xr_recenter_pending = true;   // a recentre also moves the screen: not on screen cuts
-            if (g_cut_blink) g_blink_frames = 6;
-            if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg", g_cut_count, dist, ang);
+            const bool cb = g_cut_blink && ej::limit_start(g_cut_lim, g_frames, g_ej_cfg.window);   // S4: one cut blink start per 30 frames (battle cuts come several per action)
+            if (cb && g_blink_frames < 6) g_blink_frames = 6;
+            if (g_cut_count <= 20) diag("cut %u: camera moved %.0f units, turned %.0f deg%s", g_cut_count, dist, ang, g_cut_blink ? (cb ? " (blink)" : " (blink held back: one per 30 frames)") : "");
         }
     }
     memcpy(g_cam_prev_pos, pos, sizeof(pos)); memcpy(g_cam_prev_fwd, fwd, sizeof(fwd)); g_cam_prev_valid = true;
@@ -13231,10 +14057,13 @@ static void xr_tick() {
     if (g_bt_hold && e1 != nullptr) { e1 = nullptr; bt_e1src = "held"; }   // frozen world, after the shards: the pinned last frame is re-sent over the load black
     // R15: no early return without an eye image. xr_frame still runs (events, wait, begin, locate) and re-sends the
     // last frame for up to 30 frames; the session never stalls because one Present had nothing to show.
-    if (g_screen3d_now) g_blink_frames = 0;         // the screen shows the game's cuts as cuts
+    if (g_screen3d_now || g_ovr_suspend) g_blink_frames = 0;   // the screen shows the game's cuts as cuts (S4: the virtual screen too; g_ovr_suspend is still the finished frame's decision)
     if (g_blink_frames > 0) {                       // a cut: a few black frames
         g_blink_frames--;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
+        // eye jumps (4.1): a frame with a UI pass (all of battle, a field frame with a text box) blinks too. ui.tex is left
+        // alone, so the UI panel stays through the blink; the markers drawn into the finals go black with the world.
+        else if (g_eye1_final_rtv && e1 == g_eye1_final) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_eye1_final_rtv, black); e2 = g_eye1_final; }
     }
     if (menu_black && e1 != nullptr) {              // SU-1: latched without a menu image (see above): eye 1 black, as the blink does
         ID3D11RenderTargetView* const brtv = e1 == g_bb_copy ? g_bb_copy_rtv : e1 == g_eye1_final ? g_eye1_final_rtv : nullptr;   // our own copies only

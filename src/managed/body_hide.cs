@@ -329,15 +329,44 @@ internal static class FphWalk {
         }
         return n;
     }
-    /// <summary>npc-anchor: an actor's head as push_player picks the followed actor's (the eye): the highest sub-position (the
-    /// lowest game-space Y) not on the vertical axis through the origin, folded onto the actor's position when it looks relative
-    /// (more than 100 units off it), but never for an attached actor (review N3, push_player's rule: its +0x0C is not where it is;
-    /// its sub-positions are built from the parent's bone and are world positions). False when none is set. Game space.</summary>
+    /// <summary>The first-person head, the one rule for push_player, optpos_log and the post-join snapshot (d7_join_record, which
+    /// sa_apply's head comes from on almost every frame), and HeadOf with reach 0: the highest sub-position (game space has Y down,
+    /// so the lowest Y) not on the vertical axis through the origin, leaving out, when reach > 0, points more than reach units
+    /// sideways (X / Z) from sub-position 0 (the body's base). The other sub-positions of every party battle model sit within about
+    /// 6 units of it, but Wakka's battle model carries index 11 about 14.5 units out and 8-12 units above his head (the ball he
+    /// holds up), which put his eye ~1 m high (owner, 4-5 Nov 2026 captures). The callers pass the reach in battle only and 0
+    /// elsewhere (swimming, cutscene poses and riding were never checked against it: review of 9b406b9, SF), and reach 0 is the old
+    /// rule exactly. The reach is also skipped when sub-position 0 is on the axis (or its X / Z is not a number). When it applies,
+    /// sub-position 0 qualifies itself (distance 0), so the limited pick only comes up empty if sub-position 0's Y is not a number;
+    /// the old-rule pick is the fallback then. old = the pick without the reach (the old rule), for the "skipped" log line.
+    /// Returns the index, or -1 (nothing off the axis).</summary>
+    public static int HeadPick(ReadOnlySpan<Vector4> optpos, float reach, out int old) {
+        int n = Math.Min(optpos.Length, 26);
+        old = -1; float hy = float.MaxValue;
+        for (int k = 0; k < n; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; old = k; } }
+        if (!(reach > 0f) || old < 0) return old;
+        Vector4 b = optpos[0];
+        if (!(MathF.Abs(b.X) + MathF.Abs(b.Z) > 0.01f)) return old;
+        float r2 = reach * reach; int pick = -1; hy = float.MaxValue;
+        for (int k = 0; k < n; k++) {
+            Vector4 sp = optpos[k];
+            if (!(sp.Y < hy) || !(MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f)) continue;
+            float dx = sp.X - b.X, dz = sp.Z - b.Z; if (!(dx * dx + dz * dz <= r2)) continue;
+            hy = sp.Y; pick = k;
+        }
+        return pick >= 0 ? pick : old;
+    }
+    /// <summary>npc-anchor: another actor's head for the npc-anchor ties: HeadPick with reach 0 (the old highest-point rule) on
+    /// purpose. The ties are field-only (body_hide_push gets !in_battle), and the reach is a battle-only rule (Wakka's ball is a
+    /// battle-model point), so the field keeps exactly the rule push_player uses there. Folded onto the actor's position when it
+    /// looks relative (more than 100 units off it), but never for an attached actor (review N3, push_player's rule: its +0x0C is not
+    /// where it is; its sub-positions are built from the parent's bone and are world positions). False when none is set. Game space.</summary>
     public static bool HeadOf(ReadOnlySpan<Vector4> optpos, Vector3 pos, bool attached, out Vector3 head) {
-        float hy = float.MaxValue; head = default; bool have = false;
-        for (int k = 0; k < optpos.Length && k < 26; k++) { Vector4 sp = optpos[k]; if (sp.Y < hy && MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) { hy = sp.Y; head = new Vector3(sp.X, sp.Y, sp.Z); have = true; } }
-        if (have && !attached && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
-        return have;
+        head = default;
+        int k = HeadPick(optpos, 0f, out _); if (k < 0) return false;
+        Vector4 sp = optpos[k]; head = new Vector3(sp.X, sp.Y, sp.Z);
+        if (!attached && MathF.Abs(head.X - pos.X) + MathF.Abs(head.Z - pos.Z) > 100f) head += pos;
+        return true;
     }
 }
 
