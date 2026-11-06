@@ -202,24 +202,31 @@ struct Stick {
 // (start -> end) on the head's yaw axes (right, world up, forward; the head's pitch is ignored, so looking down at the hands
 // does not tilt "up") classifies it at the end: a thrust when forward >=
 // min_len and >= thrust_dom x the larger of right / up; a slash when the larger of right / up >= min_len, >= dom x the other
-// and >= fwd_dom x |forward|; else nothing (diagonal, short, mixed, a pull back). A refractory follows every stroke.
-// The swing (Tidus) fires at the onset, once a stroke's path reaches swing_len (20 cm) with a peak of swing_peak (1.375 x the
-// start speed: 2.2 m/s) and is not mainly upward (an upward share under swing_up of the path: reaching for the headset).
-// Jumps (review S1): a sample more than max_speed (8 m/s, the Circle's limit) from the last ends the stroke with nothing and
-// starts the history again (the Quest re-acquiring a controller snaps its pose); the caller passes an untracked or merely
-// inferred pose as not valid, which ends the stroke the same way. At 30 Hz a 25 cm snap is only 7.5 m/s, so also: a stroke
-// whose largest one-frame step is snap_share (60 %) of its path or more is a snap, refused (a real stroke spreads over frames:
-// a 30 cm slash peaking at 3 m/s has its largest 30 Hz step at a third of its path, a snap has all of it in one). The bring-back (review S2): after a stroke that fired, the
-// same hand's next stroke starting within return_s (0.5 s) of its end is refused when it points back (cosine under -0.5 with
-// the fired path); for the swing any stroke then is refused (one A per swing).
+// and >= fwd_dom x |forward|; else nothing (diagonal, short, mixed, a pull back). A refractory (0.12 s) follows every stroke
+// (0.2 s until round 2: the bring-back rule below now does the longer job, and a learned opposite pair may follow at 0.15 s).
+// The swing (Tidus) fires at the onset, once a stroke's path reaches swing_len (20 cm) with a peak of swing_peak (1.25 x the
+// start speed, od_slash_speed: 2.0 m/s at 1.6; a 30 cm swing in 250 ms peaks at 2.25 m/s and samples under 2.2 at 30 Hz) and is not mainly upward (an upward share under swing_up of the path: reaching for the headset).
+// Jumps (review S1, round 2 S1): the caller passes an untracked or merely inferred pose as not valid, which ends the stroke
+// with nothing (the Quest snaps a controller's pose when it re-acquires it). On tracked poses: a one-frame step over
+// max_speed (20 m/s; the fastest real stroke in the reviewer's table peaks at 16.4 m/s: 70 cm in 80 ms) ends the stroke; and
+// a snap is a step of at least snap_min (4 cm) with rest on both sides: the step before and the step after are each at most
+// snap_rest (8 %) of it (a snap stops, a stroke goes on). Deciding that needs the next sample, so while a step could still
+// be a snap the stroke's decision (the swing's onset, the slash's end) waits one sample. A real stroke at 30 Hz has its
+// neighbours above 10 % down to 60 ms strokes (the centred frame of a 60 ms minimum-jerk stroke holds 83 %, each neighbour
+// 8.5 % of the path: 10 % of the big step); only strokes under about 55 ms at 30 Hz look like a snap.
+// The bring-back (review S2, round 2 S2): after a stroke that fired, the same hand's next stroke starting within return_s
+// (0.3 s) of its end is refused when it points back (cosine under -0.5 with the fired path), unless the caller allows that
+// class now (Auron: the game's expected next input is that stroke's button, Driver's learned map: Shooting Star's Left,
+// Right and Banishing Blade's Right, Left); for the swing any stroke within swing_return_s (0.5 s) is refused (one A per swing).
 enum Cls { C_NONE = 0, C_LEFT, C_RIGHT, C_UP, C_DOWN, C_THRUST, C_SWING, C_N };
 static const char* const k_cls[C_N] = { "none", "left", "right", "up", "down", "thrust", "swing" };
 enum Why { R_NONE = 0, R_SENT, R_DIAGONAL, R_SHORT, R_MIXED, R_BACK, R_LOST, R_JUMP, R_RETURN, R_UP, R_N };
 static const char* const k_why[R_N] = { "none", "sent", "diagonal", "short", "mixed (forward and sideways)", "pulled back", "tracking lost",
                                         "a tracking jump", "the bring-back", "upward (a reach)" };
 struct StrokeCfg {
-    float start = 1.6f, end = 0.6f, max_s = 0.5f, min_len = 0.15f, dom = 1.8f, thrust_dom = 1.5f, fwd_dom = 1.2f, refractory = 0.2f;
-    float swing_len = 0.20f, swing_peak = 2.2f, swing_up = 0.8f, max_speed = 8.f, return_s = 0.5f, snap_share = 0.6f;
+    float start = 1.6f, end = 0.6f, max_s = 0.5f, min_len = 0.15f, dom = 1.8f, thrust_dom = 1.5f, fwd_dom = 1.2f, refractory = 0.12f;
+    float swing_len = 0.20f, swing_peak = 2.0f, swing_up = 0.8f, max_speed = 20.f, return_s = 0.3f, swing_return_s = 0.5f;
+    float snap_min = 0.04f, snap_rest = 0.08f;
 };
 struct Axes { V3 r, u, f; };
 /// The head's yaw axes from its forward vector (any length; y up): false when the head looks straight up or down.
@@ -251,15 +258,16 @@ enum { ST_DIR = 0, ST_SWING = 1 };       // Stroke::step modes: Auron's classes 
 enum { EV_FIRE = 1, EV_END = 2 };        // Stroke::step results
 struct Stroke {
     int nh = 0; V3 h1, h2; double t1 = 0.0, t2 = 0.0;   // the last two samples
-    bool in = false, fired = false, decided = false, blocked = false; V3 p0; double t0 = 0.0, quiet_until = -1e300; float peak = 0.f, max_st = 0.f; Axes ax0;
+    bool in = false, fired = false, decided = false, blocked = false; V3 p0; double t0 = 0.0, quiet_until = -1e300; float peak = 0.f; Axes ax0;
+    bool cand = false; float cand_step = 0.f;          // the last step may be a snap (rest before it): the next sample decides
     double ret_until = -1e300; V3 ret_dir;              // the bring-back rule: after a fired stroke, its path (unit) and until when
-    int last_cls = C_NONE, last_why = R_NONE; float last_len = 0.f, last_peak = 0.f;
-    void reset() { nh = 0; in = fired = decided = blocked = false; quiet_until = -1e300; ret_until = -1e300; peak = 0.f; }
+    int last_cls = C_NONE, last_why = R_NONE; float last_len = 0.f, last_peak = 0.f; bool last_rev = false;   // last_rev: sent as an allowed bring-back
+    void reset() { nh = 0; in = fired = decided = blocked = cand = false; quiet_until = -1e300; ret_until = -1e300; peak = 0.f; }
     /// The stroke in progress ends with nothing (why); the history starts again.
     int drop(int why) {
         int ev = 0;
         if (in) { if (!fired) { last_cls = C_NONE; last_why = why; last_len = len(h1 - p0); last_peak = peak; } ev |= EV_END; }
-        in = false; nh = 0; return ev;
+        in = false; nh = 0; cand = false; return ev;
     }
     /// True when a stroke starting at t0 with path d is the bring-back of the last fired one (swing: any stroke then).
     bool is_return(V3 d, int mode) const {
@@ -268,42 +276,44 @@ struct Stroke {
         const float l = len(d);
         return l > 1e-6f && dot(d, ret_dir) < -0.5f * l;
     }
-    /// One sample. Returns EV_* bits; cls = the class when EV_FIRE.
-    int step(V3 p, bool valid, double t, const Axes& ax, const StrokeCfg& c, int mode, int& cls) {
+    /// One sample. Returns EV_* bits; cls = the class when EV_FIRE. allow_rev: bit c set = a class-c stroke is allowed even as
+    /// the bring-back (the game expects that input next).
+    int step(V3 p, bool valid, double t, const Axes& ax, const StrokeCfg& c, int mode, int& cls, int allow_rev = 0) {
         cls = C_NONE; int ev = 0;
         if (!valid) return drop(R_LOST);
         if (nh >= 1 && (t - t1 <= 0.0 || t - t1 > 0.25)) ev |= drop(R_LOST);                              // a gap
         else if (nh >= 1 && len(p - h1) > c.max_speed * static_cast<float>(t - t1)) ev |= drop(R_JUMP);    // a tracking jump
+        else if (nh >= 1) {   // the snap test: a big step with rest before it is a candidate; rest after it makes it a snap
+            const float sl = len(p - h1);
+            if (cand && sl <= c.snap_rest * cand_step) ev |= drop(R_JUMP);
+            else { cand = sl >= c.snap_min && (nh < 2 || len(h1 - h2) <= c.snap_rest * sl); cand_step = sl; }
+        }
         float speed = 0.f;
         if (nh >= 2 && t > t2) speed = len(p - h2) / static_cast<float>(t - t2);
         // a stroke that starts in the refractory is refused whole: blocked until its speed falls under `end`
         if (!in && nh >= 2 && speed > c.start && t < quiet_until) blocked = true;
         if (blocked && speed < c.end) blocked = false;
-        const float step_l = nh >= 1 ? len(p - h1) : 0.f;
-        if (!in && !blocked && nh >= 2 && speed > c.start) { in = true; fired = decided = false; p0 = h2; t0 = t2; peak = speed; ax0 = ax; max_st = len(h1 - h2); }
+        if (!in && !blocked && nh >= 2 && speed > c.start) { in = true; fired = decided = false; p0 = h2; t0 = t2; peak = speed; ax0 = ax; }
         if (in) {
             if (speed > peak) peak = speed;
-            if (step_l > max_st) max_st = step_l;
             const V3 d = p - p0;
             const float l = len(d);
-            const bool snap = max_st >= c.snap_share * l;
-            if (mode == ST_SWING && !decided && l >= c.swing_len && peak >= c.swing_peak) {
+            if (mode == ST_SWING && !decided && !cand && l >= c.swing_len && peak >= c.swing_peak) {
                 decided = true;
-                const int why = snap ? R_JUMP : is_return(d, mode) ? R_RETURN : dot(d, ax0.u) >= c.swing_up * l ? R_UP : R_SENT;
+                const int why = is_return(d, mode) ? R_RETURN : dot(d, ax0.u) >= c.swing_up * l ? R_UP : R_SENT;
                 if (why == R_SENT) { fired = true; cls = C_SWING; ev |= EV_FIRE; last_cls = C_SWING; }
                 else last_cls = C_NONE;
                 last_why = why; last_len = l; last_peak = peak;
             }
-            if (speed < c.end || t - t0 > c.max_s) {
+            if (!cand && (speed < c.end || t - t0 > c.max_s)) {   // (a candidate snap: the end waits one sample)
                 if (mode == ST_DIR) {
-                    int why = R_NONE; int k = classify(d, ax0, c, &why);
-                    if (k != C_NONE && snap) { k = C_NONE; why = R_JUMP; }
-                    else if (k != C_NONE && is_return(d, mode)) { k = C_NONE; why = R_RETURN; }
+                    int why = R_NONE; int k = classify(d, ax0, c, &why); last_rev = false;
+                    if (k != C_NONE && is_return(d, mode)) { if (allow_rev & (1 << k)) last_rev = true; else { k = C_NONE; why = R_RETURN; } }
                     if (k != C_NONE) { cls = k; ev |= EV_FIRE; fired = true; }
                     last_cls = k; last_why = why; last_len = l; last_peak = peak;
                 }
                 else if (!decided) { last_cls = C_NONE; last_why = R_SHORT; last_len = l; last_peak = peak; }
-                if (fired && l > 1e-6f) { ret_until = t + c.return_s; ret_dir = d * (1.f / l); }
+                if (fired && l > 1e-6f) { ret_until = t + (mode == ST_SWING ? c.swing_return_s : c.return_s); ret_dir = d * (1.f / l); }
                 in = false; quiet_until = t + c.refractory; ev |= EV_END;
             }
         }
@@ -343,13 +353,14 @@ struct PressQ {
         if (n >= 3) { full++; return false; }
         b[n] = btn; h[n] = static_cast<uint8_t>(hand & 1); t[n] = now; n++; return true;
     }
-    uint16_t pop(int* hand, double now = 0.0, double max_age = 1e300) {
+    uint16_t pop(int* hand, double now = 0.0, double max_age = 1e300, double* when = nullptr) {
         while (n > 0) {
             const uint16_t r = b[0]; const int hh = h[0]; const double tt = t[0];
             for (int i = 1; i < n; ++i) { b[i - 1] = b[i]; h[i - 1] = h[i]; t[i - 1] = t[i]; }
             n--;
             if (now - tt > max_age) { stale++; continue; }
             if (hand) *hand = hh;
+            if (when) *when = tt;
             return r;
         }
         return 0;
@@ -357,6 +368,8 @@ struct PressQ {
     void clear() { n = 0; }
 };
 /// A quick squeeze and a punch of the same hand within this are one shoulder press, not two (review S3: clenching to punch).
+/// Both sides are judged when they are SENT (round 2 N4): a punch is dropped at the slot if that hand's squeeze went within
+/// 0.3 s of the punch, and a squeeze is dropped only after a punch that was really sent, so one of the two always goes.
 constexpr double k_shoulder_clash = 0.3;
 inline bool shoulder_clash(double a, double b) { return a - b < k_shoulder_clash && b - a < k_shoulder_clash; }
 /// The press slot's rule (pad::press_hook): held for k_press_polls new packets and at least k_press_ms, then one clear packet.
@@ -371,6 +384,8 @@ struct Sess {
     int sub0 = -1, sub1 = -1, cnt0 = -1, cnt1 = -1;                                                                         // Lulu's spins / counter at the open and the close
     uint32_t cls_n[C_N] = {}, why_n[R_N] = {}; uint32_t sent = 0, queue_full = 0, stale = 0, clashes = 0;               // strokes, presses sent
     uint32_t restarts = 0;                                                                                                  // Tidus: the bar restarted
+    uint32_t samples[2] = { 0, 0 }, inferred[2] = { 0, 0 };                                                                 // poses seen / valid but untracked
+    uint32_t rev_allowed = 0;                                                                                               // Auron: bring-backs sent (the game expected them)
     int len = 0, prog_max = 0; uint32_t resets = 0, game_presses = 0;                                                        // Auron
     int end_state = 0, end_timer = 0;
 };
@@ -409,6 +424,8 @@ inline int summary(char* s, size_t n, const Sess& x) {
         if (x.od == OD_AURON) k = fmt_append(s, n, k, "; progress best %d of %d, wrong-press resets %u, game presses seen %u", x.prog_max, x.len, x.resets, x.game_presses);
         if (x.od == OD_TIDUS) k = fmt_append(s, n, k, "; the bar restarted %u times (a press outside the zone)", x.restarts);
     }
+    if (x.od == OD_AURON && x.rev_allowed) k = fmt_append(s, n, k, "; opposite pairs sent at once %u (the game expected them)", x.rev_allowed);
+    k = fmt_append(s, n, k, "; poses untracked (inferred) L %.0f %% / R %.0f %%", x.samples[0] ? 100.0 * x.inferred[0] / x.samples[0] : 0.0, x.samples[1] ? 100.0 * x.inferred[1] / x.samples[1] : 0.0);
     k = fmt_append(s, n, k, "; closed at state %d (%s), timer %d", x.end_state, end_text(x.od, x.end_state), x.end_timer);
     return k;
 }
@@ -433,6 +450,8 @@ struct FrameIn {
     bool game_press_ok = false; uint16_t game_press = 0;      // Auron's window: the game's new-press word u16 0x25D09D4 this frame
     bool grab[2] = { false, false };                          // the hand is grabbing the world (the seat / diorama grip): no gestures
     double squeeze_t[2] = { -1e300, -1e300 };                 // the last quick squeeze (LB / RB) of each hand, the same clock as t
+    bool inferred[2] = { false, false };                      // the pose is valid but not tracked (inferred): counted for the odg: line
+    const uint16_t* seq = nullptr; int seq_n = 0;             // Auron's expected sequence as read (the bring-back exception)
 };
 struct Haptic { int hand = 0; float amp = 0.f, sec = 0.f; };
 struct FrameOut {
@@ -446,6 +465,7 @@ struct FrameOut {
     bool game_press_new = false;                        // Auron: a new non-zero game press this tick (logged)
     bool tidus_restart = false;                         // Tidus: the bar restarted this tick (a press outside the zone, ours or a button)
     bool clash[2] = { false, false };                   // a punch dropped: that hand's quick squeeze already sent the shoulder
+    bool learned = false;                               // Auron: the learned map changed this tick (logged)
     void pulse(int hand, float amp, float sec) { if (nh < 6) { hap[nh].hand = hand; hap[nh].amp = amp; hap[nh].sec = sec; nh++; } }
 };
 struct Driver {
@@ -453,17 +473,35 @@ struct Driver {
     Circle circ[2]; CircleMix mix; Stroke st[2]; PressQ q; Sess sess, last; bool open = false;
     int last_hand = 1; uint16_t last_btn = 0; double last_btn_t = -1e300;   // the last press sent (Auron's capture line)
     int16_t prog = 0; uint8_t sub = 0, cnt = 0; uint16_t gp = 0; double second_at = -1.0, circ_t = -1e300;
-    bool have_cur = false; int16_t cur = 0;            // Tidus's cursor last tick (the restart test)
+    bool have_cur = false; int16_t cur = 0; double cur_t = 0.0;   // Tidus's cursor last tick and when (the restart test)
+    uint16_t learned[16] = {};                          // Auron: our button (XInput bit index) -> the game's new-press value seen right after we sent it
+    uint32_t learned_n = 0;
     double thrust_t[2] = { -1e300, -1e300 };            // the last punch queued per hand (the quick squeeze's clash test)
     static constexpr double k_stick_linger = 0.25;   // s: the stick channel stays on this long after the circling stops
     uint32_t stick_sent0 = 0, stick_dropped0 = 0; uint32_t windows = 0;
-    void apply_cfg() { cc.r_min = clampf(cfg.circle_r, 0.01f, 0.20f); sc.start = clampf(cfg.slash_speed, 0.8f, 5.f); sc.end = sc.start * 0.375f; }
+    void apply_cfg() { cc.r_min = clampf(cfg.circle_r, 0.01f, 0.20f); sc.start = clampf(cfg.slash_speed, 0.8f, 5.f); sc.end = sc.start * 0.375f; sc.swing_peak = sc.start * 1.25f; }
+    static int bit_of(uint16_t b) { for (int i = 0; i < 16; ++i) if (b == (1u << i)) return i; return -1; }
+    /// The classes whose button the game expects next (seq[progress]) by the learned map: allowed as a bring-back.
+    int allow_mask(const FrameIn& in, int hand) const {
+        if (in.seq == nullptr || in.x.auron_prog < 0 || in.x.auron_prog >= in.seq_n) return 0;
+        const uint16_t want = in.seq[in.x.auron_prog]; if (want == 0) return 0;
+        int m = 0;
+        for (int c = C_LEFT; c <= C_THRUST; ++c) { const int bi = bit_of(button_for(OD_AURON, c, hand)); if (bi >= 0 && learned[bi] == want) m |= 1 << c; }
+        return m;
+    }
     /// A quick squeeze of hand h now (t: this clock) is the same shoulder as a punch just queued in an injecting Bushido window:
     /// the caller drops the squeeze (review S3). The other order (the squeeze first) is in tick, from FrameIn::squeeze_t.
     bool squeeze_clashes(int h, double t) const { return open && sess.od == OD_AURON && sess.inject && h >= 0 && h < 2 && shoulder_clash(t, thrust_t[h]); }
     /// The grips must not grab the world now (review S4): an injecting Bushido window, where a clenched punch is a punch.
     bool grips_are_gestures() const { return open && sess.od == OD_AURON && inject_now == OD_AURON; }
     int inject_now = OD_NONE;
+    /// The hand whose poses were mostly inferred in the open window (over 50 % of at least 30 samples), or -1 (round 2 S3: a runtime
+    /// that never reports POSITION_TRACKED would make every gesture silently dead).
+    int untracked_hand() const {
+        if (!open) return -1;
+        for (int h = 1; h >= 0; --h) if (sess.samples[h] >= 30 && sess.inferred[h] * 2 > sess.samples[h]) return h;
+        return -1;
+    }
     static int word(const od::Raw& r, int od) { return od == OD_LULU ? r.lulu : od == OD_AURON ? r.auron : od == OD_TIDUS ? r.tidus : 0; }
     void close_now(const FrameIn& in) {
         sess.t1 = in.t; sess.end_state = in.r.ok ? word(in.r, sess.od) : -1; sess.end_timer = in.r.timer_ok ? in.r.timer : 0;
@@ -498,7 +536,7 @@ struct Driver {
         if (w == OD_LULU) {
             if (in.sample_new) {
                 float d[2]; bool c[2];
-                for (int h = 0; h < 2; ++h) { d[h] = circ[h].step(in.p[h], in.valid[h] && !in.grab[h], in.t, cc); c[h] = circ[h].circling; }
+                for (int h = 0; h < 2; ++h) { d[h] = circ[h].step(in.p[h], in.valid[h] && !in.grab[h], in.t, cc); c[h] = circ[h].circling; sess.samples[h]++; if (in.inferred[h]) sess.inferred[h]++; }
                 mix.step(d, c);
                 if (c[0] || c[1]) circ_t = in.t;
             }
@@ -514,12 +552,15 @@ struct Driver {
                 if (w == OD_TIDUS && h == 0) continue;   // Tidus: the right hand's swing
                 int cls = C_NONE;
                 if (!in.sample_new) continue;
-                const int ev = st[h].step(in.p[h], in.valid[h] && !in.grab[h] && ax_ok, in.t, ax, sc, w == OD_TIDUS ? ST_SWING : ST_DIR, cls);
+                sess.samples[h]++; if (in.inferred[h]) sess.inferred[h]++;
+                const int allow = w == OD_AURON ? allow_mask(in, h) : 0;
+                const int ev = st[h].step(in.p[h], in.valid[h] && !in.grab[h] && ax_ok, in.t, ax, sc, w == OD_TIDUS ? ST_SWING : ST_DIR, cls, allow);
+                if ((ev & EV_FIRE) && st[h].last_rev) sess.rev_allowed++;
                 if (ev & EV_FIRE) {
                     sess.cls_n[cls]++; o.fired[h] = cls;
                     const uint16_t b = button_for(w, cls, h); o.fired_btn[h] = b;
                     if (inj == w && cls == C_THRUST && shoulder_clash(in.t, in.squeeze_t[h])) { o.clash[h] = true; sess.clashes++; }
-                    else if (inj == w && q.push(b, h, in.t)) { o.queued[h] = true; if (cls == C_THRUST) thrust_t[h] = in.t; if (hap) o.pulse(h, 0.5f, 0.025f); }
+                    else if (inj == w && q.push(b, h, in.t)) { o.queued[h] = true; if (hap) o.pulse(h, 0.5f, 0.025f); }
                 }
                 else if ((ev & EV_END) && st[h].last_why > R_SENT && st[h].last_why < R_N) sess.why_n[st[h].last_why]++;
             }
@@ -530,22 +571,38 @@ struct Driver {
                 if (pr == 0 && prog > 0) { sess.resets++; if (hap) { o.pulse(0, 0.9f, 0.12f); o.pulse(1, 0.9f, 0.12f); } }
                 prog = pr; if (pr > sess.prog_max) sess.prog_max = pr;
                 const uint16_t g = in.game_press_ok ? in.game_press : 0;
-                if (g != 0 && g != gp) { sess.game_presses++; o.game_press_new = true; }
+                if (g != 0 && g != gp) {
+                    sess.game_presses++; o.game_press_new = true;
+                    // the map our bring-back exception needs: the game's value for the button we sent just before
+                    const int bi = bit_of(last_btn);
+                    if (bi >= 0 && in.t - last_btn_t < 0.3 && learned[bi] != g) { learned[bi] = g; learned_n++; o.learned = true; }
+                }
                 gp = g;
             }
             if (w == OD_TIDUS) {   // the bar's restart: the cursor jumps (its own bounces are reflections, continuous)
+                // at most |v| a logic tick: the ticks since the last look (up to 60 a second, one more for the phase, at least 2)
+                // bound the travel, so a hitch that spans several ticks is no restart (round 2 N3)
                 const int16_t c = in.r.cursor; const int v = in.x.tidus_vel < 0 ? -in.x.tidus_vel : in.x.tidus_vel;
                 if (have_cur) {
+                    const double el = in.t - cur_t; int ticks = el > 0.0 ? static_cast<int>(std::ceil(el * 60.0 - 1e-6)) + 1 : 2;
+                    if (ticks < 3) ticks = 3;
+                    if (ticks > 1000) ticks = 1000;
                     const int jump = c > cur ? c - cur : cur - c;
-                    if (jump > 3 * v + 4) { o.tidus_restart = true; sess.restarts++; if (hap) o.pulse(1, 0.9f, 0.12f); }
+                    if (jump > ticks * v + 4) { o.tidus_restart = true; sess.restarts++; if (hap) o.pulse(1, 0.9f, 0.12f); }
                 }
-                have_cur = true; cur = c;
+                have_cur = true; cur = c; cur_t = in.t;
             }
         }
         if (inj == OD_NONE) q.clear();
         else if (in.press_free && q.n > 0) {
-            int hh = 0; const uint16_t b = q.pop(&hh, in.t, k_press_max_age);
-            if (b) { o.press = b; o.press_hand = hh; sess.sent++; last_hand = hh; last_btn = b; last_btn_t = in.t; }
+            int hh = 0; double qt = 0.0; uint16_t b = q.pop(&hh, in.t, k_press_max_age, &qt);
+            while (b && (b == B_LSHOULDER || b == B_RSHOULDER) && shoulder_clash(qt, in.squeeze_t[hh])) {   // a punch whose squeeze went since: one shoulder (N4)
+                o.clash[hh] = true; sess.clashes++; b = q.pop(&hh, in.t, k_press_max_age, &qt);
+            }
+            if (b) {
+                o.press = b; o.press_hand = hh; sess.sent++; last_hand = hh; last_btn = b; last_btn_t = in.t;
+                if (b == B_LSHOULDER || b == B_RSHOULDER) thrust_t[hh] = in.t;   // only a punch really sent drops a later squeeze
+            }
         }
     }
 };

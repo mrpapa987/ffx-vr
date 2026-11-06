@@ -1705,13 +1705,16 @@ static void gesture_tick() {
     float& yaw_ref = diorama ? g_fp_yaw : g_seat_yaw;
     float& pitch_ref = diorama ? g_gest_pitch : g_seat_pitch;
     const float ovr[3] = { diorama ? 0.f : g_ovr_move[0], diorama ? 0.f : g_ovr_move[1], diorama ? 0.f : g_ovr_move[2] };
-    const bool grip_grab = seat && g_gest_enabled && !odg_grips_are_gestures();   // overdrive gestures: in an injecting Bushido window a clenched punch is a punch
-    bool grab[2] = { grip_grab && L.squeeze > 0.5f && L.grip_valid, grip_grab && R.squeeze > 0.5f && R.grip_valid };
+    const bool odg_grips = odg_grips_are_gestures();   // overdrive gestures: in an injecting Bushido window a clenched punch is a punch
+    static bool s_odg_held[2] = { false, false };       // ... and a grip squeezed there grabs nothing until it is let go (round 2 N1)
+    for (int h = 0; h < 2; ++h) { const float sq = h ? R.squeeze : L.squeeze; if (sq <= 0.5f) s_odg_held[h] = false; else if (odg_grips) s_odg_held[h] = true; }
+    const bool grip_grab = seat && g_gest_enabled && !odg_grips;
+    bool grab[2] = { grip_grab && !s_odg_held[0] && L.squeeze > 0.5f && L.grip_valid, grip_grab && !s_odg_held[1] && R.squeeze > 0.5f && R.grip_valid };
     float hp[2][3]; hand_to_ref(L.grip_p, hp[0]); hand_to_ref(R.grip_p, hp[1]);
     const bool was[2] = { g_gest_grab[0], g_gest_grab[1] };
     const int n = (grab[0] ? 1 : 0) + (grab[1] ? 1 : 0), nwas = (was[0] ? 1 : 0) + (was[1] ? 1 : 0);
     if (n > 0) { g_gest_active = true; g_vrpad_suppress = true; }
-    if (grip_grab && (L.squeeze > 0.5f || R.squeeze > 0.5f)) g_vrpad_suppress = true;   // the grips are the grab, not LB/RB, in the seat
+    if (grip_grab && ((L.squeeze > 0.5f && !s_odg_held[0]) || (R.squeeze > 0.5f && !s_odg_held[1]))) g_vrpad_suppress = true;   // the grips are the grab, not LB/RB, in the seat
     for (int h = 0; h < 2; ++h) if (grab[h] && !was[h]) xr_haptic(h, 0.3f, 0.04f);
     if (n == 2 && nwas < 2) g_gest_last_tilt = (grip_pitch(L.grip_q) + grip_pitch(R.grip_q)) * 0.5f;
     if (n > 0 && n == nwas && grab[0] == was[0] && grab[1] == was[1]) {
@@ -6059,6 +6062,7 @@ static void od_gest_tick() {
         // a tracked position only (an inferred one can snap when the controller is re-acquired: review S1); a grabbing hand gestures nothing (S4)
         in.valid[h] = g_vrpad.ready && hd.grip_valid && hd.grip_tracked; in.p[h] = odg::v3(hd.grip_p[0], hd.grip_p[1], hd.grip_p[2]);
         in.grab[h] = g_gest_grab[h]; in.squeeze_t[h] = g_odg_squeeze_t[h];
+        in.inferred[h] = g_vrpad.ready && hd.grip_valid && !hd.grip_tracked;   // counted per window (round 2 S3: a runtime without the bit)
     }
     { const float fw[3] = { 0.f, 0.f, -1.f }; float d[3]; quat_rotate(g_xr_raw_q, fw, d); in.head_fwd = odg::v3(d[0], d[1], d[2]); }
     // the poses' own time (XrTime, ns) when the runtime gives it: a sample synced twice (no new xrSyncActions) waits
@@ -6073,6 +6077,7 @@ static void od_gest_tick() {
         uint16_t gp = 0;
         if (ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x25D09D4u - 0x400000u)), &gp, 2)) { in.game_press_ok = true; in.game_press = gp; }
         odg_read_seq(in.x);
+        in.seq = g_odg_seq; in.seq_n = g_odg_seq_n;   // the bring-back exception: the game's expected next input (round 2 S2)
     }
     else { g_odg_seq_ptr = 0; g_odg_seq_len = -1; }
     odg::FrameOut o; g_odg.tick(in, o);
@@ -6109,6 +6114,16 @@ static void od_gest_tick() {
              have ? static_cast<unsigned>(g_odg_seq[pr]) : 0u, have ? (in.game_press == g_odg_seq[pr] ? ", a match" : ", not the expected one") : " (the sequence was not read)",
              g_odg.last_btn ? odg::button_name(g_odg.last_btn) : "none (a controller or pad button)", g_odg.last_btn && ago < 400.0 ? "" : g_odg.last_btn ? " (more than 400 ms ago)" : "");
     }
+    if (o.learned && odg_line_ok()) {
+        const int bi = odg::Driver::bit_of(g_odg.last_btn);
+        diag("odg: frame %u: Auron: learned our %s = the game's 0x%04X (%u so far; an opposite pair may then follow at once when the game expects it)",
+             g_frames, odg::button_name(g_odg.last_btn), bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, g_odg.learned_n);
+    }
+    if (o.closed && g_odg.last.od == odg::OD_AURON && g_odg.learned_n && odg_line_ok()) {   // the map so far (the capture stage 2 needs)
+        char m[300] = ""; int k = 0;
+        for (int i = 0; i < 16; ++i) if (g_odg.learned[i]) k = odg::fmt_append(m, sizeof(m), k, "%s%s=0x%04X", k ? " " : "", odg::button_name(static_cast<uint16_t>(1u << i)), static_cast<unsigned>(g_odg.learned[i]));
+        diag("odg: frame %u: Auron: our buttons -> the game's values so far: %s", g_frames, m);
+    }
     if (o.closed) {
         char b[640]; odg::summary(b, sizeof(b), g_odg.last);
         snprintf(g_odg_last_line, sizeof(g_odg_last_line), "%s", b);
@@ -6125,7 +6140,7 @@ extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, 
     c.lulu_stick = lulu_stick < 0 || lulu_stick > 2 ? 0 : lulu_stick; g_odg_lulu_stick = c.lulu_stick;
 }
 /// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
-/// expected sequence (raw). Returns the length written.
+/// expected sequence (raw); 3: a warning ("" none: a hand's poses mostly inferred in the open window). Returns the length written.
 extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n) {
     if (out == nullptr || n <= 0) return 0;
     int k = 0;
@@ -6146,6 +6161,12 @@ extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n)
     }
     else if (which == 1) k = snprintf(out, n, "%s", g_odg_last_line[0] ? g_odg_last_line : "no overdrive window closed yet");
     else if (which == 2) { char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n); k = snprintf(out, n, "%s", g_odg_seq_n ? sq : "not read yet"); }
+    else if (which == 3) {   // round 2 S3: the F8 warning ("" none)
+        const int h = d.untracked_hand();
+        if (h < 0) out[0] = 0;
+        else k = snprintf(out, n, "WARNING: the %s controller's position was untracked (inferred) in %u %% of this window's poses: its gestures are ignored (gestures need a tracked pose)",
+                          h ? "right" : "left", d.sess.samples[h] ? 100u * d.sess.inferred[h] / d.sess.samples[h] : 0u);
+    }
     return k < 0 ? 0 : (k >= n ? n - 1 : k);
 }
 
