@@ -13187,7 +13187,7 @@ extern "C" __declspec(dllexport) int ffxvr_dream_status(int* out, int n) {
 // ffxvr_fmv3d_set (ABI 42). flags: 1 flatten the bottom 15 %, 2 the tight field of view (review SF-1), 4 the edge fill, 8 the
 // 3x3 median, 16 the depth as colour. amount 0..1, range / pop in metres (the "3D movie" mapping), smooth 0..0.95.
 struct RelCfg { int on; float amount; int flags; int offset; float range, pop, smooth, edge; };   // edge: the band (share of the rect) where pop-out ramps to 0 (ABI 43)
-static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8, 0, 3.f, 0.15f, 0.6f, relief::k_feather };   // round 7.4: the centred filter (no 64) by default   // edge fill (4) off by default (round 6: blocks along silhouettes)
+static RelCfg g_rel_cfg = { 0, 1.f, 2 | 8 | 256 | (10 << 10), 0, relief::k_range_default, relief::k_pop_default, 0.6f, relief::k_feather };   // round 10c: the 640 smooth grid, softening 1.0   // round 7.4: the centred filter (no 64) by default   // edge fill (4) off by default (round 6: blocks along silhouettes)
 static float g_rel_range_now = -1.f, g_rel_pop_now = -1.f; static double g_rel_t_prev = 0.0;   // the range / pop drawn, following the settings at 2 m/s and 0.5 m/s (a slider never jumps)
 enum RelFb : int { FB_NONE = 0, FB_HYBRID, FB_VIEW, FB_CAM3D, FB_MENU, FB_PENDING, FB_FILE, FB_IMAGE, FB_GPU, FB_STATE, FB_N };
 static const char* const k_rel_fb[FB_N] = { "-", "a movie behind real-time 3D (id 32 / 46 / 70 / 72)", "not on the virtual screen", "a 3D camera is active",
@@ -13829,8 +13829,8 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     {   // the range and pop-out drawn follow the settings smoothly (2 m/s, 0.5 m/s), like the amount
         const float dts = static_cast<float>(relief::clampf(static_cast<float>(now - g_rel_t_prev), 0.f, 100.f) / 1000.0);
         if (g_rel_range_now < 0.f) { g_rel_range_now = g_rel_cfg.range; g_rel_pop_now = g_rel_cfg.pop; }
-        g_rel_range_now += relief::clampf(g_rel_cfg.range - g_rel_range_now, -2.f * dts, 2.f * dts);
-        g_rel_pop_now += relief::clampf(g_rel_cfg.pop - g_rel_pop_now, -0.5f * dts, 0.5f * dts);
+        g_rel_range_now += relief::clampf(g_rel_cfg.range - g_rel_range_now, -4.f * dts, 4.f * dts);   // round 10c: 4 m/s, 1 m/s (the ranges grew 2x, 4x)
+        g_rel_pop_now += relief::clampf(g_rel_cfg.pop - g_rel_pop_now, -1.f * dts, 1.f * dts);
         g_rel_t_prev = now;
     }
     // review3 N-1: the nominal eye at the midpoint between the eyes: the screen is placed from the left eye at the recentre,
@@ -13898,19 +13898,20 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
 /// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
 /// median, 16 the depth as colour (Debug), 32 each frame normalised to its own range (Debug; round 7: the default is the
 /// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7), 128 every cut starts flat and ramps in over
-/// 150 ms (Debug: the old behaviour, round 7.3); bits 8-9 the grid (Debug, round 10b, relief::grid_mode: 0 round 7's 320
-/// grid, the default; 256 the 640 grid on the plain depth map; 512 the guided upsample with the edge snap); bits 10-13 the edge
-/// softening in tenths of a depth texel (0..15: 0..1.5, relief::soft_texels); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
-/// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
-/// default 0.15); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
+/// 150 ms (Debug: the old behaviour, round 7.3); bits 8-9 the grid (relief::grid_mode: 0 round 7's 320 grid; 256 the 640
+/// grid on the plain depth map, ini fmv_depth_grid=1, the default since round 10c; 512 the guided upsample with the edge snap,
+/// Debug); bits 10-13 the edge softening in tenths of a depth texel (0..15: 0..1.5, relief::soft_texels; ini
+/// fmv_depth_soften, default 1.0); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far behind the
+/// screen the farthest content goes (0.5..20 m, default 10; round 10c); pop: how far in front the nearest goes (0..2 m,
+/// default 0.5; both within the comfort caps, relief::make_map); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
 /// pop-out ramps to 0 (0..0.15 of the rect, default 0.04; content behind the screen is never feathered: the window rule).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth, float edge) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
     g_rel_cfg.flags = flags & 16383;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
-    g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
-    g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;
+    g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, relief::k_range_min, relief::k_range_max) : relief::k_range_default;   // round 10c: 0.5-20 m
+    g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, relief::k_pop_max) : relief::k_pop_default;                         // round 10c: 0-2 m
     g_rel_cfg.smooth = std::isfinite(smooth) ? relief::clampf(smooth, 0.f, 0.95f) : 0.6f;
     g_rel_cfg.edge = std::isfinite(edge) ? relief::clampf(edge, relief::k_feather_min, relief::k_feather_max) : relief::k_feather;   // review3 N-5: never 0
 }

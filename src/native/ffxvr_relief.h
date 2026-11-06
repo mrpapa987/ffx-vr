@@ -420,6 +420,12 @@ struct Map { float Ds, inv_n, inv_f, k, ex, pop, range; bool pop_limited, range_
 constexpr float k_min_near = 0.5f;   // the near distance is at least this (m): a pop-out setting larger than Ds - 0.5 is capped
 constexpr float k_ipd = 0.063f;      // the eye separation the comfort limits are reckoned with (m)
 constexpr float k_max_crossed_deg = 1.0f, k_max_uncrossed_deg = 1.5f;   // review3 SF-2: at any screen distance (see the design note)
+// round 10c: the settings' ranges and defaults (the sliders, the ini, ffxvr_fmv3d_set). The caps above keep every setting
+// comfortable at every screen distance (1-6 m): at 2.5 m the far side never reaches 1.5 deg (infinity is 1.44 deg) and
+// pop-out is capped at 1.02 m; at 5.2 m range 20 is 0.55 deg and pop 2 m 0.43 deg; at 1 m the caps hold range to 0.71 m
+// and pop to 0.22 m.
+constexpr float k_range_min = 0.5f, k_range_max = 20.f, k_range_default = 10.f;   // m behind the screen (was 0.5-10, 3)
+constexpr float k_pop_max = 2.f, k_pop_default = 0.5f;                             // m in front (was 0-0.5, 0.15)
 /// Ds: the screen's distance (m), range: how far behind it the farthest content goes (m), pop: how far in front the nearest
 /// goes (m), k: the amount (0..1), ex: the nominal eye's x (m). The pop-out is capped so the nearest content's crossed
 /// disparity against the screen plane is at most k_max_crossed_deg (and the nearest at least k_min_near away), the range so

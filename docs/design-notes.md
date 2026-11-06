@@ -4589,6 +4589,28 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
     motion the depth frame and the picture disagree beyond the pass's +-2 texels; (5) the snap's plateaus (measured
     harmless on slopes: the pass falls back to the bilinear map there); (6) the tight field of view: not a cause (the
     guide reads the game's backbuffer copy, not the eye images).
+- Round 10c (6 Nov 2026), the owner's settled choice ("looking quite impressive now"; v2 files, screen 5.2 m, amount 1,
+  range 10 m = the old slider's maximum, pop 0.5 m = its maximum, smoothing 0.36, the 640 smooth grid, softening 1.0; the
+  mesh 0.197 ms for both eyes):
+  - The grid (`fmv_depth_grid`: 0 the 320 grid, 1 the 640 smooth grid, 2 guided) and `fmv_depth_soften` are ini settings
+    in the 3D FMV section (F8 > View) next to range and pop-out; the guided grid only from F8 > Debug ("experimental:
+    streaks at silhouettes"). New defaults: grid 1, softening 1.0, range 10 m, pop-out 0.5 m. An ini without the keys gets
+    them; a saved range / pop-out is the user's own and is kept.
+  - The sliders: range 0.5-20 m (was 10), pop-out 0-2 m (was 0.5). The caps (+1 deg crossed, -1.5 deg uncrossed, review3
+    SF-2) keep every position comfortable at every screen distance (1-6 m; relief_test sweeps them in 1 cm / 5 cm steps).
+    Disparity against the screen plane (63 mm):
+    | screen | defaults (range 10, pop 0.5) | maxima (range 20, pop 2) |
+    |---|---|---|
+    | 1.0 m (the slider's minimum) | capped: range 0.71 m, pop 0.22 m: +1.00 / -1.50 deg | the same |
+    | 2.0 m | pop +0.60 deg; range capped at 9.84 m: -1.50 deg | pop capped 0.71 m: +1.00; range 9.84 m: -1.50 |
+    | 2.5 m (the default screen) | +0.36 / -1.16 deg | pop capped 1.02 m: +1.00 / -1.28 deg |
+    | 5.2 m (the owner's) | +0.07 / -0.46 deg | +0.43 / -0.55 deg |
+    | 6.0 m | +0.05 / -0.38 deg | +0.30 / -0.46 deg |
+    At 2.5 m and beyond the far side never reaches the cap (infinity is 1.44 deg at 2.5 m, 0.69 deg at 5.2 m): the range
+    slider's top only matters for a far screen, where it is still well inside. Pop-out is what a far screen lacks: at
+    5.2 m the old 0.5 m maximum was 0.07 deg; 2 m gives 0.43 deg (the cap there is 3.07 m). The readout next to the sliders
+    and F8 > Debug's FMV 3D line say "limited" whenever a cap binds. The range / pop followers are 4 m/s and 1 m/s (were 2
+    and 0.5) so a slider move over the wider ranges still settles in a few seconds.
 
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
