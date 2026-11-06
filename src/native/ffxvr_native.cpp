@@ -5863,7 +5863,8 @@ static void fmv_fvd_check(const char* name, fmv::FvdInfo& v) {
 #ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
 #define LOAD_LIBRARY_SEARCH_SYSTEM32 0x00000800
 #endif
-// cfg (rel_cfg_word): bit 0 the 3x3 median, bit 1 the per-frame normalisation (Debug), the rest the temporal filter's word
+// cfg (rel_cfg_word): bit 0 the 3x3 median, bit 1 the per-frame normalisation (Debug), bit 3 the edge snap (round 10), the
+// rest the temporal filter's word
 struct RelReq { uint32_t gen; char name[fmv::k_name_len + 1]; uint32_t game_frames; int32_t want; int cfg; };
 struct RelSlot { int32_t idx; uint8_t err; int cfg; };   // the output ring (shared)
 struct RelRaw { int32_t idx; uint8_t err; uint8_t med; };                  // the decoded ring (worker-only)
@@ -5871,7 +5872,7 @@ struct RelRes { uint32_t gen; int state; char why[200]; uint32_t n, w, cuts, fla
 static RelReq  g_relw_req = {};               // render thread -> worker (g_fmvw_mx)
 static RelRes  g_relw_res = {};               // worker -> render thread (g_fmvw_mx)
 static RelSlot g_relw_slot[relief::k_ring];   // (g_fmvw_mx) idx -1 empty, -2 being written
-static uint8_t* g_relw_px = nullptr;          // (g_fmvw_mx for the pointer) k_raw decoded frames (w x 180 B), the payload buffer, k_ring output frames (2 w x 180 B)
+static uint8_t* g_relw_px = nullptr;          // (g_fmvw_mx for the pointer) k_raw decoded frames (w x 180 B), the payload buffer, k_ring output frames (2 w x 180 B each, then its snapped copy: round 10)
 static RelRaw g_relw_raw[relief::k_raw]; static int g_relw_cfg = -1;   // worker-only
 static relief::Bits g_rel_bits;               // see above
 // worker-only
@@ -5955,7 +5956,7 @@ static void relw_open(uint32_t gen, const char* name, uint32_t game_frames) {
         else snprintf(r.why, sizeof(r.why), "the depth file is %s (fmvdepth\\%s)", relief::open_text(st), file);
         CloseHandle(h); g_relw_file.reset(); done(); return;
     }
-    uint8_t* px = new (std::nothrow) uint8_t[static_cast<size_t>(relief::k_raw + 1 + 2 * relief::k_ring) * F.w * F.h];
+    uint8_t* px = new (std::nothrow) uint8_t[static_cast<size_t>(relief::k_raw + 1 + 4 * relief::k_ring) * F.w * F.h];   // round 10: + the snapped copies
     if (px == nullptr) { snprintf(r.why, sizeof(r.why), "out of memory for the depth frames (fmvdepth\\%s)", file); CloseHandle(h); g_relw_file.reset(); done(); return; }
     { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_relw_px = px; }
     for (RelRaw& rr : g_relw_raw) rr = RelRaw{ -1, 0, 0 };
@@ -5995,7 +5996,7 @@ static void relw_output(int32_t i, int cfg) {
     uint8_t* mem;
     { std::lock_guard<std::mutex> lk(g_fmvw_mx); g_relw_slot[sl].idx = -2; mem = g_relw_px; }
     const RelRaw& rr = g_relw_raw[i % relief::k_raw];
-    uint16_t* out = reinterpret_cast<uint16_t*>(mem + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(sl) * px;
+    uint16_t* out = reinterpret_cast<uint16_t*>(mem + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(sl) * 2 * px;   // the frame; out + px its snapped copy
     LARGE_INTEGER f, ta, tb; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&ta);
     if (!rr.err) {
         const bool per_frame = (cfg & 2) != 0;   // Debug: each frame to its own range (the converter's), for an A/B
@@ -6015,6 +6016,8 @@ static void relw_output(int32_t i, int cfg) {
         static relief::TFilter tf; static int tf_cfg = -1;
         if (tf_cfg != cfg) { relief::tfilter_make(tf, (cfg & 4) ? ((cfg >> 8) & 0xFF) / 100.f : 0.f); tf_cfg = cfg; }
         relief::tfilter(tf, fr, lp, px, out);   // the centred filter (or, off, the frame's own n')
+        static std::vector<uint16_t> snap_scratch;   // worker-only (4 x px values, kept)
+        if (cfg & 8) relief::snap_out(out, out + px, F.w, F.h, snap_scratch);   // round 10: the edge snap (for the guided upsample)
     }
     QueryPerformanceCounter(&tb);
     const double ms = f.QuadPart ? (tb.QuadPart - ta.QuadPart) * 1000.0 / f.QuadPart : 0.0;
@@ -12380,6 +12383,7 @@ struct RelFmv {
     bool fading = false; uint32_t fades = 0, loops = 0, cut_switches = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
     float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
     bool pop_limited = false, range_limited = false; float pop_used = 0.f, range_used = 0.f;   // review3 SF-2: the comfort limits at this screen distance
+    uint32_t grid_w = 0, grid_h = 0, jbu_runs = 0; bool guided = false;   // round 10: the grid drawn (cells), the upsample's runs
 };
 static RelFmv g_rel;
 static uint32_t g_rel_gen = 0, g_rel_lines = 0;
@@ -12394,6 +12398,18 @@ static ID3D11Texture2D* g_rel_eye[2] = { nullptr, nullptr }; static ID3D11Render
 static ID3D11Texture2D* g_rel_z = nullptr; static ID3D11DepthStencilView* g_rel_dsv = nullptr;
 static uint16_t* g_rel_up = nullptr;                     // the frame to upload (16-bit n'), copied out of the ring under the lock (w x 180)
 static uint16_t* g_rel_ema = nullptr;                    // the causal filter's state (w x 180), with g_rel_up
+// round 10: the guided upsample's shaders and constants, its output (k_up w x k_up 180, R16_UNORM: what the fine grid samples),
+// the fine grid's index buffer (triangle strips, relief::strip_indices)
+static ID3D11VertexShader* g_rel_jvs = nullptr; static ID3D11PixelShader* g_rel_jps = nullptr; static ID3D11Buffer* g_rel_jcb = nullptr; static bool g_rel_jok = false;
+static ID3D11Texture2D* g_rel_htex = nullptr; static ID3D11ShaderResourceView* g_rel_hsrv = nullptr; static ID3D11RenderTargetView* g_rel_hrtv = nullptr; static uint32_t g_rel_hw = 0;
+static ID3D11PixelShader* g_rel_gps = nullptr;            // the guide pass
+static ID3D11Texture2D* g_rel_stex = nullptr; static ID3D11ShaderResourceView* g_rel_ssrv = nullptr;   // the snapped map (w x 180, with the depth map)
+static ID3D11Texture2D* g_rel_gtex = nullptr; static ID3D11ShaderResourceView* g_rel_gsrv = nullptr; static ID3D11RenderTargetView* g_rel_grtv = nullptr;   // the guide (w x 180)
+static uint16_t* g_rel_sup = nullptr;                    // the snapped copy to upload (w x 180), with g_rel_up
+static bool g_rel_snap_ok = false;                       // the snapped map holds the depth map's frame (its last upload had the snap)
+static ID3D11Buffer* g_rel_ib = nullptr; static uint32_t g_rel_ib_cx = 0, g_rel_ib_cy = 0, g_rel_ib_n = 0;
+static int g_rel_jdue = 0;                               // upsample runs still due: k_jbu_runs at each depth upload
+static relief::Rect g_rel_jrect = { -1.f, -1.f, -1.f, -1.f };   // the rect the last run used (a change runs it again)
 
 // The grid: cell = id / 6 (row-major, G.z cells a row), corner (0,0) (1,0) (0,1) (1,0) (1,1) (0,1); no vertex buffer; a
 // vertex at every depth texel's centre and at the rect's edges (round 7: relief::grid_coord, (texels + 1)^2 cells). The
@@ -12406,16 +12422,19 @@ static uint16_t* g_rel_ema = nullptr;                    // the causal filter's 
 // first version's per-triangle ddx / ddy weight recoloured whole cells: blocks); E.w: the depth as colour.
 // R: the video rect (uv); G: W, H, cells x, y; Z: Ds, 1/Zn, 1/Zf, k; F: the edge band (pop-out only), band, band ramp, flatten the bottom;
 // E: edge fill on, edge lo, edge hi, depth as colour; X: the nominal eye's x (m), the depth map's texels across / down;
-// Y: half a backbuffer texel in uv (the colour's inset at the rect's edges, round 7.5).
+// Y: half a backbuffer texel in uv (the colour's inset at the rect's edges, round 7.5), the grid indexed (round 10: SV_VertexID
+// is then the index, row x (cells across + 1) + column; else 6 a cell, round 7's list).
 static const char k_rel_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 MVP; float4 R; float4 G; float4 Z; float4 F; float4 E; float4 X; float4 Y; };\n"
     "Texture2D<float> D : register(t0); Texture2D T : register(t1); SamplerState S : register(s0);\n"
     "struct VO { float4 p : SV_Position; float2 t : TEXCOORD0; float n : TEXCOORD1; float3 fo : TEXCOORD2; };\n"
     "float qof(float n, float wp, float wa) { float inv0 = 1 / Z.x; float dd = Z.z + n * (Z.y - Z.z) - inv0; dd *= (dd > 0 ? wp : 1) * wa; return inv0 + Z.w * dd; }\n"
     "VO vs(uint id : SV_VertexID) {\n"
-    "    uint nx = (uint)G.z; uint cell = id / 6u; uint k = id - cell * 6u;\n"
-    "    float cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
-    "    float cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0);\n"
+    "    uint nx = (uint)G.z; float cx, cy;\n"
+    "    if (Y.z > 0.5) { cx = (float)(id % (nx + 1u)); cy = (float)(id / (nx + 1u)); }   // round 10: the fine grid, indexed strips (relief::strip_indices)\n"
+    "    else { uint cell = id / 6u; uint k = id - cell * 6u;\n"
+    "        cx = (float)(cell % nx) + ((k == 1u || k == 3u || k == 4u) ? 1.0 : 0.0);\n"
+    "        cy = (float)(cell / nx) + ((k == 2u || k == 4u || k == 5u) ? 1.0 : 0.0); }\n"
     "    float a = saturate((cx - 0.5) / X.y), b = saturate((cy - 0.5) / X.z);   // a vertex per depth texel centre (relief::grid_coord)\n"
     "    float n = saturate(D.SampleLevel(S, float2(a, b), 0));\n"
     "    float e = min(min(a, 1 - a), min(b, 1 - b));\n"
@@ -12447,14 +12466,82 @@ static const char k_rel_hlsl[] =
 struct RelCb { float MVP[16]; float R[4]; float G[4]; float Z[4]; float F[4]; float E[4]; float X[4]; float Y[4]; };
 static_assert(sizeof(RelCb) == 176, "RelCb: 176 bytes");
 
+// Round 10: the guided upsample (relief::guide_ref / jbu_ref are its CPU copy; the unit test runs the text between "// core"
+// and "// end core" against them, as C++). Two passes, each one full-target triangle: psg, the guide (each depth texel's
+// footprint luma, w x 180); ps, the upsample (k_up w x k_up 180: the 5 x 5 snapped texels around each output texel in a
+// near and a far layer, each with its depth (spatially weighted) and its mean luma, taken by the output's luma; faded to
+// the original map, bilinear, where there is no edge or no contrast).
+// t0 the snapped map, t1 the backbuffer copy, t2 the guide, t3 the depth map. J0: the depth map's w, h, 1/w, 1/h; J1: the
+// video rect (uv in the backbuffer copy); J2: the output's w, h, 1/(2 sigma_s^2), 1/(2 sigma_r^2); J3: the edge range, the
+// contrast fade's start and end.
+static const char k_jbu_hlsl[] =
+    "cbuffer J : register(b0) { float4 J0; float4 J1; float4 J2; float4 J3; };\n"
+    "Texture2D<float> D : register(t0); Texture2D T : register(t1); Texture2D<float> G : register(t2); Texture2D<float> O : register(t3); SamplerState S : register(s0);\n"
+    "float jbu_luma(float u, float v) { return dot(T.SampleLevel(S, float2(J1.x + u * J1.z, J1.y + v * J1.w), 0).rgb, float3(0.2126, 0.7152, 0.0722)); }\n"
+    "float jbu_d(float x, float y) { return D.Load(int3((int)x, (int)y, 0)); }\n"
+    "float jbu_g(float x, float y) { return G.Load(int3((int)x, (int)y, 0)); }\n"
+    "float jbu_lin(float u, float v) { return O.SampleLevel(S, float2(u, v), 0); }\n"
+    "// core\n"
+    "float jbu_guide(float x, float y) {\n"
+    "    float u0 = (x + 0.25) * J0.z, u1 = (x + 0.75) * J0.z, v0 = (y + 0.25) * J0.w, v1 = (y + 0.75) * J0.w;\n"
+    "    return 0.25 * (jbu_luma(u0, v0) + jbu_luma(u1, v0) + jbu_luma(u0, v1) + jbu_luma(u1, v1));\n"
+    "}\n"
+    "float jbu(float ox, float oy) {\n"
+    "    float px = ox * J0.x - 0.5, py = oy * J0.y - 0.5;\n"
+    "    float bx = floor(px + 0.5), by = floor(py + 0.5);\n"
+    "    float mn = 1, mx = 0;\n"
+    "    for (int j = -2; j <= 2; ++j) {\n"
+    "        for (int i = -2; i <= 2; ++i) {\n"
+    "            float d = jbu_d(clamp(bx + i, 0.0, J0.x - 1), clamp(by + j, 0.0, J0.y - 1));\n"
+    "            mn = min(mn, d); mx = max(mx, d);\n"
+    "        }\n"
+    "    }\n"
+    "    float mid = 0.5 * (mn + mx);\n"
+    "    float sn = 0, dn = 0, gn = 0, cn = 0, sf = 0, df = 0, gf = 0, cf = 0;\n"
+    "    for (int j2 = -2; j2 <= 2; ++j2) {\n"
+    "        for (int i2 = -2; i2 <= 2; ++i2) {\n"
+    "            float qx = clamp(bx + i2, 0.0, J0.x - 1), qy = clamp(by + j2, 0.0, J0.y - 1);\n"
+    "            float d = jbu_d(qx, qy), g = jbu_g(qx, qy);\n"
+    "            float dx = qx - px, dy = qy - py;\n"
+    "            float s = exp(-(dx * dx + dy * dy) * J2.z);\n"
+    "            float k = d > mid ? 1.0 : 0.0;\n"
+    "            sn += k * s; dn += k * s * d; gn += k * g; cn += k;\n"
+    "            sf += (1 - k) * s; df += (1 - k) * s * d; gf += (1 - k) * g; cf += 1 - k;\n"
+    "        }\n"
+    "    }\n"
+    "    float lin = jbu_lin(ox, oy);\n"
+    "    if (sn <= 0 || sf <= 0) return lin;\n"
+    "    dn /= sn; gn /= cn; df /= sf; gf /= cf;\n"
+    "    float lp = jbu_luma(ox, oy);\n"
+    "    float en = (lp - gn) * (lp - gn), ef = (lp - gf) * (lp - gf), m = min(en, ef);\n"
+    "    float wn = sn * exp(-(en - m) * J2.w), wf = sf * exp(-(ef - m) * J2.w);\n"
+    "    float lay = (wn * dn + wf * df) / (wn + wf);\n"
+    "    float b = smoothstep(J3.x, 2 * J3.x, mx - mn) * smoothstep(J3.y, J3.z, abs(gn - gf));\n"
+    "    return lin + b * (lay - lin);\n"
+    "}\n"
+    "// end core\n"
+    "float4 vs(uint id : SV_VertexID) : SV_Position { return float4(id == 1u ? 3.0 : -1.0, id == 2u ? -3.0 : 1.0, 0, 1); }\n"
+    "float psg(float4 p : SV_Position) : SV_Target { return jbu_guide(p.x - 0.5, p.y - 0.5); }\n"
+    "float ps(float4 p : SV_Position) : SV_Target { return jbu(p.x / J2.x, p.y / J2.y); }\n";
+struct RelJcb { float J0[4]; float J1[4]; float J2[4]; float J3[4]; };
+static_assert(sizeof(RelJcb) == 64, "RelJcb: 64 bytes");
+
 // Round 7: the relief pass's GPU time (both eyes; D3D11 timestamps, read back without a flush a few frames later).
+// Round 10: two timers: [0] the relief pass (the mesh, both eyes), [1] the guided upsample (a run).
 struct RelGpuQ { ID3D11Query* dj = nullptr; ID3D11Query* t0 = nullptr; ID3D11Query* t1 = nullptr; bool busy = false; };
 static const int k_rel_gq = 4;
-static RelGpuQ g_rel_gq[k_rel_gq]; static int g_rel_gq_next = 0;
-static double g_rel_gpu_sum = 0.0, g_rel_gpu_max = 0.0, g_rel_gpu_last = 0.0; static uint32_t g_rel_gpu_n = 0;   // this movie's (reset at its start)
+struct RelTime { RelGpuQ q[k_rel_gq]; int next = 0; double sum = 0.0, max = 0.0, last = 0.0; uint32_t n = 0; };   // this movie's (reset at its start)
+static RelTime g_rel_tm[2];
+static void rel_time_reset() { for (RelTime& t : g_rel_tm) { t.sum = t.max = t.last = 0.0; t.n = 0; } }
+static RelGpuQ* rel_time_begin(RelTime& t) {
+    RelGpuQ& q = t.q[t.next];
+    if (!q.dj || !q.t0 || !q.t1 || q.busy) return nullptr;
+    g_ctx->Begin(q.dj); g_ctx->End(q.t0); return &q;
+}
+static void rel_time_end(RelTime& t, RelGpuQ* q) { if (!q) return; g_ctx->End(q->t1); g_ctx->End(q->dj); q->busy = true; t.next = (t.next + 1) % k_rel_gq; }
 /// Every relief Present: the finished timings.
 static void rel_gpu_poll() {
-    for (RelGpuQ& q : g_rel_gq) {
+    for (RelTime& t : g_rel_tm) for (RelGpuQ& q : t.q) {
         if (!q.busy) continue;
         D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {}; UINT64 t0 = 0, t1 = 0;
         if (g_ctx->GetData(q.dj, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
@@ -12462,7 +12549,7 @@ static void rel_gpu_poll() {
         if (dj.Disjoint || dj.Frequency == 0) continue;
         if (g_ctx->GetData(q.t0, &t0, sizeof(t0), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || g_ctx->GetData(q.t1, &t1, sizeof(t1), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK || t1 < t0) continue;
         const double ms = static_cast<double>(t1 - t0) * 1000.0 / static_cast<double>(dj.Frequency);
-        g_rel_gpu_last = ms; g_rel_gpu_sum += ms; g_rel_gpu_n++; if (ms > g_rel_gpu_max) g_rel_gpu_max = ms;
+        t.last = ms; t.sum += ms; t.n++; if (ms > t.max) t.max = ms;
     }
 }
 
@@ -12500,11 +12587,30 @@ static void rel_gpu_init() {
     g_rel_ok = g_rel_vs && g_rel_ps && g_rel_cb[0] && g_rel_cb[1] && g_rel_smp && g_rel_dss && g_rel_rs;
     {   // optional: the pass's timing (none: no timing, the pass still runs)
         const D3D11_QUERY_DESC dj = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, ts = { D3D11_QUERY_TIMESTAMP, 0 };
-        for (RelGpuQ& q : g_rel_gq) { g_device->CreateQuery(&dj, &q.dj); g_device->CreateQuery(&ts, &q.t0); g_device->CreateQuery(&ts, &q.t1); }
+        for (RelTime& t : g_rel_tm) for (RelGpuQ& q : t.q) { g_device->CreateQuery(&dj, &q.dj); g_device->CreateQuery(&ts, &q.t0); g_device->CreateQuery(&ts, &q.t1); }
+    }
+    {   // round 10: the guided upsample (optional: without it, round 7's grid)
+        ID3DBlob *jv = nullptr, *jp = nullptr, *jg = nullptr;
+        auto jbuild = [&](const char* entry, const char* target, ID3DBlob** out) {
+            HRESULT hr = compile(k_jbu_hlsl, sizeof(k_jbu_hlsl) - 1, "fmv3d_jbu", nullptr, nullptr, entry, target, 0, 0, out, &err);
+            if (FAILED(hr)) diag("fmv3d: guided upsample FAILED: %s: %s", entry, err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+            if (err) { err->Release(); err = nullptr; }
+            return SUCCEEDED(hr);
+        };
+        if (jbuild("vs", "vs_4_0", &jv) && jbuild("ps", "ps_4_0", &jp) && jbuild("psg", "ps_4_0", &jg)) {
+            g_device->CreateVertexShader(jv->GetBufferPointer(), jv->GetBufferSize(), nullptr, &g_rel_jvs);
+            g_device->CreatePixelShader(jp->GetBufferPointer(), jp->GetBufferSize(), nullptr, &g_rel_jps);
+            g_device->CreatePixelShader(jg->GetBufferPointer(), jg->GetBufferSize(), nullptr, &g_rel_gps);
+            D3D11_BUFFER_DESC jd = {}; jd.ByteWidth = sizeof(RelJcb); jd.Usage = D3D11_USAGE_DYNAMIC; jd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; jd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            g_device->CreateBuffer(&jd, nullptr, &g_rel_jcb);
+        }
+        if (jv) jv->Release(); if (jp) jp->Release(); if (jg) jg->Release();
+        g_rel_jok = g_rel_jvs && g_rel_jps && g_rel_gps && g_rel_jcb;
+        if (!g_rel_jok) diag("fmv3d: guided upsample not available: round 7's 320 x 180 grid (vs %d ps %d psg %d cb %d)", g_rel_jvs != nullptr, g_rel_jps != nullptr, g_rel_gps != nullptr, g_rel_jcb != nullptr);
     }
     QueryPerformanceCounter(&t1);
     const double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / static_cast<double>(fq.QuadPart);
-    if (g_rel_ok) { diag("fmv3d: relief pass ready (vs + ps compiled in %.1f ms at Present)", ms); return; }
+    if (g_rel_ok) { diag("fmv3d: relief pass ready (vs + ps%s compiled in %.1f ms at Present)", g_rel_jok ? ", the guided upsample's vs + ps" : "", ms); return; }
     snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "a D3D object could not be made");
     diag("fmv3d: relief pass FAILED: a D3D object could not be made (vs %d ps %d cb %d/%d smp %d dss %d rs %d)", g_rel_vs != nullptr, g_rel_ps != nullptr,
          g_rel_cb[0] != nullptr, g_rel_cb[1] != nullptr, g_rel_smp != nullptr, g_rel_dss != nullptr, g_rel_rs != nullptr);
@@ -12518,20 +12624,102 @@ static void rel_gpu_release() {
     for (int e = 0; e < 2; ++e) { if (g_rel_eye[e]) g_plain_srvs_forget(g_rel_eye[e]); drop(g_rel_rtv[e]); drop(g_rel_eye[e]); }
     drop(g_rel_dsv); drop(g_rel_z);
     delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr;
+    drop(g_rel_hrtv); drop(g_rel_hsrv); drop(g_rel_htex); g_rel_hw = 0;   // round 10
+    drop(g_rel_ssrv); drop(g_rel_stex); drop(g_rel_grtv); drop(g_rel_gsrv); drop(g_rel_gtex); delete[] g_rel_sup; g_rel_sup = nullptr; g_rel_snap_ok = false;
+    drop(g_rel_ib); g_rel_ib_cx = g_rel_ib_cy = g_rel_ib_n = 0;
+}
+/// Round 10: the upsample's target (k_up dw x k_up 180) and the fine grid's indices; false: round 7's grid this frame.
+static bool rel_gpu_hi(uint32_t dw) {
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
+    if (g_rel_ssrv == nullptr || g_rel_grtv == nullptr || g_rel_gsrv == nullptr) return false;
+    const uint32_t hw = relief::k_up * dw, hh = relief::k_up * relief::k_h;
+    if (g_rel_htex == nullptr || g_rel_hw != hw) {
+        drop(g_rel_hrtv); drop(g_rel_hsrv); drop(g_rel_htex); g_rel_hw = 0;
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = hw; td.Height = hh; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R16_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_htex)) || g_rel_htex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_htex, nullptr, &g_rel_hsrv))
+            || FAILED(g_device->CreateRenderTargetView(g_rel_htex, nullptr, &g_rel_hrtv))) { drop(g_rel_hrtv); drop(g_rel_hsrv); drop(g_rel_htex); return false; }
+        g_rel_hw = hw; g_rel_jdue = relief::k_jbu_runs;   // new: filled before its first use
+    }
+    const uint32_t cx = relief::grid_cells(hw), cy = relief::grid_cells(hh);
+    if (g_rel_ib == nullptr || g_rel_ib_cx != cx || g_rel_ib_cy != cy) {
+        drop(g_rel_ib); g_rel_ib_cx = g_rel_ib_cy = g_rel_ib_n = 0;
+        std::vector<uint32_t> idx; relief::strip_indices(cx, cy, idx);
+        D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = static_cast<UINT>(idx.size() * 4); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+        D3D11_SUBRESOURCE_DATA sd = {}; sd.pSysMem = idx.data();
+        if (FAILED(g_device->CreateBuffer(&bd, &sd, &g_rel_ib)) || g_rel_ib == nullptr) { drop(g_rel_ib); return false; }
+        g_rel_ib_cx = cx; g_rel_ib_cy = cy; g_rel_ib_n = static_cast<uint32_t>(idx.size());
+    }
+    return true;
+}
+/// Round 10: one run of the guided upsample (the depth map, guided by the video frame in the backbuffer copy, into g_rel_htex).
+/// Saves and restores what it touches (uid_save: the shaders, the PS's t0-t1 / s0 / b0, the targets, the viewports).
+static void rel_jbu(ID3D11ShaderResourceView* color, const relief::Rect& rc, uint32_t dw) {
+    RelJcb cb = {};
+    cb.J0[0] = static_cast<float>(dw); cb.J0[1] = static_cast<float>(relief::k_h); cb.J0[2] = 1.f / dw; cb.J0[3] = 1.f / relief::k_h;
+    cb.J1[0] = rc.u0; cb.J1[1] = rc.v0; cb.J1[2] = rc.du; cb.J1[3] = rc.dv;
+    cb.J2[0] = static_cast<float>(relief::k_up * dw); cb.J2[1] = static_cast<float>(relief::k_up * relief::k_h);
+    cb.J2[2] = 1.f / (2.f * relief::k_jbu_sigma_s * relief::k_jbu_sigma_s); cb.J2[3] = 1.f / (2.f * relief::k_jbu_sigma_r * relief::k_jbu_sigma_r);
+    cb.J3[0] = relief::k_jbu_edge; cb.J3[1] = relief::k_jbu_c0; cb.J3[2] = relief::k_jbu_c1;
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (FAILED(g_orig_map(g_ctx, g_rel_jcb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) return;
+    memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_jcb, 0);
+    RelGpuQ* tq = rel_time_begin(g_rel_tm[1]);
+    InEye2 guard;
+    UidSaved s; uid_save(s);
+    ID3D11ShaderResourceView* o_srv[2] = { nullptr, nullptr }; g_ctx->PSGetShaderResources(2, 2, o_srv);   // t2-t3 (uid_save keeps t0-t1)
+    g_ctx->VSSetShader(g_rel_jvs, nullptr, 0); g_ctx->PSSetShader(g_rel_gps, nullptr, 0);
+    g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->HSSetShader(nullptr, nullptr, 0); g_ctx->DSSetShader(nullptr, nullptr, 0);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(g_rel_dss, 0); g_ctx->RSSetState(g_rel_rs);   // no DSV bound: no depth test
+    g_ctx->PSSetSamplers(0, 1, &g_rel_smp); g_ctx->PSSetConstantBuffers(0, 1, &g_rel_jcb);
+    ID3D11ShaderResourceView* none4[4] = {}; g_ctx->PSSetShaderResources(0, 4, none4);
+    {   // the guide (w x 180)
+        ID3D11ShaderResourceView* srv[2] = { nullptr, color }; g_ctx->PSSetShaderResources(0, 2, srv);
+        ID3D11RenderTargetView* rts[1] = { g_rel_grtv };
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
+        D3D11_VIEWPORT vp = {}; vp.Width = cb.J0[0]; vp.Height = cb.J0[1]; vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
+        g_ctx->Draw(3, 0);
+    }
+    {   // the upsample (k_up w x k_up 180); the guide's target unbound first (it is read here)
+        ID3D11RenderTargetView* rts[1] = { g_rel_hrtv };
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+        g_ctx->PSSetShader(g_rel_jps, nullptr, 0);
+        ID3D11ShaderResourceView* srv[4] = { g_rel_ssrv, color, g_rel_gsrv, g_rel_dsrv }; g_ctx->PSSetShaderResources(0, 4, srv);
+        D3D11_VIEWPORT vp = {}; vp.Width = cb.J2[0]; vp.Height = cb.J2[1]; vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
+        g_ctx->Draw(3, 0);
+    }
+    g_ctx->PSSetShaderResources(0, 4, none4);
+    g_ctx->PSSetShaderResources(2, 2, o_srv); for (auto* v : o_srv) if (v) v->Release();
+    uid_restore(s);
+    rel_time_end(g_rel_tm[1], tq);
+}
+/// The depth-sized objects (the depth map, round 10's snapped map and guide, the upload copies).
+static void rel_gpu_release_maps() {
+    auto drop = [](auto*& o) { if (o) { o->Release(); o = nullptr; } };
+    drop(g_rel_dsrv); drop(g_rel_dtex); drop(g_rel_ssrv); drop(g_rel_stex); drop(g_rel_grtv); drop(g_rel_gsrv); drop(g_rel_gtex);
+    delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr; delete[] g_rel_sup; g_rel_sup = nullptr; g_rel_dw = 0; g_rel_snap_ok = false;
 }
 /// The objects for this frame (made on first use, re-made when a size changes); false with g_rel_gpu_why.
 static bool rel_gpu_frame(uint32_t dw, UINT ew, UINT eh, DXGI_FORMAT fmt) {
     if (g_rel_dtex == nullptr || g_rel_dw != dw) {
-        if (g_rel_dsrv) { g_rel_dsrv->Release(); g_rel_dsrv = nullptr; } if (g_rel_dtex) { g_rel_dtex->Release(); g_rel_dtex = nullptr; }
-        delete[] g_rel_up; g_rel_up = nullptr; delete[] g_rel_ema; g_rel_ema = nullptr; g_rel_dw = 0;
+        rel_gpu_release_maps();
         D3D11_TEXTURE2D_DESC td = {}; td.Width = dw; td.Height = relief::k_h; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_R16_UNORM;   // round 7: 16-bit n' (the per-shot range, the filters)
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_dtex)) || g_rel_dtex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_dtex, nullptr, &g_rel_dsrv))) {
             snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "the depth texture could not be made"); rel_gpu_release(); return false;
         }
+        {   // round 10: the snapped map and the guide (optional: without them, round 7's grid; rel_gpu_hi checks)
+            if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_rel_stex)) || g_rel_stex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_stex, nullptr, &g_rel_ssrv))) g_rel_ssrv = nullptr;
+            D3D11_TEXTURE2D_DESC gd = td; gd.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            if (FAILED(g_device->CreateTexture2D(&gd, nullptr, &g_rel_gtex)) || g_rel_gtex == nullptr || FAILED(g_device->CreateShaderResourceView(g_rel_gtex, nullptr, &g_rel_gsrv))
+                || FAILED(g_device->CreateRenderTargetView(g_rel_gtex, nullptr, &g_rel_grtv))) g_rel_grtv = nullptr;
+        }
         g_rel_up = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
         g_rel_ema = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
-        if (g_rel_up == nullptr || g_rel_ema == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
+        g_rel_sup = new (std::nothrow) uint16_t[static_cast<size_t>(dw) * relief::k_h];
+        if (g_rel_up == nullptr || g_rel_ema == nullptr || g_rel_sup == nullptr) { snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "out of memory"); rel_gpu_release(); return false; }
+        memset(g_rel_sup, 0, static_cast<size_t>(dw) * relief::k_h * 2);
         g_rel_dw = dw;
     }
     D3D11_TEXTURE2D_DESC like = {}; like.Width = ew; like.Height = eh; like.Format = fmt;
@@ -12557,21 +12745,23 @@ static ID3D11ShaderResourceView* rel_color_srv(ID3D11Texture2D* t) {
     return v;
 }
 /// Both eyes: clear black, the grid with that eye's view and projection. Saves and restores what it touches.
-static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
+/// dsrv / tw x th: the depth the grid samples (round 10: the upsample's output, drawn indexed; else the depth map, round 7's list).
+static void rel_draw(ID3D11ShaderResourceView* color, ID3D11ShaderResourceView* dsrv, bool indexed, const XrPoseOut v[2], const XrFovTan f[2], const XrScreen& sc, const relief::Rect& rc,
                      uint32_t tw, uint32_t th, const relief::Map& mp, int flags, uint32_t bw, uint32_t bh) {
     const uint32_t nx = relief::grid_cells(tw), ny = relief::grid_cells(th);
-    RelGpuQ& gq = g_rel_gq[g_rel_gq_next];   // round 7: the pass's GPU time (both eyes), read back a few frames later
-    const bool timed = gq.dj && gq.t0 && gq.t1 && !gq.busy;
-    if (timed) { g_ctx->Begin(gq.dj); g_ctx->End(gq.t0); }
+    RelGpuQ* tq = rel_time_begin(g_rel_tm[0]);   // round 7: the pass's GPU time (both eyes), read back a few frames later
     InEye2 guard;
     UidSaved s; uid_save(s);
     ID3D11ShaderResourceView* o_vsrv = nullptr; ID3D11SamplerState* o_vsmp = nullptr; ID3D11Buffer* o_vcb = nullptr;
     g_ctx->VSGetShaderResources(0, 1, &o_vsrv); g_ctx->VSGetSamplers(0, 1, &o_vsmp); g_ctx->VSGetConstantBuffers(0, 1, &o_vcb);
+    ID3D11Buffer* o_ib = nullptr; DXGI_FORMAT o_ibf = DXGI_FORMAT_UNKNOWN; UINT o_ibo = 0;
+    if (indexed) g_ctx->IAGetIndexBuffer(&o_ib, &o_ibf, &o_ibo);   // round 10: the game's index buffer comes back
     g_ctx->VSSetShader(g_rel_vs, nullptr, 0); g_ctx->PSSetShader(g_rel_ps, nullptr, 0);
     g_ctx->GSSetShader(nullptr, nullptr, 0); g_ctx->HSSetShader(nullptr, nullptr, 0); g_ctx->DSSetShader(nullptr, nullptr, 0);
-    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(indexed ? D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP : D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    if (indexed) g_ctx->IASetIndexBuffer(g_rel_ib, DXGI_FORMAT_R32_UINT, 0);
     g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(g_rel_dss, 0); g_ctx->RSSetState(g_rel_rs);
-    g_ctx->VSSetShaderResources(0, 1, &g_rel_dsrv); g_ctx->VSSetSamplers(0, 1, &g_rel_smp);
+    g_ctx->VSSetShaderResources(0, 1, &dsrv); g_ctx->VSSetSamplers(0, 1, &g_rel_smp);
     ID3D11ShaderResourceView* ps_srv[2] = { nullptr, color }; g_ctx->PSSetShaderResources(0, 2, ps_srv); g_ctx->PSSetSamplers(0, 1, &g_rel_smp);
     float M[16]; relief::pose_mat(sc.q, sc.p, M);
     const float W = sc.width, H = sc.width * 9.f / 16.f;
@@ -12588,6 +12778,7 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         cb.E[0] = (flags & 4) ? 1.f : 0.f; cb.E[1] = relief::k_edge_lo; cb.E[2] = relief::k_edge_hi; cb.E[3] = (flags & 16) ? 1.f : 0.f;
         cb.X[0] = mp.ex; cb.X[1] = static_cast<float>(tw); cb.X[2] = static_cast<float>(th);
         cb.Y[0] = 0.5f / static_cast<float>(bw); cb.Y[1] = 0.5f / static_cast<float>(bh);   // round 7.5: no blend with the 4:3 bars
+        cb.Y[2] = indexed ? 1.f : 0.f;
         D3D11_MAPPED_SUBRESOURCE ms = {};
         if (FAILED(g_orig_map(g_ctx, g_rel_cb[e], 0, D3D11_MAP_WRITE_DISCARD, 0, &ms)) || ms.pData == nullptr) continue;
         memcpy(ms.pData, &cb, sizeof(cb)); g_orig_unmap(g_ctx, g_rel_cb[e], 0);
@@ -12599,16 +12790,18 @@ static void rel_draw(ID3D11ShaderResourceView* color, const XrPoseOut v[2], cons
         D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(td.Width); vp.Height = static_cast<float>(td.Height); vp.MaxDepth = 1.f; g_ctx->RSSetViewports(1, &vp);
         const float black[4] = { 0.f, 0.f, 0.f, 1.f };
         g_ctx->ClearRenderTargetView(g_rel_rtv[e], black); g_ctx->ClearDepthStencilView(g_rel_dsv, D3D11_CLEAR_DEPTH, 1.f, 0);
-        g_ctx->Draw(nx * ny * 6, 0);
+        if (indexed) g_ctx->DrawIndexed(g_rel_ib_n, 0, 0);
+        else g_ctx->Draw(nx * ny * 6, 0);
     }
-    if (timed) { g_ctx->End(gq.t1); g_ctx->End(gq.dj); gq.busy = true; g_rel_gq_next = (g_rel_gq_next + 1) % k_rel_gq; }
+    rel_time_end(g_rel_tm[0], tq);
     ID3D11ShaderResourceView* none = nullptr; g_ctx->VSSetShaderResources(0, 1, &none);
     g_ctx->VSSetShaderResources(0, 1, &o_vsrv); g_ctx->VSSetSamplers(0, 1, &o_vsmp); g_orig_vssetcb(g_ctx, 0, 1, &o_vcb);
     if (o_vsrv) o_vsrv->Release(); if (o_vsmp) o_vsmp->Release(); if (o_vcb) o_vcb->Release();
+    if (indexed) { g_ctx->IASetIndexBuffer(o_ib, o_ibf, o_ibo); if (o_ib) o_ib->Release(); }
     uid_restore(s);
 }
 /// The worker's processing settings (RelReq::cfg; an output slot made with another word is made again).
-static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, (g_rel_cfg.flags & 32) != 0, (g_rel_cfg.flags & 64) == 0, g_rel_cfg.smooth); }
+static int rel_cfg_word() { return relief::cfg_word((g_rel_cfg.flags & 8) != 0, (g_rel_cfg.flags & 32) != 0, (g_rel_cfg.flags & 64) == 0, g_rel_cfg.smooth, (g_rel_cfg.flags & 256) == 0 && g_rel_jok); }   // round 10: the snap only for the guided upsample
 /// The worker's request: this movie (gen 0 = none) and the frame wanted now.
 static void rel_post() {
     { std::lock_guard<std::mutex> lk(g_fmvw_mx);
@@ -12636,9 +12829,10 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells",
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (the mesh, both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells (%s) | guided upsample GPU (%u runs timed) avg %.3f ms, max %.3f ms",
                                       r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.made, r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
-                                      g_rel_gpu_n, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max, relief::grid_cells(r.w), relief::grid_cells(relief::k_h));
+                                      g_rel_tm[0].n, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, r.grid_w, r.grid_h, r.grid_w > relief::grid_cells(r.w) ? "guided, indexed strips" : "round 7's list",
+                                      g_rel_tm[1].n, g_rel_tm[1].n ? g_rel_tm[1].sum / g_rel_tm[1].n : 0.0, g_rel_tm[1].max);
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
         if (r.fades || r.loops) n = fmv::add(b, sizeof(b), n, " | fade-outs %u, loops (the count went back) %u", r.fades, r.loops);
@@ -12699,7 +12893,7 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         if (!s.s_ok || !s.p_ok || !s.n_ok || s.name[0] == 0) return false;   // nothing known yet: next Present
         g_rel = RelFmv{};
         g_rel_range_now = g_rel_pop_now = -1.f;
-        g_rel_gpu_sum = g_rel_gpu_max = g_rel_gpu_last = 0.0; g_rel_gpu_n = 0;   // round 7: this movie's GPU time   // review3 N-3: the range / pop-out followers start at the settings (a change made between movies does not slide in)
+        rel_time_reset();   // round 7: this movie's GPU time   // review3 N-3: the range / pop-out followers start at the settings (a change made between movies does not slide in)
         g_rel.on = true; memcpy(g_rel.name, s.name, sizeof(g_rel.name)); g_rel.id = s.id; g_rel.n = fmv::frames_from_ms(s.dur_ms);
         if (++g_rel_gen == 0) g_rel_gen = 1;
         g_rel.gen = g_rel_gen;   // the file is asked for below, once nothing static rules the relief out (review N3)
@@ -12764,7 +12958,9 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
             if (sl.idx == r.want && sl.cfg == cw) {   // made with the current settings
                 a.ready = true; a.error = sl.err != 0;
                 if (!a.error && r.want != r.t.bound && g_relw_px != nullptr)
-                    memcpy(g_rel_up, reinterpret_cast<const uint16_t*>(g_relw_px + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(r.want % relief::k_ring) * px, px * 2);
+                { const uint16_t* src = reinterpret_cast<const uint16_t*>(g_relw_px + static_cast<size_t>(relief::k_raw + 1) * px) + static_cast<size_t>(r.want % relief::k_ring) * 2 * px;
+                  memcpy(g_rel_up, src, px * 2);
+                  if (cw & 8) memcpy(g_rel_sup, src + px, px * 2); }   // round 10: the snapped copy
                 if (!a.error && g_relw_px == nullptr) a.ready = false;
             }
             for (int i = 0; i < relief::k_ring; ++i) { const int32_t x = g_relw_slot[i].idx; if (x >= r.want && x < r.want + relief::k_ring && !g_relw_slot[i].err && g_relw_slot[i].cfg == cw) fill++; }
@@ -12781,6 +12977,9 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         if (ema_on) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.reset || !s_ema_was);   // the causal filter (Debug since round 7.4)
         s_ema_was = ema_on;
         InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w * 2, 0); r.uploads++;
+        g_rel_snap_ok = (rel_cfg_word() & 8) != 0 && g_rel_stex != nullptr;   // round 10 (the causal Debug filter leaves it unfiltered)
+        if (g_rel_snap_ok) g_ctx->UpdateSubresource(g_rel_stex, 0, nullptr, g_rel_sup, r.w * 2, 0);
+        g_rel_jdue = relief::k_jbu_runs;   // round 10: the upsample this Present and the next (the frame in the copy may be a Present behind)
     }
     if (o.ramp_start) r.ramps++;   // a ramp in started this Present (the first depth after flat; every cut with the old ramp)
     if (o.cut) r.cut_switches++;   // round 7.3: a cut switched at once
@@ -12833,7 +13032,17 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     XrFovTan draw_fov[2];
     for (int e = 0; e < 2; ++e) draw_fov[e] = XrFovTan{ use[e].l, use[e].r, use[e].u, use[e].d };
     rel_gpu_poll();
-    rel_draw(color, views, draw_fov, sc, rc, r.w, relief::k_h, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
+    // round 10: the guided upsample (Debug flag 256 off: round 7's grid on the depth map itself)
+    const bool want_guided = (g_rel_cfg.flags & 256) == 0 && g_rel_jok;
+    const bool guided = want_guided && g_rel_snap_ok && rel_gpu_hi(r.w);   // until a snapped frame is up (just switched on): round 7's grid
+    if (guided && !r.guided) g_rel_jdue = relief::k_jbu_runs;   // switched on (or first): its output is stale
+    if (want_guided && g_rel_snap_ok && !guided && !r.guided && g_rel_lines < k_rel_lines_max && diag_profile_on()) { static bool said = false; if (!said) { said = true; g_rel_lines++; fmv_put("fmv3d: the guided upsample's target could not be made: round 7's grid"); } }
+    r.guided = guided;
+    if (guided && (rc.u0 != g_rel_jrect.u0 || rc.v0 != g_rel_jrect.v0 || rc.du != g_rel_jrect.du || rc.dv != g_rel_jrect.dv)) g_rel_jdue = relief::k_jbu_runs;
+    if (guided && g_rel_jdue > 0) { rel_jbu(color, rc, r.w); g_rel_jdue--; g_rel_jrect = rc; r.jbu_runs++; }
+    const uint32_t gw = guided ? relief::k_up * r.w : r.w, gh = guided ? relief::k_up * relief::k_h : relief::k_h;
+    r.grid_w = relief::grid_cells(gw); r.grid_h = relief::grid_cells(gh);
+    rel_draw(color, guided ? g_rel_hsrv : g_rel_dsrv, guided, views, draw_fov, sc, rc, gw, gh, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
     *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
@@ -12842,14 +13051,15 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
 /// 1); flags: 1 flatten the bottom 15 % (subtitles), 2 the tight field of view (review SF-1), 4 the edge fill, 8 the 3x3
 /// median, 16 the depth as colour (Debug), 32 each frame normalised to its own range (Debug; round 7: the default is the
 /// shot's), 64 the causal filter (EMA) instead of the worker's centred one (Debug, round 7), 128 every cut starts flat and ramps in over
-/// 150 ms (Debug: the old behaviour, round 7.3); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
+/// 150 ms (Debug: the old behaviour, round 7.3), 256 the guided upsample and the edge snap off (Debug: round 7's 320 x 180
+/// grid, round 10); offset: the Debug sync knob, depth frames (-3..3, session-only); range: how far
 /// behind the screen the farthest content goes (0.5..10 m, default 3); pop: how far in front the nearest goes (0..0.5 m,
 /// default 0.15); smooth: the temporal filter (0..0.95, default 0.6); edge (ABI 43): the band at the border over which the
 /// pop-out ramps to 0 (0..0.15 of the rect, default 0.04; content behind the screen is never feathered: the window rule).
 extern "C" __declspec(dllexport) void ffxvr_fmv3d_set(int on, float amount, int flags, int offset, float range, float pop, float smooth, float edge) {
     g_rel_cfg.on = on ? 1 : 0;
     g_rel_cfg.amount = std::isfinite(amount) ? relief::clampf(amount, 0.f, 1.f) : 1.f;
-    g_rel_cfg.flags = flags & 255;
+    g_rel_cfg.flags = flags & 511;
     g_rel_cfg.offset = offset < -3 ? -3 : offset > 3 ? 3 : offset;
     g_rel_cfg.range = std::isfinite(range) ? relief::clampf(range, 0.5f, 10.f) : 3.f;
     g_rel_cfg.pop = std::isfinite(pop) ? relief::clampf(pop, 0.f, 0.5f) : 0.15f;
@@ -12883,8 +13093,10 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
                                                        r.s_now, r.range_used, r.range_limited ? " (limited: 1.5 deg)" : "", r.pop_used, r.pop_limited ? " (limited: 1 deg)" : "",
                                                        r.rows_tight, r.tight_now ? "tight" : "whole");
     else { reason(why, sizeof(why)); n = fmv::add(buf, c, n, ", flat screen (%s)", why); }
-    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), filter avg %.2f / max %.2f ms, ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; both eyes)", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors,
-                                    r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring, relief::k_ring, g_rel_gpu_last, g_rel_gpu_n ? g_rel_gpu_sum / g_rel_gpu_n : 0.0, g_rel_gpu_max);
+    if (r.file == 1) n = fmv::add(buf, c, n, " | decode avg %.2f / max %.2f ms (%u decoded, %u errors), filter avg %.2f / max %.2f ms, ring %d/%d, GPU %.3f ms (avg %.3f, max %.3f; the mesh, both eyes, %ux%u cells), %s", r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.decoded, r.errors,
+                                    r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring, relief::k_ring, g_rel_tm[0].last, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, r.grid_w, r.grid_h,
+                                    r.guided ? "guided upsample" : (g_rel_cfg.flags & 256) ? "guided upsample off" : "guided upsample not available");
+    if (r.file == 1 && r.guided) n = fmv::add(buf, c, n, " %.3f ms (avg %.3f, max %.3f; %u runs)", g_rel_tm[1].last, g_rel_tm[1].n ? g_rel_tm[1].sum / g_rel_tm[1].n : 0.0, g_rel_tm[1].max, r.jbu_runs);
     n = fmv::add(buf, c, n, " | in 3D on %u of %u Presents", r.rel_presents, r.presents);
     return static_cast<int>(n);
 }

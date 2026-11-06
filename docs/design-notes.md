@@ -4319,6 +4319,40 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
     ramp`: watch shot changes for the "inflate" pulse; `old causal filter`: depth trailing moving edges, shimmer on still
     backgrounds; `smoothing` 0 / 0.6 / 0.9 with the centred filter (0.9 should not lag); silhouettes against the round-6
     build (finer depth edges, less halo).
+- Round 10 (6 Nov 2026), the audit's item 5: sharp silhouettes. The rubber sheet is the depth transition across a
+  silhouette (the mixed texels the model's softness and the area downscale leave); three parts fix it where the picture
+  has an edge to follow:
+  - *The edge snap* (worker, after the temporal filter, relief::snap_out): each texel on a depth edge goes to the nearer of
+    its 5 x 5 min and max, ties to the far side. On an edge: 3 x 3 range over 12 levels and 5 x 5 range at most 15/8 of
+    it, so a soft ramp of up to ~3 texels becomes a step while a linear slope (ratio 2) stays; the texel or two next to a
+    steep kink move up to 1.5 steps; the outer 2 texels are never snapped. It never grows the near side (converter v2's 2
+    model px growth is kept as it is: over 32 sub-texel positions the 50 % point moves by 0 on average, at most half a
+    texel). The worker keeps the snapped copy beside each output frame; both are uploaded (R16 each).
+  - *The guided upsample* (GPU, at each depth upload and the Present after, k_jbu_hlsl): a guide pass (each depth texel's
+    footprint luma from the eye-1 backbuffer copy) and the upsample to 640 x 360 (480 x 360 for 4:3, R16): for each output
+    texel the 5 x 5 snapped texels split into a near and a far layer at the middle of their range; each layer's depth
+    (spatially weighted, sigma 1 texel) is taken by how close the output's own luma (2 x 2 video px) is to the layer's mean
+    luma (sigma 0.05). A plain per-texel joint bilateral (the audit's) leaves v2's grown near side, a near texel showing
+    the background's colour, in the background: 3.5-5 px of halo at contrast 1-0.3; the layer means keep it at 1.0-1.2.
+    Where the 5 x 5 depth range is under 0.05 or the layers' lumas differ by less than 0.05-0.15 it fades to the original
+    map, bilinear: there is no edge to follow, and the snapped step would crawl by a texel (4 px) as edges move.
+  - *The fine grid:* a vertex per output texel (641 x 361 cells, 232k vertices an eye) as indexed triangle strips (one
+    strip a row, cut by 0xFFFFFFFF, R32 indices, 1.86 MB); the VS takes SV_VertexID (the index) apart. Same diagonal as
+    round 7's list.
+  - Measured on the audit's cross-section (1280-px video, edge swept over 32 sub-px positions; 10-90 % width / crawl p-p in
+    video px), round 7 -> round 10: v1 model softness 1.0: 6.8 / 0.9 -> 1.6 / 1.9; softness 2.5: 10.6 / 0.6 -> 1.7 / 2.0;
+    2.5 at contrast 0.3 + noise: 10.6 -> 1.9; v2-like (sharp, near side +2 model px): 6.2, halo 6.1 -> 1.6, halo 1.0, crawl
+    1.6; v2-like at contrast 0.3: 6.2 -> 1.9 (halo 1.2); contrast 0.2: 6.2 -> 3.9; contrast 0.1 (the fade): 10.6 / 0.6 ->
+    8.3 / 3.0; no colour edge: as round 7 (10.9 / 0.6, v2 6.7 / 0.6). The crawl at a contrasty edge, 1.5-2 px, is the
+    640 grid's own (2 video px a cell; the reviewer's 1.65 px on v2 is not reduced, only kept): a 1280 grid would halve it.
+  - Cost (not measured here; F8's FMV 3D line and the fmv3d: end line time both): the upsample ~77 fetches an output texel
+    (230k), estimated ~0.05 ms a run, 2 runs a depth frame; the mesh 232k vertices and 463k triangles an eye. The worker's
+    snap is two separable min / max passes over 57.6k texels.
+  - Debug `guided upsample (A/B; off = round 7's 320 x 180 grid)` (session-only, flag 256): off draws exactly round 7's
+    grid on the unsnapped map (the worker then skips the snap). On by default. Until a snapped frame is up (just switched
+    on) round 7's grid draws.
+  - The edge fill stays off: with 2-px cells the stretched triangles at a silhouette are the disocclusion itself, at most
+    ~2 px an eye at the owner's settings; the fill is not needed for the rubber sheet any more.
 
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):
