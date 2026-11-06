@@ -190,5 +190,24 @@ class FvdTest(unittest.TestCase):
                 np.testing.assert_array_equal(r.frame(i), fr[i])
 
 
+class SegmentRangeFlagTest(unittest.TestCase):
+    def test_flag_written_and_tolerated(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            for seg in (False, True):
+                p = os.path.join(d, f'x{int(seg)}.fvd')
+                w = fvd.FvdWriter(p, 8, 4, 30000, 1001, codec=fvd.CODEC_ZLIB, thumb_w=2, thumb_h=1, segment_range=seg)
+                for i in range(3):
+                    w.add_frame(np.full((4, 8), i, np.uint8), fvd.FF_CUT if i == 0 else 0, 0, 1, 0.0, 1.0,
+                                np.zeros((1, 2), np.uint8))
+                w.close()
+                with fvd.FvdReader(p) as r:                      # the reader accepts the bit
+                    self.assertEqual(bool(r.h.flags & fvd.HF_SEGMENT_RANGE), seg)
+                    self.assertTrue(r.h.flags & fvd.HF_COMPLETE and r.h.flags & fvd.HF_THUMBS)
+                    self.assertEqual(int(r.frame(2)[0, 0]), 2)
+                with open(p, 'rb') as f:
+                    self.assertEqual(f.read(28)[27] & 0x04, 0x04 if seg else 0)    # byte 27, bit 2
+
+
 if __name__ == '__main__':
     unittest.main()

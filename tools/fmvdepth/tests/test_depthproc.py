@@ -39,37 +39,21 @@ class SizesTest(unittest.TestCase):
         self.assertEqual(dp.resize_bilinear(ramp, 8, 4).shape, (4, 8))
 
 
-class NormalizerTest(unittest.TestCase):
-    def test_first_frame_and_quantisation(self):
-        n = dp.ShotNormalizer(alpha=0.9)
+class QuantiseTest(unittest.TestCase):
+    def test_rule(self):
         d = np.linspace(0, 10, 10000, dtype=np.float32).reshape(100, 100)
-        q, p2, p98, lo, hi = n(d, cut=False)              # first frame acts as a cut
-        self.assertAlmostEqual(p2, 0.2, places=2)
-        self.assertAlmostEqual(p98, 9.8, places=2)
-        self.assertEqual((lo, hi), (p2, p98))
+        q = dp.quantise(d, 1.0, 9.0)
         self.assertEqual(q.dtype, np.uint8)
-        self.assertEqual(int(q.min()), 0)
-        self.assertEqual(int(q.max()), 255)
-        # decode: d ~ lo + q/255*(hi-lo) inside the range
-        inside = (d > lo) & (d < hi)
-        rec = lo + q.astype(np.float32) / 255 * (hi - lo)
-        self.assertLess(float(np.abs(rec - d)[inside].max()), (hi - lo) / 255)
+        self.assertEqual(int(q[d < 1].max()), 0)
+        self.assertEqual(int(q[d > 9].min()), 255)
+        inside = (d > 1) & (d < 9)
+        rec = 1.0 + q.astype(np.float32) / 255 * 8.0
+        self.assertLessEqual(float(np.abs(rec - d)[inside].max()), 8.0 / 255 / 2 + 1e-5)   # half a step
 
-    def test_ema_and_reset(self):
-        n = dp.ShotNormalizer(alpha=0.5)
-        a = np.linspace(0, 1, 1000, dtype=np.float32)
-        n(a, True)
-        _q, p2, p98, lo, hi = n(a + 10, False)            # inside a shot: half way
-        self.assertAlmostEqual(lo, (0.02 + 10.02) / 2, places=2)
-        self.assertAlmostEqual(hi, (0.98 + 10.98) / 2, places=2)
-        _q, p2, p98, lo, hi = n(a + 10, True)             # a cut: reset to this frame
-        self.assertEqual((lo, hi), (p2, p98))
-
-    def test_flat_frame(self):
-        n = dp.ShotNormalizer()
-        q, p2, p98, lo, hi = n(np.full((10, 10), 3.0, np.float32), True)
-        self.assertEqual(p2, p98)
+    def test_flat(self):
+        q = dp.quantise(np.full((10, 10), 3.0, np.float32), 3.0, 3.0)
         self.assertEqual(q.dtype, np.uint8)
+        self.assertLess(dp.range_eps(3.0), 1e-3)
 
 
 class CutTest(unittest.TestCase):
@@ -102,20 +86,102 @@ class CutTest(unittest.TestCase):
         self.assertEqual(thumb.shape, (9, 12))
 
 
-class EdgeSnapTest(unittest.TestCase):
-    def test_snap(self):
-        d = np.zeros((20, 20), np.float32)
-        d[:, 11:] = 1.0
-        d[:5, 10] = 0.3                                    # in-between values a downscale leaves on an edge
-        d[5:, 10] = 0.8
-        s = dp.edge_snap(d)
-        self.assertTrue(set(np.unique(s).tolist()) <= {0.0, 1.0})
-        self.assertEqual(float(s[0, 10]), 0.0)
-        self.assertEqual(float(s[10, 10]), 1.0)
+def soft_step(w=120, h=40, x0=60.3, sigma=2.5, near=1.0, far=0.3, slope=0.0):
+    """A vertical depth step (near on the left) blurred like a model's edge, on a background with an optional slope."""
+    x = np.arange(w, dtype=np.float64)
+    from math import erf, sqrt
+    t = np.array([0.5 * (1 - erf((xi - x0) / (sigma * sqrt(2)))) for xi in x]) if sigma > 0 else (x < x0) * 1.0
+    row = far + (near - far) * t + slope * x
+    return np.tile(row.astype(np.float32), (h, 1))
 
-    def test_slope_untouched(self):
-        g = np.tile(np.linspace(0, 1, 200, dtype=np.float32), (20, 1))
-        np.testing.assert_array_equal(dp.edge_snap(g), g)
+
+class EdgeTest(unittest.TestCase):
+    def test_box_minmax(self):
+        a = np.random.default_rng(0).random((13, 17)).astype(np.float32)
+        mn, mx = dp.box_minmax(a, 2, 3)
+        p = np.pad(a, ((2, 2), (3, 3)), mode='edge')
+        for y in range(13):
+            for x in range(17):
+                win = p[y:y + 5, x:x + 7]
+                self.assertEqual(mn[y, x], win.min())
+                self.assertEqual(mx[y, x], win.max())
+
+    def test_soft_step_becomes_a_step(self):
+        for sigma in (1.0, 2.5, 4.0):
+            d = soft_step(sigma=sigma)
+            s = dp.sharpen_edges(d, rng=0.7)
+            row = s[20]
+            inner = (row > 0.3 + 0.1 * 0.7) & (row < 1.0 - 0.1 * 0.7)
+            self.assertEqual(int(inner.sum()), 0, (sigma, np.round(row[50:70], 2)))
+            cross = int(np.argmax(row < 0.65))
+            self.assertLessEqual(abs(cross - 60.3), 1.0, (sigma, cross))      # the step at the 50 % crossing
+
+    def test_leftover_band_snaps_to_the_nearer_side(self):
+        """With no rounds left to settle the band (iters=0), every mixed pixel takes the nearer of its 11x11 min / max."""
+        d = soft_step(sigma=2.5)
+        s = dp.sharpen_edges(d, iters=0, rng=0.7)
+        row, src = s[20], d[20]
+        changed = np.flatnonzero(row != src)
+        self.assertGreater(len(changed), 3)
+        for x in changed:
+            self.assertEqual(row[x] > 0.65, src[x] > 0.65, (x, src[x], row[x]))
+
+    def test_sharp_step_slope_and_flat_untouched(self):
+        d = soft_step(sigma=0)
+        np.testing.assert_array_equal(dp.sharpen_edges(d, rng=0.7), d)
+        ramp = np.tile(np.linspace(0, 1, 120, dtype=np.float32) * 3.0, (40, 1))      # a steep slope: 0.025/px
+        np.testing.assert_array_equal(dp.sharpen_edges(ramp), ramp)
+        yy, xx = np.mgrid[0:80, 0:80]
+        bump = np.exp(-((xx - 40) ** 2 + (yy - 40) ** 2) / (2 * 12.0 ** 2)).astype(np.float32)   # a round surface
+        np.testing.assert_array_equal(dp.sharpen_edges(bump), bump)
+        noisy = (0.5 + np.random.default_rng(1).normal(0, 0.01, (60, 60))).astype(np.float32)
+        np.testing.assert_array_equal(dp.sharpen_edges(noisy), noisy)
+
+    def test_grow_near(self):
+        d = soft_step(sigma=0)
+        g = dp.grow_near(d, 2, 1, thr=0.05)
+        self.assertEqual(int(np.argmax(g[20] < 0.65)), int(np.argmax(d[20] < 0.65)) + 2)
+        v = d.T.copy()                                    # a horizontal step: near on top
+        gv = dp.grow_near(v, 2, 1, thr=0.05)
+        self.assertEqual(int(np.argmax(gv[:, 20] < 0.65)), int(np.argmax(v[:, 20] < 0.65)) + 1)
+        # slopes are not steps, whichever way they run: up or down to the right, and up or down the rows
+        ramp = np.tile(np.linspace(0, 1, 120, dtype=np.float32), (10, 1))
+        for r in (ramp, ramp[:, ::-1], ramp.T, ramp.T[::-1]):
+            r = np.ascontiguousarray(r)
+            np.testing.assert_array_equal(dp.grow_near(r, 2, 1, thr=0.05), r)
+        # a step with the near side on the right grows to the left
+        m = np.ascontiguousarray(d[:, ::-1])
+        gm = dp.grow_near(m, 2, 1, thr=0.05)
+        self.assertEqual(int(np.argmax(gm[20] > 0.65)), int(np.argmax(m[20] > 0.65)) - 2)
+
+    def test_edge_shrink(self):
+        d = soft_step(w=924, h=36, x0=402.6, sigma=0)                 # a step inside output texel 139
+        o = dp.edge_shrink(d, 320, 12, thr=0.05)
+        u = np.unique(o)
+        self.assertTrue(np.all(np.isclose(u, 0.3) | np.isclose(u, 1.0)), u)            # no in-between texel
+        a = dp.area_resize(d, 320, 12)
+        self.assertGreater(len(np.unique(np.round(a, 5))), 2)
+        ramp = np.tile(np.linspace(0, 3, 924, dtype=np.float32), (36, 1))
+        np.testing.assert_allclose(dp.edge_shrink(ramp, 320, 12, thr=0.005), dp.area_resize(ramp, 320, 12), atol=1e-6)
+
+    def test_edge_shrink_takes_the_larger_group(self):
+        """Texel 139 covers model columns 401-403. A step after column 402 (2 near, 1 far): the texel is near; after
+        column 401 (1 near, 2 far): far. So the step lands in the texel the larger part of it is in."""
+        for x0, want in ((402.6, 1.0), (401.6, 0.3)):
+            d = soft_step(w=924, h=36, x0=x0, sigma=0)
+            o = dp.edge_shrink(d, 320, 12, thr=0.05)
+            self.assertAlmostEqual(float(o[5, 139]), want, places=5, msg=x0)
+            self.assertAlmostEqual(float(o[5, 138]), 1.0, places=5)
+            self.assertAlmostEqual(float(o[5, 140]), 0.3, places=5)
+
+    def test_refine_and_shrink(self):
+        d = soft_step(w=924, h=518, x0=400.6, sigma=2.5)
+        o = dp.refine_and_shrink(d, 320, 180)
+        self.assertEqual(o.shape, (180, 320))
+        row = o[90]
+        self.assertEqual(int(((row > 0.37) & (row < 0.93)).sum()), 0, np.round(row[135:145], 2))
+        # the near side grew ~2 model px: the step moves right by under one output texel (2.9 model px)
+        self.assertIn(int(np.argmax(row < 0.65)), (139, 140))
 
 
 if __name__ == '__main__':

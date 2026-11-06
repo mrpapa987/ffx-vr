@@ -20,6 +20,13 @@ was first computed (or at the end of the video).
 One deliberate difference: the caller's model function returns depth already shrunk to the output size (320x180), so
 the fit and the cross-fade run on those maps, not on full-resolution ones. Both are linear per pixel, so this only
 changes which pixels the least-squares fit samples.
+
+Cut-aware windows (converter 0.2): upstream runs one chain of windows over the whole video, so a window that spans a
+cut feeds the model frames of two shots (its temporal attention mixes them), and every later window keeps video frame
+0 and an earlier window's slot 12 as keyframes and alignment reference. shot_windows() instead splits the stream at
+each shot start and runs windowed_depth() on every shot on its own: slot 0 is the shot's first frame, no window holds
+frames of two shots, no fit uses another shot, and a short shot is padded with its own last frame (as upstream pads the
+end of a video). Cost: each shot rounds up to whole windows, ~10-25 % more model calls on FFX's cut rate.
 """
 import numpy as np
 
@@ -60,77 +67,152 @@ def windowed_depth(frames, model, on_window=None):
     """Yield (frame_index, depth) for every frame of the iterable `frames`, in order, exactly once.
 
     model(list_of_32_frames) -> array-like [32, h, w] float32 (non-negative relative disparity) for those inputs.
-    Frames are opaque to this function (numpy images, ids in tests); it keeps at most two windows of them.
-    on_window(k, scale, shift), if given, is called after each window (k = 0, 1, ...) for logging."""
+    A model may instead offer submit(frames, real) -> a future of that array, `real` saying which of the 32 slots hold
+    a real frame (False: a padding copy of the last frame, whose depth is never emitted): then the next window is
+    submitted before this one's result is taken, so the model of window k+1 runs while window k is being finished
+    (convert.DepthAtOutput: the GPU while the CPU does the edges). Window inputs never depend on results, so the
+    output is the same either way.
+    Frames are opaque to this function (numpy images, ids in tests); it keeps at most two windows of them (three with
+    submit). on_window(k, scale, shift), if given, is called after each window (k = 0, 1, ...) for logging."""
     it = iter(frames)
-    exhausted = False
-    n_read = 0
-    last = None
+    state = {'exhausted': False, 'n_read': 0, 'last': None}
 
     def take(n):
-        nonlocal exhausted, n_read, last
         got = []
-        while len(got) < n and not exhausted:
+        while len(got) < n and not state['exhausted']:
             try:
                 f = next(it)
             except StopIteration:
-                exhausted = True
+                state['exhausted'] = True
                 break
             got.append(f)
-            last = f
-            n_read += 1
+            state['last'] = f
+            state['n_read'] += 1
         return got
 
-    first = take(INFER_LEN)
-    if not first:
-        return
-    cur = first + [last] * (INFER_LEN - len(first))
-    del first
-    d = np.asarray(model(cur), dtype=np.float32)
-    if d.shape[0] != INFER_LEN:
-        raise ValueError(f'model returned {d.shape[0]} depth maps for {INFER_LEN} frames')
-    ref = [d[0].copy(), d[KEYFRAMES[1]].copy()]
-    pending = [d[i].copy() for i in range(INFER_LEN)]   # aligned depth of frames base .. base+len-1
-    base = 0                                           # frame index of pending[0]
-    if on_window:
-        on_window(0, 1.0, 0.0)
+    def windows():
+        """(inputs, real) per window, reading the frames as needed."""
+        first = take(INFER_LEN)
+        if not first:
+            return
+        pad = INFER_LEN - len(first)
+        cur, real = first + [state['last']] * pad, [True] * len(first) + [False] * pad
+        del first
+        yield cur, real
+        k = 1
+        while True:
+            new = take(STEP)
+            # upstream runs window k while its frame_id 22*k < length. n_read is now min(length, 22*k + 32), so the
+            # test is exact (a window may have no new real frame at all: then only its cross-fade changes anything).
+            if STEP * k >= state['n_read']:
+                return
+            pad = STEP - len(new)
+            cur, real = ([cur[i] for i in KEYFRAMES] + new + [state['last']] * pad,
+                         [real[i] for i in KEYFRAMES] + [True] * len(new) + [False] * pad)
+            yield cur, real
+            k += 1
+
+    def results():
+        submit = getattr(model, 'submit', None)
+        if submit is None:
+            for cur, real in windows():
+                yield real, model(cur)
+            return
+        ahead = None
+        for cur, real in windows():
+            f = (real, submit(cur, real))
+            if ahead is not None:
+                yield ahead[0], ahead[1].result()
+            ahead = f
+        if ahead is not None:
+            yield ahead[0], ahead[1].result()
+
+    pending = []          # [aligned depth, real] of frames base .. base + len - 1
+    base = 0              # frame index of pending[0]
+    ref = None
     w8 = interp_weights()
 
     def emit(upto):
-        """Yield pending frames until only `upto` remain, never past the real video length."""
+        """Yield pending frames until only `upto` remain (padding copies are dropped)."""
         nonlocal base
         while len(pending) > upto:
-            dm = pending.pop(0)
-            if base < n_read:
+            dm, is_real = pending.pop(0)
+            if is_real:
                 yield base, dm
             base += 1
 
-    yield from emit(INTERP_LEN)
-    prev = cur
-    k = 1
-    while True:
-        new = take(STEP)
-        # upstream runs window k while its frame_id 22*k < length. n_read is now min(length, 22*k + 32), so the test
-        # below is exact (a window may have no new real frame at all: then only its cross-fade changes anything).
-        if STEP * k >= n_read:
-            break
-        cur = [prev[i] for i in KEYFRAMES] + new + [last] * (STEP - len(new))
-        d = np.asarray(model(cur), dtype=np.float32)
+    for k, (real, d) in enumerate(results()):
+        d = np.asarray(d, dtype=np.float32)
         if d.shape[0] != INFER_LEN:
             raise ValueError(f'model returned {d.shape[0]} depth maps for {INFER_LEN} frames')
-        s, t = scale_and_shift(np.concatenate([d[i].ravel() for i in range(ALIGN_LEN)]),
-                               np.concatenate([r.ravel() for r in ref]))
-        # the 8 frames both windows saw: cross-fade from the pending (earlier) depth to this window's
-        assert len(pending) == INTERP_LEN
-        for i in range(INTERP_LEN):
-            post = _aligned(d[ALIGN_LEN + i], s, t)
-            pending[i] = pending[i] * np.float32(1.0 - w8[i]) + post * np.float32(w8[i])
-        for i in range(OVERLAP, INFER_LEN):
-            pending.append(_aligned(d[i], s, t))
-        ref = [ref[0], _aligned(d[KEYFRAMES[1]], s, t)]
+        if k == 0:
+            ref = [d[0].copy(), d[KEYFRAMES[1]].copy()]
+            pending = [[d[i].copy(), real[i]] for i in range(INFER_LEN)]
+            s, t = 1.0, 0.0
+        else:
+            s, t = scale_and_shift(np.concatenate([d[i].ravel() for i in range(ALIGN_LEN)]),
+                                   np.concatenate([r.ravel() for r in ref]))
+            # the 8 frames both windows saw: cross-fade from the pending (earlier) depth to this window's
+            assert len(pending) == INTERP_LEN
+            for i in range(INTERP_LEN):
+                post = _aligned(d[ALIGN_LEN + i], s, t)
+                pending[i][0] = pending[i][0] * np.float32(1.0 - w8[i]) + post * np.float32(w8[i])
+            for i in range(OVERLAP, INFER_LEN):
+                pending.append([_aligned(d[i], s, t), real[i]])
+            ref = [ref[0], _aligned(d[KEYFRAMES[1]], s, t)]
         if on_window:
             on_window(k, s, t)
         yield from emit(INTERP_LEN)
-        prev = cur
-        k += 1
     yield from emit(0)
+
+
+_END = object()
+
+
+def split_shots(items, is_start):
+    """Split the iterable `items` into consecutive runs, a new run at every item after the first for which
+    is_start(item) is true. Yields one iterator per run, lazily: it reads one item ahead (to see where the run ends) and
+    never holds more than that one. A run the caller does not finish is skipped over before the next one starts."""
+    it = iter(items)
+    nxt = [next(it, _END)]
+
+    def run():
+        first = True
+        while nxt[0] is not _END:
+            x = nxt[0]
+            if not first and is_start(x):
+                return
+            first = False
+            nxt[0] = next(it, _END)
+            yield x
+
+    while nxt[0] is not _END:
+        g = run()
+        yield g
+        for _x in g:
+            pass
+
+
+def shot_windows(items, model, is_start, frame_of=lambda x: x, on_window=None):
+    """Cut-aware windowed depth. `items` are the video's frames in order (or tuples carrying them: frame_of(item) gives
+    the frame for the model); a shot starts at every item for which is_start(item) is true (the first item always
+    starts one). Yields (start, depths) per shot: `start` the shot's first frame index in the video, `depths` a
+    generator of (frame_index, depth) for that shot's frames, in order, each exactly once (windowed_depth restarted on
+    the shot alone). A shot's generator left unfinished is run to its end before the next shot starts."""
+    base = 0
+    for shot in split_shots(items, is_start):
+        count = [0]
+
+        def frames(shot=shot, count=count):
+            for x in shot:
+                count[0] += 1
+                yield frame_of(x)
+
+        def depths(frames=frames, base=base):
+            for j, d in windowed_depth(frames(), model, on_window):
+                yield base + j, d
+        g = depths()
+        yield base, g
+        for _x in g:            # (normally already consumed: then this does nothing)
+            pass
+        base += count[0]

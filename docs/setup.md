@@ -227,7 +227,8 @@ Requirements:
 | Python | 3.10 - 3.13 (`winget install Python.Python.3.12`); the script makes its own venv |
 | ffmpeg + ffprobe | any recent build on PATH (`winget install Gyan.FFmpeg`), or `-Ffmpeg <path>` |
 | Disk | ~1.2-1.5 GB of `.fvd` for the US list (estimate from a proxy; measure on the first run), plus ~3-5 GB for `%LOCALAPPDATA%\ffxvr\fmvdepth-venv` (PyTorch with CUDA) and ~110 MB of weights |
-| Time | estimated 1-2 hours for the US list (61 videos, 86,353 frames, 48 min of video) on a 3080 Ti class GPU; `-InputSize 392` is faster. Not yet measured. |
+| Time | US list (61 videos, 86,353 frames, 48 min of video) on a 3080 Ti + i9-12900KF: converter 0.1 took 22 min. 0.2 (per-shot windows, sharper edges on the CPU while the GPU runs the next window) is estimated at ~35-45 min with the defaults (up to ~1 h if FFX's depth turns out very edge-dense), ~1.1-1.2 h with `-Flip`, ~1.3-1.6 h with `-InputSize 714`, ~2.3-2.9 h with both (an overnight job; estimates until measured, assuming ~1,000 shots in the list). Ctrl+C stops within a second or so; finished videos are kept. `-InputSize 392` is faster. |
+| Disk | while converting, a few GB free in the output folder for one very long shot (its depth is held in a temporary `fvdshot-*` file past 2,400 frames, deleted afterwards; a leftover from a power cut is deleted on the next run) |
 
 First run sets up, under `%LOCALAPPDATA%\ffxvr\`: `fmvdepth-venv\` (pinned torch 2.6.0 + torchvision 0.21.0 from the
 PyTorch cu124 index, numpy, OpenCV headless, einops, easydict, tqdm), `fmvdepth-vda\` (the model code at commit
@@ -241,9 +242,27 @@ remove them.
     # everything the US game plays (resumes: finished videos are skipped)
     powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1
 
-Options: `-Only A,B`, `-All` (all 95 files), `-Region us|jp|asia`, `-InputSize 518|392`, `-Force`, `-Frame N` (a PNG
-of one frame with `-Preview`), `-Gray`, `-List`, `-SetupOnly`, `-OutDir`. Out of GPU memory at 518: it says so; run
-again with `-InputSize 392`. Tests (no torch, no GPU, no game data): `python -m unittest discover -s tools/fmvdepth/tests`
+Options: `-Only A,B`, `-All` (all 95 files), `-Region us|jp|asia`, `-InputSize 518|714|392` (default 518, what the
+model was trained at; 714 for finer detail at about twice the model time and VRAM), `-Flip` (each window also run
+mirrored and averaged: less noise, no left/right bias, twice the model time), `-Force`, `-Frame N` (a PNG of one frame
+with `-Preview`), `-Gray`, `-List`, `-SetupOnly`, `-OutDir`. Out of GPU memory: it says so; run again with
+`-InputSize 518` (from 714) or `392`.
+
+**Converter 0.2 (5 Nov 2026)** makes better depth from the same model: the model's windows restart at every cut, a
+flash is no longer a cut, each shot gets one fixed depth range (nothing sinks back when something enters, no flat
+plateau on the nearest 2 %; dissolves and fades through black are handled), a centred temporal filter removes most of
+the flicker without lag, and silhouettes are sharpened at the model's resolution before the shrink (design-notes,
+"Converter 0.2"). The file format stays version 1; 0.2 files carry a header flag (HF_SEGMENT_RANGE) that tells the
+mod not to re-normalise them per shot: play them with a mod build from fmv-relief 9812b55 or later (an older build
+shows short shots and dissolves with the wrong depth range). Each video records the settings it was made with: the
+first run of 0.2 converts every video again by itself (the log says how many and why), and any later change of
+`-InputSize` or `-Flip` does the same, while videos already made with the same settings are skipped. Overnight, the
+most thorough settings (714 has not been compared with 518 on the real videos yet: the A/B below is that check):
+
+    powershell -ExecutionPolicy Bypass -File .\tools\convert-fmv-depth.ps1 -InputSize 714 -Flip
+
+To compare first without touching the main folder: `-Only SIN_us,BTS_us -Preview -OutDir <another folder>` with and
+without those options. Tests (no torch, no GPU, no game data): `python -m unittest discover -s tools/fmvdepth/tests`
 (the end-to-end test needs ffmpeg on PATH).
 
 Depth quality figures (read-only, prints numbers; noise, pumping, the model's window stride, clipping, per-shot raw range):

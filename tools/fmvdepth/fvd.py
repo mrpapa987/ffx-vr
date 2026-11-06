@@ -39,10 +39,14 @@ MODEL_NAMES = {MODEL_FAKE: 'fake', MODEL_VDA_SMALL: 'vda-small'}
 # header flags (byte 27)
 HF_COMPLETE = 0x01      # set only when the index and header were written at the end
 HF_THUMBS = 0x02        # a luma thumbnail per frame follows the index
+HF_SEGMENT_RANGE = 0x04  # (converter 0.2, ALGO 2) lo/hi are already one fixed range per shot segment: a reader must
+                         # not re-normalise per shot (no p10/p90 over a shot, no folding of short shots)
 
 # frame flags (index entry u16)
 FF_CUT = 0x0001         # first frame of a shot (the converter's cut detector; frame 0 always)
 FF_STORED = 0x0002      # payload is stored (not compressed): compression did not make it smaller
+FF_BLEND = 0x0004       # (converter 0.2) part of a dissolve or fade inside a shot (a v1 reader may ignore it)
+FF_FLASH = 0x0008       # (converter 0.2) a flash or blank (near-uniform) frame: depth unreliable (may be ignored)
 
 _HDR = struct.Struct('<4sHHHHIII BBBB HH Q Q Q HH I Q Q 48s')
 _IDX = struct.Struct('<QIHHffff')
@@ -252,7 +256,7 @@ class FvdWriter:
 
     def __init__(self, path, width, height, fps_num, fps_den, codec=CODEC_ZLIB, predictor=PRED_LEFT,
                  model_id=MODEL_FAKE, input_w=0, input_h=0, settings_hash=0, src_name='', src_size=0, src_offset=0,
-                 thumb_w=0, thumb_h=0, verify=True):
+                 thumb_w=0, thumb_h=0, verify=True, segment_range=False):
         if not (0 < width < 65536 and 0 < height < 65536):
             raise FvdError(f'bad frame size {width}x{height}')
         self.path = path
@@ -260,7 +264,8 @@ class FvdWriter:
                            fps_den=fps_den, codec=codec, predictor=predictor, model_id=model_id, input_w=input_w,
                            input_h=input_h, settings_hash=settings_hash, thumb_w=thumb_w, thumb_h=thumb_h,
                            src_size=src_size, src_offset=src_offset, src_name=src_name,
-                           flags=HF_THUMBS if thumb_w and thumb_h else 0)
+                           flags=(HF_THUMBS if thumb_w and thumb_h else 0) |
+                           (HF_SEGMENT_RANGE if segment_range else 0))
         self.index = bytearray()
         self.thumbs = bytearray()
         self.count = 0
@@ -423,11 +428,17 @@ def main(argv):
         h = r.h
         print(f'{argv[1]}: {h.src_name} {h.width}x{h.height} {h.frame_count} frames {h.fps:.3f} fps, '
               f'codec {CODEC_NAMES.get(h.codec, h.codec)}, model {MODEL_NAMES.get(h.model_id, h.model_id)} '
-              f'input {h.input_w}x{h.input_h}, settings {h.settings_hash:016x}')
-        cuts = sum(1 for i in range(len(r)) if r.entry(i).flags & FF_CUT)
+              f'input {h.input_w}x{h.input_h}, settings {h.settings_hash:016x}'
+              f'{", lo/hi per shot segment" if h.flags & HF_SEGMENT_RANGE else ""}')
+        ents = [r.entry(i) for i in range(len(r))]
+        cuts = sum(1 for e in ents if e.flags & FF_CUT)
+        blend = sum(1 for e in ents if e.flags & FF_BLEND)
+        flash = sum(1 for e in ents if e.flags & FF_FLASH)
+        ranges = len({(e.lo, e.hi) for e in ents})
         for i in range(len(r)):
             r.frame(i)
-        print(f'  {cuts} cuts; every frame decodes; payload {h.index_offset - h.header_size:,} bytes')
+        print(f'  {cuts} cuts, {blend} dissolve/fade frames, {flash} flash/blank frames, {ranges} distinct lo/hi; '
+              f'every frame decodes; payload {h.index_offset - h.header_size:,} bytes')
     return 0
 
 

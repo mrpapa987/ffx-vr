@@ -189,6 +189,99 @@ class WindowTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(W.windowed_depth(range(40), lambda fr: np.zeros((31, 2, 2), np.float32)))
 
+    def test_split_shots(self):
+        runs = [list(r) for r in W.split_shots(range(12), lambda x: x in (0, 4, 5, 11))]
+        self.assertEqual(runs, [[0, 1, 2, 3], [4], [5, 6, 7, 8, 9, 10], [11]])
+        self.assertEqual([list(r) for r in W.split_shots([], lambda x: True)], [])
+        # a run left unfinished is skipped over
+        g = W.split_shots(range(10), lambda x: x == 6)
+        first = next(g)
+        self.assertEqual(next(first), 0)
+        self.assertEqual(list(next(g)), [6, 7, 8, 9])
+
+    def test_shot_windows_restart_at_cuts(self):
+        """Every shot gets its own chain of windows: no window holds frames of two shots, slot 0 of every window is the
+        shot's first frame, and each shot's depth equals windowed_depth run on that shot alone."""
+        cuts = {0, 30, 31, 100, 123}
+        n = 180
+        seen = []
+        wob = WobblyModel()
+
+        def m(frames):
+            seen.append(list(frames))
+            return wob(frames)
+        got = []
+        for start, shot in W.shot_windows(range(n), m, is_start=lambda i: i in cuts):
+            got += [(start, i, d) for i, d in shot]
+        self.assertEqual([i for _s, i, _d in got], list(range(n)))
+        bounds = sorted(cuts) + [n]
+        shot_of = {i: k for k in range(len(bounds) - 1) for i in range(bounds[k], bounds[k + 1])}
+        for s, i, _d in got:
+            self.assertEqual(s, bounds[shot_of[i]])
+        for win in seen:
+            self.assertEqual(len({shot_of[f] for f in win}), 1, win)          # never two shots in one window
+            self.assertEqual(win[0], bounds[shot_of[win[0]]])                 # slot 0 = the shot's first frame
+        # model calls: ceil(len/22) per shot
+        self.assertEqual(len(seen), sum(-(-(b - a) // 22) for a, b in zip(bounds[:-1], bounds[1:])))
+        # the same numbers as running each shot on its own (WobblyModel depends only on the call count and the frame)
+        k = 0
+        for a, b in zip(bounds[:-1], bounds[1:]):
+            calls = -(-(b - a) // 22)
+            ref_model = WobblyModel()
+            ref_model.k = k
+            k += calls
+            ref = list(W.windowed_depth(range(a, b), ref_model))
+            for (i, d), (_s, gi, gd) in zip(ref, got[a:b]):
+                np.testing.assert_array_equal(gd, d, err_msg=f'shot {a} frame {gi}')
+                self.assertEqual(gi, a + i)
+
+    def test_shot_windows_tuples_and_memory(self):
+        """Items can carry the frame (frame_of); the stream is read lazily (at most two windows + one item ahead)."""
+        state = {'read': 0}
+
+        def items():
+            for i in range(400):
+                state['read'] = i + 1
+                yield i, float(i)
+        for _s, shot in W.shot_windows(items(), IdModel(), is_start=lambda x: x[0] % 97 == 0, frame_of=lambda x: x[1]):
+            for i, d in shot:
+                self.assertTrue(np.allclose(d, i))
+                self.assertLessEqual(state['read'] - i, 32 + 22 + 1)
+
+    def test_submit_runs_one_window_ahead(self):
+        """A model with submit(frames, real): the same output as the plain call, window k+1 submitted before window
+        k's result is taken, and `real` marks the padding copies."""
+        from concurrent.futures import Future
+        log = []
+
+        class Ahead:
+            def __init__(self):
+                self.w = WobblyModel()
+                self.n = 0
+
+            def submit(self, frames, real):
+                k = self.n
+                self.n += 1
+                log.append(('submit', k))
+                self.reals = getattr(self, 'reals', []) + [list(real)]
+                d = self.w(frames)
+                f = Future()
+                f.result = lambda: (log.append(('result', k)), d)[1]
+                return f
+        for n in (1, 21, 22, 23, 75, 100):
+            log.clear()
+            m = Ahead()
+            got = list(W.windowed_depth(range(n), m))
+            ref = list(W.windowed_depth(range(n), WobblyModel()))
+            self.assertEqual([i for i, _d in got], list(range(n)))
+            for (i, d), (_j, r) in zip(got, ref):
+                np.testing.assert_array_equal(d, r)
+            for k in range(1, m.n):                  # k submitted before k-1's result
+                self.assertLess(log.index(('submit', k)), log.index(('result', k - 1)))
+            self.assertEqual(sum(sum(r[OV:]) for r in m.reals for OV in [W.OVERLAP]) + sum(m.reals[0][:W.OVERLAP]),
+                             n)                       # every real frame is marked real once as a new slot
+            self.assertEqual(m.reals[0], [True] * min(n, 32) + [False] * (32 - min(n, 32)))
+
     def test_scale_and_shift(self):
         p = np.array([1.0, 2.0, 3.0, 4.0])
         s, t = W.scale_and_shift(p, 2 * p + 1)
