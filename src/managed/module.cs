@@ -1022,7 +1022,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "battle_follow":     pb(k, v, ref _battle_follow); break;
                 case "battle_view":       pi(k, v, ref _battle_view, -1, 3); break;
                 case "bt_tag": case "bt_tag_dist": btg_parse(k, v); break;   // battle tag (bt_tag.cs)
-                case "dmg3d": case "dmg3d_scale": case "dmg3d_lift": case "dmg3d_hide2d": dmg_parse(k, v); break;   // 3D damage numbers (dmg3d.cs)
+                case "dmg3d": case "dmg3d_on": case "dmg3d_scale": case "dmg3d_lift": case "dmg3d_hide2d": dmg_parse(k, v); break;   // 3D damage numbers (dmg3d.cs; dmg3d is the first build's key, ignored)
                 case "diorama_floor":     pf(k, v, ref _diorama_floor, 0f, 40f); break;
                 case "fp_head_anchor": {  // 0/1/2; an old bool-style value still means 2 (on) or 0 (off)
                     if (int.TryParse(num(v), System.Globalization.NumberStyles.Integer, CI, out int fha)) { if (fha >= 0 && fha <= 2) _fp_head_anchor = fha; else _ini_bad.Add($"{k}='{v}'"); }
