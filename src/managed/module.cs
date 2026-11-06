@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 46;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag)
+    private const int k_abi = 47;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -353,6 +353,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         diag7_init();   // build 7 (log only): game-function hooks must be queued here, at init (diag7.cs)
         ld_init();      // load diagnostics (load_diag.cs): queued after build 7's hooks (the job join included), so a failure here cannot take them with it (LD-7)
         sr_init();      // stickrep (stickrep.cs): the flush gate's two hooks, queued last of all ours (Fahrenheit's commit stops at the first failing insertion)
+        dmg3d_init();   // 3D damage numbers (dmg3d.cs): the hop table; the queue draw's hook only with dmg3d_hide2d=1, after all the others
         return true;
     }
 
@@ -406,6 +407,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
             _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
             _fn_bt_tag_step = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float*, int, int>)req("ffxvr_bt_tag_step"); _fn_bt_tag_hold = (delegate* unmanaged[Cdecl]<int, float, float, float, int>)req("ffxvr_bt_tag_hold");   // ABI 46: battle tag (bt_tag.cs)
+            _fn_dmg_walk = (delegate* unmanaged[Cdecl]<byte*, uint, uint, DmgNode*, int, uint*, int>)req("ffxvr_dmg_walk"); _fn_dmg_queue = (delegate* unmanaged[Cdecl]<byte*, int, int, DmgNode*, int, DmgChr*, int, byte*, uint*, int>)req("ffxvr_dmg_queue");   // ABI 47: 3D damage numbers (dmg3d.cs)
+            _fn_dmg_set = (delegate* unmanaged[Cdecl]<DmgNode*, int, DmgChr*, int, uint, uint, uint, int, void>)req("ffxvr_dmg_set"); _fn_dmg_cfg = (delegate* unmanaged[Cdecl]<int, float, float, byte*, int>)req("ffxvr_dmg_cfg");
+            _fn_dmg_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_dmg_skip"); _fn_dmg_status = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_dmg_status");
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
@@ -571,6 +575,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_eye_jump_set = null; _fn_eye_event = null;   // ABI 44 (eye jumps)
         _fn_bt_tag_step = null; _fn_bt_tag_hold = null;   // ABI 46 (battle tag)
+        _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null;   // ABI 47 (3D damage numbers)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_fp_ib_set = null; _fn_cpu_report = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
@@ -1015,6 +1020,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "battle_follow":     pb(k, v, ref _battle_follow); break;
                 case "battle_view":       pi(k, v, ref _battle_view, -1, 3); break;
                 case "bt_tag": case "bt_tag_dist": btg_parse(k, v); break;   // battle tag (bt_tag.cs)
+                case "dmg3d": case "dmg3d_scale": case "dmg3d_lift": case "dmg3d_hide2d": dmg_parse(k, v); break;   // 3D damage numbers (dmg3d.cs)
                 case "diorama_floor":     pf(k, v, ref _diorama_floor, 0f, 40f); break;
                 case "fp_head_anchor": {  // 0/1/2; an old bool-style value still means 2 (on) or 0 (off)
                     if (int.TryParse(num(v), System.Globalization.NumberStyles.Integer, CI, out int fha)) { if (fha >= 0 && fha <= 2) _fp_head_anchor = fha; else _ini_bad.Add($"{k}='{v}'"); }
@@ -1392,6 +1398,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"battle_follow={(_battle_follow ? 1 : 0)}\n" +
             $"battle_view={_battle_view.ToString(ci)}\n" +
             btg_ini_text() +   // battle tag (bt_tag.cs)
+            dmg_ini_text() +   // 3D damage numbers (dmg3d.cs)
             $"diorama_floor={_diorama_floor.ToString("F1", ci)}\n" +
             $"fp_head_up={_fp_head_up.ToString("F2", ci)}\n" +
             $"fp_head_reach={_fp_head_reach.ToString("F1", ci)}\n" +
@@ -1644,6 +1651,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_ui_on) uidepth_ui();   // adaptive UI panel: ui_adaptive, ui_backing (the rest in Debug > UI panel)
         dream_ui();   // dream overlay: dream_overlay
         bt_ui();
+        dmg3d_ui();    // 3D damage numbers: dmg3d, dmg3d_scale, dmg3d_lift, dmg3d_hide2d (dmg3d.cs)
         lp_ui();   // load lock build: load_lock_release
         ImGui.Checkbox("keep characters drawn (no distance or frustum cull of characters)", ref _cull_dist);
         if (_fn_cull_dist_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_dist_get() != 0 ? "patched" : (_cull_dist_rc != 0 ? $"not applied (rc {_cull_dist_rc}, see diag log)" : "off")); }
@@ -2765,6 +2773,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_markers_set == null) return;
         fixed (float* p = _mk_pos) fixed (uint* c = _mk_col) _fn_markers_set(p, c, _mk_n);
         c3_push();   // C3: the kinds (after the set, which resets them)
+        dmg3d_push();   // 3D damage numbers: the latest snapshot (dmg3d.cs; nothing while off)
         if (_fn_cursor_game != null) _fn_cursor_game(_c2_active && _markers_on ? 1 : 0);   // only then may native skip the game's cursors (in the headset)
         if (_fn_markers_3d != null) _fn_markers_3d(_markers_3d ? 1 : 0);
     }
@@ -2929,6 +2938,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         diag7_resolve();   // build 7 (B7-1): the game-function detours' originals, before try_install_hooks adds our late hooks
         ld_resolve();      // load diagnostics: the same, for their detours
         sr_resolve();      // stickrep: the same, for the flush gate's two detours
+        dmg3d_resolve();   // 3D damage numbers: the same, for the queue draw's detour (dmg3d_hide2d)
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready && _diag_actors) actors_auto_log();   // LD2-8: diag_actors (default 0)

@@ -37,7 +37,7 @@ public sealed unsafe partial class FFXVRModule {
     /// and native's answer, battle.dds held or not. The search is on only in battle with the game source and the markers on
     /// (C3-5): game_source = the caller is the game-source path.</summary>
     private void c3_look(bool game_source) {
-        bool search = game_source && _cursor_look_game && _markers_on && _c2_in_btl;
+        bool search = (game_source && _cursor_look_game && _markers_on && _c2_in_btl) || (_dmg3d && _c2_in_btl);   // 3D damage numbers need the digits' art too
         if (_fn_cursor_look != null) _c3_atlas_ok = _fn_cursor_look(search ? 1 : 0, _cursor_hand_size, _r7u.theta, _r7u.apex, _r7u.bas, _c3_vflip_inv ? 1 : 0) != 0;
     }
 
