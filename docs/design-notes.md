@@ -4353,6 +4353,13 @@ fixes/fmv-relief-impl.md; the review fixes/fmv-relief-review.md (SF-1, N1-N8: do
     on) round 7's grid draws.
   - The edge fill stays off: with 2-px cells the stretched triangles at a silhouette are the disocclusion itself, at most
     ~2 px an eye at the owner's settings; the fill is not needed for the rubber sheet any more.
+  - Review 10 (fixes/fmv-relief-review10.md, no blockers): a flat relief (k 0: a ramp's first Present, a fade's tail, a
+    not-ready cut, amount 0) draws round 7's list, not the fine mesh (same picture; the upsample still runs at uploads);
+    the fmv3d: end line counts the Presents on the fine grid. Tests now run the flat-window guard (0 / 0 -> NaN -> the far
+    plane on an R16_UNORM target) through the shader's text and pin the edge-range fade (0 at 0.05, 1/2 at 0.075, 1 from
+    0.1). Left as notes: a failed constant-buffer Map in the upsample (removed device only) keeps the previous output for
+    that Present; the worker's snap scratch (460 KB) stays allocated for the process; with the Debug causal filter the
+    snapped copy is unfiltered; k_jbu_hlsl's one-time fxc compile time is in the "relief pass ready" diag line.
 
 Owner test steps (the Sphere Theater in Luca replays FMVs; convert first: `tools\convert-fmv-depth.ps1 -Only OPN_us,SIN_us,BTS_us`
 or the whole list; the Dev or Verbose logging profile for the `fmv3d:` lines):

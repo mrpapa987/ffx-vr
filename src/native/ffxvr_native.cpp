@@ -12383,7 +12383,7 @@ struct RelFmv {
     bool fading = false; uint32_t fades = 0, loops = 0, cut_switches = 0;  // N1: the relief fading out on the last depth; N7: the count went back (a loop: kept open)
     float rows_tight = 0.f, rows_full = 0.f; bool rows_logged = false; bool tight_now = false;   // SF-1: eye-image rows per video row (eye 0)
     bool pop_limited = false, range_limited = false; float pop_used = 0.f, range_used = 0.f;   // review3 SF-2: the comfort limits at this screen distance
-    uint32_t grid_w = 0, grid_h = 0, jbu_runs = 0; bool guided = false;   // round 10: the grid drawn (cells), the upsample's runs
+    uint32_t grid_w = 0, grid_h = 0, jbu_runs = 0, fine_n = 0; bool guided = false;   // round 10: the grid drawn (cells), the upsample's runs, Presents on the fine grid
 };
 static RelFmv g_rel;
 static uint32_t g_rel_gen = 0, g_rel_lines = 0;
@@ -12829,9 +12829,9 @@ static void rel_end(const char* how) {
         first = true;
         for (int k = 1; k < FB_N; ++k) if (r.by_fb[k]) { n = fmv::add(b, sizeof(b), n, "%s%s %u", first ? " (" : ", ", k == FB_FILE ? "the depth file" : k == FB_GPU ? "the relief pass" : k_rel_fb[k], r.by_fb[k]); first = false; }
         if (!first) n = fmv::add(b, sizeof(b), n, ")");
-        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (the mesh, both eyes, %u timed) avg %.3f ms, max %.3f ms, grid %ux%u cells (%s) | guided upsample GPU (%u runs timed) avg %.3f ms, max %.3f ms",
+        if (r.file == 1) n = fmv::add(b, sizeof(b), n, " | depth uploads %u, ramps (returns from flat) %u, cuts switched at once %u | decoded %u frames, avg %.2f ms, max %.2f ms, errors %u; filtered %u, avg %.2f ms, max %.2f ms; ring fill avg %.1f of %d | opened in %.0f ms | relief pass GPU (the mesh, both eyes, %u timed) avg %.3f ms, max %.3f ms, the fine grid (%ux%u cells, indexed strips) on %u Presents, round 7's list on the rest | guided upsample GPU (%u runs timed) avg %.3f ms, max %.3f ms",
                                       r.uploads, r.ramps, r.cut_switches, r.decoded, r.decoded ? r.dec_sum / r.decoded : 0.0, r.dec_max, r.errors, r.made, r.made ? r.make_sum / r.made : 0.0, r.make_max, r.ring_n ? r.ring_sum / r.ring_n : 0.0, relief::k_ring, r.open_ms,
-                                      g_rel_tm[0].n, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, r.grid_w, r.grid_h, r.grid_w > relief::grid_cells(r.w) ? "guided, indexed strips" : "round 7's list",
+                                      g_rel_tm[0].n, g_rel_tm[0].n ? g_rel_tm[0].sum / g_rel_tm[0].n : 0.0, g_rel_tm[0].max, relief::grid_cells(relief::k_up * r.w), relief::grid_cells(relief::k_up * relief::k_h), r.fine_n,
                                       g_rel_tm[1].n, g_rel_tm[1].n ? g_rel_tm[1].sum / g_rel_tm[1].n : 0.0, g_rel_tm[1].max);
         if (r.rel_presents) n = fmv::add(b, sizeof(b), n, " | video %ux%u in the backbuffer %ux%u: crop u %.3f+%.3f v %.3f+%.3f | eye-image rows per video row %.2f (tight field of view) / %.2f (the eye's whole)",
                                          r.vw, r.vh, r.bb_w, r.bb_h, r.rect.u0, r.rect.du, r.rect.v0, r.rect.dv, r.rows_tight, r.rows_full);
@@ -12950,10 +12950,11 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     if (color == nullptr) { r.by_fb[FB_GPU]++; r.now_fb = FB_GPU; snprintf(g_rel_gpu_why, sizeof(g_rel_gpu_why), "no view of the backbuffer copy"); relief::to_flat(r.t); return false; }
     // the ring's answer for the wanted frame (its pixels copied out under the lock only when they would be uploaded)
     relief::Avail a = { false, false }; int fill = 0;
+    const int cw = rel_cfg_word();   // review10 N-5: once a Present (the slot check, the snapped copy and its upload agree)
     {
         std::lock_guard<std::mutex> lk(g_fmvw_mx);
         if (r.want >= 0) {
-            const int cw = rel_cfg_word(); const size_t px = static_cast<size_t>(r.w) * relief::k_h;
+            const size_t px = static_cast<size_t>(r.w) * relief::k_h;
             const RelSlot& sl = g_relw_slot[r.want % relief::k_ring];
             if (sl.idx == r.want && sl.cfg == cw) {   // made with the current settings
                 a.ready = true; a.error = sl.err != 0;
@@ -12977,7 +12978,7 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
         if (ema_on) relief::ema(g_rel_ema, g_rel_up, r.w * relief::k_h, g_rel_cfg.smooth, o.reset || !s_ema_was);   // the causal filter (Debug since round 7.4)
         s_ema_was = ema_on;
         InEye2 guard; g_ctx->UpdateSubresource(g_rel_dtex, 0, nullptr, g_rel_up, r.w * 2, 0); r.uploads++;
-        g_rel_snap_ok = (rel_cfg_word() & 8) != 0 && g_rel_stex != nullptr;   // round 10 (the causal Debug filter leaves it unfiltered)
+        g_rel_snap_ok = (cw & 8) != 0 && g_rel_stex != nullptr;   // round 10 (the causal Debug filter leaves it unfiltered)
         if (g_rel_snap_ok) g_ctx->UpdateSubresource(g_rel_stex, 0, nullptr, g_rel_sup, r.w * 2, 0);
         g_rel_jdue = relief::k_jbu_runs;   // round 10: the upsample this Present and the next (the frame in the copy may be a Present behind)
     }
@@ -13040,9 +13041,12 @@ static bool relief_present(ID3D11Texture2D* e1, bool frame2d, bool menu, const X
     r.guided = guided;
     if (guided && (rc.u0 != g_rel_jrect.u0 || rc.v0 != g_rel_jrect.v0 || rc.du != g_rel_jrect.du || rc.dv != g_rel_jrect.dv)) g_rel_jdue = relief::k_jbu_runs;
     if (guided && g_rel_jdue > 0) { rel_jbu(color, rc, r.w); g_rel_jdue--; g_rel_jrect = rc; r.jbu_runs++; }
-    const uint32_t gw = guided ? relief::k_up * r.w : r.w, gh = guided ? relief::k_up * relief::k_h : relief::k_h;
-    r.grid_w = relief::grid_cells(gw); r.grid_h = relief::grid_cells(gh);
-    rel_draw(color, guided ? g_rel_hsrv : g_rel_dsrv, guided, views, draw_fov, sc, rc, gw, gh, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
+    // review10 N-3: a flat relief (k 0: a ramp's first Present, a fade's tail, a not-ready cut, amount 0) lies on the screen
+    // plane whatever the grid: round 7's 116k-triangle list shows the same picture as the 925k-triangle fine mesh
+    const bool fine = guided && mp.k > 0.f;
+    const uint32_t gw = fine ? relief::k_up * r.w : r.w, gh = fine ? relief::k_up * relief::k_h : relief::k_h;
+    r.grid_w = relief::grid_cells(gw); r.grid_h = relief::grid_cells(gh); if (fine) r.fine_n++;
+    rel_draw(color, fine ? g_rel_hsrv : g_rel_dsrv, fine, views, draw_fov, sc, rc, gw, gh, mp, g_rel_cfg.flags, bd.Width ? bd.Width : 1, bd.Height ? bd.Height : 1);
     *xe1 = g_rel_eye[0]; *xe2 = g_rel_eye[1]; xused[0] = draw_fov[0]; xused[1] = draw_fov[1];
     return true;
 }
