@@ -1514,6 +1514,12 @@ static WORD vrpad_sh_bits(bool* touched) {
 volatile LONG g_odg_stick_on = 0, g_odg_stick_target = 0, g_odg_tick = 0, g_odg_lulu_stick = 0;   // the stick channel, GetTickCount of the last tick, od_lulu_stick
 volatile LONG g_odg_press = 0, g_odg_press_t0 = 0, g_odg_press_polls = 0;                          // the press slot (pad::press_hook's rule, as the quick squeeze)
 volatile LONG g_odg_stick_sent = 0, g_odg_stick_dropped = 0, g_odg_stick_q = 0;                    // the input thread's counters and quadrant (F8, the odg: line)
+// An injecting Bushido window holds the VR triggers back (g_odg_hold_trig, render thread): the pad poll 0x62DBA0 makes LT / RT
+// pressed at any non-zero byte (0x62DCA8: cmp [ebp-0xe],0 / seta, slots +0x39E / +0x39F), every slot goes through the pad's
+// bit map (0x888C40) into the held word, and Bushido compares the edge-only new-press word 0x25D09D4 = (held ^ last) & held
+// (0x8B7D1E..0x8B7D3A, no mask) with the expected input: a trigger touched during a punch would be a wrong input (L2 0x0001 /
+// R2 0x0002 in the captured byte order). A trigger held when the window closes stays held back until it is let go (no edge).
+volatile LONG g_odg_hold_trig = 0; static bool s_odg_trig_back[2] = { false, false };              // the flag; input thread only: the latch
 static odg::Stick s_odg_stick; static pad::PressHook s_odg_hook;                                    // input thread only
 static bool odg_squeeze_may_send(int h);   // render thread (grip_tick): a quick squeeze that a punch already sent is dropped (review S3)
 static bool odg_grips_are_gestures();      // render thread (gesture_tick): an injecting Bushido window: the grips do not grab (review S4)
@@ -1565,6 +1571,11 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
         in.h[0].stick_click = (ck & 1) != 0; in.h[1].stick_click = (ck & 2) != 0;
     }
     pad::Out o = pad::compose(in, pass, g_vd_mask ? pad::C_VD_MASK : 0);   // the mapping (ffxvr_pad.h): faces, Start / Back / R3, triggers, sticks
+    {   // overdrive gestures: the VR triggers held back in an injecting Bushido window (above g_odg_hold_trig); a held one until let go
+        const bool hold = g_odg_hold_trig != 0 && GetTickCount() - static_cast<DWORD>(g_odg_tick) < 100u;
+        uint8_t* tr[2] = { &o.lt, &o.rt };
+        for (int i = 0; i < 2; ++i) { if (*tr[i] == 0) s_odg_trig_back[i] = false; else if (hold) s_odg_trig_back[i] = true; if (s_odg_trig_back[i]) *tr[i] = 0; }
+    }
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
         const LONG tb = g_tap_press;
@@ -6040,6 +6051,11 @@ static bool odg_line_ok() {
 namespace {   // the globals' anonymous namespace (line 113), where grip_tick's and gesture_tick's forward declarations are
 static bool odg_squeeze_may_send(int h) {
     if (h < 0 || h > 1) return true;
+    if (g_odg.grips_are_gestures()) {   // an injecting Bushido window: a quick squeeze is no LB / RB (a punch is; the grip is often clenched to punch)
+        static uint32_t s_n = 0;
+        if (++s_n <= 20 && odg_line_ok()) diag("odg: frame %u: Auron: the %s grip's quick squeeze held back (in Bushido the punch is %s, a squeeze is not)", g_frames, h ? "right" : "left", h ? "RB" : "LB");
+        return false;
+    }
     if (g_odg.squeeze_clashes(h, g_odg_t_last)) { if (odg_line_ok()) diag("odg: frame %u: Auron: the %s grip's quick squeeze dropped: that hand's punch already sent %s", g_frames, h ? "right" : "left", h ? "RB" : "LB"); return false; }
     g_odg_squeeze_t[h] = g_odg_t_last;
     return true;
@@ -6096,6 +6112,7 @@ static void od_gest_tick() {
     if (o.inject == odg::OD_NONE) { if (g_odg_press != 0) InterlockedExchange(&g_odg_press, 0); }
     else if (o.press) { g_odg_press_t0 = static_cast<LONG>(GetTickCount()); g_odg_press_polls = 0; InterlockedExchange(&g_odg_press, static_cast<LONG>(o.press)); }
     g_odg_tick = static_cast<LONG>(GetTickCount());
+    { const LONG ht = o.inject == odg::OD_AURON ? 1 : 0; if (g_odg_hold_trig != ht) InterlockedExchange(&g_odg_hold_trig, ht); }   // the triggers (above odg_input)
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     if (g_odv_on && o.inject != odg::OD_NONE && o.inject == w) {   // the visuals' events: a burst a gesture (green sent, grey refused), Tidus's mark
         for (int h = 0; h < 2; ++h) {
