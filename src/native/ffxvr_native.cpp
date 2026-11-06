@@ -6116,15 +6116,16 @@ static void od_gest_tick() {
              have ? static_cast<unsigned>(g_odg_seq[pr]) : 0u, have ? (in.game_press == g_odg_seq[pr] ? ", a match" : ", not the expected one") : " (the sequence was not read)",
              g_odg.last_btn ? odg::button_name(g_odg.last_btn) : "none (a controller or pad button)", g_odg.last_btn && ago < 400.0 ? "" : g_odg.last_btn ? " (more than 400 ms ago)" : "");
     }
-    if (o.learned && odg_line_ok()) {
+    if (o.disagree && odg_line_ok()) {   // the cross-check of the capture's map (k_auron_map): only a disagreement is worth a line
         const int bi = odg::Driver::bit_of(g_odg.last_btn);
-        diag("odg: frame %u: Auron: learned our %s = the game's 0x%04X (%u so far; an opposite pair may then follow at once when the game expects it)",
-             g_frames, odg::button_name(g_odg.last_btn), bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, g_odg.learned_n);
+        diag("odg: frame %u: Auron: DISAGREEMENT: the game saw 0x%04X right after our %s, the capture's map says 0x%04X (%u so far; the map is kept)",
+             g_frames, bi >= 0 ? static_cast<unsigned>(g_odg.learned[bi]) : 0u, odg::button_name(g_odg.last_btn), static_cast<unsigned>(odg::value_of_button(g_odg.last_btn)), g_odg.disagree_n);
     }
-    if (o.closed && g_odg.last.od == odg::OD_AURON && g_odg.learned_n && odg_line_ok()) {   // the map so far (the capture stage 2 needs)
+    if (o.closed && g_odg.last.od == odg::OD_AURON && g_odg.learned_n && odg_line_ok()) {   // the cross-check so far
         char m[300] = ""; int k = 0;
-        for (int i = 0; i < 16; ++i) if (g_odg.learned[i]) k = odg::fmt_append(m, sizeof(m), k, "%s%s=0x%04X", k ? " " : "", odg::button_name(static_cast<uint16_t>(1u << i)), static_cast<unsigned>(g_odg.learned[i]));
-        diag("odg: frame %u: Auron: our buttons -> the game's values so far: %s", g_frames, m);
+        for (int i = 0; i < 16; ++i) if (g_odg.learned[i]) k = odg::fmt_append(m, sizeof(m), k, "%s%s=0x%04X%s", k ? " " : "", odg::button_name(static_cast<uint16_t>(1u << i)),
+                                                                           static_cast<unsigned>(g_odg.learned[i]), odg::value_of_button(static_cast<uint16_t>(1u << i)) == g_odg.learned[i] ? "" : " (the map: differs)");
+        diag("odg: frame %u: Auron: our buttons -> the game's values seen: %s | %u disagreement(s) with the capture's map", g_frames, m, g_odg.disagree_n);
     }
     if (o.closed) {
         char b[640]; odg::summary(b, sizeof(b), g_odg.last);

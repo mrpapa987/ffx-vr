@@ -15,8 +15,9 @@ namespace FFXVR;
 // pushes the settings, draws the F8 rows, and (Debug, a diagnostic profile, this session only) sets the game's own
 // "overdrives always ready" flag. A hand grabbing the world gestures nothing; in an injecting Bushido window the grips do not
 // grab (a clenched punch is a punch). Bushido's opposite pairs in a row (Shooting Star's Left, Right; Banishing Blade's
-// Right, Left): the other hand, a 0.3 s pause, or at once once the mod has seen that button in a Bushido (it learns the game's
-// value for each button it sends) and the game expects it next.
+// Right, Left) go at once when the game expects that button next (the play2 capture's map of the sequence values, native
+// k_auron_map; the mod still learns each value it sees as a cross-check and logs any disagreement); any other bring-back of
+// the same hand within 0.3 s is ignored.
 // ini: od_gestures (1), od_gest_lulu (1), od_gest_tidus_swing (0; the old key od_gest_tidus, saved as 1 by the first build,
 // is ignored so the new default reaches every ini), od_gest_auron (0), od_gest_haptics (1), od_circle_cm (1-20; 4),
 // od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0).
@@ -111,7 +112,7 @@ public sealed unsafe partial class FFXVRModule {
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }
         ImGui.TextDisabled(esc(odg_text(0)));
-        if (_od_gest_auron) ImGui.TextDisabled("Bushido: an opposite pair in a row (Left, Right): the other hand, a 0.3 s pause, or at once once the mod has learned that button's value in a Bushido");
+        if (_od_gest_auron) ImGui.TextDisabled("Bushido: an opposite pair in a row (Left, Right) goes at once when the game asks for it; any other bring-back of the same hand within 0.3 s is ignored");
         ImGui.TextDisabled("last: " + esc(odg_text(1)));
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>
