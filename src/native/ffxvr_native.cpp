@@ -1550,13 +1550,27 @@ static bool odg_input(XINPUT_GAMEPAD& g) {
     if (hk & HV_HOOK_RELEASE) { InterlockedCompareExchange(&g_odg_press, 0, pb); touched = true; }
     return touched;
 }
+static pad::TrigGate s_trig_gate;   // input thread only
+/// The VR triggers' bytes for the game (input thread): the deadzone with hysteresis (ffxvr_pad.h TrigGate: 30 to press, below
+/// 20 to let go), then Bushido's hold-back latch (above). Run on every poll, the suppressed ones too (od-visual review N3: a
+/// trigger let go while a chord or the seat grab suppresses the VR pad clears its latch, so the next squeeze is not swallowed).
+/// With the deadzone a resting finger reads 0, so the latch's release test (0) is reliable (review S3).
+static void vrpad_triggers(uint8_t& lt, uint8_t& rt) {
+    s_trig_gate.step(lt, rt);
+    const bool hold = g_odg_hold_trig != 0 && GetTickCount() - static_cast<DWORD>(g_odg_tick) < 100u;
+    uint8_t* tr[2] = { &lt, &rt };
+    for (int i = 0; i < 2; ++i) { if (*tr[i] == 0) s_odg_trig_back[i] = false; else if (hold) s_odg_trig_back[i] = true; if (s_odg_trig_back[i]) *tr[i] = 0; }
+}
 static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];
     if (!had_pad) memset(st, 0, sizeof(*st));
     XINPUT_GAMEPAD& g = st->Gamepad;
     bool sh_touched = false;
     const WORD sh = vrpad_sh_bits(&sh_touched);   // a quick squeeze is a game input of ours: it goes in even while a gesture holds the rest back
-    if (g_vrpad_suppress) { g.wButtons |= sh; const bool ot = odg_input(g); if (!had_pad || sh_touched || ot) st->dwPacketNumber = g_vrpad_packet; return; }   // overdrive gestures: ours too
+    if (g_vrpad_suppress) {   // overdrive gestures: ours too; the triggers' gate and latch still follow the controllers (nothing of them is sent)
+        uint8_t lt = pad::trigger_byte(L.trigger), rt = pad::trigger_byte(R.trigger); vrpad_triggers(lt, rt);
+        g.wButtons |= sh; const bool ot = odg_input(g); if (!had_pad || sh_touched || ot) st->dwPacketNumber = g_vrpad_packet; return;
+    }
     int pass;
     {   // tap build, "don't pass the grip to the game while a tap can fire" (opt-in): a grip squeezed while that holds is held back until
         // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits.
@@ -1571,11 +1585,7 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
         in.h[0].stick_click = (ck & 1) != 0; in.h[1].stick_click = (ck & 2) != 0;
     }
     pad::Out o = pad::compose(in, pass, g_vd_mask ? pad::C_VD_MASK : 0);   // the mapping (ffxvr_pad.h): faces, Start / Back / R3, triggers, sticks
-    {   // overdrive gestures: the VR triggers held back in an injecting Bushido window (above g_odg_hold_trig); a held one until let go
-        const bool hold = g_odg_hold_trig != 0 && GetTickCount() - static_cast<DWORD>(g_odg_tick) < 100u;
-        uint8_t* tr[2] = { &o.lt, &o.rt };
-        for (int i = 0; i < 2; ++i) { if (*tr[i] == 0) s_odg_trig_back[i] = false; else if (hold) s_odg_trig_back[i] = true; if (s_odg_trig_back[i]) *tr[i] = 0; }
-    }
+    vrpad_triggers(o.lt, o.rt);   // the deadzone, and in an injecting Bushido window the hold-back (above g_odg_hold_trig); a held one until let go
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
         const LONG tb = g_tap_press;

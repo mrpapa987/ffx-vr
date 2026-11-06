@@ -44,6 +44,23 @@ inline uint8_t trigger_byte(float t) {
     if (!(f > -2147483648.f && f < 2147483648.f)) return 0;
     return static_cast<uint8_t>(static_cast<uint32_t>(static_cast<int32_t>(f)) & 0xFFu);
 }
+/// The game's trigger bytes get a deadzone with hysteresis (od-visual review S3): the pad poll 0x62DBA0 counts LT / RT as
+/// pressed at any non-zero byte (0x62DCA8 seta), so a finger resting on a Quest trigger (0.004 is byte 1) held L2 / R2 and its
+/// noise made edges in every menu's new-press word. A trigger is 0 until its byte reaches k_trig_on (30 / 255, XInput's
+/// XINPUT_GAMEPAD_TRIGGER_THRESHOLD) and goes back to 0 below k_trig_off (20); in between the byte passes as it is (nothing in
+/// FFX reads the analog value). Per hand, input thread only (vrpad_apply), before the merge; ImGui's feed keeps its own threshold.
+constexpr uint8_t k_trig_on = 30, k_trig_off = 20;
+struct TrigGate {
+    bool on[2] = { false, false };
+    void step(uint8_t& lt, uint8_t& rt) {
+        uint8_t* t[2] = { &lt, &rt };
+        for (int i = 0; i < 2; ++i) {
+            if (on[i]) { if (*t[i] < k_trig_off) on[i] = false; }
+            else if (*t[i] >= k_trig_on) on[i] = true;
+            if (!on[i]) *t[i] = 0;
+        }
+    }
+};
 /// -1..1 -> a stick short (vrpad_apply's stick_s).
 inline int16_t stick_s(float v) { v = v < -1.f ? -1.f : (v > 1.f ? 1.f : v); return static_cast<int16_t>(v * 32767.f); }
 
