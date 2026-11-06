@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 46;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag)
+    private const int k_abi = 47;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -540,6 +540,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_hands2_pack = (delegate* unmanaged[Cdecl]<VrHandsPackDesc*, int, void>)req("ffxvr_hands2_pack");   // ABI 28: VR hands v2 S2, the hand pack
             _fn_hands2_pack_error = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_hands2_pack_error");   // ABI 29: VR hands v2 S3, user packs
             qc_bind(req);   // ABI 44: Quest-only controls (quest_ctl.cs, imgui_pad.cs)
+            odg_bind(req);  // ABI 47: overdrive gestures (od_gest.cs)
             _fn_hands2_tap_set = (delegate* unmanaged[Cdecl]<VrTapCfg*, int, void>)req("ffxvr_hands2_tap_set"); _fn_hands2_tap_status = (delegate* unmanaged[Cdecl]<float*, int, byte*>)req("ffxvr_hands2_tap_status");   // ABI 30: the tap gesture (hands.cs)
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
@@ -602,6 +603,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_slow_set = null; _fn_slow_status = null;   // ABI 36 (the slow-GPU guard)
         _fn_fmv3d_set = null; _fn_fmv3d_text = null;   // ABI 41 (FMVs in 3D)
         qc_clear();   // ABI 44 (Quest-only controls)
+        odg_clear();  // ABI 47 (overdrive gestures)
         _fn_load_info = null;   // ABI 23 (loads)
         _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
         _fn_pre_resolve = null; _fn_hands2_set = null; _fn_hands2_status = null; _fn_hands2_cal = null; _fn_hands2_pack = null; _fn_hands2_pack_error = null;   // ABI 27, 28, 29 (VR hands v2)
@@ -1134,7 +1136,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
                 } break;
-                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs)
+                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v) && !odg_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs); od_gest* (od_gest.cs)
             }
         }
         if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
@@ -1476,6 +1478,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             hands2_ini_text() +   // VR hands v2 (hands.cs)
             ride_ini_text() +     // riding (ride.cs)
             qc_ini_text() +       // Quest-only controls (quest_ctl.cs)
+            odg_ini_text() +      // overdrive gestures (od_gest.cs)
             $"diag_verbose={(_diag_verbose ? 1 : 0)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
@@ -1562,6 +1565,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.TextDisabled($"right grip + right stick click: first person on/off.   {(_gest_active != 0 ? "GRABBING   " : "")}world scale now {_xr_scale * _gest_scale_mul:F0} units/m (base {_xr_scale:F0} x {_gest_scale_mul:F2}), grab offset ({_gest_move_x:F0}, {_gest_move_y:F0}, {_gest_move_z:F0})");
         ImGui.SameLine(); if (ImGui.SmallButton("reset grab")) { if (_fn_gesture_reset != null) _fn_gesture_reset(); }
         qc_ui();   // Quest-only controls: quick-squeeze grips, the VD overlay mask, the save screen (quest_ctl.cs)
+        odg_ui();  // overdrive gestures: Lulu's circles, Tidus's swing, Auron's slashes (od_gest.cs)
 
         // Comfort
         ImGui.Separator();
@@ -1695,6 +1699,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_counter != null)
             ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
         slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
+        odg_debug_ui();    // overdrive gestures: the test aid (overdrives always ready), Auron's raw sequence (od_gest.cs)
         timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
         fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
         fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; fmv_depth_tight_fov, the session-only depth offset (fmv_relief.cs)
@@ -2211,6 +2216,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         push_hands();
         { long t = cpu_now(); hands2_push(); _cpu_hands += cpu_now() - t; }   // VR hands v2: vr_hands_*, the calibration (hands.cs)
         qc_push();   // Quest-only controls: the walk gate's game bits, the grips, the save screen's feed (quest_ctl.cs; after hands2_push: its tap read)
+        odg_push();  // overdrive gestures: the settings, the Debug test aid (od_gest.cs)
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
