@@ -1524,7 +1524,10 @@ static bool odg_input(XINPUT_GAMEPAD& g) {
     float v[2] = { 0.f, 0.f };
     const bool on = g_odg_stick_on != 0;          // the flag first, then the target: the render side writes the target first (review N4)
     const LONG target = g_odg_stick_target;
-    if (s_odg_stick.step(fresh && on, target, g_vrpad_packet, now, v[0], v[1])) {
+    static LARGE_INTEGER s_qf = {}; if (s_qf.QuadPart == 0) QueryPerformanceFrequency(&s_qf);
+    LARGE_INTEGER qc; QueryPerformanceCounter(&qc);   // the stick's 40 ms hold on a precise clock (GetTickCount steps 15.6 ms)
+    const uint32_t now_ms = s_qf.QuadPart ? static_cast<uint32_t>(static_cast<uint64_t>(qc.QuadPart) * 1000ull / static_cast<uint64_t>(s_qf.QuadPart)) : static_cast<uint32_t>(now);
+    if (s_odg_stick.step(fresh && on, target, g_vrpad_packet, now_ms, v[0], v[1])) {
         const LONG w = g_odg_lulu_stick;   // 0 the right stick, 1 the left, 2 both
         if (w != 1) pad::merge_stick(g.sThumbRX, g.sThumbRY, v);
         if (w != 0) pad::merge_stick(g.sThumbLX, g.sThumbLY, v);

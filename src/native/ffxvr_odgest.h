@@ -159,26 +159,31 @@ struct CircleMix {
 // -- the stick (input thread) ----------------------------------------------------------------------------------------------
 // The game counts quadrants, so the stick shows quadrant centres (full-length diagonals, far past the 25 % thresholds; never a
 // dead band) and follows the hand's angle one quadrant at a time: a step only on a new packet (the game ignores an unchanged
-// one), only after the quadrant was in at least k_hold_polls new packets and k_hold_ms (two 30 Hz logic reads see it), never
-// two quadrants at once (no skip: a skip is a mismatch and loses the turn). Holding each quadrant for two reads keeps the
-// game's chain: after a counted spin its history restarts at the next quadrant read, so a stick that already left the end
-// quadrant loses a quarter turn per spin (the 40-degree sweep the design proposed loses that much at speed: the unit test's
-// transcription showed it). A quarter-quadrant hysteresis keeps a hand resting on a boundary from flickering. A backlog of a
-// whole turn or more is dropped in whole turns (the game could not count them in time; the angle is unchanged): after the
-// hand stops the stick finishes at most one turn. Cap: 4 polls a turn and 240 ms, 3.75 turns a second at 30 polls a second.
+// one), never two quadrants at once (a skip is a mismatch and loses the turn). After a counted spin the game's history
+// restarts at the next quadrant it reads, so the quadrant that completes a spin must be read twice; the others once.
+// Round 3 (the owner's play2 Fury: 18.8 hand turns, 13.2 stick turns with 5.0 dropped by this cap, 13 spins counted: the
+// chain held, the cap was the loss): a quadrant is held for 1 new packet and k_hold_ms (40 ms, a 30 Hz logic frame with
+// margin, on a precise clock), and every 4th step since the stick came on (the spin's end, counted from the quadrant it came
+// on at, which the game's chain starts at) for 2 packets and 60 ms. 40 ms between any two changes keeps one 30 Hz logic read
+// between them even with jittered polls (30 ms let two changes fall between two reads: a skip, in the unit test's jittered
+// 30 Hz polls). Polls a spin: 5 at 24 polls a second (4.8 spins a second; it was 8 polls, 3 a second), 8 at 30 (as before),
+// 13 at 60 (4.6 a second; it was 3.75); if the game's chain started elsewhere (a pause mid-window) a spin takes one quadrant more, 6 polls: still
+// no mismatch, never slower than before. A quarter-quadrant hysteresis keeps a hand resting on a boundary from flickering. A
+// backlog of a whole turn or more is dropped in whole turns (the game could not count them in time; the angle is unchanged).
 constexpr int32_t k_quad = k_turn / 4, k_hyst = k_quad / 4;
-constexpr int k_hold_polls = 2; constexpr uint32_t k_hold_ms = 60;
+constexpr int k_hold_polls = 1, k_hold_end_polls = 2; constexpr uint32_t k_hold_ms = 40, k_hold_end_ms = 60;
 inline int32_t wrap_sub(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) - static_cast<uint32_t>(b)); }
 inline int32_t wrap_add(int32_t a, int32_t b) { return static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b)); }
 /// The start of the quadrant holding angle a (units).
 inline int32_t quad_floor(int32_t a) { return static_cast<int32_t>(static_cast<uint32_t>(a) & ~static_cast<uint32_t>(k_quad - 1)); }
 struct Stick {
     bool have = false; int32_t q = 0; uint32_t pkt = 0, t_in = 0; int seen = 0;   // q: the quadrant shown (its start, units)
+    uint32_t steps = 0;                       // quadrant steps since the stick came on (every 4th lands on the spin's end)
     long long sent = 0, dropped = 0;   // units stepped / dropped (whole turns), cumulative
     /// on: the render thread's channel is live and fresh. Returns true with (x, y) = the unit vector to merge; false: nothing.
     bool step(bool on, int32_t target, uint32_t pkt_now, uint32_t now_ms, float& x, float& y) {
         if (!on) { have = false; return false; }
-        if (!have) { have = true; q = quad_floor(target); pkt = pkt_now; t_in = now_ms; seen = 1; }
+        if (!have) { have = true; q = quad_floor(target); pkt = pkt_now; t_in = now_ms; seen = 1; steps = 0; }
         else if (pkt_now != pkt) {
             pkt = pkt_now;
             int32_t d = wrap_sub(target, q);   // the target's angle from the shown quadrant's start
@@ -187,7 +192,8 @@ struct Stick {
                 q = wrap_add(q, whole); d -= whole; dropped += whole < 0 ? -static_cast<long long>(whole) : whole;
             }
             const int dir = d >= k_quad + k_hyst ? 1 : d < -k_hyst ? -1 : 0;
-            if (dir != 0 && seen >= k_hold_polls && now_ms - t_in >= k_hold_ms) { q = wrap_add(q, dir * k_quad); t_in = now_ms; seen = 1; sent += k_quad; }
+            const bool end = steps > 0 && steps % 4 == 0;   // the spin's end quadrant: read twice (2 packets and 60 ms)
+            if (dir != 0 && seen >= (end ? k_hold_end_polls : k_hold_polls) && now_ms - t_in >= (end ? k_hold_end_ms : k_hold_ms)) { q = wrap_add(q, dir * k_quad); t_in = now_ms; seen = 1; sent += k_quad; steps++; }
             else if (seen < 1000) seen++;
         }
         const float a = static_cast<float>(static_cast<double>(static_cast<uint16_t>(static_cast<uint32_t>(wrap_add(q, k_quad / 2)) & 0xFFFFu)) * (k_two_pi / k_turn));
