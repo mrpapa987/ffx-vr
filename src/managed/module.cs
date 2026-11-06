@@ -1065,8 +1065,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "fmv_depth":         pb(k, v, ref _fmv_depth); break;              // FMVs in 3D with a converted depth file (fmv_relief.cs; default 0)
                 case "fmv_depth_strength": { float t = float.NaN; pf(k, v, ref t, 0f, 0.25f); fmv3d_migrate_strength(t); } break;   // the old linear relief: migrated to fmv_depth_amount (strength / 0.08), no longer written
                 case "fmv_depth_amount":  pf(k, v, ref _fmv_depth_amount, 0f, 1f); _fmv_depth_amount_seen = true; break;   // the "3D movie" mapping's multiplier (default 1)
-                case "fmv_depth_range":   pf(k, v, ref _fmv_depth_range, 0.5f, 10f); break;   // m behind the screen for the farthest content (default 3)
-                case "fmv_depth_pop":     pf(k, v, ref _fmv_depth_pop, 0f, 0.5f); break;      // m in front of the screen for the nearest content (default 0.15)
+                case "fmv_depth_range":   pf(k, v, ref _fmv_depth_range, 0.5f, 20f); break;   // m behind the screen for the farthest content (default 10 since round 10c; a saved value is kept)
+                case "fmv_depth_pop":     pf(k, v, ref _fmv_depth_pop, 0f, 2f); break;        // m in front of the screen for the nearest content (default 0.5 since round 10c; a saved value is kept)
+                case "fmv_depth_grid":    pi(k, v, ref _fmv_depth_grid, 0, 2); break;         // round 10c: 0 the 320 grid, 1 the 640 grid on the plain depth (default), 2 guided (Debug)
+                case "fmv_depth_soften":  pf(k, v, ref _fmv_depth_soften, 0f, 1.5f); break;  // round 10c: edge softening, depth texels (default 1.0)
                 case "fmv_depth_smooth":  pf(k, v, ref _fmv_depth_smooth, 0f, 0.95f); break;  // the temporal filter within a shot (default 0.6)
                 case "fmv_depth_median":  pb(k, v, ref _fmv_depth_median); break;            // Debug: the 3x3 median (default 1)
                 case "fmv_depth_edges":   break;                                             // round 6: the old edge fill key (saved as 1 by every earlier build) is ignored: the fill starts off
@@ -1428,6 +1430,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"fmv_depth_amount={_fmv_depth_amount.ToString("F2", ci)}\n" +
             $"fmv_depth_range={_fmv_depth_range.ToString("F1", ci)}\n" +
             $"fmv_depth_pop={_fmv_depth_pop.ToString("F2", ci)}\n" +
+            $"fmv_depth_grid={_fmv_depth_grid}\n" +
+            $"fmv_depth_soften={_fmv_depth_soften.ToString("F1", ci)}\n" +
             $"fmv_depth_smooth={_fmv_depth_smooth.ToString("F2", ci)}\n" +
             $"fmv_depth_median={(_fmv_depth_median ? 1 : 0)}\n" +
             $"fmv_depth_edge_fill={(_fmv_depth_edges ? 1 : 0)}\n" +

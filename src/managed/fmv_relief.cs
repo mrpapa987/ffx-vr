@@ -46,8 +46,8 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _fmv_depth = false;              // ini fmv_depth
     private float _fmv_depth_amount = 1f;          // ini fmv_depth_amount (fmv_depth_strength / 0.08 from an older ini)
     private bool  _fmv_depth_amount_seen = false;  // the ini had fmv_depth_amount: an old fmv_depth_strength line is not migrated over it
-    private float _fmv_depth_range = 3f;           // ini fmv_depth_range (m)
-    private float _fmv_depth_pop = 0.15f;          // ini fmv_depth_pop (m)
+    private float _fmv_depth_range = 10f;          // ini fmv_depth_range (m; 0.5-20, default 10 since round 10c, was 3)
+    private float _fmv_depth_pop = 0.5f;           // ini fmv_depth_pop (m; 0-2, default 0.5 since round 10c, was 0.15)
     private float _fmv_depth_smooth = 0.6f;        // ini fmv_depth_smooth
     private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
     private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Debug; default 0 since round 6: the fill made blocks along silhouettes)
@@ -55,8 +55,8 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _fmv_depth_causal = false;       // Debug, session-only (round 7.4): the old causal filter (EMA) instead of the centred one (A/B)
     private bool  _fmv_depth_old_cuts = false;     // Debug, session-only (round 7.3): every cut starts flat and ramps in over 150 ms, as before (A/B)
     private bool  _fmv_depth_per_frame = false;    // Debug, session-only (round 7): each frame normalised to its own range, as before (A/B)
-    private int   _fmv_depth_grid = 0;             // Debug, session-only (round 10b): 0 round 7's 320 grid, 1 the 640 grid on the plain depth, 2 the guided upsample (flags bits 8-9)
-    private float _fmv_depth_soften = 0f;          // Debug, session-only (round 10b): edge softening, depth texels 0..1.5 (flags bits 10-13, tenths)
+    private int   _fmv_depth_grid = 1;             // ini fmv_depth_grid (round 10c): 0 round 7's 320 grid, 1 the 640 grid on the plain depth (default), 2 the guided upsample (Debug only: streaks) (flags bits 8-9)
+    private float _fmv_depth_soften = 1f;          // ini fmv_depth_soften (round 10c): edge softening, depth texels 0..1.5, default 1.0 (flags bits 10-13, tenths)
     private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
     private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Debug)
@@ -115,8 +115,12 @@ public sealed unsafe partial class FFXVRModule {
         if (!_fmv_depth) return;
         ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("amount##fmv3d", ref _fmv_depth_amount, 0f, 1f, "%.2f");
         ImGui.SameLine(); ImGui.Checkbox("flatten the bottom 15% (subtitles)##fmv3d", ref _fmv_depth_flat_subs);
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("depth range: the farthest, behind the screen##fmv3d", ref _fmv_depth_range, 0.5f, 10f, "%.1f m");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(160); ImGui.SliderFloat("pop-out: the nearest, in front##fmv3d", ref _fmv_depth_pop, 0f, 0.5f, "%.2f m");
+        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("depth range: the farthest, behind the screen##fmv3d", ref _fmv_depth_range, 0.5f, 20f, "%.1f m");
+        ImGui.SameLine(); ImGui.SetNextItemWidth(160); ImGui.SliderFloat("pop-out: the nearest, in front##fmv3d", ref _fmv_depth_pop, 0f, 2f, "%.2f m");
+        ImGui.TextDisabled("grid:"); ImGui.SameLine();
+        ImGui.RadioButton("640 grid, smooth depth (recommended)##fmv3dgrid", ref _fmv_depth_grid, 1); ImGui.SameLine();
+        ImGui.RadioButton("320 grid (round 7)##fmv3dgrid", ref _fmv_depth_grid, 0); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
+        ImGui.SliderFloat("edge softening (depth texels)##fmv3d", ref _fmv_depth_soften, 0f, 1.5f, "%.1f");
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("smoothing (less shimmer, within a shot)##fmv3d", ref _fmv_depth_smooth, 0f, 0.95f, "%.2f");
         fmv3d_limits(out float pop, out float range, out bool pl, out bool rl);
         float ds = Math.Max(_xr_screen_dist, 0.6f);
@@ -134,11 +138,8 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.Checkbox("each frame to its own range (old; A/B)##fmv3d", ref _fmv_depth_per_frame); ImGui.SameLine();
             ImGui.Checkbox("old cut ramp (flat at every cut; A/B)##fmv3d", ref _fmv_depth_old_cuts); ImGui.SameLine();
             ImGui.Checkbox("old causal filter (EMA, lags; A/B)##fmv3d", ref _fmv_depth_causal);
-            ImGui.TextDisabled("FMV 3D grid:"); ImGui.SameLine();
-            ImGui.RadioButton("320 grid (round 7)##fmv3dgrid", ref _fmv_depth_grid, 0); ImGui.SameLine();
-            ImGui.RadioButton("640 grid, smooth depth##fmv3dgrid", ref _fmv_depth_grid, 1); ImGui.SameLine();
-            ImGui.RadioButton("640 grid, guided (round 10)##fmv3dgrid", ref _fmv_depth_grid, 2); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
-            ImGui.SliderFloat("edge softening (depth texels)##fmv3d", ref _fmv_depth_soften, 0f, 1.5f, "%.1f");
+            ImGui.RadioButton("FMV 3D: 640 grid, guided (round 10; experimental: streaks at silhouettes)##fmv3dgrid", ref _fmv_depth_grid, 2);
+            ImGui.SameLine(); ImGui.TextDisabled("(the grid choice in the 3D FMV section returns to the others)");
             ImGui.Checkbox("edge fill (experimental)##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
             ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");

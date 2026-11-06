@@ -199,8 +199,18 @@ streamed out of `data\FFX_Data.vbf` (read only, nothing extracted), decoded by f
 Video-Depth-Anything-**Small** (Apache-2.0) on the GPU. Output: one `<name>.fvd` per video (320x180 a frame, 240x180
 for the 4:3 clips; format in `tools/fmvdepth/FORMAT.md`), `manifest.json` and `convert.log` in
 `<game>\fahrenheit\mods\ffxvr\fmvdepth\`. With F8 > View > `FMVs in 3D (needs converted depth)` (ini `fmv_depth=1`,
-off by default; `fmv_depth_amount`, `fmv_depth_range`, `fmv_depth_pop`, `fmv_depth_smooth`, `fmv_depth_flat_subs`) a converted FMV plays on the virtual screen with real depth in
+off by default; `fmv_depth_amount`, `fmv_depth_range`, `fmv_depth_pop`, `fmv_depth_grid`, `fmv_depth_soften`, `fmv_depth_smooth`, `fmv_depth_flat_subs`) a converted FMV plays on the virtual screen with real depth in
 the headset (stage S3, design-notes "FMV relief screen"); any other FMV stays on the flat screen, and F8 says why.
+
+Recommended relief settings (F8 > View, under `FMVs in 3D`; these are the defaults since 6 Nov 2026, from the owner's own
+tuning on converter v2 files): `amount` 1.00, `depth range` 10 m (ini `fmv_depth_range=10`), `pop-out` 0.5 m
+(`fmv_depth_pop=0.5`), grid `640 grid, smooth depth (recommended)` (`fmv_depth_grid=1`), `edge softening` 1.0 depth texels
+(`fmv_depth_soften=1.0`); `smoothing` 0.36 worked well for him (the default stays 0.6). A larger screen distance (he used
+5.2 m) gives the depth more room: the comfort limits allow more pop-out the further the screen is. The sliders go to 20 m
+and 2 m, but at a near screen the limits cap them (+1 deg in front, -1.5 deg behind) and the line next to the sliders says
+"limited". An ini saved by an older build keeps its own range and pop-out; set them by hand to try these. The
+`320 grid (round 7)` choice shows sharp v2 edges as a staircase; F8 > Debug's `640 grid, guided (round 10)` is
+experimental and streaks at silhouettes.
 
 **The depth is derived from Square Enix's videos: it is made locally, it stays private, and it is never shipped.**
 The folder holds `PRIVATE-do-not-share.txt`; `package-release.ps1` fails on any `.fvd` or `fmvdepth\` path;
