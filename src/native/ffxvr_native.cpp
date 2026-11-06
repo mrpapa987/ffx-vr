@@ -10247,8 +10247,9 @@ static void c3_emit(MkVertex* verts, int& nv, const Marker& m, const float bb[12
 // marker draw. Nothing runs while dmg3d is off: the set is not called and g_dmg_n stays 0.
 // The flat numbers: kept on the panel unless dmg3d_hide2d (its hook at launch); then g_dmg_skip (decided here at begin_frame
 // like C2's skip, read by the main thread) lets the detour take exactly the digits we draw off the queue (ffxvr_dmg_queue).
-// Logging: one dmg3d: line per new number for the first k_dmg_log_n (value, target, the game's anchor and screen point against
-// ours through the game's camera, where the quad was drawn and how big); managed writes the 10 s summary.
+// Logging (both with a diagnostic profile only: dmg3d is on by default): one dmg3d: line per new number for the first k_dmg_log_n
+// (value, target, the game's anchor and screen point against ours through the game's camera, where the quad was drawn and how
+// big); managed writes the 10 s summary.
 static bool g_dmg_on = false; static float g_dmg_size = 1.f, g_dmg_lift = 0.f;
 static dmg::Table g_dmg_T = dmg::table_from(nullptr); static bool g_dmg_T_set = false, g_dmg_T_checked = true;
 static dmg::Node g_dmg_nodes[dmg::k_pool_n]; static int g_dmg_nn = 0, g_dmg_n = 0;   // render thread: the live snapshot (all its nodes; drawable ones)
@@ -10264,9 +10265,11 @@ static DmgPend g_dmg_pend[8]; static int g_dmg_pend_n = 0;
 static dmg::Tracker g_dmg_track;
 static double g_dmg_log_sec_t = 0.0; static int g_dmg_log_sec_n = 0;
 static const int k_dmg_log_n = 40, k_dmg_log_per_s = 4, k_dmg_pend_age = 30;
+static bool g_dmg_log = false;   // the per-number lines: a diagnostic profile only (ffxvr_dmg_cfg bit 2; od-visual review N2)
 
 /// Writes (or drops: the session's first k_dmg_log_n, at most k_dmg_log_per_s a second) one number's line. placed: the 3D result.
 static void dmg_log_number(const DmgPend& p, const char* drawn) {
+    if (!g_dmg_log) return;
     const double t = (double)GetTickCount64() * 0.001;
     if (t - g_dmg_log_sec_t >= 1.0) { g_dmg_log_sec_t = t; g_dmg_log_sec_n = 0; }
     if (g_dmg_cnt[DC_LOGGED] >= (uint32_t)k_dmg_log_n || g_dmg_log_sec_n >= k_dmg_log_per_s) { g_dmg_cnt[DC_LOGDROP]++; return; }
@@ -10401,10 +10404,10 @@ extern "C" __declspec(dllexport) void ffxvr_dmg_set(const dmg::Node* n, int nn, 
     }
     g_dmg_stamp = stamp; g_dmg_have = true;
 }
-/// Render thread: on (dmg3d), the size (dmg3d_scale) and lift (dmg3d_lift, units), and once the 96 bytes of the hop table.
-/// Returns 1 while battle.dds is held (the digits' art).
+/// Render thread: on (dmg3d: bit 1; bit 2: the per-number dmg3d: lines, managed sets it with a diagnostic profile only), the size
+/// (dmg3d_scale) and lift (dmg3d_lift, units), and once the 96 bytes of the hop table. Returns 1 while battle.dds is held (the digits' art).
 extern "C" __declspec(dllexport) int ffxvr_dmg_cfg(int on, float size, float lift, const uint8_t* table) {
-    g_dmg_on = on != 0;
+    g_dmg_on = (on & 1) != 0; g_dmg_log = (on & 2) != 0;
     g_dmg_size = std::isfinite(size) ? (size < 0.3f ? 0.3f : size > 3.f ? 3.f : size) : 1.f;
     g_dmg_lift = std::isfinite(lift) ? (lift < -10.f ? -10.f : lift > 20.f ? 20.f : lift) : 0.f;
     if (table && !g_dmg_T_set) {

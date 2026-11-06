@@ -27,7 +27,8 @@ namespace FFXVR;
 //   placement predicted from the nodes (ffxvr_dmg_queue); on any doubt the queue is left as it is.
 //   Check of the mapping without the hook: at the join the queue's entries of this frame are still in memory (the draw zeroes
 //   only the count), and the same prediction is compared with them (the 10 s line's "queue check").
-// Logging: native writes one dmg3d: line per new number (the first 40); here a dmg3d: line every 10 s in battle while on.
+// Logging: native writes one dmg3d: line per new number (the first 40); here a dmg3d: line every 10 s in battle while on. Both only
+// with a diagnostic profile (diag_any(): dmg3d is on by default, so they would reach every Release log); the hello line always.
 public sealed unsafe partial class FFXVRModule {
     private bool  _dmg3d = true;         // ini dmg3d_on (live; default 1 since the owner's play2 test). The first build's key dmg3d (saved as 0
                                          // by it) is ignored, as fmv_depth_edges was, so the new default reaches an existing ini
@@ -251,7 +252,7 @@ public sealed unsafe partial class FFXVRModule {
         }
         uint frame = FhUtil.get_at<uint>(0x1FCBBF0);
         if (!_dmg_was_on) { _dmg_was_on = true; _dmg_on_frame = frame; _r_dmg_since = 999; }   // switched on: older snapshots never count
-        fixed (byte* t = _dmg_table) _dmg_atlas = _fn_dmg_cfg(1, _dmg_size, _dmg_lift, _dmg_table_ok ? t : null) != 0;
+        fixed (byte* t = _dmg_table) _dmg_atlas = _fn_dmg_cfg(1 | (diag_any() ? 2 : 0), _dmg_size, _dmg_lift, _dmg_table_ok ? t : null) != 0;   // 2: native's per-number lines (a diagnostic profile only)
         dmg_read();
         _r_dmg_since = _r_dmg_seq != 0 && _r_dmg_seq != _r_dmg_prev ? 0 : Math.Min(_r_dmg_since + 1, 999); _r_dmg_prev = _r_dmg_seq;
         uint floor = (int)(_dmg_on_frame - _c2_btl_frame) > 0 ? _dmg_on_frame : _c2_btl_frame;
@@ -265,7 +266,8 @@ public sealed unsafe partial class FFXVRModule {
         return FormattableString.Invariant($"(x {x} y {y} kind {kind} glyph 0x{glyph:X2} rgba {rgba & 0xFF:X2} {(rgba >> 8) & 0xFF:X2} {(rgba >> 16) & 0xFF:X2} {rgba >> 24:X2})");
     }
 
-    /// <summary>The 10 s dmg3d: line (in battle, while on; at most 500 a session) and the first queue mismatches.</summary>
+    /// <summary>The 10 s dmg3d: line (in battle, while on, with a diagnostic profile only: dmg3d is on for every player now, od-visual
+    /// review N2; at most 500 a session) and the first queue mismatches.</summary>
     private void dmg_log_tick() {
         if (_fn_diag_line == null) return;
         if (!_dmg_hello) { _dmg_hello = true; d7_log(I($"dmg3d: on (size {_dmg_size:F2}, lift {_dmg_lift:F1}); the flat numbers {(_dmg_hide2d ? "hidden while the headset shows ours" : "stay on the panel")}; hide hook: {_dmg_hook_status}; hop table {(_dmg_table_ok ? "read" : "NOT read (the checked copy)")}")); }
@@ -274,7 +276,7 @@ public sealed unsafe partial class FFXVRModule {
             DmgMis m = _dmg_mis[_dmg_mis_logged++];
             d7_log(I($"dmg3d: queue check mismatch at game frame {m.stamp} ({(m.from_draw != 0 ? "at the draw" : "after the draw, stale entries")}), entry {m.at}: game {dmg_entry(m.game0, m.game1)} vs predicted {dmg_entry(m.ours0, m.ours1)}"));
         }
-        if (!_c2_in_btl) return;
+        if (!_c2_in_btl || !diag_any()) return;
         double now = ImGui.GetTime();
         if (now - _dmg_line_t < 10.0 || _dmg_lines >= 500) return;
         _dmg_line_t = now; _dmg_lines++;
