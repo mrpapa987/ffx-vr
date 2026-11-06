@@ -171,6 +171,7 @@ public sealed unsafe partial class FFXVRModule {
         o();
         if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Debug: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
         sg_join_install();   // the shadow pool guard, once, on the main thread between frames (shadow_cam.cs)
+        dmg3d_join();        // 3D damage numbers: the nodes the battle UI just drew (dmg3d.cs; one bool read while off)
         if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
     }
     private void h7_rsz(nint self, int w, int h) {

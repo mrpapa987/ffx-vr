@@ -39,6 +39,7 @@
 #include "ffxvr_relief.h"  // fmv-relief (S3): the .fvd reader, the frame selection, the hold / cut ramp, the relief's shape (pure logic)
 #include "ffxvr_eyejump.h" // eye jumps (4.1): the blink on a one-step eye move, the battle heading toward the enemies (pure logic)
 #include "ffxvr_tag.h"     // battle tag: a swap hands the eyes on where the two cross; the eye held on the spot (pure logic)
+#include "ffxvr_dmg3d.h"   // 3D damage numbers (4.2): the node walk, the game's placement and fade, the queue check, the quads (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -1246,6 +1247,7 @@ static inline int uid_slot() { return g_uid_proj == 1 ? 0 : g_uid_proj == 2 ? 1 
 // Cursor stage C2: the game's two battle cursors are skipped while our 3D markers are what the headset shows. g_c2_on comes
 // from managed (cursor_source=game, hooks live, markers on); g_c2_skip is decided once per frame at begin_frame on the render
 // thread and published with an interlocked store; the detours read it on the game's main thread (ffxvr_cursor_skip).
+volatile LONG g_dmg_skip = 0; static void dmg_skip_decide(bool view3d);   // 3D damage numbers (dmg3d, ffxvr_dmg3d.h): the queue-draw detour's skip, decided beside C2's
 bool g_c2_on = false; volatile LONG g_c2_skip = 0; uint32_t g_c2_skip_frames = 0; uint32_t g_c2_nopass = 0; const uint32_t k_c2_nopass = 2;   // C2-8: 3D frames in a row without the UI pass before the skip lets go
 // Cursor stage C3: the game's look. g_c3_look (managed, cursor_look=game) turns on the search for battle.dds among the UI
 // pass's textures: a square power-of-two atlas of 1024 or more whose slot-3 UVs (the CPU's UV stream, exe-verify 6) hold
@@ -5069,7 +5071,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 46;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross)
+constexpr int FFXVR_ABI = 47;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6872,6 +6874,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
         if (!base || g_ui_last_frame_had_pass) g_c2_nopass = 0; else if (g_c2_nopass < 1000) g_c2_nopass++;
         const bool skip = base && g_c2_nopass <= k_c2_nopass;
         InterlockedExchange(&g_c2_skip, skip ? 1 : 0); if (skip) g_c2_skip_frames++;
+        dmg_skip_decide(g_xr_want && xr_active() && g_markers_3d && g_ui_enabled && !g_ovr_suspend && !g_xr_screen_now && !g_screen3d_now);   // 3D damage numbers: the same view rule, for dmg3d_hide2d
     }
     ptr_sprites_release();          // after xr_tick: its markers pass draws the pointer sprites captured this frame (R43)
     fmv_frame();                    // fmv-sync (S2): which video plays and which frame is on screen (read-only; after xr_tick decided the view)
@@ -9943,8 +9946,203 @@ static void c3_emit(MkVertex* verts, int& nv, const Marker& m, const float bb[12
     put(a, c, 0, 0, 0); put(tip, c, 0, 0, 0); put(b, c, 0, 0, 0);      // both windings: no culling surprises
 }
 
+// ---------------------------------------------------------------------------
+// 3D damage numbers (roadmap 4.2; the pure half is ffxvr_dmg3d.h, managed dmg3d.cs; ABI 47; dmg3d=0 by default). Managed reads the
+// game's damage-number nodes on the main thread at the point of the frame where the game has just drawn them (the job join after
+// the battle UI draw, or the queue draw's own detour with dmg3d_hide2d) and hands the latest snapshot over here once per Present
+// (ffxvr_dmg_set, render thread): every node and its target (the game's anchor, roots and screen anchors). The digits are drawn
+// in the marker pass, after the markers: head-facing quads from battle.dds (C3's held atlas), with the game's own hop, fade and
+// colour (dmg::place), at the target's anchor pulled toward the head by C3-13's rule, sized at C3's 14 UI px per unit with the
+// height kept between 1 and 4 degrees (times dmg3d_scale). No depth test, as every marker: the game draws its numbers over
+// everything, and the anchor is inside or on the body (a tested number would lose its lower half in the fiend). The quads are
+// built once per Present (dmg_build, eye 1's billboard frame for both eyes: no stereo shear) and appended to each eye's
+// marker draw. Nothing runs while dmg3d is off: the set is not called and g_dmg_n stays 0.
+// The flat numbers: kept on the panel unless dmg3d_hide2d (its hook at launch); then g_dmg_skip (decided here at begin_frame
+// like C2's skip, read by the main thread) lets the detour take exactly the digits we draw off the queue (ffxvr_dmg_queue).
+// Logging: one dmg3d: line per new number for the first k_dmg_log_n (value, target, the game's anchor and screen point against
+// ours through the game's camera, where the quad was drawn and how big); managed writes the 10 s summary.
+static bool g_dmg_on = false; static float g_dmg_size = 1.f, g_dmg_lift = 0.f;
+static dmg::Table g_dmg_T = dmg::table_from(nullptr); static bool g_dmg_T_set = false, g_dmg_T_checked = true;
+static dmg::Node g_dmg_nodes[dmg::k_pool_n]; static int g_dmg_nn = 0, g_dmg_n = 0;   // render thread: the live snapshot (all its nodes; drawable ones)
+static dmg::Chr g_dmg_chrs[dmg::k_chr_max]; static int g_dmg_nc = 0;
+static uint32_t g_dmg_stamp = 0; static bool g_dmg_have = false;
+static MkVertex g_dmg_verts[dmg::k_max * 12]; static int g_dmg_nv = 0;           // built once per Present, copied into each eye
+static float g_dmg_cam[32] = {};                                                  // the game's camera at the build (log only)
+static uint32_t g_dmg_nopass = 0;
+static uint32_t g_dmg_cnt[18] = {};   // ffxvr_dmg_status: see there
+enum { DC_SETS = 0, DC_LIVE, DC_SNAPS, DC_FRAME, DC_GLYPHS, DC_NOATLAS, DC_BADANCHOR, DC_OVER, DC_SKIPF, DC_NUMBERS, DC_LOGGED, DC_LOGDROP, DC_BUILDS };
+struct DmgPend { dmg::Group g; uint32_t stamp; int age, no; };
+static DmgPend g_dmg_pend[8]; static int g_dmg_pend_n = 0;
+static dmg::Tracker g_dmg_track;
+static double g_dmg_log_sec_t = 0.0; static int g_dmg_log_sec_n = 0;
+static const int k_dmg_log_n = 40, k_dmg_log_per_s = 4, k_dmg_pend_age = 30;
+
+/// Writes (or drops: the session's first k_dmg_log_n, at most k_dmg_log_per_s a second) one number's line. placed: the 3D result.
+static void dmg_log_number(const DmgPend& p, const char* drawn) {
+    const double t = (double)GetTickCount64() * 0.001;
+    if (t - g_dmg_log_sec_t >= 1.0) { g_dmg_log_sec_t = t; g_dmg_log_sec_n = 0; }
+    if (g_dmg_cnt[DC_LOGGED] >= (uint32_t)k_dmg_log_n || g_dmg_log_sec_n >= k_dmg_log_per_s) { g_dmg_cnt[DC_LOGDROP]++; return; }
+    g_dmg_cnt[DC_LOGGED]++; g_dmg_log_sec_n++;
+    const dmg::Chr* c = dmg::chr_of(g_dmg_chrs, g_dmg_nc, p.g.chr);
+    static const char* const k_kind[] = { "damage", "heal", "MP" };
+    char a[360] = "no target read";
+    if (c) {   // the game projects the logic optpos (no 30 Hz correction) lifted by Chr+0x4E8 with its own camera: so do we, for the comparison
+        const float r[3] = { -c->opt[0], -(c->opt[1] - c->h4e8), c->opt[2] }; float px = 0.f, py = 0.f;
+        const bool pr = c->ok && c->src <= 1 && dmg::finite3(r) && dmg::project_ps2(g_dmg_cam, r, &px, &py);
+        snprintf(a, sizeof(a), "anchor game (%.2f %.2f %.2f) idx442 %u%s h4E8 %.2f%s | screen PS2 px: game (%d %d) ours %s(%.1f %.1f) diff (%.1f %.1f)",
+                 c->opt[0], c->opt[1], c->opt[2], c->idx442, c->src == 1 ? " (0xFF: optpos[1], the game uses 0x794AB0)" : c->src == 2 ? " (NO ANCHOR)" : "", c->h4e8,
+                 (c->aflags & 3) ? " (attached / override: no 30 Hz correction)" : "", c->f44, c->f48, pr ? "" : "(not projected) ", px, py, pr ? px - c->f44 : 0.f, pr ? py - c->f48 : 0.f);
+    }
+    diag("dmg3d: #%d %s %u (%d digit%s%s) on chr 0x%02X (%s), game frame %u | %s | %s", p.no, p.g.kind >= 0 && p.g.kind <= 2 ? k_kind[p.g.kind] : "?", p.g.value,
+         p.g.digits, p.g.digits == 1 ? "" : "s", p.g.word ? " + a word, on the panel" : "", p.g.chr, p.g.chr < 0x14 ? "party" : "monster", p.stamp, a, drawn);
+}
+
+/// Render thread, at begin_frame (beside C2's skip): may the main thread's queue-draw detour take the digits off the panel
+/// this frame? Only while we draw them: dmg3d on, the headset showing the 3D view with the UI pass and the 3D markers, the
+/// atlas held and the marker pass working; sticky on the UI pass as C2-8.
+namespace {   // declared in the globals' anonymous namespace (beside g_c2_skip) for begin_frame
+void dmg_skip_decide(bool view3d) {
+    const bool base = g_dmg_on && view3d && g_c3_srv != nullptr && (!g_mk_tried || g_mk_vs != nullptr);
+    if (!base || g_ui_last_frame_had_pass) g_dmg_nopass = 0; else if (g_dmg_nopass < 1000) g_dmg_nopass++;
+    const bool skip = base && g_dmg_nopass <= k_c2_nopass;
+    InterlockedExchange(&g_dmg_skip, skip ? 1 : 0); if (skip) g_dmg_cnt[DC_SKIPF]++;
+}
+}  // namespace
+
+/// Once per Present, before the eyes (draw_markers_both): the digit quads. bb = the billboard frame (right, up, ..., the head centre).
+static void dmg_build(const float bb[12]) {
+    g_dmg_nv = 0; g_dmg_cnt[DC_FRAME] = 0;
+    if (!g_dmg_on || g_dmg_n == 0) return;
+    if (!g_c3_srv) { g_dmg_cnt[DC_NOATLAS]++; return; }
+    g_dmg_cnt[DC_BUILDS]++;
+    const float* right = bb; const float* up = bb + 3; const float* head = bb + 9;
+    const bool flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
+    float A[dmg::k_chr_max][3], S[dmg::k_chr_max], D[dmg::k_chr_max]; bool ok[dmg::k_chr_max];
+    for (int i = 0; i < g_dmg_nc; ++i) {
+        ok[i] = dmg::anchor(g_dmg_chrs[i], g_dmg_lift, A[i]);
+        if (!ok[i]) continue;
+        dmg::pull(A[i], head);
+        const float dx = head[0] - A[i][0], dy = head[1] - A[i][1], dz = head[2] - A[i][2];
+        D[i] = sqrtf(dx * dx + dy * dy + dz * dz); S[i] = dmg::units_per_px(g_dmg_size, D[i]);
+        ok[i] = dmg::finite3(A[i]) && std::isfinite(S[i]);
+    }
+    bool placed[dmg::k_chr_max] = {};
+    for (int i = 0; i < g_dmg_nn; ++i) {
+        const dmg::Node& n = g_dmg_nodes[i];
+        if (!dmg::drawable(n)) continue;
+        int ci = -1; for (int k = 0; k < g_dmg_nc; ++k) if (g_dmg_chrs[k].chr == n.chr) { ci = k; break; }
+        if (ci < 0 || !ok[ci]) { g_dmg_cnt[DC_BADANCHOR]++; continue; }
+        if (g_dmg_nv + 12 > dmg::k_max * 12) { g_dmg_cnt[DC_OVER]++; continue; }
+        const dmg::Quad q = dmg::place(n, g_dmg_T); if (!q.ok) continue;
+        float P[4][3]; dmg::corners(A[ci], right, up, S[ci], q, P);
+        float t[4]; dmg::uv(n.glyph, flip, t);
+        auto put = [&](int k, float u, float v) { MkVertex x = { { P[k][0], P[k][1], P[k][2] }, { q.c[0], q.c[1], q.c[2], q.c[3] }, { u, v, 1.f } }; g_dmg_verts[g_dmg_nv++] = x; };
+        put(0, t[0], t[1]); put(1, t[2], t[1]); put(2, t[0], t[3]);   put(2, t[0], t[3]); put(1, t[2], t[1]); put(3, t[2], t[3]);
+        put(0, t[0], t[1]); put(2, t[0], t[3]); put(1, t[2], t[1]);   put(2, t[0], t[3]); put(3, t[2], t[3]); put(1, t[2], t[1]);   // both windings
+        g_dmg_cnt[DC_FRAME]++; g_dmg_cnt[DC_GLYPHS]++; placed[ci] = true;
+    }
+    for (int p = 0; p < g_dmg_pend_n; ) {   // the new numbers' lines, now that we know where they went
+        int ci = -1; for (int k = 0; k < g_dmg_nc; ++k) if (g_dmg_chrs[k].chr == g_dmg_pend[p].g.chr) { ci = k; break; }
+        if (ci < 0 || !placed[ci]) { ++p; continue; }
+        const float upm = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f);
+        const float hgt = dmg::k_glyph_h * S[ci];
+        char d[320]; snprintf(d, sizeof(d), "3D: drawn at (%.1f %.1f %.1f) render, %.1f units = %.2f m from the head, digit %.2f units = %.3f m tall (%.2f deg; size %.2f, lift %.1f), %.1f units/m",
+                              A[ci][0], A[ci][1], A[ci][2], D[ci], upm > 0.f ? D[ci] / upm : 0.f, hgt, upm > 0.f ? hgt / upm : 0.f, D[ci] > 0.f ? hgt / D[ci] * 57.29578f : 0.f, g_dmg_size, g_dmg_lift, upm);
+        dmg_log_number(g_dmg_pend[p], d);
+        g_dmg_pend[p] = g_dmg_pend[--g_dmg_pend_n];
+    }
+}
+/// Each eye: the digits after the markers (returns the vertices appended).
+static int dmg_emit(MkVertex* verts, int room) {
+    if (g_dmg_nv == 0 || room <= 0) return 0;
+    const int n = g_dmg_nv <= room ? g_dmg_nv : room - room % 12;
+    memcpy(verts, g_dmg_verts, sizeof(MkVertex) * n);
+    return n;
+}
+
+/// Pure: the list walk over a copy of the pool (main thread; ffxvr_dmg3d.h walk). Returns the nodes written.
+extern "C" __declspec(dllexport) int ffxvr_dmg_walk(const uint8_t* pool, uint32_t base, uint32_t head, dmg::Node* out, int max, uint32_t* why) {
+    if (!out || max < 0) { if (why) *why = dmg::W_NOPOOL; return 0; }
+    return dmg::walk(pool, base, head, out, max > (int)dmg::k_pool_n ? (int)dmg::k_pool_n : max, why);
+}
+/// Pure: the queue check against the nodes (compact 0: verify only; 1: also take the drawn digits off, in place, only on a full
+/// match). table = the 96 bytes at 0xC424B0. info[12]: new count (or -1), matched, dropped, expected, at, why, the predicted
+/// entry at a mismatch (4 words). Returns the new count, or -1 when nothing was changed for a doubt.
+extern "C" __declspec(dllexport) int ffxvr_dmg_queue(dmg::Entry* q, int count, int compact, const dmg::Node* n, int nn, const dmg::Chr* c, int nc, const uint8_t* table, uint32_t* info) {
+    const dmg::Table T = dmg::table_from(table);
+    if (!n) nn = 0; if (nn > (int)dmg::k_pool_n) nn = (int)dmg::k_pool_n; if (!c) nc = 0;
+    const dmg::QueueResult r = dmg::queue_check(q, count, compact != 0, n, nn, c, nc, T);
+    if (info) {
+        info[0] = (uint32_t)r.count; info[1] = (uint32_t)r.matched; info[2] = (uint32_t)r.dropped; info[3] = (uint32_t)r.expected; info[4] = (uint32_t)r.at; info[5] = r.why;
+        info[6] = info[7] = info[8] = info[9] = 0;
+        if (r.why == dmg::Q_MISMATCH && r.at >= 0) {   // the prediction the entry at `at` was compared with
+            int j = 0; for (int i = 0; i < nn; ++i) {
+                if (!dmg::visible(n[i])) continue; const dmg::Chr* ci = dmg::chr_of(c, nc, n[i].chr); dmg::Entry e; bool inb = false;
+                if (!ci || !dmg::predict(n[i], T, *ci, &e, &inb) || !inb) continue;
+                if (j++ == (int)r.matched) { memcpy(&info[6], &e, sizeof(e)); break; }
+            }
+        }
+    }
+    return r.count;
+}
+/// Render thread, once per Present while dmg3d is on: the latest snapshot (all its nodes, every target), its game-frame stamp,
+/// the counter now, the floor (the frame dmg3d / the battle began) and the Presents since the snapshot last changed. A snapshot
+/// that is not live (dmg::live) clears the numbers.
+extern "C" __declspec(dllexport) void ffxvr_dmg_set(const dmg::Node* n, int nn, const dmg::Chr* c, int nc, uint32_t stamp, uint32_t frame, uint32_t floor, int since) {
+    g_dmg_cnt[DC_SETS]++;
+    for (int p = 0; p < g_dmg_pend_n; ) {   // numbers never drawn (no atlas, no headset frame...): their line says so
+        if (++g_dmg_pend[p].age <= k_dmg_pend_age) { ++p; continue; }
+        dmg_log_number(g_dmg_pend[p], !g_c3_srv ? "3D: NOT DRAWN (battle.dds not held yet: the number stays on the panel)" : "3D: NOT DRAWN within 30 frames (no headset 3D frame, 3D markers off, or no anchor)");
+        g_dmg_pend[p] = g_dmg_pend[--g_dmg_pend_n];
+    }
+    if (!g_dmg_on || !n || !c || nn < 0 || nc < 0 || !dmg::live(stamp, frame, floor, since)) { g_dmg_nn = g_dmg_nc = g_dmg_n = 0; g_dmg_have = false; return; }
+    g_dmg_cnt[DC_LIVE]++;
+    g_dmg_nn = nn > (int)dmg::k_pool_n ? (int)dmg::k_pool_n : nn; memcpy(g_dmg_nodes, n, sizeof(dmg::Node) * g_dmg_nn);
+    g_dmg_nc = nc > dmg::k_chr_max ? dmg::k_chr_max : nc;        memcpy(g_dmg_chrs, c, sizeof(dmg::Chr) * g_dmg_nc);
+    g_dmg_n = 0; for (int i = 0; i < g_dmg_nn; ++i) if (dmg::drawable(g_dmg_nodes[i]) && g_dmg_nodes[i].slot < dmg::k_pool_n) g_dmg_n++;
+    if (!g_dmg_have || stamp != g_dmg_stamp) {   // a new snapshot: the new numbers in it (for the log)
+        g_dmg_cnt[DC_SNAPS]++;
+        dmg::Group gs[32]; const int ng = dmg::groups(g_dmg_nodes, g_dmg_nn, gs, 32);
+        for (int i = 0; i < ng; ++i) {
+            if (!g_dmg_track.fresh(gs[i])) continue;
+            g_dmg_cnt[DC_NUMBERS]++;
+            if (g_dmg_cnt[DC_LOGGED] + (uint32_t)g_dmg_pend_n >= (uint32_t)k_dmg_log_n) continue;
+            if (g_dmg_pend_n < 8) { DmgPend& p = g_dmg_pend[g_dmg_pend_n++]; p.g = gs[i]; p.stamp = stamp; p.age = 0; p.no = (int)g_dmg_cnt[DC_NUMBERS]; }
+            else g_dmg_cnt[DC_LOGDROP]++;
+        }
+        g_dmg_track.update(g_dmg_nodes, g_dmg_nn);
+    }
+    g_dmg_stamp = stamp; g_dmg_have = true;
+}
+/// Render thread: on (dmg3d), the size (dmg3d_scale) and lift (dmg3d_lift, units), and once the 96 bytes of the hop table.
+/// Returns 1 while battle.dds is held (the digits' art).
+extern "C" __declspec(dllexport) int ffxvr_dmg_cfg(int on, float size, float lift, const uint8_t* table) {
+    g_dmg_on = on != 0;
+    g_dmg_size = std::isfinite(size) ? (size < 0.3f ? 0.3f : size > 3.f ? 3.f : size) : 1.f;
+    g_dmg_lift = std::isfinite(lift) ? (lift < -10.f ? -10.f : lift > 20.f ? 20.f : lift) : 0.f;
+    if (table && !g_dmg_T_set) {
+        g_dmg_T_set = true; g_dmg_T = dmg::table_from(table); g_dmg_T_checked = dmg::table_is_checked(table);
+        diag("dmg3d: the hop table at 0xC424B0 %s", g_dmg_T_checked ? "matches the one checked on 6 Nov" : "DIFFERS from the one checked on 6 Nov (another exe?): its bytes are used as read");
+    }
+    if (!g_dmg_on) { g_dmg_nn = g_dmg_nc = g_dmg_n = 0; g_dmg_have = false; g_dmg_nv = 0; g_dmg_pend_n = 0; }
+    return g_c3_srv ? 1 : 0;
+}
+/// Main thread (the queue-draw detour): may the drawn digits go off the panel this frame (dmg_skip_decide)?
+extern "C" __declspec(dllexport) int ffxvr_dmg_skip() { return static_cast<int>(InterlockedCompareExchange(&g_dmg_skip, 0, 0)); }
+/// Render thread: u[0] on, [1] battle.dds held, [2] sets, [3] live sets, [4] snapshots, [5] digits this frame, [6] digits drawn
+/// (Presents x digits), [7] Presents with digits but no atlas, [8] digits without an anchor, [9] over the cap, [10] frames the panel's
+/// may be hidden, [11] numbers seen, [12] lines written, [13] lines dropped, [14] the hop table as checked, [15] drawable now,
+/// [16] the skip now, [17] builds.
+extern "C" __declspec(dllexport) void ffxvr_dmg_status(uint32_t* u, int n) {
+    if (!u) return;
+    const uint32_t v[18] = { g_dmg_on ? 1u : 0u, g_c3_srv ? 1u : 0u, g_dmg_cnt[DC_SETS], g_dmg_cnt[DC_LIVE], g_dmg_cnt[DC_SNAPS], g_dmg_cnt[DC_FRAME], g_dmg_cnt[DC_GLYPHS],
+                             g_dmg_cnt[DC_NOATLAS], g_dmg_cnt[DC_BADANCHOR], g_dmg_cnt[DC_OVER], g_dmg_cnt[DC_SKIPF], g_dmg_cnt[DC_NUMBERS], g_dmg_cnt[DC_LOGGED], g_dmg_cnt[DC_LOGDROP],
+                             g_dmg_T_checked ? 1u : 0u, (uint32_t)g_dmg_n, (uint32_t)InterlockedCompareExchange(&g_dmg_skip, 0, 0), g_dmg_cnt[DC_BUILDS] };
+    for (int i = 0; i < n && i < 18; ++i) u[i] = v[i];
+}
+
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12]) {
-    if (g_marker_n == 0 || dst == nullptr || !marker_pass_init()) return;
+    if ((g_marker_n == 0 && g_dmg_nv == 0) || dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
     P[0] = 2.f / (f.r - f.l); P[2] = (f.r + f.l) / (f.r - f.l);
@@ -9957,6 +10155,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
         if (with_sprite & (1u << i)) continue;
         c3_emit(verts, nv, g_markers[i], bb);
     }
+    nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
@@ -10023,9 +10222,9 @@ extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_sc
 
 /// Draws the markers into both eye images, each with its own view and FOV.
 static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
-    if (g_marker_n == 0 || !g_cam_valid) return;
+    if ((g_marker_n == 0 && g_dmg_n == 0) || !g_cam_valid) { g_dmg_nv = 0; return; }
     float v[12];
-    { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); }
+    { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); if (g_dmg_n > 0) memcpy(g_dmg_cam, g_cam, sizeof(g_dmg_cam)); }
     float V1[16], V2[16], I[16], Pn[3];
     g_eye_shift = 0.f;   build_override_view(v, V1, I, Pn, false);   // read-only (the markers are drawn at Present)
     g_eye_shift = 1e-6f; build_override_view(v, V2, I, Pn, false);
@@ -10043,6 +10242,8 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
         const float m = g_xr_scale;
         bb[6] = C[0] + fx / fl * 0.5f * m; bb[7] = C[1] - 0.35f * m; bb[8] = C[2] + fz / fl * 0.5f * m;
     }
+    dmg_build(bb);   // 3D damage numbers: once for both eyes
+    if (g_marker_n == 0 && g_dmg_nv == 0) return;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb); }
     if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb); }
