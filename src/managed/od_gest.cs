@@ -109,7 +109,8 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Checkbox("overdrive gestures (the controllers keep working too):", ref _od_gestures);
         if (!_od_gestures) ImGui.BeginDisabled(true);
         ImGui.SameLine(); ImGui.Checkbox("Lulu's Fury: circles##odg", ref _od_gest_lulu);
-        ImGui.SameLine(); ImGui.Checkbox("Tidus's Swordplay: swing (experimental: a miss restarts the bar)##odg", ref _od_gest_tidus);
+        ImGui.SameLine(); ImGui.Checkbox("Tidus's Swordplay: swing (off until you tick it: a miss restarts the bar)##odg", ref _od_gest_tidus);
+        if (!_od_gest_tidus && ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Tick it to swing for Slice & Dice / Spiral Cut: a swing of the right controller presses A once; the light blade and a small copy of the bar show where it lands. Off by default: an early swing restarts the bar.");
         ImGui.SameLine(); ImGui.Checkbox("Auron's Bushido: slashes and punches (experimental)##odg", ref _od_gest_auron);
         ImGui.SameLine(); ImGui.Checkbox("buzz (also on a wrong Bushido input or a Swordplay miss from a button)##odg", ref _od_gest_haptics);
         ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f");
