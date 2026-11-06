@@ -20,7 +20,9 @@ namespace FFXVR;
 // the same hand within 0.3 s is ignored.
 // ini: od_gestures (1), od_gest_lulu (1), od_gest_tidus_swing (0; the old key od_gest_tidus, saved as 1 by the first build,
 // is ignored so the new default reaches every ini), od_gest_auron (0), od_gest_haptics (1), od_circle_cm (1-20; 4),
-// od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0).
+// od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0), od_visuals (1) and od_visual_size (0.5-2; 1): the
+// overdrive visuals (native ffxvr_odvis.h: trails, bursts, Lulu's ring and spin count, Tidus's blade and bar, Auron's input row),
+// drawn near the hands in the headset only while that overdrive's window is open with its gestures on.
 public sealed unsafe partial class FFXVRModule {
     private bool  _od_gestures = true, _od_gest_lulu = true, _od_gest_tidus = false, _od_gest_auron = false, _od_gest_haptics = true;
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
@@ -28,14 +30,18 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
+    private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
+    private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
+    private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_odg_text;
     private static readonly string[] k_odg_stick = { "right stick", "left stick", "both sticks" };
 
     private void odg_bind(Func<string, nint> req) {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
+        _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
     }
-    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; }
+    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; }
     private bool odg_parse(string k, string v) {
         switch (k) {
             case "od_gestures":     pb(k, v, ref _od_gestures); return true;
@@ -47,6 +53,8 @@ public sealed unsafe partial class FFXVRModule {
             case "od_circle_cm":    pf(k, v, ref _od_circle_cm, 1f, 20f); return true;
             case "od_slash_speed":  pf(k, v, ref _od_slash_speed, 0.8f, 5f); return true;
             case "od_lulu_stick":   pe(k, v, ref _od_lulu_stick, 0, 1, 2); return true;
+            case "od_visuals":      pb(k, v, ref _od_visuals); return true;
+            case "od_visual_size":  pf(k, v, ref _od_visual_size, 0.5f, 2f); return true;
             default: return false;
         }
     }
@@ -60,13 +68,16 @@ public sealed unsafe partial class FFXVRModule {
             $"od_gest_haptics={(_od_gest_haptics ? 1 : 0)}\n" +
             $"od_circle_cm={_od_circle_cm.ToString("0.#", ci)}\n" +
             $"od_slash_speed={_od_slash_speed.ToString("0.##", ci)}\n" +
-            $"od_lulu_stick={_od_lulu_stick.ToString(ci)}\n";
+            $"od_lulu_stick={_od_lulu_stick.ToString(ci)}\n" +
+            $"od_visuals={(_od_visuals ? 1 : 0)}\n" +
+            $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n";
     }
     /// <summary>Every frame from push_all: the settings; the Debug test aid.</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
+        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size);
         odg_always_tick();
     }
     /// <summary>The test aid (design 4.3 step 6): Btl + 0x28 (debug flags) + 0x14 = VA 0x112A90C, the game's own "overdrive always
@@ -108,6 +119,9 @@ public sealed unsafe partial class FFXVRModule {
             for (int i = 0; i < 3; i++) if (ImGui.Selectable(k_odg_stick[i], i == _od_lulu_stick)) _od_lulu_stick = i;
             ImGui.EndCombo();
         }
+        ImGui.Checkbox("overdrive visuals##odv", ref _od_visuals);
+        if (_od_visuals) { ImGui.SameLine(); ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("visual size##odv", ref _od_visual_size, 0.5f, 2f, "%.1f"); }
+        ImGui.SameLine(); ImGui.TextDisabled("near the hands, in the headset: Fury a ring and the spins; Swordplay a light blade and the bar; Bushido the inputs ahead");
         if (!_od_gestures) ImGui.EndDisabled();
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }

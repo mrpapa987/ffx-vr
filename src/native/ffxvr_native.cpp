@@ -41,6 +41,7 @@
 #include "ffxvr_tag.h"     // battle tag: a swap hands the eyes on where the two cross; the eye held on the spot (pure logic)
 #include "ffxvr_dmg3d.h"   // 3D damage numbers (4.2): the node walk, the game's placement and fade, the queue check, the quads (pure logic)
 #include "ffxvr_odgest.h"  // overdrive gestures (4.3): Lulu's circles, Auron's slashes and punches, Tidus's swing (pure logic)
+#include "ffxvr_odvis.h"   // overdrive visuals: trails, bursts, Lulu's ring, Tidus's blade and bar, Auron's glyph row (pure geometry)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -5114,7 +5115,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 48;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47)
+constexpr int FFXVR_ABI = 49;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6023,6 +6024,9 @@ static void od_frame(uintptr_t base, LONG bst, double now) {
 // Auron's expected sequence as raw values when its window opens, each gesture and
 // what was sent, each new press the game saw (u16 0x25D09D4; the bit -> button map for stage 2), the summary at the close.
 static odg::Driver g_odg;
+// Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
+// from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
+static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.f;
 static uint32_t g_odg_lines = 0;
 static char g_odg_last_line[700] = "";   // the last summary (F8)
 static uint16_t g_odg_seq[odg::k_seq_max]; static int g_odg_seq_n = 0; static uint32_t g_odg_seq_ptr = 0; static int32_t g_odg_seq_len = -1;
@@ -6093,6 +6097,16 @@ static void od_gest_tick() {
     else if (o.press) { g_odg_press_t0 = static_cast<LONG>(GetTickCount()); g_odg_press_polls = 0; InterlockedExchange(&g_odg_press, static_cast<LONG>(o.press)); }
     g_odg_tick = static_cast<LONG>(GetTickCount());
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
+    if (g_odv_on && o.inject != odg::OD_NONE && o.inject == w) {   // the visuals' events: a burst a gesture (green sent, grey refused), Tidus's mark
+        for (int h = 0; h < 2; ++h) {
+            if (o.fired[h] != odg::C_NONE) {
+                g_odv.flash(in.p[h], o.queued[h], in.t);
+                if (w == odg::OD_TIDUS && o.fired[h] == odg::C_SWING) g_odv.swing(in.t, odv::bar_x(in.r.cursor, in.x.tidus_start, in.x.tidus_len), od::in_zone(in.r));
+            }
+            else if (o.refused[h]) g_odv.flash(in.p[h], false, in.t);
+        }
+        if (o.spin) { const int lh = g_odg.mix.lead < 0 ? 1 : g_odg.mix.lead; g_odv.flash(in.p[lh], true, in.t, 0.01f); }
+    }
     // the lines
     for (int h = 0; h < 2; ++h) {
         if (o.fired[h] == odg::C_NONE || (w != odg::OD_AURON && w != odg::OD_TIDUS) || !odg_line_ok()) continue;
@@ -6144,6 +6158,12 @@ extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, 
     c.on = (flags & 1) != 0; c.lulu = (flags & 2) != 0; c.auron = (flags & 4) != 0; c.tidus = (flags & 8) != 0; c.haptics = (flags & 16) != 0;
     c.circle_r = odg::clampf(circle_cm, 1.f, 20.f) * 0.01f; c.slash_speed = odg::clampf(slash_speed, 0.8f, 5.f);
     c.lulu_stick = lulu_stick < 0 || lulu_stick > 2 ? 0 : lulu_stick; g_odg_lulu_stick = c.lulu_stick;
+}
+/// Overdrive visuals (ABI 49): ini od_visuals (on) and od_visual_size (0.5-2), every frame from managed's push (render thread).
+/// Returns 1 while battle.dds is held (Lulu's spin count as digits; dots otherwise).
+extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size) {
+    g_odv_on = on != 0; g_odv_size = std::isfinite(size) ? odg::clampf(size, 0.5f, 2.f) : 1.f;
+    return g_c3_srv ? 1 : 0;
 }
 /// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
 /// expected sequence (raw); 3: a warning ("" none: a hand's poses mostly inferred in the open window). Returns the length written.
@@ -9967,7 +9987,8 @@ ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3
 ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr; ID3D11SamplerState* g_mk_smp = nullptr;
 bool g_mk_tried = false;
 struct MkVertex { float p[3]; float c[4]; float t[3]; };
-static const int k_mk_max_verts = 32 * 48;
+static const int k_mk_max_verts = 32 * 48 + odv::k_max_verts;   // the markers and the damage numbers (1536), the overdrive visuals (3072)
+static_assert(sizeof(MkVertex) == sizeof(odv::Vtx), "odv::Vtx is the marker vertex");
 
 static bool marker_pass_init() {
     if (g_mk_tried) return g_mk_vs != nullptr;
@@ -10356,21 +10377,87 @@ extern "C" __declspec(dllexport) void ffxvr_dmg_status(uint32_t* u, int n) {
     for (int i = 0; i < n && i < 18; ++i) u[i] = v[i];
 }
 
+// -- overdrive visuals (ffxvr_odvis.h): built once a Present, after the views (draw_markers_both), drawn after the markers ------
+static odv::Vtx g_odv_raw[odv::k_max_verts]; static MkVertex g_odv_mk[odv::k_max_verts]; static int g_odv_nv = 0;   // render thread only
+static uint32_t g_odv_frames = 0, g_odv_verts_max = 0, g_odv_dropped = 0;
+/// The visuals' clock: the poses' time (the gesture driver's), else QPC.
+static double odv_now() {
+    if (g_vrpad.time > 0) return static_cast<double>(g_vrpad.time) * 1e-9;
+    LARGE_INTEGER q; QueryPerformanceCounter(&q); return g_qpf.QuadPart ? static_cast<double>(q.QuadPart) / static_cast<double>(g_qpf.QuadPart) : 0.0;
+}
+/// Anything of the visuals to draw now (a window open with its gestures on, a fade, a burst): the headset only.
+static bool odv_wanted() {
+    if (!g_odv_on || !g_xr_active) return false;
+    return (g_odg.open && g_odg.inject_now != odg::OD_NONE && g_odg.inject_now == g_odg.sess.od) || g_odv.active(odv_now());
+}
+/// Builds this Present's geometry in the XR space of the poses and maps it to render space with the VR hands' map (the base the
+/// view just built published: w = P + Rb^T (sc r + mv') + (0, dy, 0), r = the point relative to the recentred reference, minus
+/// the head with head_position off, as hands_draw_frame places the hands). Render thread, from draw_markers_both.
+static void odv_build() {
+    g_odv_nv = 0;
+    odv::In in; in.t = odv_now(); in.on = g_odv_on && g_xr_active; in.size = g_odv_size;
+    const odg::Driver& d = g_odg;
+    in.win = d.open ? d.sess.od : odg::OD_NONE; in.inject = d.open && d.inject_now != odg::OD_NONE && d.inject_now == in.win;
+    for (int h = 0; h < 2; ++h) {
+        const XrHand& hd = g_vrpad.hand[h]; odv::HandIn& o = in.hand[h];
+        o.ok = g_vrpad.ready && hd.grip_valid && hd.grip_tracked; o.p = odg::v3(hd.grip_p[0], hd.grip_p[1], hd.grip_p[2]); memcpy(o.q, hd.grip_q, sizeof(o.q));
+        o.aim_ok = o.ok && hd.aim_valid; o.aim_p = odg::v3(hd.aim_p[0], hd.aim_p[1], hd.aim_p[2]); memcpy(o.aim_q, hd.aim_q, sizeof(o.aim_q));
+    }
+    in.eye = odg::v3(g_xr_raw_p[0], g_xr_raw_p[1], g_xr_raw_p[2]); memcpy(in.head_q, g_xr_raw_q, sizeof(in.head_q));
+    const bool fresh = g_odg_blk_frame != 0xFFFFFFFFu && g_frames - g_odg_blk_frame <= 2u;
+    const odg::Extra x = fresh ? odg::parse_extra(g_odg_blk) : odg::Extra{};
+    if (in.win == odg::OD_LULU) {
+        in.lead = d.mix.lead < 0 ? 1 : d.mix.lead;
+        const odg::Circle& c = d.circ[in.lead];
+        in.ring_ok = c.have_c && c.r_len >= 0.5f * d.cc.r_min && odg::len(c.n_acc) > 1e-9f;
+        in.c = c.c; in.n = c.n_acc; in.radius = c.r_len; in.hist_n = x.lulu_hist_n;
+        in.spins = d.sess.sub0 >= 0 ? ((static_cast<int>(d.sub) - d.sess.sub0) & 0xFF) : 0;
+        in.atlas = g_c3_srv != nullptr; in.flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
+    }
+    else if (in.win == odg::OD_TIDUS) { in.cursor = g_od.cursor; in.zone_lo = g_od.zone_lo; in.zone_hi = g_od.zone_hi; in.start = x.tidus_start; in.blen = x.tidus_len; }
+    else if (in.win == odg::OD_AURON) { in.seq_n = g_odg_seq_n; memcpy(in.seq, g_odg_seq, sizeof(in.seq)); in.prog = x.auron_prog; }
+    odv::Out o; o.v = g_odv_raw; o.max = odv::k_max_verts;
+    g_odv.build(in, o);
+    g_odv_dropped += static_cast<uint32_t>(o.dropped);
+    if (o.n == 0) return;
+    float RbT[9]; for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) RbT[c * 3 + r] = g_hb_Rb[r * 3 + c];
+    const float ref_inv[4] = { -g_xr_ref_q[0], -g_xr_ref_q[1], -g_xr_ref_q[2], g_xr_ref_q[3] };
+    const float sc = g_hb_sc;
+    for (int i = 0; i < o.n; ++i) {
+        const odv::Vtx& v = g_odv_raw[i]; MkVertex& m = g_odv_mk[i];
+        const float dp[3] = { v.p[0] - g_xr_ref_p[0], v.p[1] - g_xr_ref_p[1], v.p[2] - g_xr_ref_p[2] };
+        float r[3]; quat_rotate(ref_inv, dp, r);
+        if (!g_xr_translate) for (int k = 0; k < 3; ++k) r[k] -= g_xr_p[k];
+        const float a[3] = { sc * r[0] + g_hb_mv[0], sc * r[1] + g_hb_mv[1], sc * r[2] + g_hb_mv[2] };
+        for (int k = 0; k < 3; ++k) m.p[k] = g_hb_P[k] + RbT[k * 3 + 0] * a[0] + RbT[k * 3 + 1] * a[1] + RbT[k * 3 + 2] * a[2];
+        m.p[1] += g_hb_dy;
+        memcpy(m.c, v.c, sizeof(m.c)); memcpy(m.t, v.t, sizeof(m.t));
+    }
+    g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);
+}
+static int odv_emit(MkVertex* verts, int room) {
+    if (g_odv_nv == 0 || room <= 0) return 0;
+    const int n = g_odv_nv <= room ? g_odv_nv : room - room % 3;
+    memcpy(verts, g_odv_mk, sizeof(MkVertex) * n);
+    return n;
+}
+
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12]) {
-    if ((g_marker_n == 0 && g_dmg_nv == 0) || dst == nullptr || !marker_pass_init()) return;
+    if ((g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0) || dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
     P[0] = 2.f / (f.r - f.l); P[2] = (f.r + f.l) / (f.r - f.l);
     P[5] = 2.f / (f.u - f.d); P[6] = (f.u + f.d) / (f.u - f.d);
     P[10] = -1.f; P[14] = -1.f;
     float VP[16]; mul4(P, V, VP);
-    const uint32_t with_sprite = draw_ptr_sprites_eye(dst, w, h, VP);   // the game's own pointer art, where it has been captured
+    const uint32_t with_sprite = g_markers_3d ? draw_ptr_sprites_eye(dst, w, h, VP) : 0u;   // the game's own pointer art, where it has been captured
     static MkVertex verts[k_mk_max_verts]; int nv = 0;   // render thread only (static: 40 B x 1536 off the stack)
-    for (int i = 0; i < g_marker_n && nv + 12 <= k_mk_max_verts; ++i) {
+    for (int i = 0; g_markers_3d && i < g_marker_n && nv + 12 <= k_mk_max_verts; ++i) {   // (the pass may run for the overdrive visuals alone)
         if (with_sprite & (1u << i)) continue;
         c3_emit(verts, nv, g_markers[i], bb);
     }
-    nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
+    if (g_markers_3d) nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
+    nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals, last (their own 3072)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
@@ -10437,7 +10524,9 @@ extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_sc
 
 /// Draws the markers into both eye images, each with its own view and FOV.
 static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
-    if ((g_marker_n == 0 && g_dmg_n == 0) || !g_cam_valid) { g_dmg_nv = 0; return; }
+    const bool odv = odv_wanted();   // the overdrive visuals may run this pass alone (markers off, nothing marked)
+    g_odv_nv = 0;
+    if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv) || !g_cam_valid) { g_dmg_nv = 0; return; }
     float v[12];
     { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); if (g_dmg_n > 0) memcpy(g_dmg_cam, g_cam, sizeof(g_dmg_cam)); }
     float V1[16], V2[16], I[16], Pn[3];
@@ -10457,8 +10546,9 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
         const float m = g_xr_scale;
         bb[6] = C[0] + fx / fl * 0.5f * m; bb[7] = C[1] - 0.35f * m; bb[8] = C[2] + fz / fl * 0.5f * m;
     }
-    dmg_build(bb);   // 3D damage numbers: once for both eyes
-    if (g_marker_n == 0 && g_dmg_nv == 0) return;
+    if (g_markers_3d) dmg_build(bb); else g_dmg_nv = 0;   // 3D damage numbers: once for both eyes
+    if (odv) odv_build();   // the overdrive visuals: once for both eyes, with the base the eye-1 view just published (g_hb_*)
+    if ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0) return;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb); }
     if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb); }
@@ -14036,7 +14126,7 @@ static void xr_tick() {
     g_ui_early = false; g_ui_early_keep = false; g_ui_early_report = g_ui_early_draws; g_ui_early_draws = 0;
     if (ui_frame) {
         e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex;
-        if (g_markers_3d) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);
+        if (g_markers_3d || g_odv_on) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);   // (+ the overdrive visuals)
     }
     else if (g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);

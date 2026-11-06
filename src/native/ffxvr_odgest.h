@@ -85,15 +85,15 @@ inline int inject_gate(int win, const Cfg& c, bool headset, bool vrpad) {
 struct Extra {
     int16_t auron_prog = 0; int32_t auron_len = 0; uint32_t auron_ptr = 0;   // 0x133D6FC, 0x133D700, 0x133D704 (-> u16[len])
     uint8_t lulu_sub = 0, lulu_cnt = 0, lulu_hist_n = 0;                    // 0x133D71E spins, 0x133D71F the counter, 0x133D731 recorded quadrants
-    int16_t tidus_start = 0, tidus_vel = 0;                                 // 0x133D736 the bar's start, 0x133D744 the cursor's velocity
+    int16_t tidus_start = 0, tidus_vel = 0, tidus_len = 0;                  // 0x133D736 the bar's start, 0x133D744 the cursor's velocity, 0x133D73A the bar's length
 };
-constexpr int k_x_prog = 0x0A, k_x_len = 0x0E, k_x_ptr = 0x12, k_x_sub = 0x2C, k_x_cnt = 0x2D, k_x_hist_n = 0x3F, k_x_tstart = 0x44, k_x_tvel = 0x52;
+constexpr int k_x_prog = 0x0A, k_x_len = 0x0E, k_x_ptr = 0x12, k_x_sub = 0x2C, k_x_cnt = 0x2D, k_x_hist_n = 0x3F, k_x_tstart = 0x44, k_x_tvel = 0x52, k_x_tlen = 0x48;
 static_assert(k_x_tvel + 2 <= static_cast<int>(od::k_blk_len), "inside the od block");
 inline Extra parse_extra(const uint8_t* b) {
     Extra e;
     e.auron_prog = od::s16_at(b, k_x_prog); e.auron_len = od::s32_at(b, k_x_len); e.auron_ptr = static_cast<uint32_t>(od::s32_at(b, k_x_ptr));
     e.lulu_sub = b[k_x_sub]; e.lulu_cnt = b[k_x_cnt]; e.lulu_hist_n = b[k_x_hist_n];
-    e.tidus_start = od::s16_at(b, k_x_tstart); e.tidus_vel = od::s16_at(b, k_x_tvel);
+    e.tidus_start = od::s16_at(b, k_x_tstart); e.tidus_vel = od::s16_at(b, k_x_tvel); e.tidus_len = od::s16_at(b, k_x_tlen);
     return e;
 }
 constexpr int k_seq_max = 32;   // Auron's sequence is read only when 1 <= length <= this
@@ -109,6 +109,7 @@ inline bool seq_len_ok(int32_t n) { return n >= 1 && n <= k_seq_max; }
 struct CircleCfg { float r_min = 0.04f, centre_tau = 0.35f, normal_tau = 0.25f, coherence = 0.6f, max_step = 1.745f, max_speed = 8.f, min_rate = 1.f; };
 struct Circle {
     bool have_c = false, have_prev = false, circling = false; V3 c, prev, n_acc, last_p; float mag_acc = 0.f; double t = 0.0;
+    float r_len = 0.f;   // the last radius (m): the visuals' ring
     float turns = 0.f;   // the turns this hand gave the output (kept by lose(); a window's reset clears it)
     void lose() { have_c = have_prev = circling = false; n_acc = V3{}; mag_acc = 0.f; }
     /// One sample (p: the grip position, m; t_s: seconds). Returns the signed angle step to add (radians; 0 when not circling).
@@ -120,7 +121,8 @@ struct Circle {
         if (!have_c) { have_c = true; c = p; have_prev = circling = false; n_acc = V3{}; mag_acc = 0.f; return 0.f; }
         c = c + (p - c) * static_cast<float>(1.0 - std::exp(-dt / k.centre_tau));
         const V3 r = p - c;
-        if (len(r) < k.r_min) { have_prev = circling = false; return 0.f; }
+        r_len = len(r);
+        if (r_len < k.r_min) { have_prev = circling = false; return 0.f; }
         if (!have_prev) { prev = r; have_prev = true; return 0.f; }
         const V3 cr = cross(prev, r);
         const float b = static_cast<float>(1.0 - std::exp(-dt / k.normal_tau));
@@ -484,6 +486,8 @@ struct FrameOut {
     bool tidus_restart = false;                         // Tidus: the bar restarted this tick (a press outside the zone, ours or a button)
     bool clash[2] = { false, false };                   // a punch dropped: that hand's quick squeeze already sent the shoulder
     bool learned = false;                               // Auron: the learned map changed this tick (logged)
+    bool spin = false;                                  // Lulu: the game counted a spin this tick (the visuals' flash)
+    bool refused[2] = { false, false };                 // a deliberate stroke was refused this tick (diagonal, mixed, pulled back, the bring-back, a reach up)
     bool disagree = false;                              // ... and the value differs from k_auron_map (logged as a disagreement)
     void pulse(int hand, float amp, float sec) { if (nh < 6) { hap[nh].hand = hand; hap[nh].amp = amp; hap[nh].sec = sec; nh++; } }
 };
@@ -561,7 +565,7 @@ struct Driver {
             }
             if (inj == OD_LULU && in.t - circ_t < k_stick_linger) { o.stick_on = true; o.target = mix.published(); }
             const int lh = mix.lead < 0 ? 1 : mix.lead;
-            if (in.x.lulu_sub != sub) { sub = in.x.lulu_sub; if (hap) o.pulse(lh, 0.3f, 0.015f); }
+            if (in.x.lulu_sub != sub) { sub = in.x.lulu_sub; o.spin = true; if (hap) o.pulse(lh, 0.3f, 0.015f); }
             if (in.x.lulu_cnt != cnt) { cnt = in.x.lulu_cnt; if (hap) o.pulse(lh, 0.6f, 0.04f); }
             sess.sub1 = sub; sess.cnt1 = cnt;
         }
@@ -581,7 +585,11 @@ struct Driver {
                     if (inj == w && cls == C_THRUST && shoulder_clash(in.t, in.squeeze_t[h])) { o.clash[h] = true; sess.clashes++; }
                     else if (inj == w && q.push(b, h, in.t)) { o.queued[h] = true; if (hap) o.pulse(h, 0.5f, 0.025f); }
                 }
-                else if ((ev & EV_END) && st[h].last_why > R_SENT && st[h].last_why < R_N) sess.why_n[st[h].last_why]++;
+                else if ((ev & EV_END) && st[h].last_why > R_SENT && st[h].last_why < R_N) {
+                    sess.why_n[st[h].last_why]++;
+                    const int y = st[h].last_why;
+                    o.refused[h] = y == R_DIAGONAL || y == R_MIXED || y == R_BACK || y == R_RETURN || y == R_UP;
+                }
             }
             if (w == OD_AURON) {
                 sess.len = in.x.auron_len;
