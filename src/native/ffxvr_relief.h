@@ -593,9 +593,9 @@ inline void snap_out(const uint16_t* in, uint16_t* out, uint32_t w, uint32_t h, 
         for (uint32_t x = 0; x < w; ++x) {
             int a3 = 65535, b3 = 0, a5 = 65535, b5 = 0;
             for (int d = -2; d <= 2; ++d) {
-                const int xx = std::min(std::max(static_cast<int>(x) + d, 0), static_cast<int>(w) - 1); const int v = r[xx];
-                a5 = std::min(a5, v); b5 = std::max(b5, v);
-                if (d >= -1 && d <= 1) { a3 = std::min(a3, v); b3 = std::max(b3, v); }
+                const int xx = (std::min)((std::max)(static_cast<int>(x) + d, 0), static_cast<int>(w) - 1); const int v = r[xx];
+                a5 = (std::min)(a5, v); b5 = (std::max)(b5, v);
+                if (d >= -1 && d <= 1) { a3 = (std::min)(a3, v); b3 = (std::max)(b3, v); }
             }
             const size_t k = static_cast<size_t>(y) * w + x;
             mn3[k] = static_cast<uint16_t>(a3); mx3[k] = static_cast<uint16_t>(b3); mn5[k] = static_cast<uint16_t>(a5); mx5[k] = static_cast<uint16_t>(b5);
@@ -605,9 +605,9 @@ inline void snap_out(const uint16_t* in, uint16_t* out, uint32_t w, uint32_t h, 
     for (uint32_t y = 0; y < h; ++y) for (uint32_t x = 0; x < w; ++x) {   // down, then the rule
         int a3 = 65535, b3 = 0, a5 = 65535, b5 = 0;
         for (int d = -2; d <= 2; ++d) {
-            const size_t k = static_cast<size_t>(std::min(std::max(static_cast<int>(y) + d, 0), static_cast<int>(h) - 1)) * w + x;
-            a5 = std::min(a5, static_cast<int>(mn5[k])); b5 = std::max(b5, static_cast<int>(mx5[k]));
-            if (d >= -1 && d <= 1) { a3 = std::min(a3, static_cast<int>(mn3[k])); b3 = std::max(b3, static_cast<int>(mx3[k])); }
+            const size_t k = static_cast<size_t>((std::min)((std::max)(static_cast<int>(y) + d, 0), static_cast<int>(h) - 1)) * w + x;
+            a5 = (std::min)(a5, static_cast<int>(mn5[k])); b5 = (std::max)(b5, static_cast<int>(mx5[k]));
+            if (d >= -1 && d <= 1) { a3 = (std::min)(a3, static_cast<int>(mn3[k])); b3 = (std::max)(b3, static_cast<int>(mx3[k])); }
         }
         const size_t k = static_cast<size_t>(y) * w + x;
         const int v = in[k], r3 = b3 - a3, r5 = b5 - a5;
@@ -629,13 +629,13 @@ template <class L> inline float jbu_ref(const float* sn, const float* orig, cons
     const float ox = (static_cast<float>(i) + 0.5f) / static_cast<float>(k_up * w), oy = (static_cast<float>(j) + 0.5f) / static_cast<float>(k_up * h);
     const float px = ox * w - 0.5f, py = oy * h - 0.5f;
     const int bx = static_cast<int>(floorf(px + 0.5f)), by = static_cast<int>(floorf(py + 0.5f));
-    auto at = [&](const float* a, int x, int y) { return a[static_cast<size_t>(std::min(std::max(y, 0), static_cast<int>(h) - 1)) * w + std::min(std::max(x, 0), static_cast<int>(w) - 1)]; };
+    auto at = [&](const float* a, int x, int y) { return a[static_cast<size_t>((std::min)((std::max)(y, 0), static_cast<int>(h) - 1)) * w + (std::min)((std::max)(x, 0), static_cast<int>(w) - 1)]; };
     float mn = 1.f, mx = 0.f;
-    for (int dj = -k_jbu_r; dj <= k_jbu_r; ++dj) for (int di = -k_jbu_r; di <= k_jbu_r; ++di) { const float d = at(sn, bx + di, by + dj); mn = std::min(mn, d); mx = std::max(mx, d); }
+    for (int dj = -k_jbu_r; dj <= k_jbu_r; ++dj) for (int di = -k_jbu_r; di <= k_jbu_r; ++di) { const float d = at(sn, bx + di, by + dj); mn = (std::min)(mn, d); mx = (std::max)(mx, d); }
     const float mid = 0.5f * (mn + mx);
     double S[2] = { 0, 0 }, D[2] = { 0, 0 }, G[2] = { 0, 0 }, C[2] = { 0, 0 };   // [1] the near layer
     for (int dj = -k_jbu_r; dj <= k_jbu_r; ++dj) for (int di = -k_jbu_r; di <= k_jbu_r; ++di) {
-        const int qx = std::min(std::max(bx + di, 0), static_cast<int>(w) - 1), qy = std::min(std::max(by + dj, 0), static_cast<int>(h) - 1);
+        const int qx = (std::min)((std::max)(bx + di, 0), static_cast<int>(w) - 1), qy = (std::min)((std::max)(by + dj, 0), static_cast<int>(h) - 1);
         const float d = at(sn, qx, qy), dx = qx - px, dy = qy - py;
         const double s = exp(-(dx * dx + dy * dy) / (2.0 * k_jbu_sigma_s * k_jbu_sigma_s));
         const int l = d > mid ? 1 : 0;
@@ -646,7 +646,7 @@ template <class L> inline float jbu_ref(const float* sn, const float* orig, cons
     const float lin = (at(orig, x0, y0) * (1 - fx) + at(orig, x0 + 1, y0) * fx) * (1 - fy) + (at(orig, x0, y0 + 1) * (1 - fx) + at(orig, x0 + 1, y0 + 1) * fx) * fy;
     if (S[1] <= 0.0 || S[0] <= 0.0) return lin;
     for (int l = 0; l < 2; ++l) { D[l] /= S[l]; G[l] /= C[l]; }
-    const double lp = luma(ox, oy), e0 = (lp - G[0]) * (lp - G[0]), e1 = (lp - G[1]) * (lp - G[1]), m = std::min(e0, e1);
+    const double lp = luma(ox, oy), e0 = (lp - G[0]) * (lp - G[0]), e1 = (lp - G[1]) * (lp - G[1]), m = (std::min)(e0, e1);
     const double k = 1.0 / (2.0 * k_jbu_sigma_r * k_jbu_sigma_r);
     const double w0 = S[0] * exp(-(e0 - m) * k), w1 = S[1] * exp(-(e1 - m) * k);   // relative to the nearer layer: never both 0
     const double lay = (w0 * D[0] + w1 * D[1]) / (w0 + w1);
