@@ -9952,7 +9952,8 @@ static void c3_emit(MkVertex* verts, int& nv, const Marker& m, const float bb[12
 // the battle UI draw, or the queue draw's own detour with dmg3d_hide2d) and hands the latest snapshot over here once per Present
 // (ffxvr_dmg_set, render thread): every node and its target (the game's anchor, roots and screen anchors). The digits are drawn
 // in the marker pass, after the markers: head-facing quads from battle.dds (C3's held atlas), with the game's own hop, fade and
-// colour (dmg::place), at the target's anchor pulled toward the head by C3-13's rule, sized at C3's 14 UI px per unit with the
+// colour (dmg::place), at the target's anchor pulled toward the head by C3-13's rule (first person's own actor: C3's self spot,
+// 0.5 m ahead at chest height, dmg::site), sized at C3's 14 UI px per unit with the
 // height kept between 1 and 4 degrees (times dmg3d_scale). No depth test, as every marker: the game draws its numbers over
 // everything, and the anchor is inside or on the body (a tested number would lose its lower half in the fiend). The quads are
 // built once per Present (dmg_build, eye 1's billboard frame for both eyes: no stereo shear) and appended to each eye's
@@ -10019,9 +10020,8 @@ static void dmg_build(const float bb[12]) {
     const bool flip = (g_c3_vflip != 0) != ((g_c3_flags & 1) != 0);
     float A[dmg::k_chr_max][3], S[dmg::k_chr_max], D[dmg::k_chr_max]; bool ok[dmg::k_chr_max];
     for (int i = 0; i < g_dmg_nc; ++i) {
-        ok[i] = dmg::anchor(g_dmg_chrs[i], g_dmg_lift, A[i]);
+        ok[i] = dmg::site(g_dmg_chrs[i], g_dmg_lift, head, bb + 6, A[i]);   // first person's own actor: C3's self spot
         if (!ok[i]) continue;
-        dmg::pull(A[i], head);
         const float dx = head[0] - A[i][0], dy = head[1] - A[i][1], dz = head[2] - A[i][2];
         D[i] = sqrtf(dx * dx + dy * dy + dz * dz); S[i] = dmg::units_per_px(g_dmg_size, D[i]);
         ok[i] = dmg::finite3(A[i]) && std::isfinite(S[i]);
@@ -10046,8 +10046,8 @@ static void dmg_build(const float bb[12]) {
         if (ci < 0 || !placed[ci]) { ++p; continue; }
         const float upm = g_xr_scale * (g_fp_mode == 2 ? g_gest_scale : 1.f);
         const float hgt = dmg::k_glyph_h * S[ci];
-        char d[320]; snprintf(d, sizeof(d), "3D: drawn at (%.1f %.1f %.1f) render, %.1f units = %.2f m from the head, digit %.2f units = %.3f m tall (%.2f deg; size %.2f, lift %.1f), %.1f units/m",
-                              A[ci][0], A[ci][1], A[ci][2], D[ci], upm > 0.f ? D[ci] / upm : 0.f, hgt, upm > 0.f ? hgt / upm : 0.f, D[ci] > 0.f ? hgt / D[ci] * 57.29578f : 0.f, g_dmg_size, g_dmg_lift, upm);
+        char d[320]; snprintf(d, sizeof(d), "3D: drawn at (%.1f %.1f %.1f) render%s, %.1f units = %.2f m from the head, digit %.2f units = %.3f m tall (%.2f deg; size %.2f, lift %.1f), %.1f units/m",
+                              A[ci][0], A[ci][1], A[ci][2], (g_dmg_chrs[ci].aflags & dmg::k_self) ? " (first person's own: the self spot, 0.5 m ahead at chest height)" : "", D[ci], upm > 0.f ? D[ci] / upm : 0.f, hgt, upm > 0.f ? hgt / upm : 0.f, D[ci] > 0.f ? hgt / D[ci] * 57.29578f : 0.f, g_dmg_size, g_dmg_lift, upm);
         dmg_log_number(g_dmg_pend[p], d);
         g_dmg_pend[p] = g_dmg_pend[--g_dmg_pend_n];
     }

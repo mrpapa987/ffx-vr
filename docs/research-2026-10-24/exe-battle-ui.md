@@ -297,7 +297,7 @@ clipped away by the scissor. It is not world-anchored. (66/54 indices = 11/9 qua
 | Overdrive timer | `TOBtlCtrlLimitTimer` [Fh] `0x891AC0`: state `[0x133F77C]==2`, elapsed `0x133F788`, remaining `0x133F790` | the minigame UIs themselves (Lulu's stick spin, Auron's inputs, Wakka's reels) were **not located**; see the DEAD END on the board | M |
 | Auto-battle | `[0x133D6E0]`, toggled in `0x657140` (`flash/autobattle.swf`, `0x6F7700`) | suppresses the turn pointer, CTB, target pointer and help; auto-confirms | M/H |
 | Encounter transition (shatter) | `MsBattleExe` [Fh] `0x781020`: `0x7829B0(Btl.screen_transition +0x105)` -> type 0..3 and SE (0x31/0x65/0x3F) -> `0x79E5E0` -> `0x7FC590` -> `0x7FD7F0(bank [0x119FE98], 0, type+8, handle)` | a VFX from a common effect bank (entries 8..11). Effects can sample the "FrameBuffer" texture (`0x7FA510`), presumably the captured screen that shatters. Not drawn by the 2D UI. | M |
-| Battle end | `Btl.battle_state` (+0x10) = 0x1F..0x21 stops the icons and digits (`0x79F660`); `TkBtlEndGetText` [Fh] `0x8BDA60`; results = menu system | not explored further | L |
+| Battle end | `Btl.battle_state` (+0x10) = 0x1F..0x21 stops only the Doom countdown icons in `0x79F660` (its tests jump to the node loop at 0x79F845: the damage digits keep drawing; corrected 6 Nov, dmg3d review S1); `TkBtlEndGetText` [Fh] `0x8BDA60`; results = menu system | not explored further | L |
 | Summon / aeon UI | command window type 5 (Summon) and the Aeon rows in the party window; `TkMenuCtrlSummon` [Fh] `0x8CC330` is the field menu | no world-anchored aeon UI found | L |
 
 Chr fields named on the way (offsets in the 0xF90 entity): +0x10 (byte, slot used; gates projection), +0x442 damage-number

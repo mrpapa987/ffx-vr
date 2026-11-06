@@ -3,15 +3,21 @@
 namespace FFXVR;
 
 // 3D damage numbers (roadmap 4.2, 6 Nov 2026; native ffxvr_dmg3d.h, ABI 47). Off by default for this first build (ini dmg3d=0;
-// F8 > View: "3D damage numbers", live). The battle's damage / heal / MP digits are drawn at each target in the world, in both
+// F8 main page, under "battle start (glass break)": "3D damage numbers", live). The battle's damage / heal / MP digits are drawn at each target in the world, in both
 // eyes, with the game's own hop, fade and colour; the four word sprites ("Miss" and the others, texture 600) and the Doom
 // countdown stay on the panel (v1).
 //   Source: the game's damage-number nodes (pool [0x11360B8], list [0x11360BC]), read on the MAIN thread right where the game
 //   has just drawn them: the first job join after the frame counter moved (h7_join, always installed: Sg_MainLoop runs the
 //   battle ticks, then the UI with its queue push and draw, then the counter, then that join), with the push's own gates
-//   (battle_state != 0 and not 0x1F-0x21, [0x133C948] != 0). One guarded read of the pool (0xA00 B) when the list is not empty,
+//   (battle_state != 0, [0x133C948] != 0: 0x780CC0 / 0x89B360; 0x79F660's battle_state 0x1F-0x21 test skips only the Doom
+//   countdown's loop, the digits go on being drawn) and the main loop's three UI-draw gates ([0x12FB8FB] == 0, [0x12FBBB4] != 0,
+//   [0x12FB7D0] == 0, 0x8214F4..0x821533: a frame without the UI publishes nothing, the last snapshot holds as the game's panel
+//   does, and the live rule clears it after 3 such frames). One guarded read of the pool (0xA00 B) when the list is not empty,
 //   native walks it (ffxvr_dmg_walk), then per target: the anchor as the game computes it (optpos[Chr+0x442] through d7_anchor,
-//   lifted by Chr+0x4E8; Chr+0x442 = 0xFF: optpos[1], counted: the game uses 0x794AB0 there) and its screen anchors. Published
+//   lifted by Chr+0x4E8; Chr+0x442 = 0xFF, above 25 or a d7_anchor fallback: a stand-in, counted and never hidden from the panel)
+//   and its screen anchors. First person (C3's rule, c3_is_self): the digits of the actor we look out of go to C3's self spot,
+//   0.5 m ahead at chest height, instead of our own eyes; with the hide they leave the panel like the others (they are drawn,
+//   in front of you: one rule for every target, and the panel never shows half of the numbers). Published
 //   in a two-slot seqlock with the game-frame stamp; the render thread hands the latest to native once per Present
 //   (ffxvr_dmg_set), which keeps it while it is live (C2's rule) and draws it in the marker pass.
 //   The flat numbers on the panel stay (the default). dmg3d_hide2d=1 (ini, read at launch for its hook; off by default) hooks the
@@ -57,6 +63,7 @@ public sealed unsafe partial class FFXVRModule {
     // main-thread counters (one writer; read by the render thread for the log)
     private int _dmg_snaps_join, _dmg_snaps_draw, _dmg_reads_failed, _dmg_faults, _dmg_nodes_seen, _dmg_chr_exact, _dmg_chr_ff, _dmg_chr_none;
     private int _dmg_cut_loop, _dmg_cut_outside, _dmg_cut_misaligned, _dmg_cut_free, _dmg_cut_cap, _dmg_cut_full;
+    private int _dmg_ui_skipped, _dmg_chr_self;   // join frames without the game's UI draw; first-person self targets
     private int _dmg_q_ok, _dmg_q_mismatch, _dmg_q_missing, _dmg_q_other, _dmg_hidden_frames, _dmg_hidden_digits, _dmg_hide_doubt;
     private struct DmgMis { public uint stamp, why; public int at, from_draw; public long game0, game1, ours0, ours1; }   // a mismatch (16 B entries as two longs)
     private readonly DmgMis[] _dmg_mis = new DmgMis[3]; private int _dmg_mis_n, _dmg_mis_logged;
@@ -136,8 +143,11 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_dmg_walk == null || _fn_safe_read == null) return;
         uint stamp = FhUtil.get_at<uint>(0x1FCBBF0);
         if (draw) _dmg_draw_stamp = stamp;
+        // the main loop drew no UI this iteration (0x8214F4: [0x12FB8FB] == 0, 0x82152A: [0x12FBBB4] != 0, 0x821533: [0x12FB7D0]
+        // == 0, else 0x8AB580, which never reaches 0x89B360): publish nothing, the last snapshot holds (the detour is its own proof)
+        if (!draw && (FhUtil.get_at<byte>(0xEFB8FB) != 0 || FhUtil.get_at<byte>(0xEFBBB4) == 0 || FhUtil.get_at<uint>(0xEFB7D0) != 0)) { _dmg_ui_skipped++; return; }
         sbyte bst = FhUtil.get_at<sbyte>(0xD2A8E0);
-        bool gate = bst != 0 && bst != 0x1F && bst != 0x20 && bst != 0x21 && FhUtil.get_at<uint>(0xF3C948) != 0;
+        bool gate = bst != 0 && FhUtil.get_at<uint>(0xF3C948) != 0;   // 0x780CC0 / 0x89B360 (0x79F660's 0x1F-0x21 test skips only the Doom loop)
         uint pbase = FhUtil.get_at<uint>(k_dmg_pool), head = FhUtil.get_at<uint>(k_dmg_head);
         bool any = gate && pbase != 0 && head != 0;
         if (!any && _dmg_published_empty) return;   // nothing up, and the last snapshot said so already
@@ -180,8 +190,11 @@ public sealed unsafe partial class FFXVRModule {
         c.idx442 = i442; c.h4e8 = h; c.sx = scr[0]; c.sy = scr[1]; c.f44 = scr[4]; c.f48 = scr[5]; c.f4c = scr[6]; c.f50 = scr[7];
         D7Anchor a = default;
         if (!d7_anchor(chrs, id, i442 != 0xFF ? i442 : 1, ref a)) { _dmg_chr_none++; return; }   // no actor: the game uses 0x794AB0; the number stays on the panel
-        c.opt = a.opt; c.tl = a.tl; c.td = a.td; c.aflags = (byte)a.flags; c.ok = 1;
-        c.src = (byte)(i442 == 0xFF ? 1 : 0);
+        c.opt = a.opt; c.tl = a.tl; c.td = a.td; c.aflags = (byte)(a.flags & 7); c.ok = 1;
+        if (c3_is_self(a)) { c.aflags |= 8; _dmg_chr_self++; }   // dmg::k_self: first person looks out of this actor (C3's rule): the self spot
+        // a stand-in (drawn, never taken off the panel): 0xFF (the game uses 0x794AB0), an index above 25 (0x8354F0 reads past optpos[25]),
+        // or d7_anchor's fallback to optpos[0] / the root for an empty sub-position (review N2)
+        c.src = (byte)(i442 == 0xFF || (a.flags & 4) != 0 || a.fallback != 0 ? 1 : 0);
         if (c.src == 0) _dmg_chr_exact++; else _dmg_chr_ff++;
     }
 
@@ -263,10 +276,10 @@ public sealed unsafe partial class FFXVRModule {
         if (now - _dmg_line_t < 10.0 || _dmg_lines >= 500) return;
         _dmg_line_t = now; _dmg_lines++;
         if (_fn_dmg_status != null) fixed (uint* u = _dmg_st) _fn_dmg_status(u, 18);
-        d7_log(I($"dmg3d: 10 s: snapshots at the join {_dmg_snaps_join}, at the queue draw {_dmg_snaps_draw} (hook calls {_dmg_draw_calls}), nodes seen {_dmg_nodes_seen}, pool reads failed {_dmg_reads_failed}, main-thread faults {_dmg_faults} | targets: the game's anchor {_dmg_chr_exact}, Chr+0x442=0xFF (optpos[1]) {_dmg_chr_ff}, no anchor {_dmg_chr_none} | walks cut: loop {_dmg_cut_loop} outside {_dmg_cut_outside} misaligned {_dmg_cut_misaligned} free {_dmg_cut_free} cap {_dmg_cut_cap} full {_dmg_cut_full} | queue check (our placement vs the game's entries): matched {_dmg_q_ok}, mismatch {_dmg_q_mismatch}, missing {_dmg_q_missing} (the UI was not drawn that frame, or the queue full), other {_dmg_q_other} | hide: {(_dmg_hide2d ? (_dmg_hook_ok ? "on" : "on, NOT HOOKED") : "off")}, frames {_dmg_hidden_frames}, digits taken off {_dmg_hidden_digits}, left for a doubt {_dmg_hide_doubt} | native: snapshots {_dmg_st[4]}, digits drawn {_dmg_st[6]} ({_dmg_st[5]} now), numbers {_dmg_st[11]} (lines {_dmg_st[12]}, dropped {_dmg_st[13]}), without battle.dds {_dmg_st[7]} Presents, no anchor {_dmg_st[8]}, over the cap {_dmg_st[9]}, skip frames {_dmg_st[10]}; battle.dds {(_dmg_atlas ? "held" : "not held")}, hop table {(_dmg_st[14] != 0 ? "as checked" : "DIFFERENT")}"));
+        d7_log(I($"dmg3d: 10 s: snapshots at the join {_dmg_snaps_join} (join frames without the game's UI draw {_dmg_ui_skipped}), at the queue draw {_dmg_snaps_draw} (hook calls {_dmg_draw_calls}), nodes seen {_dmg_nodes_seen}, pool reads failed {_dmg_reads_failed}, main-thread faults {_dmg_faults} | targets: the game's anchor {_dmg_chr_exact}, stand-in (Chr+0x442 0xFF / above 25 / fallback) {_dmg_chr_ff}, no anchor {_dmg_chr_none}, first person's own (self spot) {_dmg_chr_self} | walks cut: loop {_dmg_cut_loop} outside {_dmg_cut_outside} misaligned {_dmg_cut_misaligned} free {_dmg_cut_free} cap {_dmg_cut_cap} full {_dmg_cut_full} | queue check (our placement vs the game's entries): matched {_dmg_q_ok}, mismatch {_dmg_q_mismatch}, missing {_dmg_q_missing} (the UI was not drawn that frame, or the queue full), other {_dmg_q_other} | hide: {(_dmg_hide2d ? (_dmg_hook_ok ? "on" : "on, NOT HOOKED") : "off")}, frames {_dmg_hidden_frames}, digits taken off {_dmg_hidden_digits}, left for a doubt {_dmg_hide_doubt} | native: snapshots {_dmg_st[4]}, digits drawn {_dmg_st[6]} ({_dmg_st[5]} now), numbers {_dmg_st[11]} (lines {_dmg_st[12]}, dropped {_dmg_st[13]}), without battle.dds {_dmg_st[7]} Presents, no anchor {_dmg_st[8]}, over the cap {_dmg_st[9]}, skip frames {_dmg_st[10]}; battle.dds {(_dmg_atlas ? "held" : "not held")}, hop table {(_dmg_st[14] != 0 ? "as checked" : "DIFFERENT")}"));
     }
 
-    /// <summary>F8 > View, after the UI panel line.</summary>
+    /// <summary>F8 main page, under "battle start (glass break)" (bt_ui).</summary>
     private void dmg3d_ui() {
         ImGui.Checkbox("3D damage numbers", ref _dmg3d); ImGui.SameLine();
         ImGui.TextDisabled("battle: the damage / heal numbers at each target in the world (experimental; \"Miss\" and the other words stay on the panel)");

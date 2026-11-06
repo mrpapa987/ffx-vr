@@ -29,6 +29,7 @@ constexpr float k_ui_per_ps2_x = 1920.f / 512.f;      // the PS2 space (512 x 41
 constexpr float k_ui_per_ps2_y = 1080.f / 416.f;      // (0x79F380: F3C = F34 / (w / 512) + 256, F40 = F38 / (h / 416) + 208)
 constexpr float k_glyph_w = 34.f, k_glyph_h = 45.f;   // UI px (0x8FB840: 0x6447E0(34) = 34 * 512 / 1920, 0x644820(45) = 45 * 416 / 1080)
 constexpr float k_px_per_unit = 14.f;                 // C3's measured scale (the game's UI px per world unit at its default battle view)
+constexpr uint8_t k_self = 8;                        // Chr::aflags: the actor first person looks out of
 constexpr float k_min_rad = 1.0f * 3.14159265f / 180.f, k_max_rad = 4.0f * 3.14159265f / 180.f;   // the digit height is kept between these at size 1
 
 #pragma pack(push, 1)
@@ -42,7 +43,8 @@ struct Chr {
     int32_t f44, f48, f4c, f50;   // Chr+0xF44 / F48: the damage anchor on screen, PS2 px; F4C / F50 its clamped copy (flag 0x80)
     uint8_t chr, idx442;          // the chr index; Chr+0x442 (0xFF: the game anchors at 0x794AB0 instead)
     uint8_t src;                  // 0 the game's own rule (optpos[Chr+0x442]); 1 Chr+0x442 == 0xFF: optpos[1] (approximate); 2 no anchor
-    uint8_t aflags;               // d7_anchor's flags: 1 attached, 2 override matrix (no 30 Hz correction then), 4 index outside 0..25
+    uint8_t aflags;               // d7_anchor's flags: 1 attached, 2 override matrix (no 30 Hz correction then), 4 index outside 0..25;
+                                  // k_self (8, ours): first person looks out of this actor (C3's rule): its digits go to the self spot
     uint8_t ok, pad[3];           // ok: the read succeeded (src 0 or 1)
 };
 /// A popup-queue entry (0x899A40; 16 B at 0x133F110 + 16 * i).
@@ -149,7 +151,8 @@ inline bool finite3(const float* v) { return std::isfinite(v[0]) && std::isfinit
 /// Drawn in 3D (native's rule, dmg_build): a drawable node whose target was read (the game's rule or the optpos[1] stand-in)
 /// with a finite anchor. The first k_max of them in list order are drawn.
 inline bool drawn3d(const Node& n, const Chr* c) { return drawable(n) && c && c->ok && c->src <= 1 && finite3(c->opt) && finite3(c->tl) && finite3(c->td) && std::isfinite(c->h4e8); }
-/// Taken off the panel by the hide: drawn in 3D at the game's own anchor (a stand-in anchor keeps the game's number too).
+/// Taken off the panel by the hide (with the 64 cap, queue_check): drawn in 3D at the game's own anchor (a stand-in anchor
+/// keeps the game's number too). The self spot counts: those digits are drawn, just in front of you.
 inline bool exact(const Node& n, const Chr* c) { return drawn3d(n, c) && c->src == 0; }
 
 enum QueueWhy : uint32_t { Q_OK = 0, Q_MISMATCH = 1, Q_MISSING = 2, Q_UNPREDICTABLE = 3, Q_NOCHR = 4, Q_BADCOUNT = 5 };
@@ -168,7 +171,7 @@ inline QueueResult queue_check(Entry* q, int count, bool compact, const Node* n,
         const Chr* ci = chr_of(c, nc, n[i].chr);
         if (!ci) { r.why = Q_NOCHR; r.at = i; return r; }
         bool inb = false;
-        const bool d3 = drawn3d(n[i], ci), mine = d3 && rank < k_max && ci->src == 0; if (d3) ++rank;
+        const bool d3 = drawn3d(n[i], ci), mine = exact(n[i], ci) && rank < k_max; if (d3) ++rank;
         if (!predict(n[i], T, *ci, &pe[np], &inb)) { r.why = Q_UNPREDICTABLE; r.at = i; return r; }
         if (!inb) continue;
         drop[np++] = mine;
@@ -235,6 +238,19 @@ inline void pull(float a[3], const float head[3]) {
     if (!(dl > 1e-3f) || !std::isfinite(dl)) return;
     const float p = (0.1f * dl < 30.f ? 0.1f * dl : 30.f) / dl;
     a[0] += dx * p; a[1] += dy * p; a[2] += dz * p;
+}
+/// Where a target's digits are drawn: its anchor (anchor(), `lift` up) pulled toward the head, or, for the actor first person
+/// looks out of (aflags & k_self), C3's self spot (0.5 m ahead at chest height, from eye 1's view: bb[6..8]) as it is: the
+/// anchor would be at your own eyes (behind them, or a cross-eyed number a few cm away). No spot given: the anchor.
+inline bool site(const Chr& c, float lift, const float head[3], const float* self_spot, float out[3]) {
+    if ((c.aflags & k_self) && self_spot) {
+        if (!c.ok || c.src > 1 || !finite3(self_spot)) return false;
+        out[0] = self_spot[0]; out[1] = self_spot[1]; out[2] = self_spot[2];
+        return true;
+    }
+    if (!anchor(c, lift, out)) return false;
+    pull(out, head);
+    return finite3(out);
 }
 /// World units per UI px at distance `dist`: the game's size (size / 14 units per px), with the digit's height kept between
 /// k_min_rad and k_max_rad (times size) so it stays readable from the diorama to first person.
