@@ -5376,8 +5376,10 @@ Roadmap 4.1 (scratchpad research/roadmap-design.md), review fixes from eye-blink
   (start, swap, summon, dismissal, manual) the heading turns to the centre of the monsters (no turn under 15 deg; with the
   blink). The request waits through the load chain (battle_state 4..0x15, 0x22; the first follow change comes at state
   4, about 2-3 s before the battle is drawn) and is then sent once a monster counts: 11 monster slots (the allocator
-  0x793530), Chr+0x10 set (0x79F380's per-Chr gate), actor live, stat_visible, not stat_hide, HP > 0, not at (0, 0, 0),
-  within 400 units of the followed character. Native applies it at the next first-person frame (aged in such frames).
+  0x793530), Chr+0x10 set (0x79F380's per-Chr gate), actor live, stat_visible, alive by the game's own target test
+  (stat_death Chr+0xDCC == 0, 0x795780 for the target window's masks 0x898330), HP > 0, not at (0, 0, 0), within 400
+  units of the followed character. (Until 7 Nov it also refused Fahrenheit's `stat_hide` Chr+0x17, which is 1 on
+  visible, fighting monsters: 0 of 10 requests turned on 6 Nov, 4 of 11 on 7 Nov, each toward one monster of three.) Native applies it at the next first-person frame (aged in such frames).
 - **The field heading** is kept over a battle (battle_face on only) with the game camera's yaw, and restored at the first
   first-person frame after the battle in the same view and under the same field camera (30 deg). Another camera waits
   (the battle's end can still be drawn with the battle camera for a few frames); the heading re-latches from the game
