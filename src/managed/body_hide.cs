@@ -65,30 +65,63 @@ public sealed unsafe partial class FFXVRModule {
     // eye review SF2: the flag can turn on only while another live, drawn actor's root is on the followed actor's (within
     // fpown::k_tol, 0.5): the shared-anchor signature that caused the bug, so normal play cannot turn it on whatever joints the
     // 26 sub-positions are. N3: the state's key carries the scene generation (a map change or load starts it again).
+    // eye-grab (7 Nov 2026, the owner's sphere grabs on dj/djyt0000 and dj/djyt0600): the cloister sphere (f010, an object) sits
+    // on Tidus's root while he takes or places it, so the shared root alone switched the rule on (8 s, two blinks) with his body
+    // drawn at the root. Now the rule enters only while the root is shared AND the head sub-position (what the eye would follow)
+    // is more than EyeLogic.k_enter units from the root horizontally; once on it stays on while the root stays shared (round 3b's
+    // walk-back). A shared run that does not switch is logged once at its end (the sharing actor's slot, model and chr_id type,
+    // the head's displacement): the hook for the carried-sphere backlog item.
     private EyeDisp _eye_disp; private int _eye_key = -1, _eye_lines;
-    private bool eye_disp_step(Actor* actors, ref Actor p, int pick, bool allowed) {
+    private int _eye_dec_n, _eye_dec_slot = -1, _eye_dec_id, _eye_dec_far_k = -1; private float _eye_dec_max, _eye_dec_last, _eye_dec_far; private string _eye_dec_name = "", _eye_dec_who = "";
+    private bool eye_disp_step(Actor* actors, ref Actor p, int pick, bool allowed, Vector3 head) {
         int key = (int)(((uint)pick << 16 | (uint)(p.chr_id & 0xFFFF)) & 0x3FFFFF | (body_hide_scene_gen(actors, pick) & 0x1FF) << 22);
-        if (!allowed || key != _eye_key) { _eye_disp = default; _eye_key = key; if (!allowed) return false; }
+        if (!allowed || key != _eye_key) { eye_decline_end(); _eye_disp = default; _eye_key = key; if (!allowed) return false; }
         fixed (Actor* pp = &p) {
             Vector3 root = *(Vector3*)((byte*)pp + 0x200);
-            float d = EyeLogic.BodyOffset(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root);
-            bool shared = eye_root_shared(actors, pick, root);   // every frame: the rule is the shared root itself
-            if (EyeLogic.Step(ref _eye_disp, d, shared) && _eye_lines < 40) {
+            float h = EyeLogic.HeadOffset(head, root);
+            int other = eye_root_shared(actors, pick, root, out int other_id, out nint other_name);   // every frame: the shared root
+            bool dec = EyeLogic.Declines(in _eye_disp, h, other >= 0);
+            if (EyeLogic.Step(ref _eye_disp, h, other >= 0) && _eye_lines < 40) {
                 _eye_lines++;
-                _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head: another actor's root is on" : "back to the root: no other actor's root on")} '{actor_name(p.chr_name)}''s root for {EyeLogic.k_frames} frames (the nearest of his sub-positions {d:F1} units from it horizontally) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
+                float d = EyeLogic.BodyOffset(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root);
+                _logger.Info(I($"eye: {(_eye_disp.on ? "from the drawn head: another actor's root is on" : "back to the root: no other actor's root on")} '{actor_name(p.chr_name)}''s root for {EyeLogic.k_frames} frames{(_eye_disp.on && other >= 0 ? $" (actor {other} '{actor_name((char*)other_name)}', chr_id 0x{other_id:X})" : "")}, his head sub-position {h:F1} units from it horizontally (the nearest of his sub-positions {d:F1}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
             }
+            if (dec) {
+                if (_eye_dec_n == 0 || other != _eye_dec_slot) {   // a new run, or another actor took the root: the run's actor is the latest
+                    if (_eye_dec_n > 0 && other != _eye_dec_slot) eye_decline_end();
+                    _eye_dec_slot = other; _eye_dec_id = other_id; _eye_dec_name = actor_name((char*)other_name); _eye_dec_who = actor_name(p.chr_name); _eye_dec_max = 0f; _eye_dec_far = 0f; _eye_dec_far_k = -1;
+                }
+                _eye_dec_n++; _eye_dec_last = h; if (h > _eye_dec_max) _eye_dec_max = h;
+                // the drawn body's farthest sub-position from the root (the head pick of c001 is a helper over the root: this says
+                // whether the body itself was drawn away from it during the run; diagnostic only)
+                float far = EyeLogic.BodyFar(new ReadOnlySpan<Vector4>((byte*)pp + 0x524, 26), root, out int fk);
+                if (far > _eye_dec_far) { _eye_dec_far = far; _eye_dec_far_k = fk; }
+            }
+            else eye_decline_end();
         }
         return _eye_disp.on;
     }
-    /// <summary>Another live actor the game draws (not script-hidden) with its drawn root within 0.5 of `root` (game space).</summary>
-    private bool eye_root_shared(Actor* actors, int pick, Vector3 root) {
-        Actor* snap = tbl_snap(actors); if (snap == null) return false;
+    /// <summary>eye-grab: the end of a shared-root run that the rule declined (k_frames frames or more): one module-log line (shares
+    /// the 40-line budget of the eye lines).</summary>
+    private void eye_decline_end() {
+        int n = _eye_dec_n; _eye_dec_n = 0;
+        if (n < EyeLogic.k_frames || _eye_lines >= 40) return;
+        _eye_lines++;
+        uint type = (uint)_eye_dec_id >> 12;
+        string kind = type == 0 ? "a party / event character model" : type == 2 ? "an NPC" : type == 4 ? "a 'w' model" : type == 5 ? "an object (chr/obj)" : $"type {type}";
+        _logger.Info(I($"eye: stays on the root: actor {_eye_dec_slot} '{_eye_dec_name}' (chr_id 0x{_eye_dec_id:X}, {kind}) shared '{_eye_dec_who}''s root for {n} frames, but his head sub-position was at most {_eye_dec_max:F1} units from it horizontally (last {_eye_dec_last:F1}; the drawn head follows only past {EyeLogic.k_enter:F0}: a body drawn at its root, e.g. a carried or placed object); his farthest sub-position {_eye_dec_far:F1} units out (index {_eye_dec_far_k}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
+    }
+    /// <summary>Another live actor the game draws (not script-hidden) with its drawn root within 0.5 of `root` (game space): its slot
+    /// (the first such), chr_id and name pointer; -1 when none.</summary>
+    private int eye_root_shared(Actor* actors, int pick, Vector3 root, out int id, out nint name) {
+        id = 0; name = 0;
+        Actor* snap = tbl_snap(actors); if (snap == null) return -1;
         for (int i = 0; i < 48; i++) {
             if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name) || slot_hidden(actors, snap, i)) continue;
             Vector3 r = *(Vector3*)((byte*)(snap + i) + 0x200);
-            if (finite(r) && Vector3.DistanceSquared(r, root) < 0.5f * 0.5f) return true;
+            if (finite(r) && Vector3.DistanceSquared(r, root) < 0.5f * 0.5f) { id = (int)snap[i].chr_id; name = (nint)snap[i].chr_name; return i; }
         }
-        return false;
+        return -1;
     }
 
     // -- review SF2: the scene generation ---------------------------------------------------------------------------------
@@ -376,10 +409,38 @@ internal struct EyeDisp { public bool on; public int n_in, n_out; }
 /// (the scratch test drives it). Round 3b (the owner's retest, 14:28): the distance off-switch put the eye back on the anchor
 /// when Tidus's feet walked back near it (1.4 units) with his head still 8.4 units away. The rule is now the shared root itself:
 /// on after k_frames frames with another live, drawn actor's root on the followed one's, off after k_frames without; the body's
-/// distance only guards plausibility (none set, or over k_max, breaks a run).</summary>
+/// distance only guards plausibility (none set, or over k_max, breaks a run).
+/// eye-grab (7 Nov 2026): a cloister sphere (f010) on Tidus's root while he takes it met that rule with his body drawn at the
+/// root. Entering now also needs the head sub-position (what the eye follows) more than k_enter units from the root
+/// horizontally, on each of the k_frames frames; leaving is unchanged (the shared root gone for k_frames), so the walk-back
+/// stays on.</summary>
 internal static class EyeLogic {
-    public const float k_max = 400f;   // units (horizontal): a nearest sub-position farther than this is not believed
+    public const float k_max = 400f;   // units (horizontal): a head farther than this is not believed
     public const int k_frames = 10;    // consecutive frames to switch either way
+    // eye-grab: 12 units (1.05 m at 11.4 units/m). A body drawn at its root cannot put its head that far out horizontally by a
+    // lean or a reach (a standing bend or a kneel moves the neck ~0.5-0.8 m, 6-9 units); in the owner's sphere grabs it was 0.0
+    // (c001's head pick is a helper point exactly 18 units over the root) and the drawn palette head within 3.9 of it; on
+    // mi/mihn0100 the displaced head was 67 units out when the scene began.
+    public const float k_enter = 12f;
+    /// <summary>eye-grab: the horizontal distance from the root to the head sub-position (game space); -1 when not finite.</summary>
+    public static float HeadOffset(Vector3 head, Vector3 root) {
+        float dx = head.X - root.X, dz = head.Z - root.Z;
+        return float.IsFinite(dx) && float.IsFinite(dz) ? MathF.Sqrt(dx * dx + dz * dz) : -1f;
+    }
+    /// <summary>eye-grab: this frame the root is shared but the rule stays on the root because the head is near it (for the log).</summary>
+    public static bool Declines(in EyeDisp s, float h, bool shared) => !s.on && shared && h >= 0f && h <= k_enter;
+    /// <summary>eye-grab (diagnostics): the horizontal distance from the root to the FARTHEST sub-position (those off the origin's
+    /// axis, push_player's rule) and its index (k); 0 / -1 when none is set.</summary>
+    public static float BodyFar(ReadOnlySpan<Vector4> optpos, Vector3 root, out int k) {
+        float best = 0f; k = -1;
+        for (int i = 0; i < optpos.Length && i < 26; i++) {
+            Vector4 sp = optpos[i];
+            if (!(MathF.Abs(sp.X) + MathF.Abs(sp.Z) > 0.01f) || !float.IsFinite(sp.X) || !float.IsFinite(sp.Z)) continue;
+            float dx = sp.X - root.X, dz = sp.Z - root.Z, d = MathF.Sqrt(dx * dx + dz * dz);
+            if (d > best && d <= k_max) { best = d; k = i; }
+        }
+        return best;
+    }
     /// <summary>The horizontal distance from the root to the nearest sub-position (those off the origin's axis, push_player's
     /// rule), game space; -1 when none is set.</summary>
     public static float BodyOffset(ReadOnlySpan<Vector4> optpos, Vector3 root) {
@@ -392,12 +453,13 @@ internal static class EyeLogic {
         }
         return best == float.MaxValue ? -1f : best;
     }
-    /// <summary>One frame: on after k_frames frames with another actor's root on the followed one's (shared; eye review SF2),
-    /// off after k_frames without, whatever the body's distance d (round 3b). An unknown or implausible d (none, over k_max)
-    /// breaks a run in progress and changes nothing. True when it switched.</summary>
-    public static bool Step(ref EyeDisp s, float d, bool shared) {
-        if (!(d >= 0f) || d > k_max) { s.n_in = 0; s.n_out = 0; return false; }
-        if (!s.on) { s.n_in = shared ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
+    /// <summary>One frame: on after k_frames frames in a row with another actor's root on the followed one's (shared; eye review
+    /// SF2) and the head h more than k_enter units from it horizontally (eye-grab); off after k_frames without the shared root,
+    /// whatever h (round 3b). An unknown or implausible h (none, over k_max) breaks a run in progress and changes nothing. True
+    /// when it switched.</summary>
+    public static bool Step(ref EyeDisp s, float h, bool shared) {
+        if (!(h >= 0f) || h > k_max) { s.n_in = 0; s.n_out = 0; return false; }
+        if (!s.on) { s.n_in = shared && h > k_enter ? s.n_in + 1 : 0; if (s.n_in >= k_frames) { s.on = true; s.n_in = 0; s.n_out = 0; return true; } }
         else { s.n_out = !shared ? s.n_out + 1 : 0; if (s.n_out >= k_frames) { s.on = false; s.n_in = 0; s.n_out = 0; return true; } }
         return false;
     }

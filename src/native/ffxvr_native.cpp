@@ -735,8 +735,9 @@ float g_fp_head_fwd = 1.5f; float g_fp_move_dir[3] = {}; bool g_fp_move_dir_vali
 float g_fp_head[3] = {}; bool g_fp_have_head = false; float g_fp_head_s[3] = {}; bool g_fp_head_s_valid = false;
 // The body drawn away from its root (npc-anchor round 3, mi/mihn0100): two event actors on one scene anchor, the animation
 // placing Tidus's body up to ~70 units from it. fp_head_anchor 1 (and 0) take the eye's horizontal position from the root, so the
-// eye sat on the anchor, above Yuna. Managed sets bit 1 of ffxvr_player_head_set's `valid` when every sub-position of the
-// followed actor has been far from its root for a while (body_hide.cs EyeLogic); the eye's horizontal position then comes from
+// eye sat on the anchor, above Yuna. Managed sets bit 1 of ffxvr_player_head_set's `valid` while another live actor's root is
+// on the followed actor's (entered only with the head sub-position over 12 units from the root horizontally, eye-grab: not a
+// carried object on a body drawn at its root; body_hide.cs EyeLogic); the eye's horizontal position then comes from
 // the head sub-position (built by the game from his own skeleton; the IB-identified palette agrees with it to 0.1 units in the
 // owner's log). A head that jumps more than k_head_spike from the smoothed one is held for up to 3 frames (a one-frame bad value
 // never moves the view; a real move is taken on the 4th).
@@ -12531,7 +12532,7 @@ extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z
     g_fp_pos[0] = x; g_fp_pos[1] = y; g_fp_pos[2] = z; g_fp_have_pos = valid != 0;
 }
 /// valid: 0 no head (the eye height instead), bit 0 the head is set; round 3: bit 1 = the followed actor's body is drawn away from
-/// its root (every sub-position far from it for a while, managed EyeLogic): the eye takes its horizontal position from the head
+/// its root (a shared root with the head over 12 units out, managed EyeLogic): the eye takes its horizontal position from the head
 /// in fp_head_anchor 0 and 1 too. Old managed sends 0 / 1 only (the signature is unchanged).
 extern "C" __declspec(dllexport) void ffxvr_player_head_set(float x, float y, float z, int valid) {
     // eye review N1: a frame or two with no head while the eye follows a displaced body keeps the last eye (no cut to the root

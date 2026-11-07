@@ -2725,7 +2725,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // npc-anchor round 3: is the body drawn away from its root (a shared scene anchor)? Then the eye's horizontal position
             // comes from the head (bit 1 below). First person, field, on foot, not blitzball; gated on another actor on his root
             // (eye review SF2). Decided before the fold below: a displaced head is absolute however far it is (eye review SF1).
-            bool eye_on = have && eye_disp_step(actors, ref p, pick, _fp_mode == 1 && !att && !in_battle && !_in_blitz);
+            // eye-grab: entering also needs the head (raw, unfolded) more than 12 units from the drawn root horizontally
+            bool eye_on = have && eye_disp_step(actors, ref p, pick, _fp_mode == 1 && !att && !in_battle && !_in_blitz, new Vector3(head.X, head.Y, head.Z));
             // The sub-positions look absolute in the actor table; if one ever turns out to be relative, fold the actor position in.
             // Never for an attached actor: its +0x0C is not where it is (the fold put the riding eye 36 units low); nor for a body
             // drawn away from its root (eye review SF1: the fold moved that eye ~257 units off once the body was 100+ units out).
