@@ -210,7 +210,27 @@ inline bool move_walk(int bits, uint32_t age_ms, bool have) { return walk_why(bi
 
 // -- quick-squeeze grips -----------------------------------------------------------------------------------------------
 enum { G_OFF = 0, G_BATTLE_GRAB = 1, G_ALWAYS = 2 };   // ini grip_lbrb
-struct GripCfg { int mode = G_BATTLE_GRAB; uint32_t tap_ms = 300; float max_move_m = 0.03f, max_turn_deg = 10.f; };
+/// max_move_m / max_turn_deg: the motion a squeeze of full_ms or longer may have; short_move_m / short_turn_deg: one of short_ms
+/// or shorter (linear between; grip_limits).
+struct GripCfg {
+    int mode = G_BATTLE_GRAB; uint32_t tap_ms = 300; float max_move_m = 0.03f, max_turn_deg = 10.f;
+    uint32_t short_ms = 130, full_ms = 250; float short_move_m = 0.08f, short_turn_deg = 40.f;
+};
+/// How far a quick squeeze may move and turn the hand, by its duration el (ms). The squeeze itself moves the controller: on
+/// 6 / 7 Nov every squeeze under 130 ms in a grab view was refused (63 ms 3.4 cm, 78 ms 23 deg, 94 ms 7.2 cm, 125 ms 5.5 cm /
+/// 36 deg) while the 156-281 ms ones moved 0.5 cm / 9 deg at most. A grab-and-drag needs time to go far, so the limit is
+/// 8 cm / 40 deg up to short_ms, the old 3 cm / 10 deg from full_ms, linear between (219 ms 5.3 cm and 297 ms 18.3 cm, both
+/// drags in a burst of grabs, stay refused). A short limit below the long one counts as the long one.
+inline void grip_limits(const GripCfg& c, uint32_t el, float* move_m, float* turn_deg) {
+    const float sm = c.short_move_m > c.max_move_m ? c.short_move_m : c.max_move_m;
+    const float sd = c.short_turn_deg > c.max_turn_deg ? c.short_turn_deg : c.max_turn_deg;
+    float f;   // 1: the short limits, 0: the long ones
+    if (el >= c.full_ms) f = 0.f;
+    else if (el <= c.short_ms) f = 1.f;
+    else f = static_cast<float>(c.full_ms - el) / static_cast<float>(c.full_ms - c.short_ms);
+    if (move_m) *move_m = c.max_move_m + (sm - c.max_move_m) * f;
+    if (turn_deg) *turn_deg = c.max_turn_deg + (sd - c.max_turn_deg) * f;
+}
 inline uint32_t clamp_tap_ms(int ms) { return static_cast<uint32_t>(ms < 150 ? 150 : ms > 500 ? 500 : ms); }
 /// A squeeze is deferred (decided at its release) in mode 1 in battle (the grips are the chord modifiers) or in a grab view
 /// (the seat / the diorama: the grips are the grab), in mode 2 everywhere; otherwise it goes to the game at once (mode 0:
@@ -242,8 +262,8 @@ inline float quat_angle_deg(const float* a, const float* b) {
 /// One sample. Returns GT_* bits: PASS this grip goes to the game as LB / RB now (also while up: what a new squeeze would
 /// do, so the input thread passes it with no frame of delay); BEGIN a squeeze began (snapshot the grab); END it ended; FIRE
 /// it was a quick squeeze: send the shoulder once; RESTORE undo the grab's nudge (the squeeze began in a grab view).
-/// A quick squeeze: released within tap_ms of the squeeze, the hand moved less than max_move_m and turned less than
-/// max_turn_deg from where it was squeezed (the largest seen), no stick click while it was down (no chord), and the other grip
+/// A quick squeeze: released within tap_ms of the squeeze, the hand moved and turned less than grip_limits allows for its
+/// duration from where it was squeezed (the largest seen), no stick click while it was down (no chord), and the other grip
 /// never down meanwhile (no two-hand grab). A squeeze keeps the kind it began with (passed / deferred) until it is released,
 /// so a context change never makes an LB / RB edge the user did not make.
 inline int grip_step(GripTap& s, const GripCfg& c, const GripSample& in, uint32_t now) {
@@ -272,9 +292,13 @@ inline int grip_step(GripTap& s, const GripCfg& c, const GripSample& in, uint32_
         else if (s.chord) v = GV_CHORD;
         else if (s.other) v = GV_TWO;
         else if (el >= c.tap_ms) v = GV_HELD;
-        else if (s.max_d >= c.max_move_m) v = GV_MOVED;
-        else if (s.max_deg >= c.max_turn_deg) v = GV_TURNED;
-        else { v = GV_SENT; r |= GT_FIRE; if (s.grab0) r |= GT_RESTORE; s.fired++; }
+        else {
+            float lim_m, lim_deg; grip_limits(c, el, &lim_m, &lim_deg);
+            if (s.max_d >= lim_m) v = GV_MOVED;
+            else if (s.max_deg >= lim_deg) v = GV_TURNED;
+            else v = GV_SENT;
+        }
+        if (v == GV_SENT) { r |= GT_FIRE; if (s.grab0) r |= GT_RESTORE; s.fired++; }
         s.last = v; s.last_ms = el; s.last_d = s.max_d; s.last_deg = s.max_deg;
     }
     const bool pass = s.down ? !s.defer : !grip_defers(c.mode, in.battle, in.grab_view);

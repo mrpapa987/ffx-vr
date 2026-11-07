@@ -1276,7 +1276,9 @@ raw). ini `move_remap_walk_only` (default 1; 0 = the old behaviour for an A/B). 
 the owner's test confirms), switch = LB, CTB scroll = RB / RT held, overdrive = stick left and Weapon / Armor / Escape =
 stick right at the command menu, help = Back. The grips were lost to the seat / diorama grab and the left-grip chords
 leaked an LB press: now a **quick squeeze** (released within `grip_tap_ms`, 300 ms; the hand moved < 3 cm and turned
-< 10 degrees; no stick click meanwhile; the other grip not down) is LB / RB, sent on release as a press of 2 new packets
+< 10 degrees, or more for a shorter squeeze: 8 cm / 40 degrees up to 130 ms, linear to 3 cm / 10 degrees at 250 ms (7 Nov:
+every 63-125 ms squeeze had been refused for its own motion, `ffxvr_pad.h` `grip_limits`); no stick click meanwhile; the
+other grip not down) is LB / RB, sent on release as a press of 2 new packets
 (`grip_tap_press_ms`, default 0, can lengthen it up to 150 ms: a hold past 0.2333 s trips the game's repeat query
 0x630D30, the switch list's next / previous), and a grab's nudge during it is undone. Why 2: the CTB scroll
 (0x89F021) steps a row when R1 is held and the list is at rest, then slides 11 px (half a row) a tick, so R1 seen on 1 or 2

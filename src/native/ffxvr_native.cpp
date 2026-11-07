@@ -1692,10 +1692,12 @@ static void grip_tick(const float hp[2][3], bool seat) {
         if ((r & pad::GT_END) && g_grip[h].defer && g_grip_lines < 300) {
             const pad::GripTap& t = g_grip[h];
             g_grip_lines++;
-            diag("grips: %s grip %u ms, %.1f cm, %.0f deg (%s%s): %s%s%s", h ? "right" : "left", t.last_ms, t.last_d * 100.f, t.last_deg,
+            char lim[64] = "";   // a squeeze refused for its motion: the limit at its duration (pad::grip_limits)
+            if (t.last == pad::GV_MOVED || t.last == pad::GV_TURNED) { float lm, ld; pad::grip_limits(c, t.last_ms, &lm, &ld); snprintf(lim, sizeof(lim), " (limits at %u ms: %.1f cm, %.0f deg)", t.last_ms, lm * 100.f, ld); }
+            diag("grips: %s grip %u ms, %.1f cm, %.0f deg (%s%s): %s%s%s%s", h ? "right" : "left", t.last_ms, t.last_d * 100.f, t.last_deg,
                  battle ? "battle" : "", grab_view ? (battle ? ", grab view" : "grab view") : (battle ? "" : "everywhere"),
                  t.last == pad::GV_SENT ? (h ? "RB" : "LB") : "", t.last == pad::GV_SENT ? " sent" : pad::k_grip_verdict[t.last],
-                 (t.last == pad::GV_SENT && t.grab0) ? ", the grab undone" : "");
+                 (t.last == pad::GV_SENT && t.grab0) ? ", the grab undone" : "", lim);
             if (g_grip_lines == 300) diag("grips: no more grip lines this session");
         }
         if (r & pad::GT_PASS) pass |= 1 << h;
