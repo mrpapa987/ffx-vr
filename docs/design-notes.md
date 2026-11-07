@@ -5452,3 +5452,25 @@ Off by default for the first build (`dmg3d=0`; F8 main page, under "battle start
 - **The flat numbers** stay on the panel by default. `dmg3d_hide2d=1` (ini, its hook installed at launch only then; off by default) hooks the queue draw 0x893290 (single call site 0x89B3CB; prologue `57 E8` checked first): the detour records there and, while native draws the digits (`ffxvr_dmg_skip`, decided beside C2's skip), takes exactly those entries off the queue, only when every entry of this frame matches the placement predicted from the nodes; on any doubt nothing changes. Digits at a stand-in anchor, or past the 64 we draw, stay on the panel.
 - **Logs.** One `dmg3d:` line per new number for the first 40 (value, kind, target, the game's anchor and screen point against ours through the game's camera, where the quad went, its distance and size); a 10 s `dmg3d:` line in battle (snapshots, cut walks, stand-in anchors, the queue check: our predicted entries against the game's own, still in memory after the draw).
 - ini: `dmg3d` (0), `dmg3d_scale` (1.0, 0.3-3), `dmg3d_lift` (0, -10..20 units), `dmg3d_hide2d` (0). ABI 47: `ffxvr_dmg_walk`, `ffxvr_dmg_queue`, `ffxvr_dmg_set`, `ffxvr_dmg_cfg`, `ffxvr_dmg_skip`, `ffxvr_dmg_status`.
+
+## Render and performance fixes from the 6-7 Nov logs (branch `fix-render`, 7 Nov 2026)
+
+Sources: scratchpad research/logs-1107-perf.md and logs-1107-behaviour.md. Pure parts in `ffxvr_render.h` (and `ffxvr_cpu.h` for the
+reads); scratch tests in render_chk/tests.
+
+- **The flat-screen rule needs the painted layers to dominate (behaviour E1/E2).** A 3D cutscene in kino0400 (s2 07:25:17) went to
+  the virtual screen for 9.3 s on 2 painted-layer (dummy camera) uploads beside 349 real 3D camera uploads: any layer upload made
+  the frame a "painted-backdrop room". Now (`rnd::ModeRule`) a room is entered when the layer uploads x 4 >= the real 3D uploads
+  (or there is no real 3D upload), and kept while layers x 8 >= real (the hysteresis band); 10 frames in a row outside the band,
+  or a frame with no layer at all, end it. The 2D verdict still needs 2 frames before the screen and 3D comes back at once.
+  `g_backdrop_room` (first person, hands, stereo screen, the stick remap) follows the rule's room, not any layer upload; with
+  `backdrop_mode` 0 the room is still tracked but stays 3D. Expected: E1 stays 3D (2 x 4 < 349); the s2 title-like frame (28
+  layers, 0 real) and a hut (about 10 layers, a few characters) stay flat.
+  - **The mode lines say why.** `mode -> SCREEN|3D at frame F: ... | why: <reason with the counts and the rule>`; reasons: a real
+    3D camera, 3D with layers that do not dominate, no real 3D camera, too few scene draws, a painted room, screen_mode 1 / 2,
+    a battle transition's pin, Fahrenheit's save screen, the slow-GPU guard. While the mode stays, a new reason held for 30
+    frames gets `mode: still SCREEN at frame F, now because: ...` (200 a session): a room entered through a load is first
+    logged as "no real 3D camera" (the load frame), then as the room with its counts, which is what confirms or rules out the
+    Djose side rooms' 126 s (E2).
+  - If a painted room with many characters now shows in 3D with the painting stuck to the face, the line gives its counts
+    (`k_bd_enter` / `k_bd_stay` in `ffxvr_render.h`).

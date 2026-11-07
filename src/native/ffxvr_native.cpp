@@ -42,6 +42,7 @@
 #include "ffxvr_dmg3d.h"   // 3D damage numbers (4.2): the node walk, the game's placement and fade, the queue check, the quads (pure logic)
 #include "ffxvr_odgest.h"  // overdrive gestures (4.3): Lulu's circles, Auron's slashes and punches, Tidus's swing (pure logic)
 #include "ffxvr_odvis.h"   // overdrive visuals: trails, bursts, Lulu's ring, Tidus's blade and bar, Auron's glyph row (pure geometry)
+#include "ffxvr_render.h"  // fix-render: the flat-screen rule and its reason, the second 3D camera, the GPU budget, the xrEndFrame trend (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -1185,6 +1186,8 @@ float   g_hands_sh_w = 0.17f, g_hands_sh_down = 0.13f, g_hands_sh_back = 0.04f; 
 float   g_delta[G_COUNT][16]; bool g_delta_on[G_COUNT]; uint32_t g_delta_frame = 0;
 uint32_t g_hands_frames = 0; char g_hands_why[96] = "off";
 uint32_t g_frames_without_cam = 0;
+rnd::ModeRule g_mode_rule;             // fix-render: the frame-type decision (flat screen or 3D) and its reason (ffxvr_render.h)
+rnd::WhyWatch g_mode_why;              // ... the reason last logged, and a new one held long enough to log again
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
 
@@ -12096,6 +12099,7 @@ static void leave_xr_state() {
     g_xr_want = false; g_xr_active = false;
     g_ovr_suspend = false; g_xr_screen_now = false; g_screen3d_now = false; g_backdrop_room = false;
     g_frames_without_cam = 0; g_blink_frames = 0; g_move_delta = 0.f; g_move_held = false;
+    g_mode_rule.reset(); g_mode_why = rnd::WhyWatch();   // fix-render: no painted room or reason carried across a headset stop
     g_ej_hold = ej::Hold(); g_ej_face_rq.on = false; g_ej_head_snap = false;   // eye jumps (N6): no stale restore, face or head snap across a headset stop
     g_ui_state = UI_IDLE; g_ui_early = g_ui_early_keep = false; g_ui_last_frame_had_pass = false;   // robustness
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
@@ -14238,10 +14242,12 @@ static void xr_tick() {
     // The title screen and menus upload a dummy camera whose projection is
     // near-2D (|P[0]| <= 0.2), so only real cameras count. A draw-count
     // threshold of 20 was wrong: a hut interior is a 10-draw scene pass.
-    const bool backdrop = (g_bg_uploads_frame > 0 && g_backdrop_mode == 1);
-    const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3 || backdrop);
-    if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
-    const bool is2d = g_frames_without_cam >= 2;
+    // fix-render (logs-1107 E1): a painted-backdrop room needs its layer uploads to dominate the real 3D uploads (or no real
+    // 3D upload at all), with hysteresis (ffxvr_render.h ModeRule); a stray layer or two in a 3D scene no longer sends it flat.
+    g_mode_rule.step(rnd::FrameIn{ g_cam3d_uploads_frame, g_bg_uploads_frame, g_scene_live_draws, g_backdrop_mode });
+    g_frames_without_cam = g_mode_rule.without;
+    const bool frame2d = rnd::why_flat(g_mode_rule.why);   // this frame's own 2D verdict (fmv-relief's relief_present reads it)
+    const bool is2d = g_mode_rule.flat;
     bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
     // od-guard, the screen item: the mono screen while the guard tests it, and one Present more after (the tail), so the
     // frame rendered right after the test has its eye 2 again before a 3D frame can be submitted
@@ -14250,19 +14256,30 @@ static void xr_tick() {
     g_slow_scr_was = slow_scr;
     const bool slow_force = slow_scr || g_slow_scr_tail > 0;
     if (!slow_scr && g_slow_scr_tail > 0) g_slow_scr_tail--;
-    if (bt_no_split()) screen_next = g_bt_screen_pin;   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
-    else if (menu) screen_next = true;                  // saveui C: Fahrenheit's save screen is shown on the virtual screen, as on the monitor
-    else if (slow_force) screen_next = true;
+    int mode_why = g_mode_rule.why;                    // fix-render: why this frame is shown as it is (the mode lines)
+    if (g_xr_screen_mode == 1) mode_why = rnd::W_FORCED; else if (g_xr_screen_mode == 2) mode_why = rnd::W_NEVER;
+    if (bt_no_split()) { screen_next = g_bt_screen_pin; mode_why = rnd::W_BT; }   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
+    else if (menu) { screen_next = true; mode_why = rnd::W_MENU; }                // saveui C: Fahrenheit's save screen is shown on the virtual screen, as on the monitor
+    else if (slow_force) { screen_next = true; mode_why = rnd::W_SLOW; }
     if (screen_next != g_xr_screen_now) {
         static int logged = 0;
+        g_mode_why.switched(screen_next, mode_why);
         if (logged++ < 400) {
             D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
-            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u, backdrop %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+            char why[256]; rnd::why_text(why, sizeof(why), mode_why, g_mode_rule.last);
+            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u, backdrop %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u | why: %s",
                  screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_cam3d_uploads_frame, g_bg_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
-                 static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
+                 static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail, why);
         }
     }
-    g_backdrop_room = g_bg_uploads_frame > 0;
+    else if (g_mode_why.step(mode_why)) {               // fix-render (E2): the same mode for a new reason (held 30 frames): a room entered through a load
+        static int relogged = 0;
+        if (relogged++ < 200) {
+            char why[256]; rnd::why_text(why, sizeof(why), mode_why, g_mode_rule.last);
+            diag("mode: still %s at frame %u, now because: %s", screen_next ? "SCREEN" : "3D", g_frames, why);
+        }
+    }
+    g_backdrop_room = g_mode_rule.room;                 // fix-render: the layer rule's room (with its hysteresis), not any layer upload
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
