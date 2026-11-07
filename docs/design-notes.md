@@ -5008,13 +5008,18 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
 - **Diagnostics.** Module log: a shared run that the rule declined (10+ frames) gets one line at its end: "eye: stays on the
   root: actor N 'f010' (chr_id 0x5..., an object (chr/obj)) shared 'c001''s root for F frames, but his head sub-position
   was at most X units from it horizontally (last Y; ...); his farthest sub-position Z units out (index K)". The on line
-  names the sharing actor too. 40 lines a session, shared with the other eye lines. The slot and model are the hook for the
-  carried-sphere item (Backlog).
+  names the sharing actor too. These lines have their own budget, 20 a session (review N1: a cloister-heavy session cannot
+  silence the on / off lines, 40 a session). The slot and model are the hook for the carried-sphere item (Backlog).
+- **Known (review N3).** If the state's key resets inside a displaced scene (a load or map change: a new scene generation)
+  while the head is under 12 units out, the rule re-enters only once the head goes past 12 again (before: after 10 frames).
+  Meanwhile the eye is under 12 units from the head. If the owner sees the eye "stuck at the anchor" after a load inside
+  mi/mihn0100, this is it.
 - **Tests.** scratchpad eg_chk/eye_grab_test (EyeLogic extracted from body_hide.cs and transpiled mechanically): normal
   play never on; the Djose grab (shared 421 frames, head 0-1.7) never on and declined every frame; a grab with a lean to 8,
   a one-frame pop to 30 and 9 frames at 14 never on; mihn0100 on after 10 frames at 70 and on through the walk-back to 8.4,
   1.4 and 0, off 10 frames after the shared root ends; a scene starting 5 out that moves to 40 switches at its 10th frame
-  past 12; the threshold, run breaks, unknown / NaN / over-400 heads. 12 of 12 mutants caught.
+  past 12; the threshold (exactly 12.0: no entry, and the decline line's condition; review N2), run breaks, unknown / NaN /
+  over-400 heads. 13 of 13 mutants caught.
 
 ## Battle-start banners in double (4 Nov 2026)
 

@@ -71,7 +71,7 @@ public sealed unsafe partial class FFXVRModule {
     // is more than EyeLogic.k_enter units from the root horizontally; once on it stays on while the root stays shared (round 3b's
     // walk-back). A shared run that does not switch is logged once at its end (the sharing actor's slot, model and chr_id type,
     // the head's displacement): the hook for the carried-sphere backlog item.
-    private EyeDisp _eye_disp; private int _eye_key = -1, _eye_lines;
+    private EyeDisp _eye_disp; private int _eye_key = -1, _eye_lines, _eye_dec_lines;   // on / off lines 40 a session; decline lines their own 20 (review N1)
     private int _eye_dec_n, _eye_dec_slot = -1, _eye_dec_id, _eye_dec_far_k = -1; private float _eye_dec_max, _eye_dec_last, _eye_dec_far; private string _eye_dec_name = "", _eye_dec_who = "";
     private bool eye_disp_step(Actor* actors, ref Actor p, int pick, bool allowed, Vector3 head) {
         int key = (int)(((uint)pick << 16 | (uint)(p.chr_id & 0xFFFF)) & 0x3FFFFF | (body_hide_scene_gen(actors, pick) & 0x1FF) << 22);
@@ -101,15 +101,15 @@ public sealed unsafe partial class FFXVRModule {
         }
         return _eye_disp.on;
     }
-    /// <summary>eye-grab: the end of a shared-root run that the rule declined (k_frames frames or more): one module-log line (shares
-    /// the 40-line budget of the eye lines).</summary>
+    /// <summary>eye-grab: the end of a shared-root run that the rule declined (k_frames frames or more): one module-log line (20 a
+    /// session, a budget of their own: a cloister-heavy session cannot silence the on / off lines; review N1).</summary>
     private void eye_decline_end() {
         int n = _eye_dec_n; _eye_dec_n = 0;
-        if (n < EyeLogic.k_frames || _eye_lines >= 40) return;
-        _eye_lines++;
+        if (n < EyeLogic.k_frames || _eye_dec_lines >= 20) return;
+        _eye_dec_lines++;
         uint type = (uint)_eye_dec_id >> 12;
         string kind = type == 0 ? "a party / event character model" : type == 2 ? "an NPC" : type == 4 ? "a 'w' model" : type == 5 ? "an object (chr/obj)" : $"type {type}";
-        _logger.Info(I($"eye: stays on the root: actor {_eye_dec_slot} '{_eye_dec_name}' (chr_id 0x{_eye_dec_id:X}, {kind}) shared '{_eye_dec_who}''s root for {n} frames, but his head sub-position was at most {_eye_dec_max:F1} units from it horizontally (last {_eye_dec_last:F1}; the drawn head follows only past {EyeLogic.k_enter:F0}: a body drawn at its root, e.g. a carried or placed object); his farthest sub-position {_eye_dec_far:F1} units out (index {_eye_dec_far_k}) on map {map_name()}") + (_eye_lines == 40 ? " (no more of these lines this session)" : ""));
+        _logger.Info(I($"eye: stays on the root: actor {_eye_dec_slot} '{_eye_dec_name}' (chr_id 0x{_eye_dec_id:X}, {kind}) shared '{_eye_dec_who}''s root for {n} frames, but his head sub-position was at most {_eye_dec_max:F1} units from it horizontally (last {_eye_dec_last:F1}; the drawn head follows only past {EyeLogic.k_enter:F0}: a body drawn at its root, e.g. a carried or placed object); his farthest sub-position {_eye_dec_far:F1} units out (index {_eye_dec_far_k}) on map {map_name()}") + (_eye_dec_lines == 20 ? " (no more of these lines this session)" : ""));
     }
     /// <summary>Another live actor the game draws (not script-hidden) with its drawn root within 0.5 of `root` (game space): its slot
     /// (the first such), chr_id and name pointer; -1 when none.</summary>
