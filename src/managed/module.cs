@@ -109,6 +109,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private bool _btl_aeon_out = false; private int _btl_cycle_req = 0;
     private readonly byte[] _btl_roster = new byte[3], _btl_roster_prev = new byte[3];
     private const int k_roster_off = 0xD2C895, k_roster_saved_off = 0xD2C89C, k_aeon_summoner_off = 0x6D1;
+    /// <summary>The roster still holds the last battle's party: MsBtlReadSetScene (0x783E20, battle_state 7) writes this
+    /// battle's through the Chr init 0x79C110 and moves to 8 or 10; 4..7 come before it (MsBtlReadManage 0x783020: 4 wait,
+    /// 5 / 6 the btl read, 7 the set-up). 7 Nov, window 3: the stale [5,2,4] gave "battle start -> chr 2" (Auron) for a second.</summary>
+    internal static bool btl_roster_stale(int bst) => bst >= 4 && bst <= 7;
     private const int k_ply_n = 18, k_mon_n = 16;   // battle entity slots: players 18 (party, Aeons, the Magus Sisters), monsters 16
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
@@ -2552,7 +2556,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // The roster: three chr ids, 0xFF = empty slot. Kept by the game at setup, on swaps, summons and dismissals.
             bool roster_ok = true;
             try { for (int i = 0; i < 3; i++) _btl_roster[i] = FhUtil.get_at<byte>(k_roster_off + i); } catch { roster_ok = false; }
-            // before setup has run the bytes are stale (seen: [0,0,0]); a real roster never repeats an id
+            // before setup has run the bytes are stale (seen: [0,0,0]); a real roster never repeats an id; before battle_state 7's
+            // set-up they are the last battle's (the eyes stay with the field pick until this battle's party is there)
+            if (btl_roster_stale(btl_v.battle_state)) roster_ok = false;
             if (_btl_roster[0] == _btl_roster[1] && _btl_roster[0] != 0xFF || _btl_roster[1] == _btl_roster[2] && _btl_roster[1] != 0xFF || _btl_roster[0] == _btl_roster[2] && _btl_roster[0] != 0xFF) roster_ok = false;
             if (roster_ok && plys != null) {
                 static bool is_aeon(byte id) => id >= 8 && id <= 0x11;
@@ -2565,7 +2571,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 int ply_of(int id) { for (int i = 0; i < 18; i++) if (read(plys + i, out Chr pc) && pc.chr_id == id && pc.actor != null) return i; return -1; }
 
                 bool changed = false; for (int i = 0; i < 3; i++) if (_btl_roster[i] != _btl_roster_prev[i]) changed = true;
-                if (changed) _logger.Info($"battle follow: roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] (was [{_btl_roster_prev[0]},{_btl_roster_prev[1]},{_btl_roster_prev[2]}])");
+                if (changed) _logger.Info($"battle follow: roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] (was [{_btl_roster_prev[0]},{_btl_roster_prev[1]},{_btl_roster_prev[2]}]) at battle_state 0x{btl_v.battle_state:X2}");
 
                 int aeon_id = -1; for (int i = 0; i < 3; i++) if (is_aeon(_btl_roster[i])) aeon_id = _btl_roster[i];
                 int want = _btl_follow_id; string why = null;

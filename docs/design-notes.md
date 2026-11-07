@@ -1122,7 +1122,11 @@ battle frame, a Change window flips a slot in place (`[0,5,1]`, Auron to the
 reserve list), a summon leaves `[8,255,255]` with the party saved at
 0xD2C89C and `cur_chr_id=8` on the Aeon's turns. One caveat: before setup
 runs the bytes are stale (`[0,0,0]` seen on the first frame), so a roster
-with a repeated id is ignored.
+with a repeated id is ignored. (7 Nov) They are also the last battle's
+party until battle_state 7: MsBtlReadSetScene 0x783E20 writes this battle's
+(Chr init 0x79C110) and moves on to 8 or 10, so the roster is ignored in
+states 4..7 (about 20 frames) and the eyes keep the field pick meanwhile;
+7 Nov window 3 had followed Auron from the stale `[5,2,4]` for a second.
 
 `btl_follow` now runs on the roster: the eyes follow a chr id; Tidus when he
 is on the field (and the moment he joins), else the id that took the
