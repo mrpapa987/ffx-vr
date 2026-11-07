@@ -14,8 +14,10 @@ namespace FFXVR;
 //   countdown's loop, the digits go on being drawn) and the main loop's three UI-draw gates ([0x12FB8FB] == 0, [0x12FBBB4] != 0,
 //   [0x12FB7D0] == 0, 0x8214F4..0x821533: a frame without the UI publishes nothing, the last snapshot holds as the game's panel
 //   does, and the live rule clears it after 3 such frames). One guarded read of the pool (0xA00 B) when the list is not empty,
-//   native walks it (ffxvr_dmg_walk), then per target: the anchor as the game computes it (optpos[Chr+0x442] through d7_anchor,
-//   lifted by Chr+0x4E8; Chr+0x442 = 0xFF, above 25 or a d7_anchor fallback: a stand-in, counted and never hidden from the panel)
+//   native walks it (ffxvr_dmg_walk), then per target: the anchor as the game computes it (optpos[Chr+0x442] through d7_anchor;
+//   Chr+0x442 = 0xFF: the game's 0x794AB0, ported (dmg_ab0, native ffxvr_dmg_anchor: the override matrix, the parent's optpos, or
+//   the actor's root on the ground); lifted by Chr+0x4E8; an index above 25, a d7_anchor fallback or a failed port read: a
+//   stand-in, counted and never hidden from the panel)
 //   and its screen anchors. First person (C3's rule, c3_is_self): the digits of the actor we look out of go to C3's self spot,
 //   0.5 m ahead at chest height, instead of our own eyes; with the hide they leave the panel like the others (they are drawn,
 //   in front of you: one rule for every target, and the panel never shows half of the numbers). Published
@@ -40,7 +42,11 @@ public sealed unsafe partial class FFXVRModule {
     [StructLayout(LayoutKind.Sequential, Pack = 1)] private struct DmgNode { public byte flags, kind, chr, idx, glyph, delay, counter, len; public short ox, oy; public byte ex, ey, slot, pad; }   // dmg::Node, 16 B
     [StructLayout(LayoutKind.Sequential, Pack = 1)] private struct DmgChr {   // dmg::Chr, 72 B
         public Vector3 opt, tl, td; public float h4e8; public int sx, sy, f44, f48, f4c, f50;
-        public byte chr, idx442, src, aflags, ok, p0, p1, p2;
+        public byte chr, idx442, src, aflags, ok, how, p1, p2;   // how: dmg::AnchorHow, the 0x794AB0 port's branch (log only)
+    }
+    [StructLayout(LayoutKind.Sequential, Pack = 1)] private struct DmgAnchorIn {   // dmg::AnchorIn, 56 B: what 0x794AB0 reads
+        public Vector3 ovr_t, parent_opt, pos; public float f70, c3a4, a4f0;
+        public byte ovr, ovr_ok, parent, parent_ok, stat_death, flying, btl_9dd, btl_9ce;
     }
     private delegate* unmanaged[Cdecl]<byte*, uint, uint, DmgNode*, int, uint*, int> _fn_dmg_walk;                       // ABI 47
     private delegate* unmanaged[Cdecl]<byte*, int, int, DmgNode*, int, DmgChr*, int, byte*, uint*, int> _fn_dmg_queue;   // ABI 47
@@ -48,6 +54,7 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int, float, float, byte*, int> _fn_dmg_cfg;                                   // ABI 47
     private delegate* unmanaged[Cdecl]<int> _fn_dmg_skip;                                                             // ABI 47
     private delegate* unmanaged[Cdecl]<uint*, int, void> _fn_dmg_status;                                              // ABI 47
+    private delegate* unmanaged[Cdecl]<DmgAnchorIn*, float*, int> _fn_dmg_anchor;                                     // ABI 50
 
     private const int k_dmg_pool = 0xD360B8, k_dmg_head = 0xD360BC;    // VA 0x11360B8 / 0x11360BC
     private const int k_dmg_qcount = 0xF3F108, k_dmg_qent = 0xF3F110;  // VA 0x133F108 (s16) / 0x133F110 (16 B x 63)
@@ -64,7 +71,7 @@ public sealed unsafe partial class FFXVRModule {
     private readonly DmgHdr[] _dmgh = new DmgHdr[2]; private readonly DmgNode[] _dmgn = new DmgNode[2 * 128]; private readonly DmgChr[] _dmgc = new DmgChr[2 * 16]; private int _dmg_seq;
     private uint _dmg_join_stamp = uint.MaxValue; private bool _dmg_published_empty = true;
     // main-thread counters (one writer; read by the render thread for the log)
-    private int _dmg_snaps_join, _dmg_snaps_draw, _dmg_reads_failed, _dmg_faults, _dmg_nodes_seen, _dmg_chr_exact, _dmg_chr_ff, _dmg_chr_none;
+    private int _dmg_snaps_join, _dmg_snaps_draw, _dmg_reads_failed, _dmg_faults, _dmg_nodes_seen, _dmg_chr_exact, _dmg_chr_ff, _dmg_chr_none, _dmg_chr_ab0;
     private int _dmg_cut_loop, _dmg_cut_outside, _dmg_cut_misaligned, _dmg_cut_free, _dmg_cut_cap, _dmg_cut_full;
     private int _dmg_ui_skipped, _dmg_chr_self;   // join frames without the game's UI draw; first-person self targets
     private int _dmg_q_ok, _dmg_q_mismatch, _dmg_q_missing, _dmg_q_other, _dmg_hidden_frames, _dmg_hidden_digits, _dmg_hide_doubt;
@@ -193,13 +200,44 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_safe_read(cb + 0xF34, scr, 32) == 0) { _dmg_chr_none++; return; }
         c.idx442 = i442; c.h4e8 = h; c.sx = scr[0]; c.sy = scr[1]; c.f44 = scr[4]; c.f48 = scr[5]; c.f4c = scr[6]; c.f50 = scr[7];
         D7Anchor a = default;
-        if (!d7_anchor(chrs, id, i442 != 0xFF ? i442 : 1, ref a)) { _dmg_chr_none++; return; }   // no actor: the game uses 0x794AB0; the number stays on the panel
+        if (!d7_anchor(chrs, id, i442 != 0xFF ? i442 : 1, ref a)) { _dmg_chr_none++; return; }   // no actor: the game uses 0x794AB0's no-actor branch; the number stays on the panel
         c.opt = a.opt; c.tl = a.tl; c.td = a.td; c.aflags = (byte)(a.flags & 7); c.ok = 1;
         if (c3_is_self(a)) { c.aflags |= 8; _dmg_chr_self++; }   // dmg::k_self: first person looks out of this actor (C3's rule): the self spot
-        // a stand-in (drawn, never taken off the panel): 0xFF (the game uses 0x794AB0), an index above 25 (0x8354F0 reads past optpos[25]),
-        // or d7_anchor's fallback to optpos[0] / the root for an empty sub-position (review N2)
-        c.src = (byte)(i442 == 0xFF || (a.flags & 4) != 0 || a.fallback != 0 ? 1 : 0);
-        if (c.src == 0) _dmg_chr_exact++; else _dmg_chr_ff++;
+        // 0xFF: the game anchors at 0x794AB0(chr) (7 Nov logs, finding 3: optpos[1] put the numbers 30-490 PS2 px above the game's)
+        if (i442 == 0xFF) c.how = dmg_ab0(chrs, cb, a, ref c);
+        // a stand-in (drawn, never taken off the panel): 0xFF when the port's reads failed (optpos[1]), an index above 25 (0x8354F0
+        // reads past optpos[25]), or d7_anchor's fallback to optpos[0] / the root for an empty sub-position (review N2)
+        c.src = (byte)(c.how != 0 ? 0 : i442 == 0xFF || (a.flags & 4) != 0 || a.fallback != 0 ? 1 : 0);
+        if (c.src == 0) { _dmg_chr_exact++; if (c.how != 0) _dmg_chr_ab0++; } else _dmg_chr_ff++;
+    }
+
+    /// <summary>The game's 0x794AB0 for a target whose Chr+0x442 is 0xFF (main thread): the reads here, the branch logic in native
+    /// (ffxvr_dmg3d.h anchor_794ab0, through ffxvr_dmg_anchor). On success c.opt is the game's point (game space; native lifts it
+    /// by Chr+0x4E8 as 0x79F380 does) and c.tl / c.td the roots of its 30 Hz correction: the actor's own (d7_anchor's: opt - tl + td
+    /// moves the root to where it is drawn), the parent's for the parent's optpos, none for the override matrix (aflags 2).
+    /// Returns the AB_* bits, 0 = keep the optpos[1] stand-in.</summary>
+    private byte dmg_ab0(nint chrs, byte* cb, in D7Anchor a, ref DmgChr c) {
+        if (_fn_dmg_anchor == null || a.actor == 0) return 0;
+        byte* ac = (byte*)a.actor;
+        if (!read(ac + 0x10C, out uint ovr) || !read(ac + 0x0C, out Vector3 pos) || !read(ac + 0x4F0, out float a4f0)) return 0;
+        if (!read(cb + 0x43F, out byte par) || !read(cb + 0x441, out byte pidx) || !read(cb + 0xDCC, out byte death) || !read(cb + 0x505, out byte fly)
+            || !read(cb + 0xF70, out float f70) || !read(cb + 0x3A4, out float c3a4)) return 0;
+        DmgAnchorIn x = default;
+        x.pos = pos; x.a4f0 = a4f0; x.f70 = f70; x.c3a4 = c3a4; x.parent = par; x.stat_death = death; x.flying = fly;
+        x.btl_9dd = FhUtil.get_at<byte>(0xD2C9DD); x.btl_9ce = FhUtil.get_at<byte>(0xD2C9CE);   // VA 0x112C9DD / 0x112C9CE
+        x.ovr = (byte)(ovr != 0 ? 1 : 0);
+        if (ovr != 0 && read((byte*)(nint)ovr + 0x30, out Vector3 t)) { x.ovr_t = t; x.ovr_ok = 1; }
+        D7Anchor pa = default;
+        if (ovr == 0 && par != 0xFF && par < 0x1F && read((byte*)chrs + par * 0xF90, out nint pact) && pact != 0) {   // 0x795080: the parent chr's actor
+            x.parent_ok = 2;   // it has one: its optpos[Chr+0x441] must read (0x8354F0), or the port fails
+            if (d7_anchor(chrs, par, pidx, ref pa) && (pa.flags & 4) == 0) { x.parent_opt = pa.opt; x.parent_ok = 1; }
+        }
+        float* o = stackalloc float[3];
+        int how = _fn_dmg_anchor(&x, o);
+        if (how == 0) return 0;
+        c.opt = new Vector3(o[0], o[1], o[2]);
+        if ((how & 3) == 2) { c.tl = pa.tl; c.td = pa.td; c.aflags = (byte)((c.aflags & 8) | (pa.flags & 3)); }
+        return (byte)how;
     }
 
     /// <summary>The queue against the nodes: from the draw detour, the live queue (and the hide when native draws the digits);
@@ -281,7 +319,7 @@ public sealed unsafe partial class FFXVRModule {
         if (now - _dmg_line_t < 10.0 || _dmg_lines >= 500) return;
         _dmg_line_t = now; _dmg_lines++;
         if (_fn_dmg_status != null) fixed (uint* u = _dmg_st) _fn_dmg_status(u, 18);
-        d7_log(I($"dmg3d: 10 s: snapshots at the join {_dmg_snaps_join} (join frames without the game's UI draw {_dmg_ui_skipped}), at the queue draw {_dmg_snaps_draw} (hook calls {_dmg_draw_calls}), nodes seen {_dmg_nodes_seen}, pool reads failed {_dmg_reads_failed}, main-thread faults {_dmg_faults} | targets: the game's anchor {_dmg_chr_exact}, stand-in (Chr+0x442 0xFF / above 25 / fallback) {_dmg_chr_ff}, no anchor {_dmg_chr_none}, first person's own (self spot) {_dmg_chr_self} | walks cut: loop {_dmg_cut_loop} outside {_dmg_cut_outside} misaligned {_dmg_cut_misaligned} free {_dmg_cut_free} cap {_dmg_cut_cap} full {_dmg_cut_full} | queue check (our placement vs the game's entries): matched {_dmg_q_ok}, mismatch {_dmg_q_mismatch}, missing {_dmg_q_missing} (the UI was not drawn that frame, or the queue full), other {_dmg_q_other} | hide: {(_dmg_hide2d ? (_dmg_hook_ok ? "on" : "on, NOT HOOKED") : "off")}, frames {_dmg_hidden_frames}, digits taken off {_dmg_hidden_digits}, left for a doubt {_dmg_hide_doubt} | native: snapshots {_dmg_st[4]}, digits drawn {_dmg_st[6]} ({_dmg_st[5]} now), numbers {_dmg_st[11]} (lines {_dmg_st[12]}, dropped {_dmg_st[13]}), without battle.dds {_dmg_st[7]} Presents, no anchor {_dmg_st[8]}, over the cap {_dmg_st[9]}, skip frames {_dmg_st[10]}; battle.dds {(_dmg_atlas ? "held" : "not held")}, hop table {(_dmg_st[14] != 0 ? "as checked" : "DIFFERENT")}"));
+        d7_log(I($"dmg3d: 10 s: snapshots at the join {_dmg_snaps_join} (join frames without the game's UI draw {_dmg_ui_skipped}), at the queue draw {_dmg_snaps_draw} (hook calls {_dmg_draw_calls}), nodes seen {_dmg_nodes_seen}, pool reads failed {_dmg_reads_failed}, main-thread faults {_dmg_faults} | targets: the game's anchor {_dmg_chr_exact} (of them through the 0x794AB0 port {_dmg_chr_ab0}), stand-in (0xFF port failed / above 25 / fallback) {_dmg_chr_ff}, no anchor {_dmg_chr_none}, first person's own (self spot) {_dmg_chr_self} | walks cut: loop {_dmg_cut_loop} outside {_dmg_cut_outside} misaligned {_dmg_cut_misaligned} free {_dmg_cut_free} cap {_dmg_cut_cap} full {_dmg_cut_full} | queue check (our placement vs the game's entries): matched {_dmg_q_ok}, mismatch {_dmg_q_mismatch}, missing {_dmg_q_missing} (the UI was not drawn that frame, or the queue full), other {_dmg_q_other} | hide: {(_dmg_hide2d ? (_dmg_hook_ok ? "on" : "on, NOT HOOKED") : "off")}, frames {_dmg_hidden_frames}, digits taken off {_dmg_hidden_digits}, left for a doubt {_dmg_hide_doubt} | native: snapshots {_dmg_st[4]}, digits drawn {_dmg_st[6]} ({_dmg_st[5]} now), numbers {_dmg_st[11]} (lines {_dmg_st[12]}, dropped {_dmg_st[13]}), without battle.dds {_dmg_st[7]} Presents, no anchor {_dmg_st[8]}, over the cap {_dmg_st[9]}, skip frames {_dmg_st[10]}; battle.dds {(_dmg_atlas ? "held" : "not held")}, hop table {(_dmg_st[14] != 0 ? "as checked" : "DIFFERENT")}"));
     }
 
     /// <summary>F8 main page, under "battle start (glass break)" (bt_ui).</summary>
