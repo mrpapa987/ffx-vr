@@ -1293,6 +1293,15 @@ Sg_ControlPlayer at 0x82D795 instead of the latched camera yaw 0x130079C) could 
 with no stick rotation at all, but event scripts also set it (0x82D990, called from 0x83B519 and 0xA77C07), so we would
 have to own it only in our first-person views and give the script's value back; untested.
 
+Carried cloister sphere in the VR hand (owner, 7 Nov 2026). In first person, while Tidus carries a cloister sphere, show it
+resting in the VR right hand's palm (right by default, as in the game) instead of where Tidus's hand would be. Plan, option 2
+first: hide the carried sphere's game draws in first person (the body hide's IB / draw identity work: the sphere's model
+chain gives its index-buffer keys as "another actor's") and draw a simple glowing sphere in the palm, coloured by the sphere
+type. Drawing only: the game's sphere and puzzle logic are untouched. Option 1, re-drawing the game's own sphere model at the
+palm, comes later if option 2 is not good enough. Hook: the eye's shared-root lines (round 3c) name the actor on Tidus's root
+during a grab (dj/djyt0000: actor 13 `f010`, an object model, 2 segments); while carried it is not on his root (the rule was
+off between grabs), so finding it then (attached to his hand bone? +0x19C) is the first step.
+
 Field / modes: per-area diorama memory by event_id; swimming / underwater
 eye height and the distortion pass; blitzball and chocobo (doc only);
 gesture tuning.
@@ -4967,6 +4976,45 @@ SF1-SF3, N1-N4, N6-N8) and review 2 (od-guard-review2.md: SF1, SF2, N1-N4).
   hold the raw head is stale for the tie rule and the census (harmless: a stale dp gives no "other" evidence). N6: without the
   flag the eye base is equal in value, not always in bits (-0.0 + 0.0). N7: with a +0x10C script matrix the metric (+0x200)
   and the eye base (+0x0C) use different origins (pre-existing). N8: k_frames counts Presents (10 = 167 ms at 60 fps).
+
+### Round 3c: not for a sphere grab (7 Nov 2026)
+
+- **The owner's report.** In a cloister, taking a sphere from a wall socket in first person: Tidus's body moved abruptly
+  during the grab animation and the view went up close into the wall. Suspected after-effect of round 3b.
+- **The logs (Djose, not Kilika: dj/djyt0000 at 07:26:44-52 local and dj/djyt0600 at 07:43:24-32).** The rule switched on
+  and off around each grab (about 8 s each). The module log names the actor on the root: actor 13 `f010` (an object model,
+  chr_id type 5, 2 segments; +0x0C on Tidus's, not attached, no script matrix). Its root was 0.01-0.09 units from his for
+  421 and 428 frames. Round 3b's rule (the shared root alone) was met by the sphere.
+- **But the rule did not move the eye there.** c001's head pick (push_player's rule, the highest sub-position) is index 25,
+  a helper point exactly 18 units over the root (every optpos dump: `25*: (root x, root y - 18, root z)`). The census during
+  both grabs: "the player's head sub-position 18.00 from the centre" in every line; the drawn palette head 0.0-0.2 units from
+  it (texture 3B3F1FA4) and the root still (step 0) through 07:26:44-50. With the bit on, the eye's horizontal offset was the
+  smoothed head offset, 0. So the switch only gave two 4-frame blinks; the close-to-the-wall view most likely has another
+  cause: the game standing Tidus's root right at the socket (the eye is at the root horizontally in fp_head_anchor 1), or the
+  drawn body moving off the root during the grab (which the head pick of c001 cannot show). Not settled by these logs.
+- **The fix (EyeLogic.Step, body_hide.cs).** Entering needs, on each of the 10 frames, the shared root AND the head
+  sub-position more than `k_enter` = 12 units (1.05 m) from the root horizontally. A body drawn at its root does not put its
+  head that far out with a lean or a reach (a bend or a kneel: 6-9 units); mi/mihn0100's head was 67 units out. Once on, it
+  stays on while the root stays shared, whatever the distance (round 3b's walk-back to 8.4 / 1.4 is unchanged). Leaving is
+  unchanged. The measure is the head pick itself (what the eye would follow), not the nearest sub-position (index 0 of c001
+  is the root itself, always 0.0).
+- **Not chosen: a gate on the sharing actor's kind.** The type in chr_id (0 `c`, 2 `n`, 4 `w`, 5 `f`) does not say "has a
+  body": the chocobo `f051` is an `f` model with a skeleton, and an event can anchor Tidus on a prop. The displacement is
+  the property that matters (would following the head move the eye a lot?), so it is the only gate; the kind is logged.
+- **The eye while on (checked, unchanged).** fp_eye_base in fp_head_anchor 0 / 1 takes only the horizontal part of the
+  smoothed head offset (g_fp_head_s, 0.35 a frame; spikes over 8 units held for up to 3 frames) and adds no head-length
+  along the lean (mode 2's term); the height is the mode's own (mode 1: the head's height, as without the bit; mode 0: the
+  fixed eye height). A lean moves the eye only while the rule is on, which now needs a body drawn 12+ units off its root.
+- **Diagnostics.** Module log: a shared run that the rule declined (10+ frames) gets one line at its end: "eye: stays on the
+  root: actor N 'f010' (chr_id 0x5..., an object (chr/obj)) shared 'c001''s root for F frames, but his head sub-position
+  was at most X units from it horizontally (last Y; ...); his farthest sub-position Z units out (index K)". The on line
+  names the sharing actor too. 40 lines a session, shared with the other eye lines. The slot and model are the hook for the
+  carried-sphere item (Backlog).
+- **Tests.** scratchpad eg_chk/eye_grab_test (EyeLogic extracted from body_hide.cs and transpiled mechanically): normal
+  play never on; the Djose grab (shared 421 frames, head 0-1.7) never on and declined every frame; a grab with a lean to 8,
+  a one-frame pop to 30 and 9 frames at 14 never on; mihn0100 on after 10 frames at 70 and on through the walk-back to 8.4,
+  1.4 and 0, off 10 frames after the shared root ends; a scene starting 5 out that moves to 40 switches at its 10th frame
+  past 12; the threshold, run breaks, unknown / NaN / over-400 heads. 12 of 12 mutants caught.
 
 ## Battle-start banners in double (4 Nov 2026)
 
