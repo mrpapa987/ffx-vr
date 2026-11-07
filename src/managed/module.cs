@@ -2669,33 +2669,35 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // the same (fp_name_rank). The rule, the order and the cadence are unchanged: the actor-0 last resort, a hidden
             // listed model and a hidden party model still rescan every frame, they just cost no reads when nothing changed.
             Actor* snap = null;
+            ulong scene = fp_scene_sig();
+            int gp = fp_game_player(actors, scene);   // finding 1: the game's player actor (a tie goes to it)
             int score_of(in Actor a, int i, Actor* tbl) {
                 if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
                 int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
-                if (r >= 0) return RideLogic.FpScore(r, slot_hidden(tbl, snap, i), (int)a.chr_id, i);
                 int cid = (int)a.chr_id;
-                return RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
+                int s = r >= 0 ? RideLogic.FpScore(r, slot_hidden(tbl, snap, i), cid, i) : RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
+                return s >= 0 && fp_chain_bad(i, actors, cid) ? FpPick.Bad(s) : s;   // finding 1: a model chain that stopped reading whole
             }
             int cur_score = -1;
             if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
             _fp_scan_tick++;
             if ((_fp_scan_tick % 30) == 0) _fpn_frame_clear = true;   // the name ranks are read again with the 30-frame rescan (a backstop)
-            if (cur_score == 0 || (cur_score > 0 && cur_score < 100000 && (cur_score < 500 || cur_score >= 1000) && (_fp_scan_tick % 30) != 0)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
+            if (FpPick.Keep(cur_score, (_fp_scan_tick % 30) == 0, gp >= 0 && gp != _fp_actor_idx)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
             else {
                 int best = int.MaxValue, best_i = -1;
-                if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor
+                if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor, unless the other is the game's player (finding 1)
                 snap = tbl_snap(actors);
                 Actor slot = default;
                 for (int i = 0; i < 48; i++) {
                     Actor* ap = snap != null ? snap + i : &slot;
                     if (snap == null && !read(actors + i, out slot)) break;
-                    if (!live(*ap) || i == best_i) continue;
+                    if (!live(*ap) || i == _fp_actor_idx && cur_score >= 0) continue;
                     int s = score_of(*ap, i, actors);
-                    if (s >= 0 && s < best) { best = s; best_i = i; }
+                    if (FpPick.Better(s, i, best, best_i, gp)) { best = s; best_i = i; }
                 }
                 pick = best_i;
                 if (pick >= 0 && (pick != _fp_actor_idx || cur_score < 0) && read(actors + pick, out Actor pa2)) {
-                    string how = RideLogic.FpHow(best, names);
+                    string how = RideLogic.FpHow(best, names) + (pick == gp ? ", the game's player actor" : "");
                     _fp_chr_id = (int)pa2.chr_id;
                     _fp_how = $"actor {pick} '{actor_name(pa2.chr_name)}' ({how})";
                     string mp = map_name();
