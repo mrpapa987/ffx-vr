@@ -675,6 +675,7 @@ volatile LONG g_sr_in_extra = 0;  // SR-1: extra frames in flight (sr_extra); ff
 double   g_sr_fresh_accum = 0.0; // SR-6: g_turn_accum at the last fresh base layer (the extra frames' yaw bound when the held image is not a live view)
 uint32_t g_sr_clears = 0;         // the game's clears (ffxvr_on_clear outside InEye2): the ring wait's "next frame has started" test
 double   g_sr_rate_extras = 0.0;  // extra frames per second over the last 10 s (the perf: line, the overlay)
+rnd::GpuBudget g_gpu_budget;      // fix-render (perf finding 2): the F8 readout's GPU span against the knee, extras and repeated slots (sr_present / perf_tick)
 
 // Movement remap: in first person the game still maps the left stick against
 // its own camera, so the stick is rotated by (view heading - game camera
@@ -7116,6 +7117,7 @@ static void perf_tick() {
     g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
     g_acc_frame = g_acc_xr = g_acc_wait = g_acc_end = g_acc_e2 = g_acc_max = 0; g_acc_n = 0;
     if (g_acc_gpu_n > 0) { g_perf.gpu_ms = g_acc_gpu / g_acc_gpu_n; g_perf.gpu_max_ms = g_acc_gpu_max; g_acc_gpu = g_acc_gpu_max = 0; g_acc_gpu_n = 0; }
+    g_gpu_budget.gpu_ms = g_perf.gpu_ms; g_gpu_budget.gpu_max_ms = g_perf.gpu_max_ms;   // fix-render: the F8 GPU-budget readout
     if (g_acc_can_n > 0) { g_perf.can_ms = g_acc_can / g_acc_can_n; g_perf.can_max_ms = g_acc_can_max; g_perf.can_over = g_acc_can_over; g_acc_can = g_acc_can_max = 0; g_acc_can_n = 0; g_acc_can_over = 0; }
     g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
     { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
@@ -12310,9 +12312,23 @@ extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { bt_user("a turn ke
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;   // a 0 size would hit the CRT's invalid-parameter handler (process abort)
-    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
+    // fix-render (perf finding 2): a second line, the GPU budget (an older ffxvr.dll's 256-byte buffer shows the first line and
+    // the start of this one: _TRUNCATE). The game's render size and scene MSAA, the GPU span against the knee where the 120 Hz
+    // extra frames collapse, the extra frames a second and the slots the runtime repeated (extra frames dropped), late fresh frames.
+    unsigned ew = 0, eh = 0; xr_eye_size(&ew, &eh);
+    const rnd::GpuBudget& G = g_gpu_budget;
+    char msaa[48];
+    if (g_msaa_last_n != 0) snprintf(msaa, sizeof(msaa), "%ux (msaa=%d)", g_msaa_last_n, g_msaa_override);
+    else snprintf(msaa, sizeof(msaa), "not seen yet (msaa=%d)", g_msaa_override);
+    char hz[96] = "";
+    if (G.extras_s > 0.0 || G.dropped_s > 0.0)
+        snprintf(hz, sizeof(hz), " | extra frames %.0f/s, dropped (slots repeated) %.0f/s, fresh frames late %.0f%%", G.extras_s, G.dropped_s, G.late_pct);
+    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB\n"
+        "GPU budget: span %.1f ms (max %.0f) against the ~%.1f ms knee%s%s | game renders %ux%u, scene MSAA %s, eye image %ux%u%s",
         g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
-        (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
+        (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb,
+        G.gpu_ms, G.gpu_max_ms, rnd::k_gpu_knee_ms, G.over() ? ": OVER" : "", hz, g_bb_w, g_bb_h, msaa, ew, eh,
+        G.over() ? "\nOver the knee: try the game at 2560x1440 (tools\\game-settings.ps1 -Profile vr, game closed), then msaa=2 (next start); setup.md, GPU-bound scenes" : "");
 }
 /// ABI 21: + `menu` (saveui): 0, or 1 | (state << 8) while fh_menu_on_screen is on and Fahrenheit's save screen is open (managed
 /// latches 0x8CB994 from OPEN to CLOSED, guarded read; `state` is this frame's raw word, 2 = OPEN). Managed, every frame; xr_tick
@@ -15792,6 +15808,7 @@ static void sr_present() {
     const double secs = (tn - g_sr_line_t) / 1000.0; g_sr_line_t = tn;
     SrStats& S = g_sr_s;
     g_sr_rate_extras = S.extras / secs; g_sr_rate_skipped = S.skipped / secs;
+    rnd::gpu_budget_rates(g_gpu_budget, S.fresh, S.late, S.extras, S.skipped, secs);   // fix-render: the F8 GPU-budget readout
     g_sr_rate_yaw = S.rot ? S.yaw_sum / S.rot : 0.0; g_sr_rate_delay_max = S.delay_max;
     static int s_sr_windows = 0; static char s_sr_why[96] = "";   // the default (non-verbose) sr: lines, per headset session
     if (!(want && g_xr_want && xr_active())) { s_sr_windows = 0; s_sr_why[0] = 0; }

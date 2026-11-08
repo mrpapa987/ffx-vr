@@ -1690,7 +1690,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ImGui.SameLine(); if (ImGui.SmallButton("default##ots")) _overlay_text_scale = 1f;
         ImGui.SameLine(); ImGui.TextDisabled(I($"now {ImGui.GetFontSize():F0} px"));
         if (_fn_perf_status != null) {
-            byte* pb = stackalloc byte[256]; _fn_perf_status(pb, 256);
+            byte* pb = stackalloc byte[768]; _fn_perf_status(pb, 768);   // fix-render: + the GPU budget line(s) (perf finding 2)
             ImGui.TextDisabled(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb)));
         }
         ImGui.TextDisabled("Home: recentre   F8: hide/show this overlay (F7 is Fahrenheit's own mod-settings menu)");

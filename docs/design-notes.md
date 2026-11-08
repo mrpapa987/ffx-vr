@@ -5508,3 +5508,11 @@ reads); scratch tests in render_chk/tests.
     same camera a moment apart (head pose right); "partly into another render target" = an off-screen pass (then the head pose
     is wrong for it: a follow-up would leave those uploads alone); "LIGHT-LIKE" = a shadow light the light-camera rule missed
     (e.g. under 1872 B; same follow-up). The render target is the one bound when the constant buffer was uploaded.
+- **The GPU budget in F8 (perf finding 2).** The heavy scenes are GPU-bound: above a span of about 13.5 ms the 120 Hz extra
+  frames collapse. The planned drop (perf-plan S1: the game at 2560x1440, then S3 `msaa=2`) is a game setting
+  (`tools/game-settings.ps1 -Profile vr`, GameSetting.ini) plus the existing `msaa` key, so nothing new is stored and no default
+  changes; setup.md "GPU-bound scenes" gives the steps. `ffxvr_perf_status` (same export, ABI 49) now returns a second line:
+  `GPU budget: span X ms (max Y) against the ~13.5 ms knee[: OVER] | extra frames N/s, dropped (slots repeated) N/s, fresh
+  frames late N% | game renders WxH, scene MSAA Nx (msaa=M), eye image WxH`, and when over the knee a third line naming the two
+  settings to try. Rates come from the last 10 s sr window (`rnd::gpu_budget_rates`), the span from the perf window. The overlay
+  reads 768 bytes (an older ffxvr.dll's 256 bytes show the first line and the start of the second).
