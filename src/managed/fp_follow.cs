@@ -11,7 +11,8 @@ namespace FFXVR;
 public sealed unsafe partial class FFXVRModule {
 
     private int _fp_gp_idx = -1, _fp_gp_id; private ulong _fp_gp_scene;   // the last slot [0x1300788] named, its chr_id, on which scene
-    private int _ib_bad_slot = -1, _ib_bad_id; private nint _ib_bad_h; private int _ib_bad_lines;   // finding 1: the followed actor's chain failed to read
+    private nint _ib_bad_h; private ulong _ib_bad_scene; private int _ib_bad_lines;   // finding 1: the model object (+0x830) whose chain failed to read, on which scene
+    private double _fp_how_t = -1e9; private int _fp_how_skip;   // review B1: the "following" line, one a second
 
     /// <summary>The map words and the event id (body_hide_scene_gen's signature without the followed actor's model): changes with
     /// a map change or a new event. No allocation.</summary>
@@ -37,15 +38,18 @@ public sealed unsafe partial class FFXVRModule {
         return _fp_gp_idx;
     }
 
-    /// <summary>finding 1: ib_build saw the followed actor's (k == 0) model chain fail to read whole: that slot, with this +0x830 and
-    /// chr_id, ranks after every healthy listed model until its model changes, the slot is reused, or the chain reads whole again.</summary>
-    private void fp_chain_mark(int slot, nint h, int chr_id, bool failed, char* name) {
+    /// <summary>finding 1: ib_build saw the followed actor's (k == 0) model chain fail to read whole: every actor on that model object
+    /// (+0x830) ranks after every healthy listed model until a whole read of the object (any slot) or a new scene. Review B1: the
+    /// object, not the slot: in A1 actors 0 and 36 shared one object, and a per-slot mark moved with the pick, flipping it every frame;
+    /// keyed on the object both rank the same and the tie goes to the game's player actor.</summary>
+    private void fp_chain_mark(int slot, nint h, bool failed, char* name) {
+        if (h == 0) return;
         if (failed) {
-            if (slot == _ib_bad_slot && h == _ib_bad_h && chr_id == _ib_bad_id) return;
-            _ib_bad_slot = slot; _ib_bad_h = h; _ib_bad_id = chr_id;
-            if (_ib_bad_lines < 20) { _ib_bad_lines++; _logger.Info(I($"first person: actor {slot} '{actor_name(name)}''s model chain (+0x830 0x{(ulong)h:X}) did not read whole: it ranks after every listed model whose chain reads (a stale or rebuilt model; finding 1) on map {map_name()}") + (_ib_bad_lines == 20 ? " (no more of these lines this session)" : "")); }
+            if (h == _ib_bad_h) return;
+            _ib_bad_h = h; _ib_bad_scene = fp_scene_sig();
+            if (_ib_bad_lines < 20) { _ib_bad_lines++; _logger.Info(I($"first person: actor {slot} '{actor_name(name)}''s model chain (+0x830 0x{(ulong)h:X}) did not read whole: every actor on that object ranks after every listed model whose chain reads (a stale or rebuilt model; finding 1) on map {map_name()}") + (_ib_bad_lines == 20 ? " (no more of these lines this session)" : "")); }
         }
-        else if (slot == _ib_bad_slot) _ib_bad_slot = -1;
+        else if (h == _ib_bad_h) _ib_bad_h = 0;
     }
     // -- finding 4: no NPC heads, no hopping ---------------------------------------------------------------------------------
     // s1 (6 Nov): first person sat in an NPC ('n130', actor 0) for 23 s on ki/kino0800 and hopped c102 -> c003 -> c108 -> c002
@@ -55,8 +59,12 @@ public sealed unsafe partial class FFXVRModule {
     // listed model is live (a re-pick: the eye-jump blink) or the scene ends (a map change, a new event, another view). The
     // game camera was the fallback for "nothing at all" and stays so for a scene that starts with nothing to follow: holding
     // the last place is the least jarring for a body that leaves mid-scene (the game camera would cut to wherever it is).
+    // Review S2: but not for long: after FpPick.k_hold_s (3 s) or at a camera cut the held eye goes to the game camera (with a
+    // blink: ffxvr_fp_event bit 8) and stays there until a listed model is live or the scene ends (s1 22:41:46: the cutscene after
+    // battle 1 ran 61 s on Yuna with no listed model; the eye would have stood all that time at Tidus's last battle spot).
     private bool _fpk_on, _fp_strict_had; private ulong _fpk_scene, _fp_none_scene; private Vector3 _fpk_pos, _fpk_head; private int _fpk_hv;
-    private int _fpk_lines; private ulong _fpk_from; private string _fpk_who = "";
+    private int _fpk_lines; private string _fpk_who = "", _fpk_how = "";
+    private bool _fpk_done, _fpk_blink; private double _fpk_t0; private int _fpk_cuts0;   // review S2: the hold handed to the game camera; a blink to send; its start, the cut count then
     /// <summary>A normal followed frame: in strict mode, where the eye is (game space), for a later hold.</summary>
     private void fpk_note(bool strict, Vector3 pos, Vector3 head, int hv) {
         _fp_strict_had = strict;
@@ -65,7 +73,8 @@ public sealed unsafe partial class FFXVRModule {
         _fpk_who = _fp_how;   // "actor N 'c001' (model c001)", set at the pick (no allocation here)
     }
     private void fpk_start(Actor* actors, int skip_i) {
-        _fpk_on = true; _fpk_from = _frames;
+        _fpk_on = true; _fpk_t0 = _now; _fpk_cuts0 = (int)_fpev_st[16];
+        _fpk_how = "held: " + _fpk_who + " left; waiting for a listed model";   // review S6: built once
         if (_fpk_lines >= 40) return;
         _fpk_lines++;
         string skip = skip_i >= 0 && read(actors + skip_i, out Actor sa) ? I($"; not followed: actor {skip_i} '{actor_name(sa.chr_name)}' ({(FpPick.IsNpc((int)sa.chr_id) ? "an NPC" : "another body")})") : "";
@@ -75,7 +84,7 @@ public sealed unsafe partial class FFXVRModule {
         _fpk_on = false;
         if (_fpk_lines >= 40) return;
         _fpk_lines++;
-        _logger.Info(I($"first person: the held eye is released after {(_frames - _fpk_from) / 60.0:F1} s: {why}") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
+        _logger.Info(I($"first person: the held eye is released after {_now - _fpk_t0:F1} s: {why}") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
     }
     /// <summary>A held frame: the last place again (player_set first: the head is an offset from it), no body hide (fp_set gets hide 0).</summary>
     private void fpk_frame() {
@@ -83,7 +92,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_player_head_set != null) _fn_player_head_set(-_fpk_head.X, -_fpk_head.Y, _fpk_head.Z, _fpk_hv);
         body_hide_push(null, -1, -1, false, default, 0, default);
         _sa_used = false; _sa_status = "the eye held where the followed actor was (nothing listed to follow)";
-        _fp_how = "held: " + _fpk_who + " left; waiting for a listed model";
+        _fp_how = _fpk_how;
     }
     /// <summary>Strict, nothing allowed at the scene's first pick (only an NPC actor 0, or a hidden party model): the game's camera,
     /// as before for "nothing"; one line per scene.</summary>
@@ -103,9 +112,12 @@ public sealed unsafe partial class FFXVRModule {
     // Cutscenes (control off for minutes) end it at their first camera cut, and the 45 s cap ends one without cuts (a scripted
     // walk under a following camera): an interaction rarely lasts longer (the djyt0000 grab: 27 s with control off). An "object or
     // actor within 20 units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
-    private bool _fp_event_hold = true; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 1), fp_event_leash (units, 2..40)
+    // Review S1: the cut that starts a cutscene can reach native a frame before the control flag, or on the same frame: a cut on
+    // the edge frame or the 2 before blocks the start (EV_BLOCKED). Review S3: no hold while the eye is on the drawn head.
+    // review S1: off by default until the owner's capture confirms the cause (the game moving the root); F8 ticks it for a test
+    private bool _fp_event_hold = false; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 0), fp_event_leash (units, 2..40)
     private delegate* unmanaged[Cdecl]<int, float, float*, int, int> _fn_fp_event;   // ABI 50
-    private long _fpev_key = -1; private readonly float[] _fpev_st = new float[16];   // the last eligible frame's (slot, scene generation); native's state for F8
+    private long _fpev_key = -1; private readonly float[] _fpev_st = new float[17];   // the last eligible frame's (slot, scene generation); native's state for F8
     /// <summary>push_player, every frame after the eye is sent: eligible = the field, first person, on foot (not riding), not
     /// blitzball, a followed actor; with control off ([0x1300788] 0) native holds the eye. release = the followed slot or the
     /// scene generation (map, event, the model instance a load re-creates) changed since the last eligible frame.</summary>
@@ -131,7 +143,7 @@ public sealed unsafe partial class FFXVRModule {
             else if (_eye_share_d < _fpcap_share_dmin) _fpcap_share_dmin = _eye_share_d;
         }
         fixed (float* o = _fpev_st) {
-            _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0), _fp_event_leash, o, 16);
+            _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0) | (_fpk_blink ? 8 : 0), _fp_event_leash, o, 17); _fpk_blink = false;   // 8: review S2's blink
             if (o[4] != _fpcap_seq) { _fpcap_seq = o[4]; if (_fpcap.episode && !off) fpcap_summary(o); }
         }
     }
@@ -152,12 +164,8 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_fp_event != null) { ImGui.SameLine(); ImGui.TextDisabled(I($"{(_fpev_st[0] == 1f ? $"holding {_fpev_st[1]:F1} s, the eye {_fpev_st[2]:F1} units off" : _fpev_st[0] == 2f ? "gliding back" : "not holding")}; holds {_fpev_st[3]:F0}")); }
     }
 
-    /// <summary>finding 1: is slot i the marked one, with the same model and chr_id (tbl: this frame's snapshot or the live table)?</summary>
-    private bool fp_chain_bad(int i, Actor* tbl, int chr_id) {
-        if (i != _ib_bad_slot || tbl == null) return false;
-        if (chr_id != _ib_bad_id || !read((byte*)(tbl + i) + 0x830, out nint h) || h != _ib_bad_h) { _ib_bad_slot = -1; return false; }
-        return true;
-    }
+    /// <summary>finding 1: is h (an actor's +0x830) the marked model object?</summary>
+    private bool fp_chain_bad(nint h) => h != 0 && h == _ib_bad_h;
 }
 
 /// <summary>fix-eye: the automatic capture's state (FpCap.Step).</summary>
@@ -214,6 +222,10 @@ internal static class FpPick {
     }
     /// <summary>finding 4: an NPC model ('n', chr_id type 2: chr_id >> 12).</summary>
     public static bool IsNpc(int chr_id) => ((chr_id >> 12) & 0xF) == 2;
+    /// <summary>review S2: the held eye (the followed body gone mid-scene) goes back to the game camera after k_hold_s seconds or at a
+    /// camera cut: holding beats a hop into another head, but a scene that moves on elsewhere must still be seen.</summary>
+    public const double k_hold_s = 3.0;
+    public static bool HoldEnds(double held_s, bool cut) => cut || held_s >= k_hold_s;
     /// <summary>finding 4: may a candidate at score s (chr_id) be followed? strict = first person on foot in the field (fp_mode 1,
     /// not battle, not blitzball); first = nothing is followed and nothing held on this scene (the first pick after a map change, a
     /// load, a battle or another view). Outside strict: anything FpScore accepts, as before. In strict: a listed model always (Tidus,

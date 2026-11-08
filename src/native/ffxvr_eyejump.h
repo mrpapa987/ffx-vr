@@ -11,8 +11,9 @@
 // unit a frame at 60 fps (2 at 30), the chocobo about 2.5; a jump is a move of more than Cfg::units (default 8) in a frame.
 #pragma once
 // fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again; 4: the
-// event hold (EvHold); 5: a no-control episode's summary (Episode) (the shared scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 5
+// event hold (EvHold); 5: a no-control episode's summary (Episode); 6 (review): min_gap 6, the hold's no_start (a cut at the
+// edge), EV_PULL / EV_BLOCKED (the shared scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 6
 #include <cmath>
 #include <cstdint>
 
@@ -26,10 +27,12 @@ struct Cfg {
     // fix-eye (finding 6, s1 16:41:46: an 87-unit move back 22 frames after a blink, held back by the window, a 7.6 m teleport in the
     // clear): inside the window, once the blink is over, a jump of more than `big` units blinks again: a fresh blink when at least
     // min_gap frames of picture were shown since the last black frame, the dark period restarted when none was (a jump right at
-    // the blink's end), and held back when fewer than min_gap were (one frame of picture between two blinks would flash). Jumps
-    // up to `big` stay held back in the window: a dash or a scripted glide in 8-20 unit steps would strobe.
+    // the blink's end), and held back when fewer than min_gap were. Jumps up to `big` stay held back in the window: a dash or a
+    // scripted glide in 8-20 unit steps would strobe. Review S5: min_gap 6 (was 2): a big jump every 8 frames gave 6 black / 2
+    // picture, a 7.5 Hz strobe; now blinks are at least 6 picture frames apart, and a big jump 1-5 picture frames after a blink is
+    // held back (a teleport seen once, right after a dark period, rather than a flicker). A run of big jumps stays one dark period.
     float big = 20.f;     // units
-    int   min_gap = 2;    // frames of picture between two blinks
+    int   min_gap = 6;    // frames of picture between two blinks
 };
 
 // This frame's context (native globals at the call).
@@ -261,9 +264,12 @@ struct EvCfg {
     float reset() const { return 2.f * leash; }       // a single root step over this restarts the hold at the root
     float glide_max() const { return 0.5f * leash; }  // an offset under this glides back, else a blink and a snap
 };
-enum EvEvent : int { EV_NONE = 0, EV_START, EV_RESET, EV_GLIDE, EV_SNAP };   // EV_GLIDE / EV_SNAP: the hold ended this frame
+// EV_GLIDE / EV_SNAP: the hold ended this frame. EV_PULL (review N2): a single root step over the leash pulled the eye along
+// (a 12-24 unit staging under the restart; the caller blinks). EV_BLOCKED (review S1): control went off with a camera cut on that
+// frame or just before (a cutscene's start): no hold this episode.
+enum EvEvent : int { EV_NONE = 0, EV_START, EV_RESET, EV_GLIDE, EV_SNAP, EV_PULL, EV_BLOCKED };
 enum EvWhy : int { EVW_NONE = 0, EVW_CONTROL, EVW_RELEASE, EVW_CUT, EVW_CAP, EVW_OFF };
-static const char* const k_ev_why[] = { "-", "control back", "a map change, a load or a re-pick", "a camera cut", "the time cap", "fp_event_hold off or not first person" };
+static const char* const k_ev_why[] = { "-", "control back", "a map change, a load, a re-pick or a gap in first person", "a camera cut", "the time cap", "fp_event_hold off, the eye on the drawn head, or first person left" };
 struct EvHold {
     bool     on = false;
     bool     want_prev = false;   // the last step's want (the start is on its rising edge)
@@ -285,9 +291,11 @@ struct EvHold {
 };
 inline float hlen(float x, float z) { return std::sqrt(x * x + z * z); }
 /// One advance frame. P = the eye base (x and z replaced while held or gliding). want = an eligible frame with control off
-/// (managed); enabled = fp_event_hold; release = managed's map change / load / re-pick; cut = a camera cut since the last step;
-/// dt = seconds since the last frame. Returns this frame's event.
-inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release, bool cut, float dt, const EvCfg& c, uint32_t frame) {
+/// (managed); enabled = fp_event_hold (the caller also clears it while the eye is on the drawn head, review S3, and outside first
+/// person); release = managed's map change / load / re-pick (or a gap in the steps); cut = a camera cut since the last step;
+/// no_start = a camera cut on this frame or within the 2 before (review S1: the cut that starts a cutscene can come a frame before
+/// the control flag, or in the same game frame, and the hold must not swallow it). dt = seconds since the last frame.
+inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release, bool cut, bool no_start, float dt, const EvCfg& c, uint32_t frame) {
     const bool rising = want && !h.want_prev;
     h.want_prev = want;
     if (!finite3(P) || !std::isfinite(dt)) { h.on = false; h.glide = false; h.prev_ok = false; return EV_NONE; }
@@ -301,8 +309,9 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
         if (why == EVW_NONE) {
             if (step > c.reset()) { h.H[0] = bx; h.H[1] = bz; h.resets++; ev = EV_RESET; }   // a staging: the usual blink (the jump)
             else {
-                const float vx = bx - h.H[0], vz = bz - h.H[1], d = hlen(vx, vz);
+                const float vx = bx - h.H[0], vz = bz - h.H[1], d = hlen(vx, vz), hx = h.H[0], hz = h.H[1];
                 if (d > L) { const float k = L / d; h.H[0] = bx - vx * k; h.H[1] = bz - vz * k; }   // the leash: trail at L
+                if (step > L && hlen(h.H[0] - hx, h.H[1] - hz) > 0.5f) ev = EV_PULL;   // review N2: a staging step the leash passes on
             }
             if (step > h.step_max) h.step_max = step;
             h.t += dt > 0.f ? dt : 0.f;
@@ -317,6 +326,7 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
         if (h.end_off < c.glide_max() && c.glide_s > 0.f && why != EVW_RELEASE && why != EVW_OFF) { h.glide = true; h.G[0] = h.H[0] - bx; h.G[1] = h.H[1] - bz; h.glide_left = c.glide_s; ev = EV_GLIDE; }
         else { h.glide = false; ev = EV_SNAP; }
     }
+    else if (rising && enabled && !release && no_start) ev = EV_BLOCKED;   // (a glide under way goes on below)
     else if (rising && enabled && !release) {
         // from where the eye is now (a glide still under way included)
         const float ox = h.glide ? h.G[0] : 0.f, oz = h.glide ? h.G[1] : 0.f;

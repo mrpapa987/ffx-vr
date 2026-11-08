@@ -647,6 +647,7 @@ float g_follow_rate = 20.f;                    // deg/s
 uint32_t g_cut_count = 0; int g_blink_frames = 0;
 float g_cam_prev_pos[3] = {}, g_cam_prev_fwd[3] = {}; bool g_cam_prev_valid = false;
 uint32_t g_cam_cuts_any = 0;   // fix-eye: authored-camera cuts in every view (g_cut_count counts the seat view's only); the event hold ends at one
+uint32_t g_cam_cut_frame = 0; bool g_cam_cut_seen = false;   // fix-eye review S1: the frame of the last such cut
 float g_dt = 1.f / 72.f;                      // the last Present-to-Present interval, measured at the top of ffxvr_begin_frame
 constexpr float k_dt_min = 0.001f, k_dt_max = 0.05f;   // clamp: slow motion and load stalls must not make the filters jump
 bool  g_dt_measured = false;                   // once true, the managed dt passed to ffxvr_cuts_set is ignored
@@ -2153,29 +2154,39 @@ ej::EvHold g_evh; ej::EvCfg g_evh_cfg;
 int        g_evh_flags = 0; uint32_t g_evh_flags_frame = 0;   // managed's flags (ffxvr_fp_event) and the frame they were sent
 uint32_t   g_evh_rel_seq = 0, g_evh_rel_seen = 0, g_evh_cut_seen = 0;
 bool       g_evh_out_on = false; float g_evh_out[2] = {};     // this frame's held / gliding horizontal eye position (render x, z)
-uint32_t   g_evh_lines = 0, g_evh_holds = 0;
+uint32_t   g_evh_lines = 0, g_evh_holds = 0, g_evh_tick_frame = 0; bool g_evh_ticked = false;
 ej::Episode g_evep; float g_evep_out[11] = {}; uint32_t g_evep_seq = 0;   // the last finished no-control episode (ffxvr_fp_event's out 4..14)
 static void evh_tick(float P[3]) {
     const bool fresh = g_frames - g_evh_flags_frame <= 2u;   // managed stopped sending (no actor table, a load): no control-off frame
-    const bool want = fresh && (g_evh_flags & 1) != 0 && g_fp_mode == 1;
-    const bool enabled = (g_evh_flags & 2) != 0;
-    const bool release = g_evh_rel_seq != g_evh_rel_seen; g_evh_rel_seen = g_evh_rel_seq;
+    const bool want = fresh && (g_evh_flags & 1) != 0;   // managed's eligible control-off frame (first person on foot)
+    // review S3: no hold while the eye is on the drawn head (it leashed the displaced body's head); and only in first person (the
+    // diorama ends it as "first person left")
+    const bool enabled = (g_evh_flags & 2) != 0 && g_fp_mode == 1 && !g_fp_head_disp;
+    // review N1: a gap in the steps (the seat view, a screen, a menu) is a release: it does not resume from the old place
+    const bool gap = g_evh_ticked && g_frames - g_evh_tick_frame > 2u; g_evh_tick_frame = g_frames; g_evh_ticked = true;
+    const bool release = g_evh_rel_seq != g_evh_rel_seen || gap; g_evh_rel_seen = g_evh_rel_seq;
     const bool cut = g_cam_cuts_any != g_evh_cut_seen; g_evh_cut_seen = g_cam_cuts_any;
+    const bool cut_near = cut || (g_cam_cut_seen && g_frames - g_cam_cut_frame <= 2u);   // review S1: a cut on the edge or the 2 frames before
     const float bx = P[0], bz = P[2];
-    const int ev = ej::ev_step(g_evh, P, want, enabled, release, cut, g_dt, g_evh_cfg, g_frames);
+    const int ev = ej::ev_step(g_evh, P, want, enabled, release, cut, cut_near, g_dt, g_evh_cfg, g_frames);
     g_evh_out_on = ej::ev_active(g_evh); g_evh_out[0] = P[0]; g_evh_out[1] = P[2];
-    if (ej::ep_step(g_evep, want, g_fp_pos, P, g_yaw_view, g_blink_frames > 0, cut, g_frames) == ej::EP_END) {   // the capture's summary (managed logs it)
+    if (ej::ep_step(g_evep, want && g_fp_mode == 1, g_fp_pos, P, g_yaw_view, g_blink_frames > 0, cut, g_frames) == ej::EP_END) {   // the capture's summary (managed logs it)
         const ej::Episode& e = g_evep;
         const float v[11] = { static_cast<float>(e.frames), e.disp, static_cast<float>(e.dir), e.along, e.across, e.step_max, static_cast<float>(e.step_at), e.eye_far, static_cast<float>(e.black), static_cast<float>(e.cuts), static_cast<float>(g_evh.resets) };
         memcpy(g_evep_out, v, sizeof(v)); g_evep_seq++;
     }
     if (ev == ej::EV_START) g_evh_holds++;
     if (ev == ej::EV_SNAP && g_evh.end_off >= 1.f) ej_blink();   // control back (or the hold released) far from the root: blink and snap
+    if (ev == ej::EV_PULL) ej_blink();                              // review N2: a 12-24 unit staging step moves the eye: blinked too
     if (ev == ej::EV_NONE || g_evh_lines >= 60) return;
     g_evh_lines++;
     const char* last = g_evh_lines == 60 ? " (no more eye hold: lines this session)" : "";
     if (ev == ej::EV_START)
         diag("eye hold: frame %u: player control off in first person: the eye's horizontal position held at (%.1f %.1f) (leash %.1f units, a staging over %.1f restarts it, cap %.0f s)%s", g_frames, P[0], P[2], g_evh_cfg.leash, g_evh_cfg.reset(), g_evh_cfg.max_s, last);
+    else if (ev == ej::EV_BLOCKED)
+        diag("eye hold: frame %u: player control off with a camera cut %u frames before (a cutscene's start): no hold this time%s", g_frames, g_frames - g_cam_cut_frame, last);
+    else if (ev == ej::EV_PULL)
+        diag("eye hold: frame %u: a root step over the leash %.1f (the largest this hold %.1f): the eye pulled along, blinked%s", g_frames, g_evh_cfg.leash, g_evh.step_max, last);
     else if (ev == ej::EV_RESET)
         diag("eye hold: frame %u: the root moved %.1f units in one frame (a scene staging, over %.1f): the hold starts again at the new root (the eye-jump blink)%s", g_frames, g_evh.step_max, g_evh_cfg.reset(), last);
     else
@@ -12578,15 +12589,19 @@ static void motion_log_tick() {
 /// then the last finished no-control episode (ej::Episode, the automatic capture's summary): 4 its sequence number (0 none yet), 5
 /// frames, 6 the root's horizontal displacement, 7 its direction (0 none, 1 forward, 2 sideways, 3 back of the view at the start),
 /// 8 / 9 its parts along / across, 10 the largest single-frame root step, 11 its frame after the start, 12 the eye's largest
-/// distance from where it was, 13 black frames, 14 camera cuts, 15 the hold's restarts. Returns the count written (16 at most).
+/// distance from where it was, 13 black frames, 14 camera cuts, 15 the hold's restarts; 16 the camera cuts of the session (every
+/// view, mod 1e6). flags 8 (review S2): blink now (managed hands its held eye back to the game camera). Returns the count written
+/// (17 at most).
 extern "C" __declspec(dllexport) int ffxvr_fp_event(int flags, float leash, float* out, int n) {
     g_evh_flags = flags; g_evh_flags_frame = g_frames;
     if (flags & 4) g_evh_rel_seq++;
+    if (flags & 8) ej_blink();   // review S2: managed hands a held eye back to the game camera
     g_evh_cfg.leash = std::isfinite(leash) ? (leash < 2.f ? 2.f : leash > 40.f ? 40.f : leash) : 12.f;
     int k = 0;
-    float v[16] = { g_evh.on ? 1.f : g_evh.glide ? 2.f : 0.f, g_evh.t, g_evh_out_on ? ej::hlen(g_evh_out[0] - g_evh.prev[0], g_evh_out[1] - g_evh.prev[1]) : 0.f, static_cast<float>(g_evh_holds), static_cast<float>(g_evep_seq) };
+    float v[17] = { g_evh.on ? 1.f : g_evh.glide ? 2.f : 0.f, g_evh.t, g_evh_out_on ? ej::hlen(g_evh_out[0] - g_evh.prev[0], g_evh_out[1] - g_evh.prev[1]) : 0.f, static_cast<float>(g_evh_holds), static_cast<float>(g_evep_seq) };
     memcpy(v + 5, g_evep_out, sizeof(g_evep_out));
-    for (; out != nullptr && k < n && k < 16; ++k) out[k] = v[k];
+    v[16] = static_cast<float>(g_cam_cuts_any % 1000000u);   // review S2: managed's held eye ends at a camera cut
+    for (; out != nullptr && k < n && k < 17; ++k) out[k] = v[k];
     return k;
 }
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {
@@ -12862,7 +12877,7 @@ static void detect_cut() {
         const float dist = sqrtf(dp[0]*dp[0] + dp[1]*dp[1] + dp[2]*dp[2]);
         const float dot = fmaxf(-1.f, fminf(1.f, fwd[0]*g_cam_prev_fwd[0] + fwd[1]*g_cam_prev_fwd[1] + fwd[2]*g_cam_prev_fwd[2]));
         const float ang = acosf(dot) * 57.2958f;
-        if (dist > 40.f || ang > 25.f) g_cam_cuts_any++;   // fix-eye: every view (the event hold)
+        if (dist > 40.f || ang > 25.f) { g_cam_cuts_any++; g_cam_cut_frame = g_frames; g_cam_cut_seen = true; }   // fix-eye: every view (the event hold)
         if ((dist > 40.f || ang > 25.f) && g_fp_mode == 0) {
             g_cut_count++;
             g_seat_latched = false; g_sr_epoch++;   // stickrep: a cut is not a stick turn

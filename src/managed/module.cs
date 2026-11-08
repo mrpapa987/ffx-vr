@@ -2464,14 +2464,14 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private static string fph_pt(int i, Vector4 v, Vector4 b, float ry) => I($"{i} (up {ry - v.Y:F1}, out {MathF.Sqrt((v.X - b.X) * (v.X - b.X) + (v.Z - b.Z) * (v.Z - b.Z)):F1})");
     private void fph_jump_log(ref Actor a, int pick, int k, int old, float reach, bool in_battle) {
         if (k < 0) { _fph_prev_actor = -1; return; }
-        float y = a.chr_optpos[k].Y;
+        float y = a.chr_pos_vec.Y - a.chr_optpos[k].Y;   // review S4: the height over the root (a root warp or a jump of the whole body is not a head change)
         if (pick == _fph_prev_actor && _fph_prev_k >= 0 && MathF.Abs(y - _fph_prev_y) > 6f && _fph_jump_lines < 12 && _fph_jump_btl < 4) {
             _fph_jump_lines++; _fph_jump_btl++;
             Vector4 b = a.chr_optpos[0]; float ry = a.chr_pos_vec.Y;
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < 26; i++) { Vector4 v = a.chr_optpos[i]; if (v.X == 0f && v.Y == 0f && v.Z == 0f) continue; sb.Append(' ').Append(fph_pt(i, v, b, ry)); }
             string left = old >= 0 && old != k ? I($", the reach {reach:F1} left out {fph_pt(old, a.chr_optpos[old], b, ry)}") : reach > 0f ? I($", nothing left out by the reach {reach:F1}") : "";
-            _logger.Info(I($"head: the head pick of actor {pick} '{actor_name(a.chr_name)}' moved {_fph_prev_y - y:F1} units up in one frame ({(in_battle ? "in battle" : "field")}, map {map_name()}): index {_fph_prev_k} -> {fph_pt(k, a.chr_optpos[k], b, ry)}{left} | sub-positions (index, up from the root, out from sub-position 0):{sb}") + (_fph_jump_lines == 12 ? " (no more of these lines this session)" : ""));
+            _logger.Info(I($"head: the head pick of actor {pick} '{actor_name(a.chr_name)}' moved {y - _fph_prev_y:F1} units up (over the root) in one frame ({(in_battle ? "in battle" : "field")}, map {map_name()}): index {_fph_prev_k} -> {fph_pt(k, a.chr_optpos[k], b, ry)}{left} | sub-positions (index, up from the root, out from sub-position 0):{sb}") + (_fph_jump_lines == 12 ? " (no more of these lines this session)" : ""));
         }
         _fph_prev_actor = pick; _fph_prev_k = k; _fph_prev_y = y;
     }
@@ -2572,7 +2572,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         System.Threading.Volatile.Write(ref _fp_reach_live, in_battle ? _fp_head_reach : 0f);   // the head rule's reach: battle only (review of 9b406b9, SF); before _d7_follow_actor below
         if (in_battle != _btl_was) {
-            _fph_skip_n = 0; _fph_skip_key = -1; _fph_jump_btl = 0;
+            _fph_skip_n = 0; _fph_skip_key = -1; _fph_jump_btl = 0; _fph_prev_actor = -1;
             btg_end(in_battle ? "a new battle" : "the battle ended"); btg_log(in_battle ? "a new battle" : "the battle ended"); _btg_state = 0;   // battle tag
             _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
             for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
@@ -2708,16 +2708,17 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // finding 4: first person on foot (strict) never follows an NPC and never hops to another body mid-scene; the eye is held
             // where it was while nothing listed is live (FpPick.Allowed; fp_follow.cs). A map change, a new event or another view ends it.
             bool strict = !in_battle && _fp_mode == 1 && !_in_blitz;
-            if (!strict || scene != _fpk_scene) { if (_fpk_on) fpk_release(!strict ? "first person left (another view, a battle or blitzball)" : "a map change or a new event"); _fp_strict_had = false; _fpk_scene = scene; }
-            int score_of(in Actor a, int i, Actor* tbl) {
+            if (!strict || scene != _fpk_scene) { if (_fpk_on) fpk_release(!strict ? "first person left (another view, a battle or blitzball)" : "a map change or a new event"); _fp_strict_had = false; _fpk_done = false; _fpk_scene = scene; }
+            if (scene != _ib_bad_scene) _ib_bad_h = 0;   // review B1: the bad-model mark lives on its scene only
+            int score_of(in Actor a, int i, Actor* tbl, nint h830) {
                 if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
                 int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
                 int cid = (int)a.chr_id;
                 int s = r >= 0 ? RideLogic.FpScore(r, slot_hidden(tbl, snap, i), cid, i) : RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
-                return s >= 0 && fp_chain_bad(i, actors, cid) ? FpPick.Bad(s) : s;   // finding 1: a model chain that stopped reading whole
+                return s >= 0 && fp_chain_bad(h830) ? FpPick.Bad(s) : s;   // finding 1: a model object whose chain stopped reading whole (review B1: every actor on it)
             }
             int cur_score = -1;
-            if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
+            if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors, *(nint*)((byte*)&cur + 0x830));
             if (cur_score >= 0 && !FpPick.Allowed(cur_score, strict, true, _fp_chr_id)) cur_score = -1;   // finding 4: e.g. an NPC followed in the diorama, then first person
             bool first = cur_score < 0 && !_fpk_on && !_fp_strict_had;   // finding 4: nothing followed (or held) yet on this scene in first person: the first pick
             int skip_s = int.MaxValue, skip_i = -1;   // the best candidate strict left out (for the hold's line)
@@ -2733,7 +2734,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     Actor* ap = snap != null ? snap + i : &slot;
                     if (snap == null && !read(actors + i, out slot)) break;
                     if (!live(*ap) || i == _fp_actor_idx && cur_score >= 0) continue;
-                    int s = score_of(*ap, i, actors);
+                    int s = score_of(*ap, i, actors, *(nint*)((byte*)ap + 0x830));
                     if (!FpPick.Allowed(s, strict, first, (int)ap->chr_id)) { if (s >= 0 && s < skip_s) { skip_s = s; skip_i = i; } continue; }   // finding 4
                     if (FpPick.Better(s, i, best, best_i, gp)) { best = s; best_i = i; }
                 }
@@ -2743,13 +2744,19 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     _fp_chr_id = (int)pa2.chr_id;
                     _fp_how = $"actor {pick} '{actor_name(pa2.chr_name)}' ({how})";
                     string mp = map_name();
-                    if (_fp_how + mp != _fp_how_logged) { _fp_how_logged = _fp_how + mp; _logger.Info($"first person: following {_fp_how} on map {mp}"); }
+                    if (_fp_how + mp != _fp_how_logged) {   // review B1: at most one line a second (a flapping pick wrote one every frame)
+                        if (_now - _fp_how_t >= 1.0) { _fp_how_logged = _fp_how + mp; _fp_how_t = _now; _logger.Info($"first person: following {_fp_how} on map {mp}" + (_fp_how_skip > 0 ? I($" ({_fp_how_skip} re-picks in the second before not logged)") : "")); _fp_how_skip = 0; }
+                        else _fp_how_skip++;
+                    }
                 }
             }
             if (pick < 0) { _fp_how = ""; _fp_chr_id = -1; }
             if (strict) {   // finding 4: the hold starts when the pick is lost mid-scene and ends with the next listed model
-                if (pick >= 0) { if (_fpk_on) fpk_release("following " + _fp_how); }
-                else if (_fp_strict_had && !_fpk_on) fpk_start(actors, skip_i);
+                if (pick >= 0) { if (_fpk_on) fpk_release("following " + _fp_how); _fpk_done = false; }
+                // review S2: the held eye goes back to the game camera (with a blink) after 3 s or at a camera cut; then the game camera
+                // until a listed model is live or the scene ends (no other body: finding 4)
+                else if (_fpk_on && FpPick.HoldEnds(_now - _fpk_t0, (int)_fpev_st[16] != _fpk_cuts0)) { fpk_release((int)_fpev_st[16] != _fpk_cuts0 ? "a camera cut: the game's camera" : I($"{FpPick.k_hold_s:F0} s: the game's camera")); _fpk_done = true; _fpk_blink = true; }
+                else if (_fp_strict_had && !_fpk_on && !_fpk_done) fpk_start(actors, skip_i);
                 else if (!_fpk_on) fp_none_log(actors, skip_i, scene);
             }
             // gates (4 Nov): the pick against the game's own player actor ([0x1300788], Sg_GetPlayer), every 10th scan tick in
