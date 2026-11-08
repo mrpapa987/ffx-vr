@@ -5474,3 +5474,18 @@ reads); scratch tests in render_chk/tests.
     Djose side rooms' 126 s (E2).
   - If a painted room with many characters now shows in 3D with the painting stuck to the face, the line gives its counts
     (`k_bd_enter` / `k_bd_stay` in `ffxvr_render.h`).
+- **The exe's image runs are kept across frames (perf finding 5).** s2 paid about 0.4 ms of render-thread time a frame on two
+  4-byte reads into one 25 MB run of FFX.exe's image (0x0116B994 through ffxvr_safe_read, 0x0117ED3C through range_readable):
+  both caches were cleared at every Present and kept the run from the *queried* page, so the lower read never hit the higher
+  one's run. Now (`cpu::ImageKeep`, render thread, fast_reads on and the working-set check on): every image run a query answers
+  is kept across frames (a lower query of the same run supersedes it), and a miss in the image first queries its PE section's
+  start, once a section, so the run is learnt from its start where it starts there. **Safety:** a run kept from an earlier
+  frame is never trusted as it stands. A read in it is answered only when QueryWorkingSetEx says every page of the read is
+  resident and readable now (lean2's rule: Valid, not bad, range_readable's protections; nothing uses it before the start-up
+  self-test passed), which a page freed, decommitted, made no-access or turned into a guard page since cannot pass; the proven
+  pages last as long as a query's answer did (the frame, or the 50 ms bound). The pages read through kept runs are remembered,
+  so the next frame proves them all in one call: about one QueryWorkingSetEx call a frame instead of two 25 MB scans. A refused
+  proof drops the run and the read walks as before; a failed kernel copy, fast_reads=0 or the check off drop every kept run.
+  Only FFX.exe's own image is kept (heap and other modules keep the per-frame rules). Model (render_chk keep_test, s2's shape
+  and the owner's measured costs): 350-366 us -> 1.6 us a frame. The `cpu:` line adds `kept exe runs N (of S sections; safe
+  reads through them, proofs a frame over P pages, section probes)`.

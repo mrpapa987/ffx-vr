@@ -273,6 +273,142 @@ struct SiteTable {
     }
 };
 
+// -- fix-render (7 Nov 2026): FFX.exe's image runs kept across frames, each use proven by the working-set check ---------------
+// The owner's s2 session paid ~0.4 ms a frame on two 4-byte reads into a 25 MB run of FFX.exe's image (0x0116B994 and
+// 0x0117ED3C, one through range_readable, one through ffxvr_safe_read): both caches end with every Present, and each keeps the
+// run from the QUERIED page (VirtualQuery's answer starts there), so the lower read missed the higher one's run and every
+// frame scanned the 25 MB twice. ImageKeep holds the image runs any query answered (render thread, across frames) and
+// learns a run from its section's start where it can (one probe per section, the PE section table); a run kept from an
+// earlier frame is never trusted as it stands: a read in it is answered only when QueryWorkingSetEx says every page of the read
+// is resident and readable NOW (lean2's ws rule: Valid, not bad, range_readable's protections; nothing uses it before its
+// self-test passed), which a page freed, decommitted, made no-access or turned into a guard page since cannot pass. The pages
+// proven are kept for the rest of the frame (the same lifetime as a query's answer), and the pages read through kept runs are
+// remembered (hot) so the next frame proves them all in one call. Anything else (no working-set answer, a page not resident,
+// a run dropped) takes the walk as before, which queries afresh. Off (fast_reads=0, the check off): never consulted.
+constexpr int k_keep_hot = 32;     // pages proven in one call (k_ws_max_pages)
+template <int K = 8, int S = 16>
+struct ImageKeep {
+    uintptr_t lo[K] = {}, hi[K] = {}; int next = 0;            // image runs answered readable (any frame)
+    uintptr_t hot[k_keep_hot] = {}; int hot_n = 0, hot_next = 0; // pages read through kept runs (proven together at the next frame's first use)
+    uintptr_t ok[k_keep_hot] = {}; int ok_n = 0, ok_next = 0;    // pages proven resident and readable this frame
+    bool batched = false;                                        // this frame's first proof (with the hot pages) done
+    uintptr_t sec_lo[S] = {}, sec_hi[S] = {}; bool sec_probed[S] = {}; int sec_n = 0;   // the exe's sections (page-aligned), and which were probed
+    uint32_t proofs = 0, proof_pages = 0, answered = 0, refused = 0, probes = 0;       // statistics (the caller rolls them)
+    /// Everything but the sections (a failed copy, fast_reads or the check off): the next reads query afresh.
+    void clear() { for (int i = 0; i < K; ++i) lo[i] = hi[i] = 0; next = 0; hot_n = hot_next = 0; new_frame(); for (int i = 0; i < S; ++i) sec_probed[i] = false; }
+    /// A new frame (or the per-frame runs' age bound): the proofs expire with the frame's runs.
+    void new_frame() { ok_n = ok_next = 0; batched = false; }
+    void set_sections(const uintptr_t* l, const uintptr_t* h, int n) {
+        sec_n = 0;
+        for (int i = 0; i < n && sec_n < S; ++i) if (h[i] > l[i]) { sec_lo[sec_n] = l[i] & ~(k_page - 1); sec_hi[sec_n] = h[i]; sec_probed[sec_n] = false; sec_n++; }
+    }
+    int count() const { int n = 0; for (int i = 0; i < K; ++i) n += hi[i] > lo[i]; return n; }
+    /// [a, a + len) inside one kept run (len > 0, no wrap).
+    bool in_run(uintptr_t a, size_t len) const {
+        const uintptr_t e = a + len;
+        if (len == 0 || e < a) return false;
+        for (int i = 0; i < K; ++i) if (hi[i] > lo[i] && a >= lo[i] && e <= hi[i]) return true;
+        return false;
+    }
+    /// Keeps [l, h): nothing if a run holds it; runs it holds are dropped (a lower query of the same run: the longer answer);
+    /// else a free slot, else the oldest.
+    void add_run(uintptr_t l, uintptr_t h) {
+        if (h <= l) return;
+        for (int i = 0; i < K; ++i) if (hi[i] > lo[i] && lo[i] <= l && h <= hi[i]) return;
+        int slot = -1;
+        for (int i = 0; i < K; ++i) if (hi[i] > lo[i] && l <= lo[i] && hi[i] <= h) { lo[i] = hi[i] = 0; if (slot < 0) slot = i; }
+        if (slot < 0) for (int i = 0; i < K; ++i) if (hi[i] <= lo[i]) { slot = i; break; }
+        if (slot < 0) { slot = next; next = (next + 1) % K; }
+        lo[slot] = l; hi[slot] = h;
+    }
+    /// Drops the runs holding q (a proof failed there: the next read queries).
+    void drop_at(uintptr_t q) { for (int i = 0; i < K; ++i) if (hi[i] > lo[i] && q >= lo[i] && q < hi[i]) lo[i] = hi[i] = 0; }
+    bool is_ok(uintptr_t pg) const { for (int i = 0; i < ok_n; ++i) if (ok[i] == pg) return true; return false; }
+    bool ok_covers(uintptr_t a, size_t len) const {
+        if (len == 0 || a + len < a) return false;
+        for (uintptr_t pg = a & ~(k_page - 1); pg < a + len; pg += k_page) if (!is_ok(pg)) return false;
+        return true;
+    }
+    void ok_add(uintptr_t pg) { if (is_ok(pg)) return; if (ok_n < k_keep_hot) ok[ok_n++] = pg; else { ok[ok_next] = pg; ok_next = (ok_next + 1) % k_keep_hot; } }
+    void hot_add(uintptr_t pg) {
+        for (int i = 0; i < hot_n; ++i) if (hot[i] == pg) return;
+        if (hot_n < k_keep_hot) hot[hot_n++] = pg; else { hot[hot_next] = pg; hot_next = (hot_next + 1) % k_keep_hot; }
+    }
+    void hot_remove(uintptr_t pg) { for (int i = 0; i < hot_n; ++i) if (hot[i] == pg) { hot[i] = hot[--hot_n]; if (hot_next > hot_n) hot_next = 0; return; } }
+    /// One working-set query for the read's pages (and, at the frame's first proof, the hot pages too): every page that answers
+    /// resident and readable is kept as proven for the frame. True when every page of the read did.
+    template <class Ws>
+    bool prove(uintptr_t a, size_t len, Ws&& ws) {
+        if (len == 0 || a < 0x10000 || a + len < a) return false;
+        const uintptr_t p0 = a & ~(k_page - 1), pl = (a + len - 1) & ~(k_page - 1);
+        const uintptr_t n_read = (pl - p0) / k_page + 1;
+        if (n_read > static_cast<uintptr_t>(k_ws_max_pages)) return false;
+        uintptr_t va[k_ws_max_pages]; uint32_t at[k_ws_max_pages]; int n = 0;
+        for (uintptr_t i = 0; i < n_read; ++i) va[n++] = p0 + i * k_page;
+        if (!batched) for (int i = 0; i < hot_n && n < k_ws_max_pages; ++i) if (hot[i] < p0 || hot[i] > pl) va[n++] = hot[i];
+        for (int i = 0; i < n; ++i) at[i] = 0;
+        proofs++; proof_pages += static_cast<uint32_t>(n);
+        if (!ws(static_cast<const uintptr_t*>(va), static_cast<uint32_t*>(at), n)) { refused++; return false; }
+        answered++;
+        const bool was_batched = batched; batched = true;
+        bool all = true;
+        for (int i = 0; i < n; ++i) {
+            const bool yes = ws_readable(at[i]);
+            if (yes) ok_add(va[i]); else if (i >= static_cast<int>(n_read)) hot_remove(va[i]);
+            if (i < static_cast<int>(n_read) && !yes) all = false;
+        }
+        (void)was_batched;
+        if (all) for (uintptr_t i = 0; i < n_read; ++i) hot_add(p0 + i * k_page);
+        return all;
+    }
+    /// A miss at q (in the exe's image): its section's page-aligned start, once per section until the next clear, when it lies
+    /// below q's page (a query from there learns the run from its start, if the run starts there).
+    bool take_probe(uintptr_t q, uintptr_t& start) {
+        for (int i = 0; i < sec_n; ++i)
+            if (q >= sec_lo[i] && q < sec_hi[i]) {
+                if (sec_probed[i] || sec_lo[i] >= (q & ~(k_page - 1))) return false;
+                sec_probed[i] = true; start = sec_lo[i]; probes++; return true;
+            }
+        return false;
+    }
+};
+
+/// range_readable's walk on the render thread with fast_reads on (fix-render): range_check with the kept image runs. A read
+/// inside a run kept from any frame is answered when the working-set check proves its pages (or they were proven this frame);
+/// a failed proof drops the run and walks. The walk is range_check's, except that a miss inside the exe's image
+/// [image_base, image_end) may first query its section's start (once a section), and every image run it sees is kept in both
+/// caches. Same answers as range_check whenever the working-set answers are true.
+template <class Query, class Ws, int N, int K, int S>
+bool range_check_keep(uintptr_t a, size_t len, Query&& query, Ws&& ws, RegionCache<N>& cache, ImageKeep<K, S>& keep,
+                      uintptr_t image_base, uintptr_t image_end, RangeStats* st) {
+    if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return false;
+    if (cache.covers(a, len)) { if (st) st->hits++; return true; }
+    if (image_base != 0 && keep.in_run(a, len)) {
+        if (keep.ok_covers(a, len) || keep.prove(a, len, ws)) { if (st) st->hits++; return true; }
+        keep.drop_at(a);
+    }
+    uintptr_t q = a;
+    while (q < a + len) {
+        uintptr_t s0 = 0;
+        if (image_base != 0 && q >= image_base && q < image_end && keep.take_probe(q, s0)) {
+            const Mbi b = query(s0);
+            if (st) st->queries++;
+            const uintptr_t be = b.base + b.size;
+            if (mbi_readable(b) && b.base == s0 && be > q && b.type == k_mem_image && b.alloc_base == image_base) {
+                cache.add(b.base, be); keep.add_run(b.base, be); q = be; continue;
+            }
+        }
+        const Mbi m = query(q);
+        if (st) st->queries++;
+        if (!mbi_readable(m)) return false;
+        const uintptr_t end = m.base + m.size;
+        if (end <= q) return false;
+        if (image_base != 0 && m.type == k_mem_image && m.alloc_base == image_base) { cache.add(m.base, end); keep.add_run(m.base, end); }
+        q = end;
+    }
+    return true;
+}
+
 struct FastStats { uint32_t queries = 0, hits = 0, probes = 0, ws = 0, ws_yes = 0; };   // queries include the probes; hits: ranges answered with no query; ws: working-set checks, ws_yes: reads they answered
 enum : int { k_fast_no = 0, k_fast_image = 1, k_fast_other = 2 };
 
@@ -282,8 +418,9 @@ enum : int { k_fast_no = 0, k_fast_image = 1, k_fast_other = 2 };
 /// k_fast_other (the copy must be the kernel's).
 /// lean2: with hints, every long answer outside the exe's image (>= k_big_run from the queried page) is noted there as
 /// [allocation base, end of the run) (a cost hint only; the answer itself is used exactly as before).
-template <class Query, int N, int P, int H = 8>
-int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, AllocSeen<P>& seen, uintptr_t image_base, FastStats* st, BigHints<H>* hints = nullptr) {
+template <class Query, int N, int P, int H = 8, int K = 8, int S = 16>
+int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, AllocSeen<P>& seen, uintptr_t image_base, FastStats* st, BigHints<H>* hints = nullptr,
+                     ImageKeep<K, S>* keep = nullptr, uintptr_t image_end = 0) {
     if (a == 0 || len == 0 || a < 0x10000 || a + len < a) return k_fast_no;
     const uintptr_t e = a + len;
     bool all_img = true, queried = false;
@@ -292,7 +429,15 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
         const int i = c.find(q);
         if (i >= 0) { all_img = all_img && c.img[i]; q = c.hi[i]; continue; }
         queried = true;
-        uintptr_t ab = 0;
+        uintptr_t ab = 0, s0 = 0;
+        if (keep && image_base != 0 && q >= image_base && q < image_end && keep->take_probe(q, s0)) {   // fix-render: the run from its section's start
+            const Mbi b = query(s0);
+            if (st) st->queries++;
+            const uintptr_t be = b.base + b.size;
+            if (mbi_readable(b) && b.base == s0 && be > q && b.type == k_mem_image && b.alloc_base == image_base) {
+                c.add(b.base, be, true); keep->add_run(b.base, be); q = be; continue;
+            }
+        }
         if (seen.take_probe(q, ab)) {   // below a kept run of a noted allocation: one query from its base first
             const Mbi b = query(ab);
             if (st) { st->queries++; st->probes++; }
@@ -300,6 +445,7 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
             if (mbi_readable(b) && b.base == ab && be > ab) {
                 const bool bim = image_base != 0 && b.type == k_mem_image && b.alloc_base == image_base;
                 c.add(b.base, be, bim);
+                if (bim && keep) keep->add_run(b.base, be);
                 if (hints && !bim && be - b.base >= k_big_run) hints->add(b.base, be);
                 if (q < be) { all_img = all_img && bim; q = be; continue; }   // its run holds q: answered
             }
@@ -311,6 +457,7 @@ int range_check_fast(uintptr_t a, size_t len, Query&& query, RunCache<N>& c, All
         if (end <= q || m.base > q) return k_fast_no;   // (a broken answer; VirtualQuery never gives one)
         const bool im = image_base != 0 && m.type == k_mem_image && m.alloc_base == image_base;
         c.add(m.base, end, im);
+        if (im && keep) keep->add_run(m.base, end);   // fix-render: kept across frames (each later use proven by the working-set check)
         all_img = all_img && im;
         if (!im) seen.note(m.alloc_base, m.base);
         if (hints && !im && end - m.base >= k_big_run) hints->add(m.alloc_base != 0 && m.alloc_base <= m.base ? m.alloc_base : m.base, end);
@@ -334,12 +481,26 @@ struct FastReader {
     int64_t t0 = 0; bool armed = false;   // when the kept runs were started (the first read after a clear)
     uint32_t copies = 0, fails = 0;       // kernel copies, of them failed (this frame; the caller rolls them)
     uint32_t ws_zero_run = 0; bool ws_tripped = false;   // review SF1: answers in a row with no page Valid where VirtualQuery found the range readable
+    ImageKeep<8, 16>* keep = nullptr;     // fix-render: the exe's image runs kept across frames (null: vq-lean / lean2 exactly)
+    uint32_t keep_hits = 0;               // reads answered through it (this frame; the caller rolls them)
+    uint32_t keep_fails = 0;              // fails when the keep was last cleared: a failed kernel copy clears it before the next read
+    /// The caller's per-frame roll, before it zeroes `fails`: a failure no read has seen yet clears the keep now.
+    void keep_roll() { if (keep && fails != keep_fails) keep->clear(); keep_fails = 0; }
     void clear() { runs.clear(); seen.clear(); armed = false; }   // (not the hints: they are no claim about the memory)
     /// 1: copied; 0: not readable or the copy failed. now / max_age in the caller's clock (QPC ticks). ws: the working-set
     /// query (ws_check's); one that always returns false is the vq-lean reader exactly.
     template <class Query, class Ws, class Plain, class Kernel>
     int read(uintptr_t a, size_t len, int64_t now, int64_t max_age, uintptr_t image_base, uintptr_t image_end, Query&& query, Ws&& ws, Plain&& plain, Kernel&& kernel) {
-        if (!armed || now - t0 > max_age || now < t0) { clear(); armed = true; t0 = now; }
+        if (!armed || now - t0 > max_age || now < t0) { if (keep && armed) keep->new_frame(); clear(); armed = true; t0 = now; }   // (fix-render: the keep's proofs end with the runs' age bound; the caller ends them every frame)
+        if (keep && fails != keep_fails) { keep->clear(); keep_fails = fails; }   // fix-render: the map changed under a kept run: start over
+        if (keep && image_base != 0 && a >= image_base && a + len <= image_end && keep->in_run(a, len) && !runs.covers(a, len)) {
+            if (keep->ok_covers(a, len) || keep->prove(a, len, ws)) {   // fix-render: resident and readable now, in the exe's image
+                runs.add(a & ~(k_page - 1), ((a + len - 1) & ~(k_page - 1)) + k_page, true);
+                st.hits++; keep_hits++;
+                return plain() ? 1 : 0;
+            }
+            keep->drop_at(a);
+        }
         WsInfo wi;
         if (hints.has(a) && !(a < image_end && a + len > image_base) && !runs.covers(a, len)) {
             const bool yes = ws_check(a, len, ws, &wi);
@@ -355,7 +516,7 @@ struct FastReader {
                 return 0;
             }
         }
-        const int k = range_check_fast(a, len, query, runs, seen, image_base, &st, &hints);
+        const int k = range_check_fast(a, len, query, runs, seen, image_base, &st, &hints, keep, image_end);
         if (wi.answered) {   // review SF1: an answer with no page Valid for a range VirtualQuery finds readable counts towards ws_tripped
             if (wi.any_valid) ws_zero_run = 0;
             else if (k != k_fast_no && ++ws_zero_run >= k_ws_zero_max) ws_tripped = true;

@@ -2769,12 +2769,37 @@ static cpu::Mbi g_rs_last;                 // the current call's last VirtualQue
 static uintptr_t g_cpu_exe_end = 0;        // the end of FFX.exe's image (SizeOfImage; ~0 if unknown: safe_read_fast then makes no
                                            // working-set check, and no caller is labelled ffx+ on the cpu: line; review N4)
 static cpu::Mbi cpu_vq_rt(uintptr_t q) { const cpu::Mbi m = cpu_vq(q); g_rs_last = m; return m; }   // render thread only
+// fix-render (logs-1107 perf 5): FFX.exe's image runs kept across frames for both render-thread caches (ffxvr_cpu.h ImageKeep),
+// each use proven by QueryWorkingSetEx; with the exe's section table, a miss queries its section's start once.
+static cpu::ImageKeep<8, 16> g_keep;
+static uint32_t g_keep_sections = 0;
+/// The exe's sections from its PE headers (the header page checked readable first; a loaded image's headers always are).
+static void cpu_exe_sections() {
+    const uintptr_t b = g_cpu_exe_base;
+    if (b == 0 || g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return;
+    if (!cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(b, 0x1000, cpu_vq, nullptr, 0, nullptr)) return;
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0xC00) return;
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + static_cast<uintptr_t>(dos->e_lfanew));
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    const IMAGE_SECTION_HEADER* sh = IMAGE_FIRST_SECTION(nt);
+    const int n = nt->FileHeader.NumberOfSections;
+    if (n <= 0 || reinterpret_cast<uintptr_t>(sh + n) > b + 0x1000) return;   // the table must lie in the checked page
+    uintptr_t lo[16], hi[16]; int k = 0;
+    for (int i = 0; i < n && k < 16; ++i) {
+        const uintptr_t l = b + sh[i].VirtualAddress, sz = sh[i].Misc.VirtualSize ? sh[i].Misc.VirtualSize : sh[i].SizeOfRawData;
+        if (sz == 0 || l < b || l + sz > g_cpu_exe_end || l + sz < l) continue;
+        lo[k] = l; hi[k] = (l + sz + 0xFFF) & ~static_cast<uintptr_t>(0xFFF); k++;
+    }
+    g_keep.set_sections(lo, hi, k); g_keep_sections = static_cast<uint32_t>(k);
+}
 static void cpu_exe_init() {
     if (g_cpu_exe_base != 0) return;
     g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     MODULEINFO mi = {};
     g_cpu_exe_end = g_cpu_exe_base != 0 && GetModuleInformation(GetCurrentProcess(), reinterpret_cast<HMODULE>(g_cpu_exe_base), &mi, sizeof(mi)) && mi.SizeOfImage != 0
                   ? g_cpu_exe_base + mi.SizeOfImage : ~static_cast<uintptr_t>(0);
+    cpu_exe_sections();
 }
 
 // lean2: QueryWorkingSetEx on our own process (the pseudo-handle has PROCESS_QUERY_INFORMATION; K32QueryWorkingSetEx, kernel32),
@@ -2783,6 +2808,7 @@ static void cpu_exe_init() {
 // self-test failed, or the render thread saw it answer "not resident" for 64 ranges in a row that VirtualQuery then found
 // readable: the Wine case). g_ws_why: the reason, on the cpu: line. A failed call is only counted (that read falls back).
 static volatile LONG g_ws_state = 0, g_ws_fails = 0;
+static volatile LONG g_fast_reads = 0;   // vq-lean (ini fast_reads): see below, with g_fr (defined here: range_readable_at reads it, fix-render)
 static char g_ws_why[128] = "not tested yet";
 static bool ws_query_raw(const uintptr_t* va, uint32_t* at, int n) {
     if (n <= 0 || n > cpu::k_ws_max_pages) return false;
@@ -2839,7 +2865,11 @@ static bool range_readable_at(const void* p, size_t len, const void* site) {
     const LONGLONG t0 = cpu_q();
     const uint32_t q0 = g_cpu_rr.queries;
     g_rs_last = cpu::Mbi{};
-    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
+    // fix-render: with fast_reads on and the working-set check on, the exe's image runs are kept across frames (each use proven
+    // resident and readable by QueryWorkingSetEx); otherwise the cpu-lean walk exactly.
+    const bool ok = (g_fast_reads != 0 && g_ws_state == 1 && g_cpu_exe_end != ~static_cast<uintptr_t>(0))
+        ? cpu::range_check_keep(a, len, cpu_vq_rt, ws_query, g_cpu_rcache, g_keep, g_cpu_exe_base, g_cpu_exe_end, &g_cpu_rr)
+        : cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
     const LONGLONG d = cpu_q() - t0;
     g_cpu_rr_q += d;
     if (g_cpu_rr.queries != q0) g_rs.note(reinterpret_cast<uintptr_t>(site), g_cpu_rr.queries - q0, 0, d, static_cast<uint32_t>(len), a, g_rs_last.alloc_base, g_rs_last.size);
@@ -2867,8 +2897,7 @@ static __declspec(noinline) bool range_readable(const void* p, size_t len) { ret
 // page. Resident and readable (a guard page is never resident until its first touch) -> its pages are kept for the frame,
 // never as image, and the kernel copies it; anything else -> the walk above, unchanged. The other threads use the same
 // check before range_readable's walk and copy as before. fast_reads=0 turns all of it off (the old path, unchanged).
-static volatile LONG g_fast_reads = 0;
-static cpu::FastReader<32, 16> g_fr;
+static cpu::FastReader<32, 16> g_fr;   // (g_fast_reads: defined with the working-set state above, fix-render)
 static uint32_t g_fr_frames = 0, g_fr_off = 0;   // frames of this cpu: window with fast_reads on / off (cpu_frame_roll)
 static LONGLONG g_fr_copy_q = 0;           // this frame's QPC ticks in ReadProcessMemory (render thread)
 static uint32_t g_fr_big_n = 0;            // this frame's kernel copies over 4 KB (the actor table snapshot, 104 KB) (review N7)
@@ -2907,6 +2936,7 @@ static int safe_read_fast(const void* src, void* dst, unsigned len, const void* 
     LONGLONG copy_q = 0, plain_q = 0, ws_q = 0;
     const cpu::FastStats before = g_fr.st;
     g_rs_last = cpu::Mbi{};
+    g_fr.keep = g_ws_state == 1 ? &g_keep : nullptr;   // fix-render: the kept image runs, only while QueryWorkingSetEx is on
     const int ok = g_fr.read(a, len, t0, g_fr_qpf / 20, g_cpu_exe_base, g_cpu_exe_end, cpu_vq_rt,
         [&](const uintptr_t* va, uint32_t* at, int n) {
             if (g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return false;   // review N4: the exe's end unknown: no check
@@ -5699,6 +5729,7 @@ static cpu::Acc g_cpu_cpyn, g_cpu_cpyms, g_cpu_prbn;            // vq-lean, per 
 static cpu::Acc g_cpu_bign, g_cpu_bigms;                        // vq-lean (review N7), per frame: kernel copies over 4 KB, their ms
 static uint32_t g_cpu_cpy_fail = 0;                             // vq-lean: failed kernel copies over the window
 static cpu::Acc g_cpu_wsn, g_cpu_wsy, g_cpu_wsms;                // lean2, per frame: working-set checks, the reads they answered, their ms
+static cpu::Acc g_cpu_kph, g_cpu_kpr, g_cpu_kpp, g_cpu_kps;       // fix-render, per frame: safe reads answered by the kept image runs, proofs (working-set calls), pages proven, section probes
 static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
 static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
 static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu_hook_end_q = 0;
@@ -5726,6 +5757,13 @@ static void cpu_frame_roll() {
         diag("fast reads: QueryWorkingSetEx off for the session: %s", g_ws_why);
     }
     if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
+    {   // fix-render: the kept image runs' proofs end with the frame; a failed copy, fast_reads off or the check off drop them all
+        g_cpu_kph.add(g_fr.keep_hits); g_cpu_kpr.add(g_keep.proofs); g_cpu_kpp.add(g_keep.proof_pages); g_cpu_kps.add(g_keep.probes);
+        g_fr.keep = &g_keep; g_fr.keep_roll(); g_fr.keep_hits = 0;
+        g_keep.proofs = g_keep.proof_pages = g_keep.answered = g_keep.refused = g_keep.probes = 0;
+        g_keep.new_frame();
+        if (g_fast_reads == 0 || g_ws_state != 1) g_keep.clear();
+    }
     g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
@@ -5830,16 +5868,18 @@ static void cpu_log_line() {
                   M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
     char gt[1200];
     gt_line_part(gt, sizeof(gt));   // grid-timer: the timer, the game window, the main loop and the limiter's Sleep (a new window)
-    char fr[512];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
+    char fr[768];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
     if (g_fr_frames == 0) snprintf(fr, sizeof(fr), ", fast_reads off");
     else {
         char ws[200];   // lean2: QueryWorkingSetEx's state (review SF1: the self-test's verdict, or why it is off)
         snprintf(ws, sizeof(ws), "; QueryWorkingSetEx %s: %s%s", g_ws_state == 1 ? "on" : g_ws_state < 0 ? "off" : "not tested", g_ws_why,
                  g_ws_fails != 0 ? ", some calls failed" : "");
-        snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)",
+        snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)"
+                                 ", kept exe runs %d (of %u sections; safe reads through them %.1f/%.0f a frame, proofs %.1f/%.0f a frame over %.1f/%.0f pages, section probes %.0f/%.0f)",
                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx,
-                 g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws);
+                 g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws,
+                 g_keep.count(), g_keep_sections, g_cpu_kph.avg(), g_cpu_kph.mx, g_cpu_kpr.avg(), g_cpu_kpr.mx, g_cpu_kpp.avg(), g_cpu_kpp.mx, g_cpu_kps.avg(), g_cpu_kps.mx);
     }
     char sites[900];   // lean2: the render thread's reads that queried or checked, by caller, the top four by time
     cpu_sites_part(sites, sizeof(sites), g_cpu_frames);
@@ -5853,6 +5893,7 @@ static void cpu_log_line() {
     for (auto& a : g_cpu_man) a = cpu::Acc{};
     g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = g_cpu_bign = g_cpu_bigms = cpu::Acc{};
     g_cpu_wsn = g_cpu_wsy = g_cpu_wsms = cpu::Acc{};
+    g_cpu_kph = g_cpu_kpr = g_cpu_kpp = g_cpu_kps = cpu::Acc{};
     g_cpu_cpy_fail = 0; g_fr_frames = g_fr_off = 0;
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;
