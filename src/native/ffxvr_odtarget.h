@@ -61,6 +61,7 @@ constexpr double k_appear_s = 0.12;                                             
 constexpr float k_plate_r = 0.12f;                                                         // the plate's circumradius at size 1 (24 cm across)
 constexpr float k_preview_scale = 0.40f;                                                   // the next symbol, above and behind
 constexpr double k_chev_period_s = 0.9; constexpr float k_guide_m = 0.12f;                 // the cut's chevrons; the guide line beyond each edge
+constexpr double k_swirl_turns = 0.15, k_burst_s = 0.20, k_sparks_s = 0.30; constexpr float k_art_outline = 1.35f;               // the art: the swirl's turns a second; a hit's burst and sparks
 constexpr double k_defl_show_s = 0.30, k_flash_s = 0.25;                                   // a deflect's red rim and big chevrons; a pip's confirmation
 // A deflect is trusted only when it was not part of a cut (review R5-S2): it is held k_defl_hold_s after its pass ends and dropped
 // if the plate goes meanwhile (a wind-up through the sphere, then the chop), and a pass that began less than k_defl_new_s after
@@ -181,11 +182,21 @@ inline int side_of(int s) { return sym_arrow(s) ? -1 : 1; }
 /// The palette: brightness first. A saturated face (arrows cyan, face buttons amber, L1 / R1 violet; grey off the map) under a
 /// near-black symbol (dark on bright reads at a glance), a white rim, all on a dark halo that keeps a bright battle effect behind
 /// from washing it out.
+/// Each symbol its own colour (the owner's concept, 9 Nov 2026), for the textured medallions and the flat plates alike.
 inline Col sym_col(int s) {
-    if (sym_arrow(s)) return col(0.10f, 0.82f, 1.f, 1.f);
-    if (s >= odv::G_Y && s <= odv::G_X) return col(1.f, 0.68f, 0.08f, 1.f);
-    if (s == odv::G_L1 || s == odv::G_R1) return col(0.68f, 0.38f, 1.f, 1.f);
-    return col(0.62f, 0.62f, 0.64f, 1.f);
+    switch (s) {
+        case odv::G_UP:    return col(0.35f, 0.65f, 1.f, 1.f);    // blue
+        case odv::G_DOWN:  return col(0.20f, 0.85f, 0.75f, 1.f);  // teal
+        case odv::G_LEFT:  return col(0.40f, 0.95f, 0.45f, 1.f);  // green
+        case odv::G_RIGHT: return col(0.30f, 0.90f, 1.f, 1.f);    // cyan
+        case odv::G_A:     return col(0.40f, 0.55f, 1.f, 1.f);    // blue
+        case odv::G_B:     return col(1.f, 0.50f, 0.15f, 1.f);    // orange
+        case odv::G_X:     return col(0.35f, 0.85f, 1.f, 1.f);    // cyan
+        case odv::G_Y:     return col(1.f, 0.82f, 0.30f, 1.f);    // gold
+        case odv::G_L1:    return col(0.55f, 0.50f, 1.f, 1.f);    // violet-blue
+        case odv::G_R1:    return col(0.30f, 0.95f, 0.70f, 1.f);  // sea-green
+        default:           return col(0.62f, 0.62f, 0.64f, 1.f);  // off the map: grey
+    }
 }
 inline Col ink(float a) { return col(0.04f, 0.04f, 0.06f, a); }
 /// The symbol's colour (contrast pass, the owner's second test): near-white tinted toward the plate's colour, the brightest thing
@@ -195,6 +206,97 @@ inline Col bright(Col k, float a) { return col(0.80f + 0.20f * k.r, 0.80f + 0.20
 /// its soft outer glow to k_glow_out; the symbol's stroke weight (1.6x the first build's 1.35), each symbol scaled as large as fits
 /// inside the rim (k_sym_fit of its inner edge: Runner::sym_scale); the face's alpha.
 constexpr float k_rim_in = 0.64f, k_glow_out = 1.22f, k_sym_fit = 0.97f, k_sym_w = 1.35f * 1.6f, k_face_a = 0.92f;
+
+// -- the target art (a local pack: the owner's own AI-generated medallion art, never in the repository) -------------------------
+/// The pack: <mod>/art/targets/*.png (tools/target-art/target_art.py cuts it from a 3x3 sheet; docs "Bushido target art"). The
+/// native glue (render thread, at the first use) decodes the eight pieces with WIC, checks each size, packs them here into two
+/// atlases with full mip chains (A 2048: frame, glow, swirl, back at 1024; B 1024: halo, burst, sparks, edge at 512) and uploads
+/// them; anything missing or odd keeps the flat plates. The marker pass samples atlas A in slot 1 and B in slot 2 (Vtx t.z 2 / 3;
+/// + 4: an additive layer, drawn premultiplied in the targets' own draw). Pure: sizes, layout, UVs, packing and mips.
+namespace art {
+enum Piece { P_FRAME = 0, P_GLOW, P_SWIRL, P_BACK, P_HALO, P_BURST, P_SPARKS, P_EDGE, P_N };
+inline const char* file(int p) {
+    static const char* const k[P_N] = { "frame.png", "glow.png", "swirl.png", "back.png", "halo.png", "burst.png", "sparks.png", "edge.png" };
+    return p >= 0 && p < P_N ? k[p] : "";
+}
+constexpr int k_src = 1024;                      // every piece 1024 x 1024 but the edge strip: 1024 x 32..512
+constexpr int k_edge_hmin = 32, k_edge_hmax = 512;
+constexpr int k_a = 2048, k_b = 1024;            // the atlases' sides
+constexpr float k_outer = 0.960f, k_hole = 0.465f, k_swirl = 0.925f;   // of a piece's half-size: the frame's edge and hole, the swirl's opaque disc
+constexpr float k_halo_peak = 0.65f;             // the halo ring's brightest radius (of its half-size)
+/// A piece's place: atlas 0 (A) or 1 (B), its cell (texels). edge_h: the edge strip's height as decoded.
+struct Cell { int atlas = 0, x = 0, y = 0, w = 0, h = 0; };
+inline Cell cell(int p, int edge_h = 188) {
+    Cell c;
+    switch (p) {
+        case P_FRAME:  c.atlas = 0; c.x = 0;    c.y = 0;    c.w = c.h = 1024; break;
+        case P_GLOW:   c.atlas = 0; c.x = 1024; c.y = 0;    c.w = c.h = 1024; break;
+        case P_SWIRL:  c.atlas = 0; c.x = 0;    c.y = 1024; c.w = c.h = 1024; break;
+        case P_BACK:   c.atlas = 0; c.x = 1024; c.y = 1024; c.w = c.h = 1024; break;
+        case P_HALO:   c.atlas = 1; c.x = 0;    c.y = 0;    c.w = c.h = 512; break;
+        case P_BURST:  c.atlas = 1; c.x = 512;  c.y = 0;    c.w = c.h = 512; break;
+        case P_SPARKS: c.atlas = 1; c.x = 0;    c.y = 512;  c.w = c.h = 512; break;
+        case P_EDGE:   c.atlas = 1; c.x = 512;  c.y = 512;  c.w = 512; c.h = (edge_h < k_edge_hmin ? k_edge_hmin : edge_h > k_edge_hmax ? k_edge_hmax : edge_h) / 2; break;
+        default: break;
+    }
+    return c;
+}
+/// A piece's UV rectangle in its atlas (half a texel in from each side, so bilinear never reads the neighbour at mip 0).
+struct Uv { float u0 = 0.f, v0 = 0.f, u1 = 0.f, v1 = 0.f; };
+inline Uv uv(int p, int edge_h = 188) {
+    const Cell c = cell(p, edge_h); const float n = c.atlas == 0 ? static_cast<float>(k_a) : static_cast<float>(k_b);
+    Uv u; u.u0 = (static_cast<float>(c.x) + 0.5f) / n; u.v0 = (static_cast<float>(c.y) + 0.5f) / n; u.u1 = (static_cast<float>(c.x + c.w) - 0.5f) / n; u.v1 = (static_cast<float>(c.y + c.h) - 0.5f) / n;
+    return u;
+}
+/// The vertex texture code for a piece's layer (Vtx t.z): 2 atlas A, 3 atlas B, + 4 additive.
+inline float code(int p, bool add) { return static_cast<float>((cell(p).atlas == 0 ? 2 : 3) + (add ? 4 : 0)); }
+/// A decoded piece's size check: nullptr when it fits, else the reason (for the log line and F8).
+inline const char* size_bad(int p, int w, int h) {
+    if (w <= 0 || h <= 0) return "empty";
+    if (p == P_EDGE) return w == k_src && h >= k_edge_hmin && h <= k_edge_hmax ? nullptr : "not 1024 x 32..512";
+    return w == k_src && h == k_src ? nullptr : "not 1024 x 1024";
+}
+inline uint32_t px(float r, float g, float b, float a) {
+    auto q = [](float v) { const float c = v < 0.f ? 0.f : v > 1.f ? 1.f : v; return static_cast<uint32_t>(c * 255.f + 0.5f); };
+    return q(r) | q(g) << 8 | q(b) << 16 | q(a) << 24;
+}
+/// The average of n texels, the colour weighted by alpha (a transparent texel's colour never darkens an edge).
+inline uint32_t avg(const uint32_t* const* t, int n) {
+    float r = 0.f, g = 0.f, b = 0.f, a = 0.f;
+    for (int k = 0; k < n; ++k) {
+        const uint32_t v = *t[k]; const float al = static_cast<float>(v >> 24) / 255.f;
+        r += static_cast<float>(v & 255u) / 255.f * al; g += static_cast<float>(v >> 8 & 255u) / 255.f * al; b += static_cast<float>(v >> 16 & 255u) / 255.f * al; a += al;
+    }
+    if (a <= 0.f) return 0u;
+    return px(r / a, g / a, b / a, a / static_cast<float>(n));
+}
+/// Copies a decoded piece (iw x ih, RGBA8 with R in the low byte) into its cell of an atlas of side aw, shrunk by the whole
+/// factor iw / cell width (1 or 2) with the alpha-weighted box filter.
+inline void put(uint32_t* atlas, int aw, const uint32_t* img, int iw, int ih, const Cell& c) {
+    const int f = c.w > 0 ? iw / c.w : 1; if (f < 1) return;
+    for (int y = 0; y < c.h; ++y) for (int x = 0; x < c.w; ++x) {
+        const uint32_t* t[4]; int n = 0;
+        for (int dy = 0; dy < f && n < 4; ++dy) for (int dx = 0; dx < f && n < 4; ++dx) {
+            const int sx = x * f + dx, sy = y * f + dy; if (sx < iw && sy < ih) t[n++] = &img[static_cast<size_t>(sy) * static_cast<size_t>(iw) + static_cast<size_t>(sx)];
+        }
+        atlas[static_cast<size_t>(c.y + y) * static_cast<size_t>(aw) + static_cast<size_t>(c.x + x)] = n ? avg(t, n) : 0u;
+    }
+}
+/// The mip chain's level count for a square of side w (down to 1 x 1), and its texels in all.
+inline int levels(int w) { int n = 1; while (w > 1) { w /= 2; ++n; } return n; }
+inline size_t chain_texels(int w) { size_t n = 0; while (w >= 1) { n += static_cast<size_t>(w) * static_cast<size_t>(w); if (w == 1) break; w /= 2; } return n; }
+/// One mip level down (a square of side w to w / 2), alpha-weighted.
+inline void mip_down(const uint32_t* src, int w, uint32_t* dst) {
+    const int h = w / 2;
+    for (int y = 0; y < h; ++y) for (int x = 0; x < h; ++x) {
+        const size_t r0 = static_cast<size_t>(2 * y) * static_cast<size_t>(w), r1 = r0 + static_cast<size_t>(w);
+        const uint32_t* t[4] = { &src[r0 + 2u * static_cast<size_t>(x)], &src[r0 + 2u * static_cast<size_t>(x) + 1u], &src[r1 + 2u * static_cast<size_t>(x)], &src[r1 + 2u * static_cast<size_t>(x) + 1u] };
+        dst[static_cast<size_t>(y) * static_cast<size_t>(h) + static_cast<size_t>(x)] = avg(t, 4);
+    }
+}
+/// Both atlases with their chains, RGBA8 (4 bytes a texel): about 21.3 + 5.3 MB of VRAM.
+inline size_t vram_bytes() { return 4u * (chain_texels(k_a) + chain_texels(k_b)); }
+}   // namespace art
 
 // -- the blade and the swept test ----------------------------------------------------------------------------------------------
 /// A blade pose: the grip p, the blade's direction d (the grip's -Z tilted by the pitch about the grip's X), the spine side u.
@@ -398,7 +500,11 @@ struct Inject {
 };
 struct Cut {
     double t0 = -1e300; V3 c; Axes3 ax; float rad = 0.065f, th = 0.02f; V3 cd, cn; Col k; float off = 0.f;
-    float hx[2][12] = {}, hy[2][12] = {}; bool hcut[2][12] = {}; int hn[2] = { 0, 0 };   // the halves in the plate's plane (centroid-relative); hcut: edge j..j+1 is the cut
+    float hx[2][16] = {}, hy[2][16] = {}; bool hcut[2][16] = {}; int hn[2] = { 0, 0 };   // the halves in the plate's plane (centroid-relative); hcut: edge j..j+1 is the cut
+    bool art = false;                                           // the textured medallion's halves (a 12-gon, not the octagon) ...
+    float pcx[2] = {}, pcy[2] = {};                             // ... each half's centroid in the plate's plane (for the UVs)
+    float ix[2][16] = {}, iy[2][16] = {}; int in_[2] = { 0, 0 }; // ... the swirl disc's part (centroid-relative)
+    float swirl_a = 0.f;                                        // ... the swirl's turn at the cut
     V3 hc0[2], hv[2]; float spin[2] = { 0.f, 0.f }, tumble[2] = { 0.f, 0.f };
     float spark_a[6] = {};
     bool twin = false;                                          // cut while it materialised (a second plate in one stroke): the flash ring
@@ -468,6 +574,7 @@ struct Runner {
     Cfg cfg; Round r; HandTrack ht[2]; Inject inj; Stats st, last_st; Cut cut[k_cut_n]; int cut_next = 0;
     uint32_t rounds = 0; double hap_t[2] = { -1.0, -1.0 };
     Stretch tm;                                                  // the countdown's stretch (od_targets_time)
+    bool art = false;                                            // the textured medallions (the glue: the local pack loaded, F8 "target art" on, the shader ready)
     uint32_t phys_seen = 0; int phys_frames = 1000; double phys_note_t = -1e300;   // the settle in frames (review S2); when the last new press was noticed
     double gate_off_t = -1.0;                                    // the injection gate off since (review S1); -1 on
     /// The player's new presses: a new count starts the frame count (the noticing Present itself does not count).
@@ -798,15 +905,27 @@ struct Runner {
         c = Cut{}; c.t0 = t; c.c = C; c.ax = ax; c.rad = r.g.rad; c.th = r.g.th; c.k = k;
         c.cd = norm(cd); c.cn = cross(ax.N, c.cd);
         c.off = clampf(dot(at - C, c.cn), -0.35f * c.rad, 0.35f * c.rad);
-        float ox[8], oy[8];
-        for (int j = 0; j < 8; ++j) { const float a = (22.5f + 45.f * static_cast<float>(j)) * k_deg; ox[j] = c.rad * std::cos(a); oy[j] = c.rad * std::sin(a); }
+        // the outline: the flat plate's octagon, or the medallion's 12-gon (art); the swirl disc's 12-gon for the art's inner layer
+        c.art = art; c.swirl_a = static_cast<float>(std::fmod(t * k_swirl_turns * odg::k_two_pi, static_cast<double>(odg::k_two_pi)));
+        const int no = art ? 12 : 8; float ox[12], oy[12], ixs[12], iys[12];
+        const float rs = art_swirl_r(c.rad);
+        for (int j = 0; j < no; ++j) {
+            const float a = (art ? 15.f + 30.f * static_cast<float>(j) : 22.5f + 45.f * static_cast<float>(j)) * k_deg;
+            ox[j] = c.rad * std::cos(a); oy[j] = c.rad * std::sin(a); ixs[j] = rs * std::cos(a); iys[j] = rs * std::sin(a);
+        }
         const float dx = dot(c.cd, ax.R), dy = dot(c.cd, ax.U), nx = -dy, ny = dx;   // the cut's direction and normal in the plane (x, y)
         for (int s = 0; s < 2; ++s) {
-            float hx[12], hy[12]; bool hc[12];
-            const int m = clip_half(ox, oy, 8, nx * c.off, ny * c.off, dx, dy, s == 0 ? 1.f : -1.f, hx, hy, hc, 12);
+            float hx[16], hy[16]; bool hc[16];
+            const int m = clip_half(ox, oy, no, nx * c.off, ny * c.off, dx, dy, s == 0 ? 1.f : -1.f, hx, hy, hc, 16);
             float cx = 0.f, cy = 0.f; for (int j = 0; j < m; ++j) { cx += hx[j]; cy += hy[j]; }
             if (m > 0) { cx /= static_cast<float>(m); cy /= static_cast<float>(m); }
             c.hn[s] = m; for (int j = 0; j < m; ++j) { c.hx[s][j] = hx[j] - cx; c.hy[s][j] = hy[j] - cy; c.hcut[s][j] = hc[j]; }
+            c.pcx[s] = cx; c.pcy[s] = cy;
+            if (art) {   // the swirl's part of this half, clipped by the same line
+                float qx[16], qy[16]; bool qc[16];
+                const int mi = clip_half(ixs, iys, no, nx * c.off, ny * c.off, dx, dy, s == 0 ? 1.f : -1.f, qx, qy, qc, 16);
+                c.in_[s] = mi; for (int j = 0; j < mi; ++j) { c.ix[s][j] = qx[j] - cx; c.iy[s][j] = qy[j] - cy; }
+            }
             c.hc0[s] = C + ax.R * cx + ax.U * cy;
             const V3 nd = c.cn * (s == 0 ? 1.f : -1.f);
             V3 v = nd * 0.8f + bv * 0.15f;
@@ -823,13 +942,48 @@ struct Runner {
     }
     /// A half's centroid at age a (s): hc0 + v a + gravity.
     static V3 half_c(const Cut& c, int s, float a) { return c.hc0[s] + c.hv[s] * a + v3(0.f, -0.5f * k_g * a * a, 0.f); }
+    /// A half's axes at age a (spun about the plate's normal, tumbled about the cut).
+    static void half_axes(const Cut& c, int s, float a, V3* R, V3* U, V3* N) {
+        *R = c.ax.R; *U = c.ax.U; *N = c.ax.N;
+        const float sp = c.spin[s] * a, tu = c.tumble[s] * a;
+        *R = rot_axis(*R, c.ax.N, sp); *U = rot_axis(*U, c.ax.N, sp);
+        *R = rot_axis(*R, c.cd, tu); *U = rot_axis(*U, c.cd, tu); *N = rot_axis(*N, c.cd, tu);
+    }
     /// A half's vertex j (front face when side > 0, back when < 0) at age a.
     static V3 half_v(const Cut& c, int s, int j, float a, float side) {
-        V3 R = c.ax.R, U = c.ax.U, N = c.ax.N;
-        const float sp = c.spin[s] * a, tu = c.tumble[s] * a;
-        R = rot_axis(R, c.ax.N, sp); U = rot_axis(U, c.ax.N, sp);
-        R = rot_axis(R, c.cd, tu); U = rot_axis(U, c.cd, tu); N = rot_axis(N, c.cd, tu);
+        V3 R, U, N; half_axes(c, s, a, &R, &U, &N);
         return half_c(c, s, a) + R * c.hx[s][j] + U * c.hy[s][j] + N * (0.5f * c.th * side);
+    }
+    /// A textured half (art): its rim's side with the edge strip (the cut's own face hot white), then the face toward the eye:
+    /// the front's swirl part, frame and glow (the same UVs as the whole medallion, clipped by the cut), or the back face. k: fade.
+    static void draw_art_half(const Cut& c, int s, float af, float k, V3 eye, Out& o) {
+        const int m = c.hn[s]; if (m < 3) return;
+        V3 R, U, N; half_axes(c, s, af, &R, &U, &N); const V3 P = half_c(c, s, af);
+        auto at = [&](float x, float y, float side) { return P + R * x + U * y + N * (0.5f * c.th * side); };
+        const float q = art_q(c.rad), qs = art_swirl_q(c.rad);
+        const art::Uv eu = art::uv(art::P_EDGE); const float ec = art::code(art::P_EDGE, false);
+        const Col hot = col(1.f, 1.f, 1.f, k), metal = col(1.f, 1.f, 1.f, k);
+        for (int j = 0; j < m; ++j) {   // the sides
+            const int n = (j + 1) % m;
+            const V3 a0 = at(c.hx[s][j], c.hy[s][j], 1.f), a1 = at(c.hx[s][n], c.hy[s][n], 1.f), b1 = at(c.hx[s][n], c.hy[s][n], -1.f), b0 = at(c.hx[s][j], c.hy[s][j], -1.f);
+            if (c.hcut[s][j]) { o.quad(a0, hot, a1, hot, b1, hot, b0, hot); continue; }
+            ttri(o, a0, eu.u0, eu.v0, a1, eu.u1, eu.v0, b1, eu.u1, eu.v1, metal, ec); ttri(o, a0, eu.u0, eu.v0, b1, eu.u1, eu.v1, b0, eu.u0, eu.v1, metal, ec);
+        }
+        const bool front = dot(N, eye - P) > 0.f;
+        auto fan = [&](const float* xs, const float* ys, int nn, int piece, float qq, float ang, float side, float mirror, Col kk, bool add) {
+            const float cd = art::code(piece, add);
+            for (int j = 1; j + 1 < nn; ++j) {
+                const int id[3] = { 0, j, j + 1 }; V3 p3[3]; float u3[3], v3_[3];
+                for (int e = 0; e < 3; ++e) { p3[e] = at(xs[id[e]], ys[id[e]], side); puv(piece, mirror * (xs[id[e]] + c.pcx[s]), ys[id[e]] + c.pcy[s], qq, ang, &u3[e], &v3_[e]); }
+                ttri(o, p3[0], u3[0], v3_[0], p3[1], u3[1], v3_[1], p3[2], u3[2], v3_[2], kk, cd);
+            }
+        };
+        if (front) {
+            fan(c.ix[s], c.iy[s], c.in_[s], art::P_SWIRL, qs, c.swirl_a, 0.6f, 1.f, col(0.8f * c.k.r, 0.8f * c.k.g, 0.8f * c.k.b, k), false);
+            fan(c.hx[s], c.hy[s], m, art::P_FRAME, q, 0.f, 1.f, 1.f, col(1.f, 1.f, 1.f, k), false);
+            fan(c.hx[s], c.hy[s], m, art::P_GLOW, q, 0.f, 1.f, 1.f, col(c.k.r, c.k.g, c.k.b, 0.8f * k), true);
+        }
+        else fan(c.hx[s], c.hy[s], m, art::P_BACK, q, 0.f, -1.f, -1.f, col(1.f, 1.f, 1.f, k), false);   // (mirrored: it reads the right way round from behind)
     }
     // -- drawing ------------------------------------------------------------------------------------------------------------------------
     static void stroke(Out& o, V3 c, V3 R, V3 U, float x0, float y0, float x1, float y1, float w, Col k) {
@@ -887,21 +1041,30 @@ struct Runner {
     }
     /// The symbol's extent at scale 1 with the contrast pass's weight (its core's farthest vertex from the centre), per glyph,
     /// measured once; and the scale that makes it as large as the plate allows inside the rim.
-    static float sym_extent(int sym) {
-        static float ext[odv::G_N] = {};
+    /// (outline: at the art's dark outline weight, 1.35 x)
+    static float sym_extent(int sym, bool outline = false) {
+        static float ext[2][odv::G_N] = {};
         static const bool init = [] {
-            for (int gl = 0; gl < odv::G_N; ++gl) {
+            for (int w = 0; w < 2; ++w) for (int gl = 0; gl < odv::G_N; ++gl) {
                 Vtx b[192]; Out o; o.v = b; o.max = 192;
-                symbol(o, gl, v3(0.f, 0.f, 0.f), v3(1.f, 0.f, 0.f), v3(0.f, 1.f, 0.f), 1.f, col(1.f, 1.f, 1.f, 1.f), k_sym_w);
+                symbol(o, gl, v3(0.f, 0.f, 0.f), v3(1.f, 0.f, 0.f), v3(0.f, 1.f, 0.f), 1.f, col(1.f, 1.f, 1.f, 1.f), w ? k_art_outline * k_sym_w : k_sym_w);
                 float m = 0.f; for (int v = 0; v < o.n; ++v) m = (std::max)(m, std::sqrt(b[v].p[0] * b[v].p[0] + b[v].p[1] * b[v].p[1]));
-                ext[gl] = m > 0.05f ? m : 1.f;
+                ext[w][gl] = m > 0.05f ? m : 1.f;
             }
             return true;
         }();
         (void)init;
-        return sym >= 0 && sym < odv::G_N ? ext[sym] : 1.f;
+        return sym >= 0 && sym < odv::G_N ? ext[outline ? 1 : 0][sym] : 1.f;
     }
     static float sym_scale(int sym, float rad) { return k_sym_fit * k_rim_in * rad / sym_extent(sym); }
+    // -- the textured medallion's proportions (of the plate's radius: its frame's outer edge is the plate's edge) ----------------
+    static float art_q(float rad) { return rad / art::k_outer; }                                // the frame's half-size
+    static float art_hole(float rad) { return art::k_hole * art_q(rad); }                       // the hole: 0.484 of the radius
+    static float art_swirl_r(float rad) { return 1.04f * art_hole(rad); }                       // the swirl disc: just under the frame's inner edge
+    static float art_swirl_q(float rad) { return art_swirl_r(rad) / art::k_swirl; }             // ... its texture's half-size (opaque inside k_swirl)
+    static float art_halo_q(float rad) { return 1.10f * rad / art::k_halo_peak; }               // the halo ring: brightest at 1.1 x the radius
+    /// The symbol in the hole: as large as fits with its dark outline (k_art_outline x the weight) inside the hole.
+    static float art_sym_scale(int sym, float rad) { return k_sym_fit * art_hole(rad) / sym_extent(sym, true); }
     /// The plate (contrast pass): a short octagonal prism with a near-black face (k_face_a), a thick bright rim in the plate's
     /// colour (k_rim_in .. 1 of the radius; red on a deflect) and a soft glow ring outside it (to k_glow_out), front toward ax.N.
     /// (Alpha-blended layers: the marker pass blends straight alpha only, so the glows are dim layers drawn under what they light.)
@@ -937,6 +1100,70 @@ struct Runner {
             o.quad(c + d0 * (1.15f * rad), in_, c + d1 * (1.15f * rad), in_, c + d1 * (1.4f * rad), out_, c + d0 * (1.4f * rad), out_);
         }
     }
+    // -- the textured layers (art) -------------------------------------------------------------------------------------------------
+    /// One textured triangle (t.z = the piece's code); dropped and counted like Out::tri when it does not fit.
+    static void ttri(Out& o, V3 a, float au, float av, V3 b, float bu, float bv, V3 c, float cu, float cv, Col k, float code) {
+        if (o.n + 3 > o.max || !finite3(a) || !finite3(b) || !finite3(c)) { o.dropped++; return; }
+        o.put(a, k, au, av, code); o.put(b, k, bu, bv, code); o.put(c, k, cu, cv, code);
+    }
+    /// The UV of a point (x, y) of a piece's square (half-size q, centred; y up), turned by -ang (the texture turns by +ang).
+    static void puv(int p, float x, float y, float q, float ang, float* u, float* v) {
+        const art::Uv r = art::uv(p); const float cs = std::cos(ang), sn = std::sin(ang);
+        const float xr = x * cs + y * sn, yr = -x * sn + y * cs;
+        *u = r.u0 + (0.5f + 0.5f * xr / q) * (r.u1 - r.u0); *v = r.v0 + (0.5f - 0.5f * yr / q) * (r.v1 - r.v0);
+    }
+    /// A piece as a square in the plane (R, U) at c, half-size q, turned by ang; colour k (straight alpha, or additive).
+    static void sprite(Out& o, int p, V3 c, V3 R, V3 U, float q, float ang, Col k, bool add) {
+        const float cs = std::cos(ang), sn = std::sin(ang); const float cx[4] = { -1.f, 1.f, 1.f, -1.f }, cy[4] = { 1.f, 1.f, -1.f, -1.f };
+        V3 P[4]; float uu[4], vv[4];
+        for (int j = 0; j < 4; ++j) {
+            const float x = q * (cx[j] * cs - cy[j] * sn), y = q * (cx[j] * sn + cy[j] * cs);
+            P[j] = c + R * x + U * y; puv(p, x, y, q, ang, &uu[j], &vv[j]);
+        }
+        const float cd = art::code(p, add);
+        ttri(o, P[0], uu[0], vv[0], P[1], uu[1], vv[1], P[2], uu[2], vv[2], k, cd); ttri(o, P[0], uu[0], vv[0], P[2], uu[2], vv[2], P[3], uu[3], vv[3], k, cd);
+    }
+    /// The swirl disc (radius rs, its texture's half-size q, turned by ang), tinted k, darkened toward the centre to `centre`
+    /// (under the symbol): two rings of 24.
+    static void swirl_disc(Out& o, V3 c, V3 R, V3 U, float rs, float q, float ang, Col k, float centre) {
+        const int n = 24; const float rr[3] = { 0.f, 0.55f, 1.f }, sh[3] = { centre, 0.5f * (centre + 1.f), 1.f };
+        const float cd = art::code(art::P_SWIRL, false);
+        for (int ring = 0; ring < 2; ++ring) for (int j = 0; j < n; ++j) {
+            const float a0 = odg::k_two_pi * static_cast<float>(j) / static_cast<float>(n), a1 = odg::k_two_pi * static_cast<float>(j + 1) / static_cast<float>(n);
+            float x[4], y[4], u[4], v[4]; Col kk[4];
+            const float r0 = rr[ring] * rs, r1 = rr[ring + 1] * rs;
+            x[0] = r0 * std::cos(a0); y[0] = r0 * std::sin(a0); x[1] = r1 * std::cos(a0); y[1] = r1 * std::sin(a0);
+            x[2] = r1 * std::cos(a1); y[2] = r1 * std::sin(a1); x[3] = r0 * std::cos(a1); y[3] = r0 * std::sin(a1);
+            for (int m = 0; m < 4; ++m) {
+                puv(art::P_SWIRL, x[m], y[m], q, ang, &u[m], &v[m]);
+                const float f = sh[(m == 1 || m == 2) ? ring + 1 : ring]; kk[m] = col(k.r * f, k.g * f, k.b * f, k.a);
+            }
+            if (ring == 0) {   // the centre: one triangle a segment
+                if (o.n + 3 > o.max) { o.dropped++; continue; }
+                o.put(c + R * x[0] + U * y[0], kk[0], u[0], v[0], cd); o.put(c + R * x[1] + U * y[1], kk[1], u[1], v[1], cd); o.put(c + R * x[2] + U * y[2], kk[2], u[2], v[2], cd);
+                continue;
+            }
+            if (o.n + 6 > o.max) { o.dropped++; continue; }
+            const V3 P0 = c + R * x[0] + U * y[0], P1 = c + R * x[1] + U * y[1], P2 = c + R * x[2] + U * y[2], P3 = c + R * x[3] + U * y[3];
+            o.put(P0, kk[0], u[0], v[0], cd); o.put(P1, kk[1], u[1], v[1], cd); o.put(P2, kk[2], u[2], v[2], cd);
+            o.put(P0, kk[0], u[0], v[0], cd); o.put(P2, kk[2], u[2], v[2], cd); o.put(P3, kk[3], u[3], v[3], cd);
+        }
+    }
+    /// The textured medallion, back to front: halo (tinted, pulsing, additive), the swirl in the hole (tinted, turning, darker at
+    /// the centre), the frame (its own metal), its glow channel (tinted, pulsing, additive), the symbol in the hole (near-white
+    /// over a thin dark outline over the colour's glow). k: the plate's colour; glow_k: the glow channel's (red on a deflect);
+    /// halo: the halo's alpha (0: none, the preview).
+    static void medallion(Out& o, int sym, V3 C, const Axes3& ax, float rad, float th, Col k, Col glow_k, float al, double t, float halo_a) {
+        const float ang = static_cast<float>(std::fmod(t * k_swirl_turns * odg::k_two_pi, static_cast<double>(odg::k_two_pi)));
+        const float pl = 0.5f + 0.5f * static_cast<float>(std::sin(t * odg::k_two_pi * 0.8));   // the slow pulse (0..1)
+        if (halo_a > 0.f) sprite(o, art::P_HALO, C - ax.N * th, ax.R, ax.U, art_halo_q(rad), 0.f, col(k.r, k.g, k.b, halo_a * (0.80f + 0.20f * pl) * al), true);
+        swirl_disc(o, C - ax.N * (0.2f * th), ax.R, ax.U, art_swirl_r(rad), art_swirl_q(rad), ang, col(k.r, k.g, k.b, al), 0.40f);
+        sprite(o, art::P_FRAME, C, ax.R, ax.U, art_q(rad), 0.f, col(1.f, 1.f, 1.f, al), false);
+        sprite(o, art::P_GLOW, C + ax.N * 0.0005f, ax.R, ax.U, art_q(rad), 0.f, col(glow_k.r, glow_k.g, glow_k.b, (0.85f + 0.15f * pl) * al), true);
+        const V3 F = C + ax.N * (0.5f * th + 0.0008f); const float s = art_sym_scale(sym, rad);
+        symbol(o, sym, F, ax.R, ax.U, s, ink(0.85f * al), k_art_outline * k_sym_w, col(k.r, k.g, k.b, 0.55f * al));   // the colour's glow, then the dark outline
+        symbol(o, sym, F, ax.R, ax.U, s, bright(k, al), k_sym_w);                                             // the near-white core
+    }
     /// One chevron: a V pointing along d (in the plate's plane, across b), its tip at c; dark outline under a white core.
     static void chevron(Out& o, V3 c, V3 d, V3 b, float hw, float depth, float w, float a, Col core = col(1.f, 1.f, 1.f, 1.f)) {
         const V3 l = c - d * depth + b * hw, rr = c - d * depth - b * hw;
@@ -962,7 +1189,7 @@ struct Runner {
         const Col face = grey ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);   // the plate's colour (the rim, the glows, the symbol's tint)
         const Col rim = defl ? col(1.f, 0.18f, 0.12f, 1.f) : face;
         const Col ink_k = bright(face, al), glow_k = col(face.r, face.g, face.b, 0.45f * al);
-        halo(o, C - ax.N * th, ax, rad, 0.6f * al);
+        if (!art) halo(o, C - ax.N * th, ax, rad, 0.6f * al);
         const bool arrow = sym_directed(g.sym) && !grey;   // (every symbol on the map: the arrows, the face buttons, L1 / R1)
         const bool letter = !sym_arrow(g.sym);                  // a letter or the L / R tab: the chevrons give way over it
         const V3 d = arrow_dir(g.sym, ax), b = cross(ax.N, d);
@@ -970,9 +1197,9 @@ struct Runner {
             const float L = rad + k_guide_m * r.g.size;
             odv::glow_line(o, C - d * L, C + d * L, 0.0025f * r.g.size, col(1.f, 1.f, 1.f, 0.35f * al), col(1.f, 1.f, 1.f, 0.35f * al), in.eye);
         }
-        plate(o, C, ax, rad, th, rim, al);
         const V3 F = C + ax.N * (0.5f * th + 0.0008f);
-        symbol(o, g.sym, F, ax.R, ax.U, sym_scale(g.sym, rad), ink_k, k_sym_w, glow_k);
+        if (art) medallion(o, g.sym, C, ax, rad, th, face, rim, al, t, 0.55f);   // the textured medallion (the local pack)
+        else { plate(o, C, ax, rad, th, rim, al); symbol(o, g.sym, F, ax.R, ax.U, sym_scale(g.sym, rad), ink_k, k_sym_w, glow_k); }
         if (arrow) {   // three chevrons sliding along the cut, looping every 0.9 s, in the symbol's tint (thicker: 0.08 of the radius); they swell on a deflect
             const float L = rad + k_guide_m * r.g.size, big = defl ? 1.5f : 1.f;
             const float ph = static_cast<float>(std::fmod((t - r.t_open) / k_chev_period_s, 1.0));
@@ -984,20 +1211,23 @@ struct Runner {
                 // alpha and 65 % size, full again by the rim's middle and beyond the plate (a lane around the letter); on an arrow
                 // they run over it at full strength (they point the same way)
                 float fa = 1.f, fs = 1.f;
-                if (letter) { const float u2 = clampf((std::fabs(x) - 0.18f * rad * big - k_rim_in * rad) / (0.15f * rad), 0.f, 1.f), sm = u2 * u2 * (3.f - 2.f * u2); fa = 0.2f + 0.8f * sm; fs = 0.65f + 0.35f * sm; }
+                const float face_r = art ? art_hole(rad) : k_rim_in * rad;   // the face the letter sits on (the medallion's hole)
+                if (letter) { const float u2 = clampf((std::fabs(x) - 0.18f * rad * big - face_r) / (0.15f * rad), 0.f, 1.f), sm = u2 * u2 * (3.f - 2.f * u2); fa = 0.2f + 0.8f * sm; fs = 0.65f + 0.35f * sm; }
                 const float a = al * fa * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than the first build's plain sine
                 chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big * fs, 0.18f * rad * big * fs, 0.08f * rad * big * fs, a, ink_k);
             }
         }
     }
     /// The next symbol: small (40 %), faint, above and behind; never hittable.
-    void draw_preview(int i, float A, Out& o) const {
+    void draw_preview(int i, float A, Out& o, double t = 0.0) const {
         const Tgt& g = r.tg[i];
         const V3 P = preview_spot(i); const Axes3 ax = plate_axes(r.fr, P);
         const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.5f * A;    // a little brighter than the first build's 0.45, clearly dimmer than the plate (R6-N2: 0.65 competed)
         const Col k = r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
+        const Col kd = col(0.8f * k.r, 0.8f * k.g, 0.8f * k.b, 1.f);
+        if (art) { medallion(o, g.sym, P, ax, rad, th, kd, kd, al, t, 0.f); return; }   // the textured look at 40 %, dimmed (no halo)
         halo(o, P - ax.N * th, ax, rad, 0.4f * al);
-        plate(o, P, ax, rad, th, col(0.8f * k.r, 0.8f * k.g, 0.8f * k.b, 1.f), al);
+        plate(o, P, ax, rad, th, kd, al);
         symbol(o, g.sym, P + ax.N * (0.5f * th + 0.0005f), ax.R, ax.U, sym_scale(g.sym, rad), bright(k, 0.85f * al), k_sym_w);
     }
     void draw_fx(const In& in, Out& o) const {
@@ -1007,6 +1237,7 @@ struct Runner {
             const float af = static_cast<float>(a), k = 1.f - static_cast<float>(a / k_half_s);
             for (int s = 0; s < 2; ++s) {
                 const int m = c.hn[s]; if (m < 3) continue;
+                if (c.art) { draw_art_half(c, s, af, k, in.eye, o); continue; }
                 const Col side = col(0.8f * c.k.r, 0.8f * c.k.g, 0.8f * c.k.b, 0.9f * k), hot = col(1.f, 1.f, 1.f, k);   // the plate's look: bright coloured edges, a dark face
                 for (int j = 0; j < m; ++j) {
                     const int q = (j + 1) % m; const Col e = c.hcut[s][j] ? hot : side;
@@ -1016,7 +1247,11 @@ struct Runner {
                 const Col fi = col(0.04f + 0.08f * c.k.r, 0.04f + 0.08f * c.k.g, 0.05f + 0.08f * c.k.b, k_face_a * k), fe = col(c.k.r, c.k.g, c.k.b, 0.95f * k);
                 for (int j = 0; j < m; ++j) { const int q = (j + 1) % m; o.tri(fc + N * (0.5f * c.th), fi, half_v(c, s, j, af, 1.f), fe, half_v(c, s, q, af, 1.f), fe); }
             }
-            if (a < k_spark_s) {
+            if (c.art) {   // the art's hit: the burst (0.2 s) and the sparks (0.3 s), tinted, expanding, additive, in the plate's plane
+                if (a < k_burst_s) { const float u = static_cast<float>(a / k_burst_s); sprite(o, art::P_BURST, c.c + c.ax.N * (0.5f * c.th + 0.002f), c.ax.R, c.ax.U, c.rad * (0.8f + 1.4f * u), 0.f, col(0.6f + 0.4f * c.k.r, 0.6f + 0.4f * c.k.g, 0.6f + 0.4f * c.k.b, 1.f - u), true); }
+                if (a < k_sparks_s) { const float u = static_cast<float>(a / k_sparks_s); sprite(o, art::P_SPARKS, c.c + c.ax.N * (0.5f * c.th + 0.003f), c.ax.R, c.ax.U, c.rad * (0.7f + 2.0f * u), c.spark_a[0] + 0.8f * u, col(c.k.r, c.k.g, c.k.b, (1.f - u) * (1.f - u)), true); }
+            }
+            else if (a < k_spark_s) {
                 const float u = static_cast<float>(a / k_spark_s);
                 for (int j = 0; j < 6; ++j) {
                     const V3 d = rot_axis(c.cd, c.ax.N, c.spark_a[j]);
@@ -1120,7 +1355,7 @@ struct Runner {
         const int d0 = o.dropped;
         if (show) {
             const int f = front();
-            if (cfg.preview && f < r.n) { const int nx = next_after(f); if (nx >= 0) draw_preview(nx, A, o); }
+            if (cfg.preview && f < r.n) { const int nx = next_after(f); if (nx >= 0) draw_preview(nx, A, o, t); }
             if (f < r.n) draw_current(f, t, A, in, o);
         }
         draw_fx(in, o);

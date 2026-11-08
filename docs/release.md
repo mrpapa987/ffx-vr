@@ -38,8 +38,18 @@ ini, logs and captures). `-SkipBuild` packs the existing build but refuses if an
 file is newer than the DLLs. It warns if a packed DLL contains a `C:\Users\<name>\` path
 (debug-info paths; ours are `C:\projects\FFX-VR\...`, which is fine).
 
+**The optional target art zip.** Next to the mod's zip, `package-release.ps1` also makes
+`ffxvr-target-art-<label>.zip` (+ `.sha256`) when the Bushido target art pack is on the packing PC (in
+`<game>\fahrenheit\mods\ffxvr\art\targets\`, or `-ArtDir <folder>`; `-NoArt` skips it). It unpacks to
+`fahrenheit/mods/ffxvr/art/targets/` (extract it into the game folder) and holds the eight PNGs and
+`ART-NOTICE.txt` ("Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights
+claimed, free to use. Optional: without it the mod draws plain targets."). Without the pack the step prints a note and the
+release goes on. The art is the owner's own AI-generated art: it is never in the repository, and never in the mod's zip
+(a guard fails the package on any `art\` folder there). Attach it to the GitHub release as a separate, optional download.
+**Nexus and other hosts ask whether a file contains AI-generated content: tick that disclosure for the art zip.**
+
 Not in the zip: `ffxvr.ini` (the mod writes it on first run), `.pdb`, logs, captures, bone
-labels, `.bak`; Fahrenheit and FFX-60fps (separate projects, own licences and releases; the
+labels, `.bak`, the target art pack (a separate optional zip, above); Fahrenheit and FFX-60fps (separate projects, own licences and releases; the
 README sends players to them). The README puts the HD texture pack last, as an optional
 "later" step: most players won't start with it.
 

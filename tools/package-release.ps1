@@ -14,6 +14,11 @@
 #                              game-settings.ps1, import-steam-saves.ps1, export-save-to-steam.ps1,
 #                              install-texture-pack.ps1, set-logging.ps1
 #   dist\ffx-vr-<label>.zip.sha256
+#   dist\ffxvr-target-art-<label>.zip (+ .sha256)   OPTIONAL, a separate download: the Bushido target art pack (the owner's
+#                              AI-generated medallion art, never in the repository or in the mod's zip), from
+#                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir; it unpacks to
+#                              fahrenheit\mods\ffxvr\art\targets\ (8 PNGs + ART-NOTICE.txt). No pack: skipped with a note,
+#                              never a failure. -NoArt skips it.
 #
 # Fahrenheit and FFX-60fps are NOT included: they are separate projects with their own licences
 # and releases (see docs\release.md). No settings, logs, captures or .pdb files are included, and
@@ -28,11 +33,14 @@
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 [-Version 0.1.0-alpha1] [-SkipBuild] [-OutDir <folder>]
+#              [-ArtDir <folder with the 8 PNGs>] [-NoArt]
 
 param(
     [string]$Version = '',
     [switch]$SkipBuild,
-    [string]$OutDir = ''
+    [string]$OutDir = '',
+    [string]$ArtDir = '',
+    [switch]$NoArt
 )
 
 $ErrorActionPreference = 'Stop'
@@ -193,6 +201,8 @@ foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -File)) {
     # player zip yet either; when it is, copy its .py files by name and allow exactly those here.)
     if (@($rel -split '[\\/]') -contains $FfxvrFmvDepthDir) { Fail "${rel}: under a $FfxvrFmvDepthDir\ folder (FMV depth or previews made from the game's videos)" }
     if (@('.fvd', '.part', '.mp4', '.webm', '.bik', '.npz', '.exr') -contains $f.Extension.ToLowerInvariant()) { Fail "${rel}: FMV depth, a preview or a video does not belong in the zip" }
+    # The Bushido target art pack (<mod>\art\targets\, assets\art\) is the owner's own AI-generated art: never in the zip.
+    if (@($rel -split '[\\/]') -contains 'art') { Fail "${rel}: under an art\ folder (the local target art pack is never shipped)" }
 }
 
 foreach ($f in 'LICENSE', 'THIRD-PARTY-NOTICES') {
@@ -239,3 +249,50 @@ try { $z.Entries | Sort-Object FullName | ForEach-Object { Write-Host ('  {0,10:
 finally { $z.Dispose() }
 Write-Host ''
 Write-Host 'Players: extract it anywhere, then follow README.md (tools\install-mod.ps1).'
+
+# ---------------------------------------------------------------- the optional target art zip (a separate download)
+# The Bushido target art pack is the owner's own AI-generated art: never in the repository, never in the mod's zip (the guard
+# above fails on any art\ folder there). This step only packs it as its own optional zip. Anything wrong: a note, never a failure.
+$artFiles = @('frame.png', 'glow.png', 'halo.png', 'swirl.png', 'back.png', 'edge.png', 'burst.png', 'sparks.png')
+$artNotice = 'Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights claimed, free to use. Optional: without it the mod draws plain targets.'
+Write-Host ''
+if ($NoArt) {
+    Write-Host 'Target art zip: skipped (-NoArt).'
+} else {
+    try {
+        $artSrc = $ArtDir
+        if (-not $artSrc) {
+            $g = Find-FfxvrGame
+            if ($g) { $artSrc = [IO.Path]::Combine($g, 'fahrenheit', 'mods', $modId, 'art', 'targets') }
+        }
+        $missing = @()
+        if ($artSrc) { $missing = @($artFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $artSrc $_)) }) }
+        if (-not $artSrc) {
+            Write-Host 'Target art zip: skipped (no game folder found and no -ArtDir; the mod zip does not need it).'
+        } elseif ($missing.Count -gt 0) {
+            Write-Host ("Target art zip: skipped (not in {0}: {1}; the mod zip does not need it)." -f $artSrc, ($missing -join ', '))
+        } else {
+            $artName  = "ffxvr-target-art-$label"
+            $artStage = Join-Path $OutDir '_stage_art'
+            $artTo    = [IO.Path]::Combine($artStage, 'fahrenheit', 'mods', $modId, 'art', 'targets')
+            if (Test-Path -LiteralPath $artStage) { Remove-Item -LiteralPath $artStage -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path $artTo | Out-Null
+            foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
+            [IO.File]::WriteAllText((Join-Path $artTo 'ART-NOTICE.txt'), $artNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
+            $artZip = Join-Path $OutDir "$artName.zip"
+            if (Test-Path -LiteralPath $artZip) { Remove-Item -LiteralPath $artZip -Force }
+            [IO.Compression.ZipFile]::CreateFromDirectory($artStage, $artZip, [IO.Compression.CompressionLevel]::Optimal, $false)
+            Remove-Item -LiteralPath $artStage -Recurse -Force
+            $artHash = (Get-FileHash $artZip -Algorithm SHA256).Hash.ToLower()
+            Set-Content -Path "$artZip.sha256" -Value "$artHash  $artName.zip" -Encoding ascii
+            Write-Host "Target art zip (optional, a separate download): $artZip"
+            Write-Host ('  {0:N0} KB   sha256 {1}   from {2}' -f ((Get-Item $artZip).Length / 1KB), $artHash, $artSrc)
+            $za = [IO.Compression.ZipFile]::OpenRead($artZip)
+            try { $za.Entries | Sort-Object FullName | ForEach-Object { Write-Host ('  {0,10:N0}  {1}' -f $_.Length, $_.FullName) } }
+            finally { $za.Dispose() }
+            Write-Host '  AI-generated art: tick the AI disclosure where it is hosted (docs\release.md).'
+        }
+    } catch {
+        Write-Host "Target art zip: skipped ($($_.Exception.Message)); the mod zip is made."
+    }
+}

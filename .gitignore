@@ -80,3 +80,6 @@ debug-preview.png
 *_preview.mp4
 *_preview.mp4.part.mp4
 *_frame[0-9]*.png
+
+# The Bushido target art pack: the owner's own AI-generated art, local only (tools/target-art; docs "Bushido target art")
+assets/art/

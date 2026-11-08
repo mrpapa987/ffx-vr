@@ -5581,6 +5581,60 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 / 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`
 (its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
+- **Textured medallions** (the owner's concept, 10 Nov 2026: engraved silver medallions with a swirling glowing disc and a
+  bright symbol, each symbol its own colour). From a local art pack when present (next section); without it the flat plates as
+  before. Each plate, back to front: a soft halo ring (tinted, pulsing, additive), the swirl disc in the frame's hole (tinted,
+  turning 0.15 turn/s, darkened to 40 % at the centre under the symbol), the engraved frame (its own metal colour), its glow
+  channel (tinted, pulsing a little, additive; red on a deflect), the symbol (the same procedural shapes, near-white over a thin
+  dark outline over the colour's glow, scaled to fit inside the hole). The chevrons and guide line stay (over a letter they give
+  way inside the hole). The frame's outer edge is the plate's edge (24 cm at size 1), its hole 0.48 of the radius. A cut: the
+  halves are the medallion's own layers clipped by the cut (the same UVs), the back face once a half has turned away (with the
+  current tumble, at most about 63 degrees in its 0.45 s, it rarely does), the rim's edge strip on the side, the cut's face hot
+  white; a burst (0.2 s) and sparks (0.3 s), tinted, expanding, additive. The preview: the textured look at 40 %, dimmed, no
+  halo. Colours per symbol (the flat plates use them too): Up blue, Down teal, Left green, Right cyan, A blue, B orange, X cyan,
+  Y gold, L1 violet-blue, R1 sea-green. The comfort rules are unchanged (everything in the plate's plane or behind it; the
+  halves' motion as before).
+- **The targets' own draw.** The marker pass's shader gained a second pixel shader (`pst`, compiled at run time from the same
+  source with D3DCompile, ps_4_0, as the rest of the pass) and two texture slots (t1 atlas A, t2 atlas B, sampler s1: trilinear,
+  clamp, mips 0-6). The markers, damage digits and overdrive visuals draw exactly as before (ps, straight alpha); the targets
+  follow in their own Draw with pst and a premultiplied blend (ONE, INV_SRC_ALPHA): a vertex's t.z picks plain (0), atlas A (2)
+  or B (3), + 4 additive (alpha 0 after premultiplying). Without pst (a compile failure, logged) the targets draw with ps in the
+  same draw as before and the art is off.
+
+## Bushido target art (local pack)
+
+The textured medallions use an art pack. **The art is not in the repository and not in the mod's zip**: it is the owner's
+own AI-generated art (Google Gemini, upscaled with Upscayl), offered with releases as a separate optional download,
+`ffxvr-target-art-<version>.zip`, which unpacks to `fahrenheit/mods/ffxvr/art/targets/` (docs/release.md). The repository
+has only the loader, the cutting script and these notes; `assets/art/` is ignored, and the release script refuses any `art\`
+folder in the mod's zip. To make your own pack:
+
+1. **The sheet.** Generate one image, a 3 x 3 grid of cells on pure black, straight-on, no text, at 2048 px, then upscale 2x in
+   a faithful (not creative) mode; save as PNG. The cells, row by row:
+   1. an ornate engraved silver medallion frame, no glow, an empty black centre;
+   2. the same frame with a white glow channel;
+   3. a soft white halo ring;
+   4. a white or grey swirling energy disc;
+   5. a second swirl (unused);
+   6. the medallion's back face;
+   7. a seamless side strip of the rim;
+   8. a white burst;
+   9. white sparks.
+2. **Cut it:** `python tools/target-art/target_art.py sheet.png out` (Python 3 with numpy and Pillow). It writes eight PNGs:
+   frame, glow, halo, swirl, back, burst, sparks (1024 x 1024 RGBA) and edge (1024 wide), and prints the frame's measured hole
+   and edge (the mod assumes 0.465 and 0.960 of the half-size) and the swirl's disc (0.925).
+3. **Put them** in `<the mod folder>\art\targets\` (eight files: frame.png, glow.png, halo.png, swirl.png, back.png, edge.png,
+   burst.png, sparks.png). The mod's build and install never touch that folder.
+4. **F8 > Controllers:** "target art (local pack)" (ini `od_targets_art`, on by default) and its status line, e.g. `art pack:
+   loaded 8 of 8 (atlas 2048 + 1024, 27 MB; ...)` or `art pack: frame.png not found at ..., flat plates`.
+
+How the mod loads it: once, at the first targets drawn (render thread), each file decoded with WIC (Windows' own codecs) and
+its size checked (1024 x 1024; the edge strip 1024 x 32..512); the pieces packed into atlas A (2048: frame, glow, swirl, back
+at 1024) and atlas B (1024: halo, burst, sparks, edge at 512, shrunk 2:1), each with a full mip chain made on the CPU
+(alpha-weighted), uploaded as immutable textures: 26.7 MB of VRAM. Anything missing, odd-sized or failing: nothing is kept,
+the flat plates, and the reason in one `odt:` log line and in F8. Turning the box off releases the textures. The first load
+takes a moment on the render thread (its time is in the log line).
+
 - **Two places** (the owner, 9 Nov 2026: "two places where the icons can appear"). The single spot became two, at the same
   distance and height, 0.36 m apart (`od_targets_spread`, F8 "target spacing (m)", 0.25-0.6 between the centres, never less
   than the plate's width + 2 cm, so the plates never overlap from either eye at any setting): the LEFT spot holds the four d-pad

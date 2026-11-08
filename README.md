@@ -24,6 +24,8 @@ Each part of the game gets the viewpoint that suits it, instead of one VR camera
 
 The Quest controllers act as the gamepad (with rumble), the stick turns smoothly at the headset's
 refresh rate, and the game's own battle cursors are drawn in 3D over their targets.
+Overdrives can be played with gestures (F8 > Controllers), Auron's Bushido by cutting targets with a blade in each hand; an
+optional download, `ffxvr-target-art-<version>.zip` (AI-generated art), turns those targets into textured medallions.
 
 ## Requirements
 

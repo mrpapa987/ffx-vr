@@ -260,7 +260,8 @@ $dest = Join-Path $modsDir $modId
 Log ''
 Log "[deploy] -> $dest"
 # Keep the user's files: settings, hand calibration, bone labels, captures (img_*.bmp, seq_*.bmp,
-# ui_atlas_*.dds, ffxvr_bones_*.bin) and logs live next to the DLLs. Only the build output is deleted
+# ui_atlas_*.dds, ffxvr_bones_*.bin) and logs live next to the DLLs; the Bushido target art pack (<mod>\art\targets\, an
+# optional separate download or the user's own) is a subfolder and is never touched (the delete below is not recursive). Only the build output is deleted
 # and replaced. The managed output has no subfolders (owner checked, 24 Oct 2026), so the delete is not recursive: a hand-made
 # subfolder (an old\ copy for A/B tests) survives. ffxvr.manifest.json is overwritten by the copy.
 # Any delete or copy error stops the deploy and says so (a locked DLL used to leave a half-new

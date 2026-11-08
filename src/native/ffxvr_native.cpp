@@ -5316,7 +5316,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 54;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots)
+constexpr int FFXVR_ABI = 55;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6249,6 +6249,11 @@ static volatile LONG g_odt_req = 0;
 static char g_odt_line[400] = "";
 static uint16_t g_odt_last_seq[odg::k_seq_max]; static int g_odt_last_n = 0; static odg::AuronMap g_odt_last_map = odg::k_auron_map;
 static uint32_t g_xr_space_epoch = 0;
+// The target art (a local pack, never shipped: <mod>\art\targets\*.png; ffxvr_odtarget.h odt::art): F8 "target art (local pack)"
+// (ffxvr_odt_set's art, ABI 55) and its status line (ffxvr_odg_text 6). Render thread only, but the status is read by managed.
+static volatile LONG g_odt_art_on = 1;
+static char g_odt_art_why[320] = "art pack: not loaded yet (it loads at the first targets)";
+static void odt_art_frame(bool wanted_now);   // (defined with the marker pass)
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
 // from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
 static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.f;
@@ -6378,6 +6383,7 @@ static void odt_tick(const odg::FrameIn& gi, const odg::FrameOut& go, odt::TickO
     ti.read_now = gi.fresh && g_odg_blk_frame == g_frames;   // the od block read at this Present (the settle's frame count)
     ti.elapsed_ok = ti.read_now && gi.r.timer_ok; ti.elapsed = gi.r.count; ti.total = gi.r.total;   // the countdown's frame count and total, read at this Present (the stretch)
     g_odt.cfg.haptics = g_odg.cfg.haptics;
+    odt_art_frame(false);   // the F8 box (off: released); loading waits for the first targets drawn (odt_build)
     g_odt.tick(ti, to);
     if (to.time_write) g_odt.time_result(odt_count_write(to.time_val, to.time_expect));   // the stretch: lands only if the game has not changed the count since the read
     const LONG rq = InterlockedExchange(&g_odt_req, 0);
@@ -6513,9 +6519,10 @@ extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, 
 }
 /// Strike the targets (ABI 52): ini od_targets_blade_pitch (-45..45 deg), od_targets_dist2 (0.35-0.9 m, 0.50), od_targets_height2
 /// (-0.5..0 m, -0.30), od_targets_size (0.6-1.6: a multiplier on the 24 cm plate), od_targets_time (1-3: the countdown's stretch in a
-/// targets window, practice's bar too; ABI 53), od_targets_spread (0.25-0.6 m between the two spots; ABI 54), every frame from managed's push (render thread). The pitch applies at once (practice
+/// targets window, practice's bar too; ABI 53), od_targets_spread (0.25-0.6 m between the two spots; ABI 54), od_targets_art (the local art pack; ABI 55), every frame from managed's push (render thread). The pitch applies at once (practice
 /// is where it is set); the rest from the next round.
-extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist, float height, float size, float time_mult, float spread) {
+extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist, float height, float size, float time_mult, float spread, int art) {
+    InterlockedExchange(&g_odt_art_on, art != 0 ? 1 : 0);   // ABI 55: F8 "target art (local pack)" (render thread acts on it)
     odt::Cfg& c = g_odt.cfg;
     c.pitch_deg = std::isfinite(pitch_deg) ? odg::clampf(pitch_deg, -45.f, 45.f) : 0.f; c.dist = std::isfinite(dist) ? odg::clampf(dist, 0.35f, 0.9f) : 0.5f;
     c.height = std::isfinite(height) ? odg::clampf(height, -0.5f, 0.f) : -0.3f; c.size = std::isfinite(size) ? odg::clampf(size, 0.6f, 1.6f) : 1.f;
@@ -6563,6 +6570,7 @@ extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n)
     else if (which == 1) k = snprintf(out, n, "%s", g_odg_last_line[0] ? g_odg_last_line : "no overdrive window closed yet");
     else if (which == 2) { char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n); k = snprintf(out, n, "%s", g_odg_seq_n ? sq : "not read yet"); }
     else if (which == 4) k = snprintf(out, n, "%s", g_odt_line[0] ? g_odt_line : "no practice yet");
+    else if (which == 6) k = snprintf(out, n, "%s", g_odt_art_why);   // ABI 55: the target art's status
     else if (which == 5) {
         out[0] = 0;
         for (int i = 0; i < g_odt_last_n && i < odg::k_seq_max; ++i) k = odg::fmt_append(out, static_cast<size_t>(n), k, "%s%s", i ? " " : "", odt::sym_name(odv::glyph_of(g_odt_last_map, g_odt_last_seq[i])));
@@ -10373,12 +10381,22 @@ Marker g_markers[32]; int g_marker_n = 0;
 static const char k_marker_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 VP; };\n"
     "Texture2D T : register(t0); SamplerState S : register(s0);\n"
+    "Texture2D A : register(t1); Texture2D B : register(t2); SamplerState SA : register(s1);\n"
     "struct VI { float3 p : POSITION; float4 c : COLOR; float3 t : TEXCOORD; };\n"
     "struct VO { float4 p : SV_Position; float4 c : COLOR; float3 t : TEXCOORD; };\n"
     "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); o.p.z = 0.5 * o.p.w; o.c = i.c; o.t = i.t; return o; }\n"
-    "float4 ps(VO i) : SV_Target { return i.c * lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), i.t.z); }\n";
+    "float4 ps(VO i) : SV_Target { return i.c * lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), i.t.z); }\n"
+    // the targets' own draw (strike the targets, the art pack): t.z 0 plain, 2 atlas A, 3 atlas B, + 4 additive; premultiplied
+    // output for its blend (ONE, INV_SRC_ALPHA), so an additive layer is alpha 0 (the same look as ps for the plain ones)
+    "float4 pst(VO i) : SV_Target {\n"
+    "  float4 a = A.Sample(SA, i.t.xy), b = B.Sample(SA, i.t.xy); float k = fmod(i.t.z, 4.0);\n"
+    "  float4 tx = k < 1.5 ? lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), k) : (k < 2.5 ? a : b);\n"
+    "  float4 c = i.c * tx; c.rgb *= c.a; if (i.t.z > 3.5) c.a = 0; return c; }\n";
 ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3D11InputLayout* g_mk_il = nullptr;
 ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr; ID3D11SamplerState* g_mk_smp = nullptr;
+// the targets' own draw (ABI 55): its pixel shader (premultiplied, additive layers), blend (ONE, INV_SRC_ALPHA) and the art's sampler
+// (trilinear, clamp, mips 0-6); any of them missing: the targets draw with ps as before, without the art
+ID3D11PixelShader* g_mk_pst = nullptr; ID3D11BlendState* g_mk_blend_pm = nullptr; ID3D11SamplerState* g_mk_smp_art = nullptr;
 bool g_mk_tried = false;
 struct MkVertex { float p[3]; float c[4]; float t[3]; };
 static const int k_mk_max_verts = 32 * 48 + odv::k_max_verts + odt::k_max_verts;   // the markers and the damage numbers (1536), the overdrive visuals (3072), the targets (4608)
@@ -10399,6 +10417,14 @@ static bool marker_pass_init() {
     if (err) err->Release();
     g_device->CreateVertexShader(vsb->GetBufferPointer(), vsb->GetBufferSize(), nullptr, &g_mk_vs);
     g_device->CreatePixelShader(psb->GetBufferPointer(), psb->GetBufferSize(), nullptr, &g_mk_ps);
+    {   // the targets' pixel shader: a failure only costs the art (logged)
+        ID3DBlob* pstb = nullptr; ID3DBlob* e2 = nullptr;
+        const HRESULT h2 = compile(k_marker_hlsl, sizeof(k_marker_hlsl) - 1, "mk", nullptr, nullptr, "pst", "ps_4_0", 0, 0, &pstb, &e2);
+        if (SUCCEEDED(h2) && pstb) g_device->CreatePixelShader(pstb->GetBufferPointer(), pstb->GetBufferSize(), nullptr, &g_mk_pst);
+        else diag("marker pass: the targets' shader failed (target art off): %s", e2 ? static_cast<const char*>(e2->GetBufferPointer()) : "?");
+        if (pstb) pstb->Release();
+        if (e2) e2->Release();
+    }
     D3D11_INPUT_ELEMENT_DESC ie[3] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -10417,9 +10443,13 @@ static bool marker_pass_init() {
     bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA; bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     g_device->CreateBlendState(&bl, &g_mk_blend);
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;   // the targets' draw: premultiplied (pst)
+    g_device->CreateBlendState(&bl, &g_mk_blend_pm);
     D3D11_SAMPLER_DESC sm = {};   // C3: the atlas, trilinear over mips 0-2 (cleaner at a distance without bleeding)
     sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR; sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sm.MaxLOD = 2.f; sm.ComparisonFunc = D3D11_COMPARISON_NEVER;   // C3-7: past mip 2 the neighbouring sprites bleed into the 68x45 rect
     g_device->CreateSamplerState(&sm, &g_mk_smp);
+    sm.MaxLOD = 6.f;   // the art's atlases: their 1024 / 512 cells are 16 / 8 texels at mip 6 (no bleeding worth a look below)
+    g_device->CreateSamplerState(&sm, &g_mk_smp_art);
     const bool ok = g_mk_vs && g_mk_ps && g_mk_il && g_mk_vb && g_mk_cb && g_mk_smp;
     diag("marker pass: %s", ok ? "ready" : "FAILED");
     return ok;
@@ -10864,6 +10894,90 @@ static int odv_emit(MkVertex* verts, int room) {
 }
 // -- strike the targets / Practice targets (ffxvr_odtarget.h): their own share of the marker buffer (odt::k_max_verts), drawn last ----
 static odv::Vtx g_odt_raw[odt::k_max_verts]; static MkVertex g_odt_mk[odt::k_max_verts]; static int g_odt_nv = 0;   // render thread only
+// -- the target art: the local pack (<mod>\art\targets\*.png, never in the repository) -----------------------------------------------
+// Loaded once, lazily, on the render thread at the first targets with F8 "target art (local pack)" on: each piece read and decoded
+// with WIC (hv_wic_decode), its size checked (odt::art::size_bad), packed into atlas A (2048: frame, glow, swirl, back) and B
+// (1024: halo, burst, sparks, edge) with full mip chains built on the CPU (alpha-weighted), uploaded immutable (about 27 MB).
+// Anything missing, odd or failing: nothing is kept, the flat plates, and the reason in one log line and F8 (ffxvr_odg_text 6).
+// Turning it off releases the textures (the next "on" loads again); the game's device lives as long as the process.
+struct OdtArt { bool tried = false, ok = false; ID3D11Texture2D* tex[2] = {}; ID3D11ShaderResourceView* srv[2] = {}; };
+static OdtArt g_odt_art;
+static void odt_art_release() {
+    for (int a = 0; a < 2; ++a) { if (g_odt_art.srv[a]) g_odt_art.srv[a]->Release(); if (g_odt_art.tex[a]) g_odt_art.tex[a]->Release(); }
+    g_odt_art = OdtArt{};
+}
+/// One atlas (side n, mip 0 in `top`) as an immutable texture with its full chain and a view; false on any failure.
+static bool odt_art_upload(std::vector<uint32_t>& top, int n, int a) {
+    const int lv = odt::art::levels(n);
+    std::vector<std::vector<uint32_t>> mips(static_cast<size_t>(lv));
+    mips[0].swap(top);
+    for (int l = 1, w = n; l < lv; ++l, w /= 2) { mips[static_cast<size_t>(l)].assign(static_cast<size_t>(w / 2) * static_cast<size_t>(w / 2), 0u); odt::art::mip_down(mips[static_cast<size_t>(l) - 1].data(), w, mips[static_cast<size_t>(l)].data()); }
+    std::vector<D3D11_SUBRESOURCE_DATA> sd(static_cast<size_t>(lv));
+    for (int l = 0, w = n; l < lv; ++l, w = w > 1 ? w / 2 : 1) { sd[static_cast<size_t>(l)].pSysMem = mips[static_cast<size_t>(l)].data(); sd[static_cast<size_t>(l)].SysMemPitch = static_cast<UINT>(w) * 4u; sd[static_cast<size_t>(l)].SysMemSlicePitch = 0; }
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = td.Height = static_cast<UINT>(n); td.MipLevels = static_cast<UINT>(lv); td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_device->CreateTexture2D(&td, sd.data(), &g_odt_art.tex[a])) || g_odt_art.tex[a] == nullptr) return false;
+    return SUCCEEDED(g_device->CreateShaderResourceView(g_odt_art.tex[a], nullptr, &g_odt_art.srv[a])) && g_odt_art.srv[a] != nullptr;
+}
+static void odt_art_load() {
+    g_odt_art.tried = true;
+    if (g_device == nullptr) { snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: no device yet, flat plates"); return; }
+    LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+    wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\targets", g_dir);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC on this thread (RPC_E_CHANGED_MODE: already initialised, also fine)
+    char why[240] = ""; int loaded = 0, edge_h = 0;
+    try {
+        std::vector<uint32_t> A(static_cast<size_t>(odt::art::k_a) * odt::art::k_a, 0u), B(static_cast<size_t>(odt::art::k_b) * odt::art::k_b, 0u);
+        for (int p = 0; p < odt::art::P_N && !why[0]; ++p) {
+            const char* nm = odt::art::file(p);
+            wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", dir, nm);
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, path, L"rb") != 0 || f == nullptr) { snprintf(why, sizeof(why), "%s not found", nm); break; }
+            std::vector<uint8_t> bytes; uint8_t buf[65536]; size_t got;
+            while ((got = fread(buf, 1, sizeof(buf), f)) > 0 && bytes.size() < (64u << 20)) bytes.insert(bytes.end(), buf, buf + got);
+            fclose(f);
+            HvImage im; char err[160] = "";
+            if (!hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) { snprintf(why, sizeof(why), "%s: %s", nm, err); break; }
+            if (const char* bad = odt::art::size_bad(p, im.w, im.h)) { snprintf(why, sizeof(why), "%s is %dx%d (%s)", nm, im.w, im.h, bad); break; }
+            if (p == odt::art::P_EDGE) edge_h = im.h;
+            const odt::art::Cell c = odt::art::cell(p, im.h);
+            odt::art::put(c.atlas == 0 ? A.data() : B.data(), c.atlas == 0 ? odt::art::k_a : odt::art::k_b, im.rgba.data(), im.w, im.h, c);
+            loaded++;
+        }
+        if (!why[0] && !odt_art_upload(A, odt::art::k_a, 0)) snprintf(why, sizeof(why), "the 2048 atlas could not be made");
+        if (!why[0] && !odt_art_upload(B, odt::art::k_b, 1)) snprintf(why, sizeof(why), "the 1024 atlas could not be made");
+    }
+    catch (...) { snprintf(why, sizeof(why), "out of memory while packing"); }
+    if (SUCCEEDED(co)) CoUninitialize();
+    QueryPerformanceCounter(&q1);
+    const double ms = qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
+    char d8[MAX_PATH * 2]; WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
+    if (why[0]) {
+        odt_art_release(); g_odt_art.tried = true;
+        snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: %s at %s (loaded %d of %d), flat plates", why, d8, loaded, odt::art::P_N);
+    }
+    else {
+        g_odt_art.ok = true;
+        snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms)", loaded, odt::art::P_N, odt::art::k_a, odt::art::k_b,
+                 static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0), edge_h, ms);
+    }
+    diag("odt: %s", g_odt_art_why);
+}
+/// Every Present (odt_tick): the art follows the F8 box; the Runner draws it only with the pack loaded and the targets' shader ready.
+static void odt_art_frame(bool wanted_now) {
+    const bool on = g_odt_art_on != 0;
+    if (!on && (g_odt_art.ok || g_odt_art.tried)) {
+        if (g_odt_art.ok) diag("odt: art pack released (target art off)");
+        odt_art_release(); snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: off (flat plates)");
+    }
+    if (on && !g_odt_art.tried && wanted_now && marker_pass_init()) {
+        if (g_mk_pst && g_mk_blend_pm && g_mk_smp_art) odt_art_load();
+        else { g_odt_art.tried = true; snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the targets' shader is not ready (see the log), flat plates"); }
+    }
+    if (on && !g_odt_art.tried && strncmp(g_odt_art_why, "art pack: off", 13) == 0) snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: not loaded yet (it loads at the first targets)");
+    g_odt.art = on && g_odt_art.ok && g_mk_pst != nullptr;
+}
 /// The targets to draw now (a round, its end's fade, a cut still falling): the headset's 3D view only (as odv_wanted).
 static bool odt_wanted() {
     if (!g_xr_active || g_xr_screen_now || g_screen3d_now || g_ovr_suspend) return false;
@@ -10872,6 +10986,7 @@ static bool odt_wanted() {
 /// This Present's plates, cuts, pips, bar and blades (the Runner's build, XR space; drops counted in its odt: line), mapped to render space.
 static void odt_build() {
     g_odt_nv = 0;
+    odt_art_frame(true);   // the art pack: loaded at the first targets drawn (render thread), g_odt.art set
     odt::In in; in.t = odv_now();
     for (int h = 0; h < 2; ++h) { const XrHand& hd = g_vrpad.hand[h]; in.hand[h].ok = g_vrpad.ready && hd.grip_valid; in.hand[h].p = odg::v3(hd.grip_p[0], hd.grip_p[1], hd.grip_p[2]); memcpy(in.hand[h].q, hd.grip_q, sizeof(in.hand[h].q)); }
     in.eye = odg::v3(0.5f * (g_xr_raw_p[0] + g_xr_raw_p1[0]), 0.5f * (g_xr_raw_p[1] + g_xr_raw_p1[1]), 0.5f * (g_xr_raw_p[2] + g_xr_raw_p1[2]));
@@ -10910,7 +11025,9 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     }
     if (mk) nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
     if (!only_odt) nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals (their own 3072)
+    const int nv_pre = nv;
     nv += odt_emit(verts + nv, k_mk_max_verts - nv);   // the targets, last: on top (their own 4608)
+    const bool own = nv > nv_pre && g_mk_pst && g_mk_blend_pm && g_mk_smp_art;   // the targets in their own draw (pst: the art, additive layers)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
@@ -10929,6 +11046,8 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
     ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
     ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
+    ID3D11ShaderResourceView* o_srv2[2] = {}; ID3D11SamplerState* o_smp2 = nullptr;
+    if (own) { g_ctx->PSGetShaderResources(1, 2, o_srv2); g_ctx->PSGetSamplers(1, 1, &o_smp2); }
 
     InEye2 guard;
     ID3D11RenderTargetView* rt[1] = { dst };
@@ -10941,7 +11060,14 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     { ID3D11ShaderResourceView* sv = g_c3_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp); }   // C3: battle.dds (null when not held: no textured vertices then)
-    g_ctx->Draw(static_cast<UINT>(nv), 0);
+    if (!own) g_ctx->Draw(static_cast<UINT>(nv), 0);
+    else {   // the markers, digits and visuals exactly as before; then the targets with pst, the premultiplied blend and the art
+        if (nv_pre > 0) g_ctx->Draw(static_cast<UINT>(nv_pre), 0);
+        ID3D11ShaderResourceView* sv[2] = { g_odt_art.srv[0], g_odt_art.srv[1] };   // (null without the pack: no textured vertices then)
+        g_ctx->PSSetShaderResources(1, 2, sv); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
+        g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF);
+        g_ctx->Draw(static_cast<UINT>(nv - nv_pre), static_cast<UINT>(nv_pre));
+    }
 
     om_restore_keep(o_rtv, o_dsv);
     if (nvp) g_ctx->RSSetViewports(1, &o_vp);
@@ -10951,6 +11077,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
     g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
     g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
+    if (own) { g_ctx->PSSetShaderResources(1, 2, o_srv2); g_ctx->PSSetSamplers(1, 1, &o_smp2); for (auto* v : o_srv2) if (v) v->Release(); if (o_smp2) o_smp2->Release(); }
     for (auto* v : o_rtv) if (v) v->Release();
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
