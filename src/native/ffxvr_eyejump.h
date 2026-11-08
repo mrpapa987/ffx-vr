@@ -10,8 +10,9 @@
 // Units are game units (about 9 cm); frames are native frames (g_frames, one per Present). Running moves the eye about 1
 // unit a frame at 60 fps (2 at 30), the chocobo about 2.5; a jump is a move of more than Cfg::units (default 8) in a frame.
 #pragma once
-// fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump (the shared scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 2
+// fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again (the shared
+// scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 3
 #include <cmath>
 #include <cstdint>
 
@@ -22,6 +23,13 @@ struct Cfg {
     float units  = 8.f;   // ini eye_jump_units: a jump is more than this many units in one frame
     int   window = 30;    // at most one blink start per this many frames (a scripted glide in 8-20 unit steps would strobe)
     int   ext_max = 2;    // a jump inside the window extends a running blink by at most this many frames in all
+    // fix-eye (finding 6, s1 16:41:46: an 87-unit move back 22 frames after a blink, held back by the window, a 7.6 m teleport in the
+    // clear): inside the window, once the blink is over, a jump of more than `big` units blinks again: a fresh blink when at least
+    // min_gap frames of picture were shown since the last black frame, the dark period restarted when none was (a jump right at
+    // the blink's end), and held back when fewer than min_gap were (one frame of picture between two blinks would flash). Jumps
+    // up to `big` stay held back in the window: a dash or a scripted glide in 8-20 unit steps would strobe.
+    float big = 20.f;     // units
+    int   min_gap = 2;    // frames of picture between two blinks
 };
 
 // This frame's context (native globals at the call).
@@ -57,6 +65,8 @@ struct State {
     uint32_t start_frame = 0;
     int      ext = 0;            // frames added to the blink that started at start_frame
     float    last_d = 0.f;       // the last frame's move if it was compared, else 0 (Result::prev_dist)
+    bool     black_valid = false;// fix-eye: black_last is meaningful
+    uint32_t black_last = 0;     // fix-eye: the last frame whose Present is (or was planned) black, as far as step has seen
     uint32_t n_jumps = 0, n_start = 0, n_ext = 0, n_held = 0;   // since the last clear (the view: line)
 };
 
@@ -69,8 +79,12 @@ inline bool finite3(const float p[3]) { return std::isfinite(p[0]) && std::isfin
 /// the diorama and third person only), and in third person the grab moves the camera's offset (g_gest_move), applied after the
 /// eye base this tests: a grab cannot move P, so a jump during one is a re-pick or a scripted move like any other. (The s1 hops
 /// without a blink, 16:43:21-55, were in the diorama, which never blinks: W_MODE.)
+inline void note_black(State& s, uint32_t f) {   // fix-eye: Present f is black (a blink set at frame g with n frames: g .. g + n - 1)
+    if (!s.black_valid || static_cast<int32_t>(f - s.black_last) > 0) { s.black_last = f; s.black_valid = true; }
+}
 inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     Result r; r.prev_dist = s.last_d; s.last_d = 0.f;
+    if (c.blink_left > 0) note_black(s, c.frame + static_cast<uint32_t>(c.blink_left) - 1u);   // any source's blink (cut, eye_disp, a turn)
     if (!finite3(P)) { s.valid = false; r.why = W_NAN; return r; }
     const bool had = s.valid;
     const uint32_t gap = c.frame - s.prev_frame;
@@ -89,14 +103,24 @@ inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     const bool in_window = s.started && c.frame - s.start_frame < static_cast<uint32_t>(cfg.window > 0 ? cfg.window : 0);
     if (!in_window) {
         s.started = true; s.start_frame = c.frame; s.ext = 0; s.n_start++;
-        r.kind = K_START; r.frames = cfg.blink;
+        r.kind = K_START; r.frames = cfg.blink; note_black(s, c.frame + static_cast<uint32_t>(r.frames) - 1u);
         return r;
     }
     const int room = cfg.ext_max - s.ext;
     if (c.blink_left > 0 && room > 0) {
         s.ext += room; s.n_ext++;
-        r.kind = K_EXTEND; r.frames = c.blink_left + room;
+        r.kind = K_EXTEND; r.frames = c.blink_left + room; note_black(s, c.frame + static_cast<uint32_t>(r.frames) - 1u);
         return r;
+    }
+    if (c.blink_left <= 0 && d > cfg.big) {   // fix-eye (finding 6): the blink is over and this is a big jump
+        // frames of picture shown since the last black frame (a blink cut short, e.g. by the screen, counts as none)
+        const int32_t pic = s.black_valid ? static_cast<int32_t>(c.frame - s.black_last) - 1 : 0x7FFFFFFF;
+        if (pic <= 0 || pic >= cfg.min_gap) {
+            s.started = true; s.start_frame = c.frame; s.ext = 0;
+            if (pic <= 0) { s.n_ext++; r.kind = K_EXTEND; } else { s.n_start++; r.kind = K_START; }   // none shown: the dark period goes on
+            r.frames = cfg.blink; note_black(s, c.frame + static_cast<uint32_t>(r.frames) - 1u);
+            return r;
+        }
     }
     s.n_held++; r.kind = K_HELD;
     return r;
