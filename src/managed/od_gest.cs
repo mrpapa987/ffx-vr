@@ -136,7 +136,7 @@ public sealed unsafe partial class FFXVRModule {
         _logger.Info("odt: Bushido row detour: " + _odt_row_check);
         d7_log("odt: Bushido row detour: " + _odt_row_check + I($"; call-site patch state {_odt_patch_state} (1 patched, 2 off, < 0 not patched: see its own line)"));   // ffxvr_diag.log too
     }
-    private static string odt_patch_name(int st) => st switch { 1 => "patched", 2 => "off", -1 => "FAILED: FFX.exe", -2 => "not patched: the call site's bytes differ (another mod?)", -3 => "FAILED: VirtualProtect", _ => "not asked (no native helper)" };
+    private static string odt_patch_name(int st) => st switch { 1 => "patched", 2 => "off", -1 => "FAILED: FFX.exe", -2 => "not patched: the call site's bytes differ (another mod?)", -3 => "FAILED: VirtualProtect", -4 => "not patched: a battle was on at launch", -5 => "not patched: the DLL could not be pinned", _ => "not asked (no native helper)" };
     private string odt_row_bytes() {
         try { byte* p = (byte*)_a_odt_row; return I($"{p[0]:X2} {p[1]:X2} {p[2]:X2} {p[3]:X2} {p[4]:X2}"); } catch { return "unreadable"; }
     }

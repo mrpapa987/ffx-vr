@@ -6266,25 +6266,25 @@ static volatile LONG g_odt_hide2d = 0;
 // - a call-site patch of our own (ffxvr_odt_row_patch, at init): the battle UI's 5-byte `call 0x892740` at 0x89B411 is pointed
 //   at odt_row_stub, which skips the call while g_odt_hide2d is 1 and otherwise calls 0x892740 (its detour too, when inserted).
 //   The bytes are checked first (E8 and a target of 0x892740, rebased); only the rel32 is rewritten (one interlocked store
-//   inside a cache line), and it is put back on a dynamic unload.
+//   inside a cache line), at module init before any battle; the DLL is pinned, so the stub outlives every call (no restore).
 // The diagnostics for the window line: every question by Auron's state (3, 4, other) and answer; managed's counts (pushed);
 // the stub's calls and skips.
 static volatile LONG g_odt_row_st = 0;                  // Auron's state at the last Present (the questions' bucket)
-static volatile LONG g_odt_row_q[3][2] = {};            // questions: [3 / 4 / other][answer 0 / 1]
+static volatile LONG g_odt_row_q[2][3][2] = {};         // questions: [the stub / the detour (the export)][3 / 4 / other][answer 0 / 1] (R10-N3: kept apart)
 static volatile LONG g_odt_row_m[4] = {};               // managed (ffxvr_odt_row_stat): the detour's install state, calls, hidden, faults
 static volatile LONG g_odt_patch_calls = 0, g_odt_patch_hidden = 0;
-static int g_odt_patch_state = 0;                       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect
-static uintptr_t g_odt_row_fn = 0, g_odt_row_site = 0; static LONG g_odt_row_rel_orig = 0;
-static int odt_row_ask() {
+static int g_odt_patch_state = 0;                       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
+static uintptr_t g_odt_row_fn = 0;   // 0x892740 (rebased), the stub's call
+static int odt_row_ask(int who) {   // who: 0 the stub, 1 the detour (ffxvr_odt_hide2d)
     const LONG h = InterlockedCompareExchange(&g_odt_hide2d, 0, 0);
     const LONG st = g_odt_row_st;
-    InterlockedIncrement(&g_odt_row_q[st == 3 ? 0 : st == 4 ? 1 : 2][h ? 1 : 0]);
+    InterlockedIncrement(&g_odt_row_q[who][st == 3 ? 0 : st == 4 ? 1 : 2][h ? 1 : 0]);
     return static_cast<int>(h);
 }
 /// The patched call site's target (the game's main thread, from 0x89B411; cdecl void(), as 0x892740).
 static void __cdecl odt_row_stub() {
     InterlockedIncrement(&g_odt_patch_calls);
-    if (odt_row_ask()) { InterlockedIncrement(&g_odt_patch_hidden); return; }
+    if (odt_row_ask(0)) { InterlockedIncrement(&g_odt_patch_hidden); return; }
     reinterpret_cast<void(__cdecl*)()>(g_odt_row_fn)();
 }
 static const char* odt_row_hook_name(LONG st) {
@@ -6293,18 +6293,21 @@ static const char* odt_row_hook_name(LONG st) {
 }
 static const char* odt_row_patch_name(int st) {
     switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
-                  case -3: return "FAILED (VirtualProtect)"; default: return "not asked"; }
+                  case -3: return "FAILED (VirtualProtect)"; case -4: return "not patched (a battle was on at launch)"; case -5: return "not patched (the DLL could not be pinned)"; default: return "not asked"; }
 }
 /// The window line's tail: the row's mechanisms and counts since the last window line (then reset).
 static int odt_row_line(char* s, size_t n, int k) {
-    LONG q[3][2]; for (int a = 0; a < 3; ++a) for (int b = 0; b < 2; ++b) q[a][b] = InterlockedExchange(&g_odt_row_q[a][b], 0);
+    LONG q[2][3][2]; for (int w = 0; w < 2; ++w) for (int a = 0; a < 3; ++a) for (int b = 0; b < 2; ++b) q[w][a][b] = InterlockedExchange(&g_odt_row_q[w][a][b], 0);
     const LONG pc = InterlockedExchange(&g_odt_patch_calls, 0), ph = InterlockedExchange(&g_odt_patch_hidden, 0);
     static LONG m_prev[3] = { 0, 0, 0 };
     const LONG hs = g_odt_row_m[0], mc = g_odt_row_m[1], mh = g_odt_row_m[2], mf = g_odt_row_m[3];
     const LONG dc = mc - m_prev[0], dh = mh - m_prev[1], df = mf - m_prev[2]; m_prev[0] = mc; m_prev[1] = mh; m_prev[2] = mf;
-    return odg::fmt_append(s, n, k, "; row: hook %s, detour calls %ld, hidden %ld, faults %ld; call-site patch %s, calls %ld, hidden %ld; asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld (answers 0/1)%s",
-                           odt_row_hook_name(hs), static_cast<long>(dc), static_cast<long>(dh), static_cast<long>(df), odt_row_patch_name(g_odt_patch_state), static_cast<long>(pc), static_cast<long>(ph),
-                           static_cast<long>(q[0][0]), static_cast<long>(q[0][1]), static_cast<long>(q[1][0]), static_cast<long>(q[1][1]), static_cast<long>(q[2][0]), static_cast<long>(q[2][1]),
+    k = odg::fmt_append(s, n, k, "; row: hook %s, detour calls %ld, hidden %ld, faults %ld, asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld",
+                        odt_row_hook_name(hs), static_cast<long>(dc), static_cast<long>(dh), static_cast<long>(df),
+                        static_cast<long>(q[1][0][0]), static_cast<long>(q[1][0][1]), static_cast<long>(q[1][1][0]), static_cast<long>(q[1][1][1]), static_cast<long>(q[1][2][0]), static_cast<long>(q[1][2][1]));
+    return odg::fmt_append(s, n, k, "; call-site patch %s, calls %ld, hidden %ld, asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld (answers 0/1)%s",
+                           odt_row_patch_name(g_odt_patch_state), static_cast<long>(pc), static_cast<long>(ph),
+                           static_cast<long>(q[0][0][0]), static_cast<long>(q[0][0][1]), static_cast<long>(q[0][1][0]), static_cast<long>(q[0][1][1]), static_cast<long>(q[0][2][0]), static_cast<long>(q[0][2][1]),
                            dc + pc == 0 ? " (NEITHER RAN this window)" : "");
 }
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
@@ -6596,7 +6599,7 @@ extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist,
 }
 /// ABI 56 (the game's main thread, from the detour on 0x892740): 1 = skip the game's Bushido input row now (a strike-the-targets
 /// window's targets are being drawn in the headset). One aligned interlocked-published value, at most one Present old.
-extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return odt_row_ask(); }   // (counted by Auron's state and answer: section 15)
+extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return odt_row_ask(1); }   // (counted by Auron's state and answer: section 15)
 /// ABI 57 (managed, at init, with od_targets_hide2d): on = 1 points the battle UI's call of 0x892740 (at 0x89B411) at our stub,
 /// after checking its bytes; 0 records "off". Returns the patch state (1 patched; < 0 why not). Once a session.
 extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
@@ -6605,6 +6608,13 @@ extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (base == 0) { g_odt_patch_state = -1; return -1; }
     const uintptr_t site = base + (0x89B411u - 0x400000u), fn = base + (0x892740u - 0x400000u);
+    // R10-N2: the patch is race-free only because no battle has started: 0x89B411 is inside the battle UI draw 0x89B360, which
+    // returns at once while its "battle UI alive" word [0x133C948] is 0 (set at battle init 0x89B660, cleared at its end
+    // 0x89AD90), and this runs once at module init. While that word is set the main thread could be at the call: not now.
+    uint32_t alive = 0;
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x133C948u - 0x400000u)), &alive, 4) || alive != 0) {
+        g_odt_patch_state = -4; diag("odt: Bushido row call-site patch: the battle UI is alive ([0x133C948] = %u, or unreadable): not patched (only before a battle)", alive); return -4;
+    }
     uint8_t b[5] = {};
     if (!ffxvr_safe_read(reinterpret_cast<const void*>(site), b, 5)) { g_odt_patch_state = -2; diag("odt: Bushido row call-site patch: 0x89B411 unreadable: not patched"); return -2; }
     LONG rel = 0; memcpy(&rel, b + 1, 4);
@@ -6613,9 +6623,16 @@ extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
         diag("odt: Bushido row call-site patch: 0x89B411 reads %02X %02X %02X %02X %02X, not a call of 0x892740: not patched (another mod or another exe)", b[0], b[1], b[2], b[3], b[4]);
         return -2;
     }
+    // R10-N1: the stub must outlive every call through the patched site (the main thread can be inside 0x892740 with the stub's
+    // return address on its stack), so the DLL is pinned for the process's life instead of the call being restored at unload:
+    // a restore could not cover a thread already inside, and process exit needs nothing.
+    HMODULE pin = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(reinterpret_cast<uintptr_t>(&odt_row_stub)), &pin)) {
+        g_odt_patch_state = -5; diag("odt: Bushido row call-site patch: the DLL could not be pinned (%lu): not patched", GetLastError()); return -5;
+    }
     DWORD old = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { g_odt_patch_state = -3; diag("odt: Bushido row call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
-    g_odt_row_fn = fn; g_odt_row_site = site; g_odt_row_rel_orig = rel;
+    g_odt_row_fn = fn;
     const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odt_row_stub) - (site + 5));
     InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store (inside one cache line)
     DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
@@ -16895,14 +16912,7 @@ static void gt_line_part(char* out, size_t n) {
     snprintf(out, n, " | timer %s, timer_fix %s | game window: %s | main loop: %s%s%s", tm, g_gt_fix_state, wn, part_off ? "(limiter_probe was 0 for part of this window) " : "", ml, sl);
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
-    if (reason == DLL_PROCESS_DETACH && reserved == nullptr && g_odt_patch_state == 1 && g_odt_row_site != 0) {   // a dynamic unload: the game's call back (section 15)
-        DWORD old = 0;
-        if (VirtualProtect(reinterpret_cast<void*>(g_odt_row_site), 5, PAGE_EXECUTE_READWRITE, &old)) {
-            InterlockedExchange(reinterpret_cast<volatile LONG*>(g_odt_row_site + 1), g_odt_row_rel_orig);
-            DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(g_odt_row_site), 5, old, &tmp); FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(g_odt_row_site), 5);
-        }
-    }
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         GetModuleFileNameW(module, g_dir, MAX_PATH);

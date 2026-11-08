@@ -5619,8 +5619,11 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
     5-byte `call 0x892740` at 0x89B411: the byte E8, and a target of 0x892740 at the real base. It then points the call at a
     native stub, which skips the call while the row is to be hidden and otherwise calls 0x892740 (and so the detour too, when
     inserted).
-    - Only the rel32 is rewritten, in one interlocked store inside a cache line, under VirtualProtect. It is put back on a
-      dynamic unload.
+    - Only the rel32 is rewritten, in one interlocked store inside a cache line, under VirtualProtect. This happens at module
+      init, and never while the battle UI is alive ([0x133C948] non-zero): the patch is race-free only because no battle has
+      started.
+    - The DLL is pinned (GetModuleHandleExW PIN), so the stub outlives every call. Nothing is restored at unload: a restore
+      could not cover a thread already inside 0x892740.
     - Other bytes there (another mod, another exe) leave it alone, with a log line.
     - It does not depend on Fahrenheit's hook commit. Either mechanism alone hides the row.
   - **Why not the 2D draw skip.** The row's icons go 0x892740 → 0x9029B0 → 0x8E6030 → 0x8E6070 → 0x903EE0 → the 2D quad
@@ -5631,10 +5634,10 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
       per quad.
     - The call site is the narrowest point that is ours alone.
   - **Diagnostics.**
-    - Native counts every question (the stub's and the detour's) by Auron's state (3, 4, other) and answer.
+    - Native counts each question by Auron's state (3, 4, other) and answer, the stub's and the detour's apart.
     - Managed pushes the detour's install state and counts each frame (`ffxvr_odt_row_stat`).
     - Each Bushido window's `odt:` line in ffxvr_diag.log ends with `; row: hook <state>, detour calls N, hidden H, faults F;
-      call-site patch <state>, calls P, hidden Q; asked st3 a/b st4 c/d other e/f (answers 0/1)`, with counts since the last
+      asked st3 a/b st4 c/d other e/f; call-site patch <state>, calls P, hidden Q, asked ... (answers 0/1)`, with counts since the last
       window line. "NEITHER RAN this window" flags a window in which neither path was called.
 - **Textured medallions** (the owner's concept, 10 Nov 2026: engraved silver medallions with a swirling glowing disc and a
   bright symbol, each symbol its own colour). From a local art pack when present (next section); without it the flat plates as
