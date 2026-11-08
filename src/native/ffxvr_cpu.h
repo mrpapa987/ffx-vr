@@ -206,6 +206,20 @@ inline int ws_selftest_verdict(bool ok1, uint32_t f1, bool ok2, uint32_t f2) {
     if ((f2 & 1u) != 0 && ((f2 >> 4) & k_page_guard) == 0) return k_wst_guard_valid;
     return k_wst_pass;
 }
+/// fix-render review S3: two more self-test steps. (3) The test page made PAGE_NOACCESS must answer Valid = 0 or protection
+/// PAGE_NOACCESS (else the whole check is off); (4) the exe's header page, after a read, must answer resident and readable (an
+/// image page: else only the kept image runs are off, the heap's check stays).
+enum : int { k_wst_call3 = 16, k_wst_noaccess_valid, k_wst_img_call, k_wst_img_not_readable };
+inline int ws_selftest_noaccess(bool ok3, uint32_t f3) {
+    if (!ok3) return k_wst_call3;
+    if ((f3 & 1u) != 0 && ((f3 >> 4) & 0x7FFu) != k_page_noaccess) return k_wst_noaccess_valid;
+    return k_wst_pass;
+}
+inline int ws_selftest_image(bool ok4, uint32_t f4) {
+    if (!ok4) return k_wst_img_call;
+    return ws_readable(f4) ? k_wst_pass : k_wst_img_not_readable;
+}
+
 inline const char* ws_selftest_why(int v) {
     switch (v) {
     case k_wst_pass: return "passed";
@@ -214,6 +228,10 @@ inline const char* ws_selftest_why(int v) {
     case k_wst_prot: return "a written PAGE_READWRITE page reported another protection";
     case k_wst_call2: return "the call failed on a guard page";
     case k_wst_guard_valid: return "a guard page reported Valid without the guard bit";
+    case k_wst_call3: return "the call failed on a no-access page";
+    case k_wst_noaccess_valid: return "a no-access page reported Valid with another protection";
+    case k_wst_img_call: return "the call failed on the exe's header page";
+    case k_wst_img_not_readable: return "the exe's header page (read just before) did not report resident and readable";
     default: return "?";
     }
 }
@@ -293,7 +311,8 @@ struct ImageKeep {
     uintptr_t ok[k_keep_hot] = {}; int ok_n = 0, ok_next = 0;    // pages proven resident and readable this frame
     bool batched = false;                                        // this frame's first proof (with the hot pages) done
     uintptr_t sec_lo[S] = {}, sec_hi[S] = {}; bool sec_probed[S] = {}; int sec_n = 0;   // the exe's sections (page-aligned), and which were probed
-    uint32_t proofs = 0, proof_pages = 0, answered = 0, refused = 0, probes = 0;       // statistics (the caller rolls them)
+    uint32_t proofs = 0, proof_pages = 0, answered = 0, refused = 0, probes = 0;       // statistics (the caller rolls them): refused = calls not answered
+    uint32_t pages_no = 0;                                                             // review S3: pages a proof found not resident / not readable
     /// Everything but the sections (a failed copy, fast_reads or the check off): the next reads query afresh.
     void clear() { for (int i = 0; i < K; ++i) lo[i] = hi[i] = 0; next = 0; hot_n = hot_next = 0; new_frame(); for (int i = 0; i < S; ++i) sec_probed[i] = false; }
     /// A new frame (or the per-frame runs' age bound): the proofs expire with the frame's runs.
@@ -354,6 +373,7 @@ struct ImageKeep {
         bool all = true;
         for (int i = 0; i < n; ++i) {
             const bool yes = ws_readable(at[i]);
+            if (!yes) pages_no++;
             if (yes) ok_add(va[i]); else if (i >= static_cast<int>(n_read)) hot_remove(va[i]);
             if (i < static_cast<int>(n_read) && !yes) all = false;
         }
@@ -497,7 +517,9 @@ struct FastReader {
             if (keep->ok_covers(a, len) || keep->prove(a, len, ws)) {   // fix-render: resident and readable now, in the exe's image
                 runs.add(a & ~(k_page - 1), ((a + len - 1) & ~(k_page - 1)) + k_page, true);
                 st.hits++; keep_hits++;
-                return plain() ? 1 : 0;
+                if (plain()) return 1;
+                keep->drop_at(a);   // review N5: a failed plain copy through a proven page: the run is not trusted again
+                return 0;
             }
             keep->drop_at(a);
         }

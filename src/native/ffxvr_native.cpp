@@ -2804,6 +2804,7 @@ static cpu::Mbi cpu_vq_rt(uintptr_t q) { const cpu::Mbi m = cpu_vq(q); g_rs_last
 // each use proven by QueryWorkingSetEx; with the exe's section table, a miss queries its section's start once.
 static cpu::ImageKeep<8, 16> g_keep;
 static uint32_t g_keep_sections = 0;
+static bool g_keep_off = false; static char g_keep_why[160] = "not tested yet";   // review S3: the self-test's image-page step failed: no kept runs
 /// The exe's sections from its PE headers (the header page checked readable first; a loaded image's headers always are).
 static void cpu_exe_sections() {
     const uintptr_t b = g_cpu_exe_base;
@@ -2861,7 +2862,7 @@ static bool ws_query(const uintptr_t* va, uint32_t* at, int n) {
 /// address) and is released at once. Either expectation failing turns the check off for the session; the verdict is logged.
 static void ws_selftest() {
     int v = cpu::k_wst_pass; const char* step = nullptr;
-    uint32_t f1 = 0, f2 = 0; bool ok1 = false, ok2 = false;
+    uint32_t f1 = 0, f2 = 0, f3 = 0, f4 = 0; bool ok1 = false, ok2 = false;
     void* p = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (p == nullptr) step = "VirtualAlloc failed";
     else {
@@ -2872,14 +2873,32 @@ static void ws_selftest() {
         DWORD old = 0;
         if (!VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) step = "VirtualProtect(PAGE_GUARD) failed";
         else ok2 = ws_query_raw(&va, &f2, 1);
+        bool ok3 = false;   // fix-render (review S3): step 3, the same page made PAGE_NOACCESS (never read)
+        if (step == nullptr) { if (!VirtualProtect(p, 0x1000, PAGE_NOACCESS, &old)) step = "VirtualProtect(PAGE_NOACCESS) failed"; else ok3 = ws_query_raw(&va, &f3, 1); }
         VirtualFree(p, 0, MEM_RELEASE);
         if (step == nullptr) v = cpu::ws_selftest_verdict(ok1, f1, ok2, f2);
+        if (step == nullptr && v == cpu::k_wst_pass) v = cpu::ws_selftest_noaccess(ok3, f3);
     }
     const bool pass = step == nullptr && v == cpu::k_wst_pass;
-    snprintf(g_ws_why, sizeof(g_ws_why), "self-test %s%s (resident page 0x%X, guard page 0x%X)", pass ? "passed" : "failed: ",
-             pass ? "" : (step ? step : cpu::ws_selftest_why(v)), f1, f2);
+    // fix-render (review S3): step 4, an image page: the exe's header page, read first (a loaded image's headers are readable;
+    // checked anyway), must answer resident and readable, or the kept image runs (ffxvr_cpu.h ImageKeep) stay off for the session.
+    if (pass) {
+        cpu_exe_init();
+        const uintptr_t hp = g_cpu_exe_base;
+        bool ok4 = false;
+        if (hp != 0 && cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(hp, 1, cpu_vq, nullptr, 0, nullptr)) {
+            volatile uint8_t sink = *reinterpret_cast<const volatile uint8_t*>(hp); (void)sink;
+            ok4 = ws_query_raw(&hp, &f4, 1);
+        }
+        const int vi = cpu::ws_selftest_image(ok4, f4);
+        g_keep_off = vi != cpu::k_wst_pass;
+        snprintf(g_keep_why, sizeof(g_keep_why), "%s (header page 0x%X)", cpu::ws_selftest_why(vi), f4);
+    }
+    snprintf(g_ws_why, sizeof(g_ws_why), "self-test %s%s (resident page 0x%X, guard page 0x%X, no-access page 0x%X)", pass ? "passed" : "failed: ",
+             pass ? "" : (step ? step : cpu::ws_selftest_why(v)), f1, f2, f3);
     InterlockedExchange(&g_ws_state, pass ? 1 : -1);
-    diag("fast reads: QueryWorkingSetEx %s: %s", pass ? "on" : "off for the session", g_ws_why);
+    diag("fast reads: QueryWorkingSetEx %s: %s%s%s", pass ? "on" : "off for the session", g_ws_why,
+         pass ? (g_keep_off ? "; the kept exe runs OFF for the session: " : "; image page: ") : "", pass ? g_keep_why : "");
 }
 
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
@@ -2898,7 +2917,7 @@ static bool range_readable_at(const void* p, size_t len, const void* site) {
     g_rs_last = cpu::Mbi{};
     // fix-render: with fast_reads on and the working-set check on, the exe's image runs are kept across frames (each use proven
     // resident and readable by QueryWorkingSetEx); otherwise the cpu-lean walk exactly.
-    const bool ok = (g_fast_reads != 0 && g_ws_state == 1 && g_cpu_exe_end != ~static_cast<uintptr_t>(0))
+    const bool ok = (g_fast_reads != 0 && g_ws_state == 1 && !g_keep_off && g_cpu_exe_end != ~static_cast<uintptr_t>(0))
         ? cpu::range_check_keep(a, len, cpu_vq_rt, ws_query, g_cpu_rcache, g_keep, g_cpu_exe_base, g_cpu_exe_end, &g_cpu_rr)
         : cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
     const LONGLONG d = cpu_q() - t0;
@@ -2967,7 +2986,7 @@ static int safe_read_fast(const void* src, void* dst, unsigned len, const void* 
     LONGLONG copy_q = 0, plain_q = 0, ws_q = 0;
     const cpu::FastStats before = g_fr.st;
     g_rs_last = cpu::Mbi{};
-    g_fr.keep = g_ws_state == 1 ? &g_keep : nullptr;   // fix-render: the kept image runs, only while QueryWorkingSetEx is on
+    g_fr.keep = g_ws_state == 1 && !g_keep_off ? &g_keep : nullptr;   // fix-render: the kept image runs, only while QueryWorkingSetEx is on
     const int ok = g_fr.read(a, len, t0, g_fr_qpf / 20, g_cpu_exe_base, g_cpu_exe_end, cpu_vq_rt,
         [&](const uintptr_t* va, uint32_t* at, int n) {
             if (g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return false;   // review N4: the exe's end unknown: no check
@@ -5761,6 +5780,7 @@ static cpu::Acc g_cpu_bign, g_cpu_bigms;                        // vq-lean (revi
 static uint32_t g_cpu_cpy_fail = 0;                             // vq-lean: failed kernel copies over the window
 static cpu::Acc g_cpu_wsn, g_cpu_wsy, g_cpu_wsms;                // lean2, per frame: working-set checks, the reads they answered, their ms
 static cpu::Acc g_cpu_kph, g_cpu_kpr, g_cpu_kpp, g_cpu_kps;       // fix-render, per frame: safe reads answered by the kept image runs, proofs (working-set calls), pages proven, section probes
+static cpu::Acc g_cpu_kpn; static uint32_t g_cpu_kpf = 0;         // review S3, per frame: pages the proofs refused; over the window: proof calls not answered
 static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
 static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
 static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu_hook_end_q = 0;
@@ -5790,10 +5810,11 @@ static void cpu_frame_roll() {
     if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
     {   // fix-render: the kept image runs' proofs end with the frame; a failed copy, fast_reads off or the check off drop them all
         g_cpu_kph.add(g_fr.keep_hits); g_cpu_kpr.add(g_keep.proofs); g_cpu_kpp.add(g_keep.proof_pages); g_cpu_kps.add(g_keep.probes);
+        g_cpu_kpn.add(g_keep.pages_no); g_cpu_kpf += g_keep.refused;   // review S3: pages refused by the proofs, calls not answered
         g_fr.keep = &g_keep; g_fr.keep_roll(); g_fr.keep_hits = 0;
-        g_keep.proofs = g_keep.proof_pages = g_keep.answered = g_keep.refused = g_keep.probes = 0;
+        g_keep.proofs = g_keep.proof_pages = g_keep.answered = g_keep.refused = g_keep.probes = g_keep.pages_no = 0;
         g_keep.new_frame();
-        if (g_fast_reads == 0 || g_ws_state != 1) g_keep.clear();
+        if (g_fast_reads == 0 || g_ws_state != 1 || g_keep_off) g_keep.clear();
     }
     g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
@@ -5906,11 +5927,12 @@ static void cpu_log_line() {
         snprintf(ws, sizeof(ws), "; QueryWorkingSetEx %s: %s%s", g_ws_state == 1 ? "on" : g_ws_state < 0 ? "off" : "not tested", g_ws_why,
                  g_ws_fails != 0 ? ", some calls failed" : "");
         snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)"
-                                 ", kept exe runs %d (of %u sections; safe reads through them %.1f/%.0f a frame, proofs %.1f/%.0f a frame over %.1f/%.0f pages, section probes %.0f/%.0f)",
+                                 ", kept exe runs %d (of %u sections; safe reads through them %.1f/%.0f a frame, proofs %.1f/%.0f a frame over %.1f/%.0f pages, pages refused %.1f/%.0f, calls unanswered %u, section probes %.0f/%.0f%s%s)",
                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx,
                  g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws,
-                 g_keep.count(), g_keep_sections, g_cpu_kph.avg(), g_cpu_kph.mx, g_cpu_kpr.avg(), g_cpu_kpr.mx, g_cpu_kpp.avg(), g_cpu_kpp.mx, g_cpu_kps.avg(), g_cpu_kps.mx);
+                 g_keep.count(), g_keep_sections, g_cpu_kph.avg(), g_cpu_kph.mx, g_cpu_kpr.avg(), g_cpu_kpr.mx, g_cpu_kpp.avg(), g_cpu_kpp.mx, g_cpu_kpn.avg(), g_cpu_kpn.mx, g_cpu_kpf,
+                 g_cpu_kps.avg(), g_cpu_kps.mx, g_keep_off ? "; OFF: " : "", g_keep_off ? g_keep_why : "");
     }
     char sites[900];   // lean2: the render thread's reads that queried or checked, by caller, the top four by time
     cpu_sites_part(sites, sizeof(sites), g_cpu_frames);
@@ -5924,7 +5946,7 @@ static void cpu_log_line() {
     for (auto& a : g_cpu_man) a = cpu::Acc{};
     g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = g_cpu_bign = g_cpu_bigms = cpu::Acc{};
     g_cpu_wsn = g_cpu_wsy = g_cpu_wsms = cpu::Acc{};
-    g_cpu_kph = g_cpu_kpr = g_cpu_kpp = g_cpu_kps = cpu::Acc{};
+    g_cpu_kph = g_cpu_kpr = g_cpu_kpp = g_cpu_kps = g_cpu_kpn = cpu::Acc{}; g_cpu_kpf = 0;
     g_cpu_cpy_fail = 0; g_fr_frames = g_fr_off = 0;
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;

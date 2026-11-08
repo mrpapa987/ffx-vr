@@ -5488,12 +5488,15 @@ reads); scratch tests in render_chk/tests.
   frame is never trusted as it stands. A read in it is answered only when QueryWorkingSetEx says every page of the read is
   resident and readable now (lean2's rule: Valid, not bad, range_readable's protections; nothing uses it before the start-up
   self-test passed), which a page freed, decommitted, made no-access or turned into a guard page since cannot pass; the proven
-  pages last as long as a query's answer did (the frame, or the 50 ms bound). The pages read through kept runs are remembered,
+  pages last as long as a query's answer did (the frame, or the 50 ms bound); a failed plain copy through a kept run drops it.
+  The start-up self-test has two more steps (review S3): the test page made PAGE_NOACCESS must not answer Valid with another
+  protection (else the whole working-set check is off), and the exe's header page, read first, must answer resident and
+  readable (else only the kept runs are off, `kept exe runs ... OFF: <why>` on the cpu: line). The pages read through kept runs are remembered,
   so the next frame proves them all in one call: about one QueryWorkingSetEx call a frame instead of two 25 MB scans. A refused
   proof drops the run and the read walks as before; a failed kernel copy, fast_reads=0 or the check off drop every kept run.
   Only FFX.exe's own image is kept (heap and other modules keep the per-frame rules). Model (render_chk keep_test, s2's shape
   and the owner's measured costs): 350-366 us -> 1.6 us a frame. The `cpu:` line adds `kept exe runs N (of S sections; safe
-  reads through them, proofs a frame over P pages, section probes)`.
+  reads through them, proofs a frame over P pages, pages refused a frame, calls unanswered, section probes)`.
 - **The second 3D camera (behaviour G).** kino0800 (s1 16:27:41-51) had about 70 uploads a frame whose view differs from the
   frame's main (tick) camera, and the aeon in battle 1 about 0.8 a frame. What the code shows:
   - Mirrored (reflection) cameras are already rejected (the inverse view must agree), the ShadowManager's light cameras are left
