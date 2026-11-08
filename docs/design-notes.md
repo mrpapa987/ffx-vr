@@ -5504,12 +5504,18 @@ reads); scratch tests in render_chk/tests.
   - The override is relative to each upload's own view (seat: its own position under the seat heading; first person: the
     player's eye for every camera), so those draws need the head pose: leaving it off would put about 70 draws a frame (the
     characters, if node list 3 is them) in the game's flat view, head-locked, with no stereo. That is not done.
-  - What *was* wrong: `build_override_view` wrote the frame's main-camera state on every eye-1 upload, so the last camera of the
-    frame won: `g_yaw_cam` / `g_move_delta` (the first-person stick remap's heading) and the VR hands' base (`g_hb_*`). Now an
-    upload of another camera (`g_ov_other`, set by `write_camera` when the view differs from the tick's) writes none of it.
+  - What *was* wrong: `build_override_view` wrote the frame's main-camera state on every eye-1 call, so the last camera of the
+    frame won: `g_yaw_cam` / `g_move_delta` (the first-person stick remap's heading), the VR hands' base (`g_hb_*`) and the
+    first-person heading latch. Now only a call with `g_ov_publish` set writes it: write_camera for an upload of the frame's
+    main camera, and hands_draw_frame for the main view. ffxvr_project, the markers and eye 2 only read (review S1). The
+    per-frame filter steps (eye jumps, the stickrep record) stay on the frame's first 3D upload (`advance`), whichever camera.
+  - **Which camera is main (review S2):** not simply the first. `rnd::MainPick` gives each distinct view of the frame a slot in
+    order of first upload; the main slot is the previous frame's camera with the most uploads while the scene target was bound,
+    then the most uploads (ties: the first). hands_draw_frame uses that camera's view (`g_main_v`).
   - **The log line that confirms it:** every 10 s with another camera, `view: another 3D camera this window: N uploads (bound
     to the scene target K, orthographic near projection L), up to X units and Y deg from the frame's main camera, first B bytes
-    with P0 (main P0) -> verdict` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
+    with P0 (main P0) -> verdict | the main camera's own uploads M (per frame); main = a later camera than the frame's first in
+    F of T frames [(the pick flipped within the window)]` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
     same camera a moment apart (head pose right); "partly into another render target" = an off-screen pass (then the head pose
     is wrong for it: a follow-up would leave those uploads alone); "LIGHT-LIKE" = a shadow light the light-camera rule missed
     (e.g. under 1872 B; same follow-up). The render target is the one bound when the constant buffer was uploaded.

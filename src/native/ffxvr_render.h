@@ -126,10 +126,38 @@ inline CamDiff cam_diff(const float a[12], const float b[12]) {
     d.dang = acosf(c) * 57.29578f;
     return d;
 }
+/// Review S2: which camera of the frame is the main one. The views of the frame's real 3D eye-1 uploads get slots in order of
+/// first upload (a fifth view folds into the last slot). The main slot of a frame is the previous frame's camera with the most
+/// uploads while the scene target was bound, then the most uploads (ties: the earlier); a frame after one with no camera:
+/// slot 0. Only the main camera's uploads write the main-camera state; the window counts how often the main one was not the
+/// frame's first camera (a flip of the pick shows there).
+constexpr int k_cams = 4;
+struct MainPick {
+    float v[k_cams][12] = {}; uint32_t n[k_cams] = {}, scene[k_cams] = {}; int k = 0;
+    int main = 0;                      // this frame's main slot
+    uint32_t frames = 0, later = 0;    // frames started, of them with a later camera as main (the window: the caller resets)
+    void new_frame() {
+        int best = 0;
+        for (int i = 1; i < k; ++i) if (scene[i] > scene[best] || (scene[i] == scene[best] && n[i] > n[best])) best = i;
+        main = k > 0 ? best : 0;
+        frames++; if (main != 0) later++;
+        k = 0; for (int i = 0; i < k_cams; ++i) { n[i] = 0; scene[i] = 0; }
+    }
+    /// One real 3D eye-1 upload of this frame: its slot.
+    int note(const float vv[12], bool scene_rt) {
+        int s = -1;
+        for (int i = 0; i < k && s < 0; ++i) { bool eq = true; for (int j = 0; j < 12 && eq; ++j) eq = v[i][j] == vv[j]; if (eq) s = i; }
+        if (s < 0) { if (k < k_cams) { s = k++; for (int j = 0; j < 12; ++j) v[s][j] = vv[j]; } else s = k_cams - 1; }
+        n[s]++; if (scene_rt) scene[s]++;
+        return s;
+    }
+};
+
 /// The other camera's uploads over the view: line's 10 s: how many, how many while the scene target was bound, the largest
 /// distance / angle from the main camera, and the first one's buffer size and projection.
 struct OtherCam {
     uint32_t n = 0, into_scene = 0, ortho_near = 0; float dpos_max = 0.f, dang_max = 0.f; uint32_t size0 = 0; float p0 = 0.f, p0_main = 0.f;
+    uint32_t main_n = 0;               // review S2: the main camera's own uploads over the same window
     void note(const CamDiff& d, bool scene_rt, bool ortho, uint32_t size, float p0_other, float p0_of_main) {
         if (n == 0) { size0 = size; p0 = p0_other; p0_main = p0_of_main; }
         n++; if (scene_rt) into_scene++; if (ortho) ortho_near++;
