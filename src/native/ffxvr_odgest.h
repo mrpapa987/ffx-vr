@@ -65,8 +65,12 @@ inline int window(const od::Raw& r, bool battle, bool fresh) {
 }
 
 /// The settings (ini od_gestures, od_gest_lulu / _auron / _tidus, od_gest_haptics, od_lulu_stick, od_circle_cm, od_slash_speed).
+/// od_gest_auron 0 / 1 / 2: auron off; on with auron_mode 1 (slashes and punches, this file); on with auron_mode 2 (strike the
+/// targets, ffxvr_odtarget.h: the driver then runs no stroke classifier in Auron's window and queues nothing; the targets' Runner
+/// sends the presses through the same slot and gate).
 struct Cfg {
     bool on = true, lulu = true, auron = false, tidus = false, haptics = true;   // Tidus off until the owner's test: a false A restarts the bar
+    int auron_mode = 1;           // 1 slashes and punches, 2 strike the targets (only while auron is on)
     int lulu_stick = 0;           // 0 the right stick (the PS2 byte order: GUESS-strong), 1 the left, 2 both
     float circle_r = 0.04f;       // m: a circle smaller than this is jitter
     float slash_speed = 1.6f;     // m/s: a stroke starts above this
@@ -472,6 +476,7 @@ struct Sess {
     uint32_t samples[2] = { 0, 0 }, inferred[2] = { 0, 0 };                                                                 // poses seen / valid but untracked
     uint32_t rev_allowed = 0;                                                                                               // Auron: bring-backs sent (the game expected them)
     int len = 0, prog_max = 0; uint32_t resets = 0, game_presses = 0;                                                        // Auron
+    bool targets = false;                                                                                                   // Auron in the targets scheme (its own odt: line)
     int end_state = 0, end_timer = 0;
 };
 inline int fmt_append(char* s, size_t n, int k, const char* fmt, ...) {
@@ -496,6 +501,7 @@ inline int summary(char* s, size_t n, const Sess& x) {
                        x.turns[0], x.turns[1], x.sent_turns, x.out_turns, x.dropped_turns, x.lead_changes);
         if (x.sub0 >= 0 && x.sub1 >= 0) k = fmt_append(s, n, k, "; the game counted %d spins, counter %d -> %d", (x.sub1 - x.sub0) & 0xFF, x.cnt0, x.cnt1);
     }
+    else if (x.od == OD_AURON && x.targets) k = fmt_append(s, n, k, "; strike the targets (the odt: line); presses sent %u; progress best %d of %d, wrong-press resets %u, game presses seen %u", x.sent, x.prog_max, x.len, x.resets, x.game_presses);
     else {
         k = fmt_append(s, n, k, "; strokes:");
         for (int c = C_LEFT; c < C_N; ++c) if (x.cls_n[c]) k = fmt_append(s, n, k, " %s %u", k_cls[c], x.cls_n[c]);
@@ -583,6 +589,10 @@ struct Driver {
     bool squeeze_clashes(int h, double t) const { return open && sess.od == OD_AURON && sess.inject && h >= 0 && h < 2 && shoulder_clash(t, thrust_t[h]); }
     /// The grips must not grab the world now (review S4): an injecting Bushido window, where a clenched punch is a punch.
     bool grips_are_gestures() const { return open && sess.od == OD_AURON && inject_now == OD_AURON; }
+    /// The targets scheme's press (ffxvr_odtarget.h Runner), recorded as ours: the capture line's "our last press" and the
+    /// learned map's cross-check (as a press from the queue below).
+    void note_press(uint16_t b, int hand, double t) { if (!b) return; sess.sent++; last_hand = hand & 1; last_btn = b; last_btn_t = t; }
+    bool targets_now() const { return cfg.auron && cfg.auron_mode == 2; }
     int inject_now = OD_NONE;
     /// The hand whose poses were mostly inferred in the open window (over 50 % of at least 30 samples), or -1 (round 2 S3: a runtime
     /// that never reports POSITION_TRACKED would make every gesture silently dead).
@@ -612,7 +622,7 @@ struct Driver {
             prog = in.x.auron_prog; sub = in.x.lulu_sub; cnt = in.x.lulu_cnt; gp = in.game_press_ok ? in.game_press : 0;
             stick_sent0 = in.stick_sent; stick_dropped0 = in.stick_dropped;
             if (w == OD_LULU) { sess.sub0 = sess.sub1 = sub; sess.cnt0 = sess.cnt1 = cnt; }
-            if (w == OD_AURON) sess.len = in.x.auron_len;
+            if (w == OD_AURON) { sess.len = in.x.auron_len; sess.targets = targets_now(); }
             o.opened = true;
         }
         const int inj = inject_gate(w, cfg, in.headset, in.vrpad);
@@ -637,11 +647,13 @@ struct Driver {
         }
         else {
             Axes ax; const bool ax_ok = yaw_axes(in.head_fwd, ax);
+            const bool tgt = w == OD_AURON && sess.targets;   // the targets scheme: no strokes (the Runner strikes), poses still counted
             for (int h = 0; h < 2; ++h) {
                 if (w == OD_TIDUS && h == 0) continue;   // Tidus: the right hand's swing
                 int cls = C_NONE;
                 if (!in.sample_new) continue;
                 sess.samples[h]++; if (in.inferred[h]) sess.inferred[h]++;
+                if (tgt) continue;
                 const int allow = w == OD_AURON ? allow_mask(in, h) : 0;
                 const int ev = st[h].step(in.p[h], in.valid[h] && !in.grab[h] && ax_ok, in.t, ax, sc, w == OD_TIDUS ? ST_SWING : ST_DIR, cls, allow);
                 if ((ev & EV_FIRE) && st[h].last_rev) sess.rev_allowed++;
@@ -660,7 +672,7 @@ struct Driver {
             if (w == OD_AURON) {
                 sess.len = in.x.auron_len;
                 const int16_t pr = in.x.auron_prog;
-                if (pr > prog && hap && in.t - last_btn_t < 0.5) o.pulse(last_hand, 0.6f, 0.03f);   // ours: tick that hand (review N9)
+                if (pr > prog && hap && !tgt && in.t - last_btn_t < 0.5) o.pulse(last_hand, 0.6f, 0.03f);   // ours: tick that hand (review N9; the targets: the hit already ticked)
                 if (pr == 0 && prog > 0) { sess.resets++; if (hap) { o.pulse(0, 0.9f, 0.12f); o.pulse(1, 0.9f, 0.12f); } }
                 prog = pr; if (pr > sess.prog_max) sess.prog_max = pr;
                 const uint16_t g = in.game_press_ok ? in.game_press : 0;
