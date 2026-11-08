@@ -5512,13 +5512,18 @@ reads); scratch tests in render_chk/tests.
     first-person heading latch. Now only a call with `g_ov_publish` set writes it: write_camera for an upload of the frame's
     main camera, and hands_draw_frame for the main view. ffxvr_project, the markers and eye 2 only read (review S1). The
     per-frame filter steps (eye jumps, the stickrep record) stay on the frame's first 3D upload (`advance`), whichever camera.
-  - **Which camera is main (review S2):** not simply the first. `rnd::MainPick` gives each distinct view of the frame a slot in
-    order of first upload; the main slot is the previous frame's camera with the most uploads while the scene target was bound,
-    then the most uploads (ties: the first). hands_draw_frame uses that camera's view (`g_main_v`).
+  - **Which camera is main (review S2, round 2 R2-1):** tracked by its view, not by its upload order. `rnd::MainPick` gives each
+    distinct view of the frame a slot; an upload's slot is main when its view lies within a tracking gate of the previous
+    frame's main view (4 units and 4 degrees, widened by twice the camera's recent per-frame motion, each frame's motion capped
+    at 25 units / 10 degrees), and a later slot nearer that view takes over (the nearest wins). With no slot in the gate yet (a
+    cut, the first frame), the previous frame's busiest slot (most uploads into the scene target, then most uploads) is main
+    from its second upload, or else the first slot to reach 8 uploads, so a one-upload stray camera never qualifies. The next
+    reference is the gate-picked main view, else the busiest camera's. The reviewer's simulation (a stray uploading first in 11
+    of 16 frames) now gives no stray pick and no frame without a main upload. hands_draw_frame uses the main view (`g_main_v`).
   - **The log line that confirms it:** every 10 s with another camera, `view: another 3D camera this window: N uploads (bound
     to the scene target K, orthographic near projection L), up to X units and Y deg from the frame's main camera, first B bytes
     with P0 (main P0) -> verdict | the main camera's own uploads M (per frame); main = a later camera than the frame's first in
-    F of T frames [(the pick flipped within the window)]` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
+    F of T frames, no main upload in K [(the pick flipped within the window)]` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
     same camera a moment apart (head pose right); "partly into another render target" = an off-screen pass (then the head pose
     is wrong for it: a follow-up would leave those uploads alone); "LIGHT-LIKE" = a shadow light the light-camera rule missed
     (e.g. under 1872 B; same follow-up). The render target is the one bound when the constant buffer was uploaded.

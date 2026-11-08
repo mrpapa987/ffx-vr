@@ -126,29 +126,76 @@ inline CamDiff cam_diff(const float a[12], const float b[12]) {
     d.dang = acosf(c) * 57.29578f;
     return d;
 }
-/// Review S2: which camera of the frame is the main one. The views of the frame's real 3D eye-1 uploads get slots in order of
-/// first upload (a fifth view folds into the last slot). The main slot of a frame is the previous frame's camera with the most
-/// uploads while the scene target was bound, then the most uploads (ties: the earlier); a frame after one with no camera:
-/// slot 0. Only the main camera's uploads write the main-camera state; the window counts how often the main one was not the
-/// frame's first camera (a flip of the pick shows there).
+/// Review S2 / round 2 (R2-1): which camera of the frame is the main one, decided upload by upload (the main-camera state is
+/// written as the uploads come). The views of the frame's real 3D eye-1 uploads get slots in order of first upload (a fifth
+/// view folds into the last slot). The main camera is tracked by its view, not by its slot number (a camera that is there in
+/// some frames only, and uploads first, would shift the numbers):
+/// - with a reference (the previous frame's main view), a slot whose view lies within the tracking gate of it is main: k_pick_pos
+///   units and k_pick_deg degrees, widened by twice the main camera's recent per-frame motion (a moving camera; each frame's
+///   motion counts capped at k_pick_mot_pos / k_pick_mot_deg, so a cut widens the gate only a little); a later slot nearer the reference takes
+///   over (the nearest wins; the earlier one's uploads were drawn right, the state they wrote is overwritten);
+/// - until one does (a cut moves every camera; the first frame has no reference), the previous frame's busiest slot (the most
+///   uploads into the scene target, then the most uploads; ties: the earlier) is main from its second upload of the frame on,
+///   or else the first slot to reach k_pick_busy uploads this frame (a one-upload stray never qualifies);
+/// The next frame's reference is the gate-picked main slot's view, else the busiest slot's (so a stray picked by a fallback,
+/// or first in the very first frame, never becomes the reference). The window counts frames with
+/// a later camera than the first as main, and frames with no main upload.
 constexpr int k_cams = 4;
+constexpr uint32_t k_pick_busy = 8;
+constexpr float k_pick_pos = 4.f, k_pick_deg = 4.f, k_pick_mot_pos = 25.f, k_pick_mot_deg = 10.f;
 struct MainPick {
     float v[k_cams][12] = {}; uint32_t n[k_cams] = {}, scene[k_cams] = {}; int k = 0;
-    int main = 0;                      // this frame's main slot
-    uint32_t frames = 0, later = 0;    // frames started, of them with a later camera as main (the window: the caller resets)
-    void new_frame() {
+    int main = -1;                     // this frame's main slot (-1: none yet)
+    bool by_gate = false; float main_d = 0.f;   // ... picked by the tracking gate, and its distance score
+    int fallback = 0;                  // the previous frame's busiest slot
+    float ref[12] = {}; bool ref_ok = false;   // the previous frame's main view
+    float mot_pos = 0.f, mot_deg = 0.f;        // the main camera's recent per-frame motion (decaying maximum)
+    bool open = false;                         // a frame is in progress
+    uint32_t frames = 0, later = 0, none = 0;  // frames closed, of them with a later camera as main / with no main upload (the window: the caller resets)
+    int busiest() const {
         int best = 0;
         for (int i = 1; i < k; ++i) if (scene[i] > scene[best] || (scene[i] == scene[best] && n[i] > n[best])) best = i;
-        main = k > 0 ? best : 0;
-        frames++; if (main != 0) later++;
-        k = 0; for (int i = 0; i < k_cams; ++i) { n[i] = 0; scene[i] = 0; }
+        return best;
     }
-    /// One real 3D eye-1 upload of this frame: its slot.
+    /// Within the gate: true, and *score = the distance (units, plus a unit a degree) for the nearest-wins rule.
+    bool near_ref(const float vv[12], float* score) const {
+        const CamDiff d = cam_diff(ref, vv);
+        *score = d.dpos + d.dang;
+        return d.dpos <= k_pick_pos + 2.f * mot_pos && d.dang <= k_pick_deg + 2.f * mot_deg;
+    }
+    void new_frame() {
+        if (open) {   // close the previous frame
+            frames++;
+            if (main < 0) none++; else if (main != 0) later++;
+            if (k > 0) {
+                const int r = main >= 0 && by_gate ? main : busiest();   // a fallback pick is no reference: the busiest camera is
+                if (ref_ok && main >= 0) {
+                    const CamDiff d = cam_diff(ref, v[r]);
+                    const float dp = d.dpos < k_pick_mot_pos ? d.dpos : k_pick_mot_pos, da = d.dang < k_pick_mot_deg ? d.dang : k_pick_mot_deg;
+                    mot_pos = dp > 0.8f * mot_pos ? dp : 0.8f * mot_pos;
+                    mot_deg = da > 0.8f * mot_deg ? da : 0.8f * mot_deg;
+                }
+                else { mot_pos = 0.f; mot_deg = 0.f; }
+                for (int j = 0; j < 12; ++j) ref[j] = v[r][j];
+                ref_ok = true; fallback = busiest();
+            }
+            else { ref_ok = false; fallback = 0; }
+        }
+        open = true;
+        main = -1; by_gate = false; main_d = 0.f; k = 0; for (int i = 0; i < k_cams; ++i) { n[i] = 0; scene[i] = 0; }
+    }
+    /// One real 3D eye-1 upload of this frame: its slot (it may make that slot the main one; compare with `main` after the call).
     int note(const float vv[12], bool scene_rt) {
         int s = -1;
         for (int i = 0; i < k && s < 0; ++i) { bool eq = true; for (int j = 0; j < 12 && eq; ++j) eq = v[i][j] == vv[j]; if (eq) s = i; }
         if (s < 0) { if (k < k_cams) { s = k++; for (int j = 0; j < 12; ++j) v[s][j] = vv[j]; } else s = k_cams - 1; }
         n[s]++; if (scene_rt) scene[s]++;
+        float d = 0.f;
+        if (main < 0) {
+            if (ref_ok && near_ref(v[s], &d)) { main = s; by_gate = true; main_d = d; }
+            else if ((s == fallback && n[s] >= 2) || n[s] >= k_pick_busy) main = s;   // no gate match (yet): the busiest
+        }
+        else if (n[s] == 1 && s != main && ref_ok && near_ref(v[s], &d) && (!by_gate || d < main_d)) { main = s; by_gate = true; main_d = d; }   // nearer: takes over
         return s;
     }
 };

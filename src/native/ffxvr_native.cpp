@@ -1454,7 +1454,7 @@ uint32_t g_view_ticks = 0, g_view_uploads = 0, g_view_othercam = 0, g_view_early
 // line below says what the other camera is (how far from the main one, which target it drew into).
 // Review S1 / S2: build_override_view writes the main-camera state (the stick heading g_yaw_cam / g_move_delta, the hands' base
 // g_hb_*, the first-person heading latch) only when g_ov_publish is set: by write_camera for an eye-1 upload of the frame's
-// main camera (rnd::MainPick: the previous frame's camera with the most uploads into the scene target, then the most uploads),
+// main camera (rnd::MainPick: the view nearest the previous frame's main view, else the previous frame's busiest camera),
 // and by hands_draw_frame for the main view. ffxvr_project, the markers and eye 2 only read.
 bool g_ov_publish = false;             // build_override_view: this call may write the main-camera state
 rnd::MainPick g_main_pick;             // the frame's cameras and its main one
@@ -2478,7 +2478,8 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); g_main_pick.new_frame(); }
         if (g_view_tick_frame == g_frames && real3d) {   // fix-render (review S2): which camera of the frame this is, and whether it is the main one
             const bool scene_rt = g_cur_rtv0_tex != nullptr && (g_cur_rtv0_tex == g_scene_tex || g_cur_rtv0_tex == g_scene_live_tex);
-            if (g_main_pick.note(v, scene_rt) == g_main_pick.main) { memcpy(g_main_v, v, sizeof(g_main_v)); g_main_v_frame = g_frames; g_main_p0 = mp[0]; g_other_cam.main_n++; }
+            const int slot = g_main_pick.note(v, scene_rt);   // (may decide the frame's main slot: compared after the call)
+            if (slot == g_main_pick.main) { memcpy(g_main_v, v, sizeof(g_main_v)); g_main_v_frame = g_frames; g_main_p0 = mp[0]; g_other_cam.main_n++; }
             else {
                 other = true;   // this camera's view gets the head pose; the frame's main-camera state stays the main camera's
                 g_view_othercam++;
@@ -7324,16 +7325,16 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
                 diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u; eye jumps %u (blinks %u, extended %u, held back %u)", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early,
                       g_ej_10s[0], g_ej_10s[1], g_ej_10s[2], g_ej_10s[3]);
-            if (g_other_cam.n != 0 || g_main_pick.later != 0) {   // fix-render (behaviour G): what the other camera is, whenever there is one (not verbose-only; 120 a session)
+            if (g_other_cam.n != 0 || g_main_pick.later != 0 || g_main_pick.none != 0) {   // fix-render (behaviour G): what the other camera is, whenever there is one (not verbose-only; 120 a session)
                 static int lines = 0;
                 if (lines++ < 120)
                     diag("view: another 3D camera this window: %u uploads (bound to the scene target %u, orthographic near projection %u), up to %.1f units and %.1f deg from the frame's main camera, first %u B with P0 %.3f (main %.3f) -> %s | "
-                         "the main camera's own uploads %u (%.1f a frame); main = a later camera than the frame's first in %u of %u frames%s | the other camera got the head pose relative to its own view; the main camera's state (stick heading, hands base) is the main camera's",
+                         "the main camera's own uploads %u (%.1f a frame); main = a later camera than the frame's first in %u of %u frames, no main upload in %u%s | the other camera got the head pose relative to its own view; the main camera's state (stick heading, hands base) is the main camera's",
                          g_other_cam.n, g_other_cam.into_scene, g_other_cam.ortho_near, g_other_cam.dpos_max, g_other_cam.dang_max, g_other_cam.size0, g_other_cam.p0, g_other_cam.p0_main, g_other_cam.verdict(),
-                         g_other_cam.main_n, g_main_pick.frames ? g_other_cam.main_n / static_cast<float>(g_main_pick.frames) : 0.f, g_main_pick.later, g_main_pick.frames,
+                         g_other_cam.main_n, g_main_pick.frames ? g_other_cam.main_n / static_cast<float>(g_main_pick.frames) : 0.f, g_main_pick.later, g_main_pick.frames, g_main_pick.none,
                          g_main_pick.later != 0 && g_main_pick.later != g_main_pick.frames ? " (the pick flipped within the window)" : "");
             }
-            g_other_cam = rnd::OtherCam(); g_main_pick.frames = g_main_pick.later = 0;
+            g_other_cam = rnd::OtherCam(); g_main_pick.frames = g_main_pick.later = g_main_pick.none = 0;
             g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0; g_ej_10s[0] = g_ej_10s[1] = g_ej_10s[2] = g_ej_10s[3] = 0;
         }
     }
