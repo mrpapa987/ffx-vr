@@ -5596,6 +5596,29 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   0.8 m/s, fall, spin and fade (450 ms), with sparks and a bright line along the cut; they never move toward the eyes (the
   near-eye fade still applies). Nothing is drawn nearer the eyes than the plate. The look is this mod's own: no game assets,
   no console colour scheme.
+- **Contrast** (the owner's second test, 8 Nov 2026: "an improvement"; then more contrast, bolder and brighter symbols). The
+  plate's face is near-black (alpha 0.92) inside a thick bright rim in the plate's colour (arrows cyan, A / B / X / Y amber,
+  L1 / R1 violet; 0.36 of the radius, twice the first build's) with a soft glow ring outside it (to 1.22x); the dark halo stays
+  behind. The symbol is the brightest thing in view: near-white tinted toward the plate's colour, full alpha, strokes 1.6x the
+  first build's, each symbol scaled as large as fits inside the rim (its extent measured once), over a slightly larger, dimmer copy
+  of the same strokes in the plate's colour as a glow. The chevrons take the symbol's tint, thicker (0.08 of the radius), bright
+  for longer in their loop. The preview is brighter (0.65) with the same look, still small and dimmer. The cut halves have the
+  plate's look (a dark face, bright coloured edges). The marker pass blends straight alpha only (no additive or premultiplied
+  output), so the glows are dim layers drawn under what they light. Worst frame (any symbol and preview, a deflect, six cuts
+  with flash rings, both blades): 3150 of the 4608 vertices.
+- **More time** (`od_targets_time`, F8 "Bushido time (x, strike the targets)", 1-3, default 1). The game's countdown (our exe):
+  each logic frame while the timer word 0x133F77C is 2, 0x891AC0 adds 1.0 to the f32 frame count 0x133F788 and recomputes the
+  seconds left 0x133F790 = total 0x133F78C - count / 30 (25 in the 50 Hz mode), clamped at 0; Auron's state 4 (0x890FE5)
+  then goes to 7 when the seconds left are not above 0. The seconds left are derived every frame (a write to them would be
+  overwritten before the test), so the lever is the frame count: each Present with a fresh read, in an open strike-the-targets
+  window with the timer running, the count is written back as prev + (now - prev) / mult (prev: what we wrote or saw at the last
+  such Present), so a logic frame counts 1 / mult. A count that went down (the game resets it at a window's end and a battle's
+  start) or a Present without a fresh read starts afresh with no write; x1 never writes; nothing is written in mode 1, another
+  overdrive, practice, or once the window closed (state 5 / 7, the battle over, the headset off or the gate past its grace end
+  the round). The only other writers of the count are that reset (0x897F00) and the battle's start (0x89B780); its only reader
+  is the tick itself. The game compares the count after its own +1, before our write, so a window is up to mult - 1 frames
+  short of total x mult (67 ms at x3). The bar under the plate shows the stretched seconds; practice's bar is 4 s x mult; the
+  window line logs `time xM (N writes)`. This is the mod's first write into the game's data (one f32 in .data, guarded).
 - **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 15 cm sphere at the plate; 1.2 m/s
   at the contact. Only the current plate can be cut (no lanes, nothing ahead of time). An arrow is judged on the stroke's path
   in the plate's plane over the pass (at least 7 cm of it, from the first contact sample or the last turn back), which must lie
@@ -5632,8 +5655,8 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 - **Practice targets** (F8, under the overdrive gesture rows): any time with the headset's 3D view and no overdrive window open,
   outside battle too: a random 3-8 symbols (or "Replay last Bushido": the last sequence seen this session), a 4 s bar, the full
   test and visuals, nothing sent. It ends with `practice: 8 of 8 in 2.31 s (first 0.57 s, then 0.25 s an input; deflects 2)` in
-  F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate) (ini
-  `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`; the first build's `od_targets_dist` /
+  F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate), Bushido
+  time (ini `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`, `od_targets_time`; the first build's `od_targets_dist` /
   `od_targets_height`, defaults 0.6 / -0.2, are read and ignored so the new 0.5 / -0.3 apply; one log line says so).
 - **Drawing:** the plate, preview, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn

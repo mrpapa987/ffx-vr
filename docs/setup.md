@@ -221,7 +221,8 @@ member's view (battle), left grip + left stick click = reset the view, both stic
 game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
 gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (cut the
 big plate in front of you with either hand: an arrow along its sliding chevrons, a letter or L / R any way). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
-and set the blade pitch, target distance, target height and target size first.
+and set the blade pitch, target distance, target height and target size first; "Bushido time" (1-3x) slows the game's input timer
+while the targets window is open, if the time is too short.
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old

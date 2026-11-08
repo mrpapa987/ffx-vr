@@ -28,7 +28,8 @@ namespace FFXVR;
 // ini: od_gestures (1), od_gest_lulu (1), od_gest_tidus_swing (0; the old key od_gest_tidus, saved as 1 by the first build,
 // is ignored so the new default reaches every ini), od_gest_auron (0 / 1 / 2, default 0; an older ini's bool 1 / true reads as 1,
 // slashes and punches, as before), od_targets_blade_pitch (-45..45 deg; 0), od_targets_dist2 (0.35-0.9 m; 0.5), od_targets_height2
-// (-0.5..0 m; -0.3), od_targets_size (0.6-1.6, a multiplier on the 24 cm plate; 1); the first build's od_targets_dist / _height
+// (-0.5..0 m; -0.3), od_targets_size (0.6-1.6, a multiplier on the 24 cm plate; 1), od_targets_time (1-3; 1: the game's Bushido
+// countdown runs that many times slower in a strike-the-targets window, practice's bar too); the first build's od_targets_dist / _height
 // (0.6 / -0.2 for its row of plates) are ignored so the one-target defaults reach every ini; od_gest_haptics (1), od_circle_cm (1-20; 4),
 // od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0), od_visuals (1) and od_visual_size (0.5-2; 1): the
 // overdrive visuals (native ffxvr_odvis.h: trails, bursts, Lulu's ring and spin count, Tidus's blade and bar, Auron's input row),
@@ -38,13 +39,14 @@ public sealed unsafe partial class FFXVRModule {
     private int   _od_gest_auron = 0;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52)
     private bool _od_tgt_old_logged;                                                                                     // R5-N2: the old keys' one line
     private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.50f, _od_tgt_height = -0.30f, _od_tgt_size = 1f;   // ini od_targets_blade_pitch / _dist2 / _height2 / _size
+    private float _od_tgt_time = 1f;                                                                      // ini od_targets_time (the countdown's stretch)
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
     private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
-    private delegate* unmanaged[Cdecl]<float, float, float, float, void> _fn_odt_set; // ABI 52: strike the targets (pitch, distance, height, size)
+    private delegate* unmanaged[Cdecl]<float, float, float, float, float, void> _fn_odt_set; // ABI 52: strike the targets (pitch, distance, height, size, time)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odt_practice;                   // ABI 52: Practice targets (1 random, 2 the last Bushido)
     private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
     private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
@@ -55,7 +57,7 @@ public sealed unsafe partial class FFXVRModule {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
         _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
-        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, void>)req("ffxvr_odt_set");   // ABI 52
+        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, void>)req("ffxvr_odt_set");   // ABI 52 (+ time, unshipped)
         _fn_odt_practice = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_practice");
     }
     private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; }
@@ -81,6 +83,7 @@ public sealed unsafe partial class FFXVRModule {
             case "od_targets_dist2":   pf(k, v, ref _od_tgt_dist, 0.35f, 0.9f); return true;
             case "od_targets_height2": pf(k, v, ref _od_tgt_height, -0.5f, 0f); return true;
             case "od_targets_size":   pf(k, v, ref _od_tgt_size, 0.6f, 1.6f); return true;
+            case "od_targets_time":   pf(k, v, ref _od_tgt_time, 1f, 3f); return true;
             case "od_gest_haptics": pb(k, v, ref _od_gest_haptics); return true;
             case "od_circle_cm":    pf(k, v, ref _od_circle_cm, 1f, 20f); return true;
             case "od_slash_speed":  pf(k, v, ref _od_slash_speed, 0.8f, 5f); return true;
@@ -101,6 +104,7 @@ public sealed unsafe partial class FFXVRModule {
             $"od_targets_dist2={_od_tgt_dist.ToString("0.0#", ci)}\n" +
             $"od_targets_height2={_od_tgt_height.ToString("0.0#", ci)}\n" +
             $"od_targets_size={_od_tgt_size.ToString("0.0#", ci)}\n" +
+            $"od_targets_time={_od_tgt_time.ToString("0.0#", ci)}\n" +
             $"od_gest_haptics={(_od_gest_haptics ? 1 : 0)}\n" +
             $"od_circle_cm={_od_circle_cm.ToString("0.#", ci)}\n" +
             $"od_slash_speed={_od_slash_speed.ToString("0.##", ci)}\n" +
@@ -114,7 +118,7 @@ public sealed unsafe partial class FFXVRModule {
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
         if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size);
-        if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size);
+        if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time);
         odg_always_tick();
     }
     /// <summary>The test aid (design 4.3 step 6): Btl + 0x28 (debug flags) + 0x14 = VA 0x112A90C, the game's own "overdrive always
@@ -187,6 +191,8 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target distance (m)##odt", ref _od_tgt_dist, 0.35f, 0.9f, "%.2f");
         ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target height (m)##odt", ref _od_tgt_height, -0.5f, 0f, "%.2f");
         ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target size##odt", ref _od_tgt_size, 0.6f, 1.6f, "%.1f");
+        ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("Bushido time (x, strike the targets)##odt", ref _od_tgt_time, 1f, 3f, "%.1f");
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("More time for Bushido in strike the targets: the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. Nothing changes for the slashes and punches or any other overdrive.");
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>

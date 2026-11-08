@@ -92,6 +92,7 @@ struct Cfg {
     float size = 1.f;          // 0.6..1.6: a multiplier on the 24 cm plate (the hit sphere and the preview scale with it)
     float hit_cm = 15.f, dir_deg = 65.f, speed = 1.2f;     // hit sphere at size 1, arrow tolerance, contact speed (m/s)
     bool preview = true, shoulder_hand = false, body = true, deflect_buzz = true, haptics = true;
+    float time_mult = 1.f;     // od_targets_time, 1..3: the game's countdown runs this many times slower in a targets window (Stretch); practice's bar too
 };
 struct Geo {
     bool fist = false;
@@ -164,6 +165,13 @@ inline Col sym_col(int s) {
     return col(0.62f, 0.62f, 0.64f, 1.f);
 }
 inline Col ink(float a) { return col(0.04f, 0.04f, 0.06f, a); }
+/// The symbol's colour (contrast pass, the owner's second test): near-white tinted toward the plate's colour, the brightest thing
+/// in view on the near-black face.
+inline Col bright(Col k, float a) { return col(0.80f + 0.20f * k.r, 0.80f + 0.20f * k.g, 0.80f + 0.20f * k.b, a); }
+/// The contrast pass's proportions (of the plate's radius): the coloured rim from k_rim_in to 1 (twice the first build's 0.18),
+/// its soft outer glow to k_glow_out; the symbol's stroke weight (1.6x the first build's 1.35), each symbol scaled as large as fits
+/// inside the rim (k_sym_fit of its inner edge: Runner::sym_scale); the face's alpha.
+constexpr float k_rim_in = 0.64f, k_glow_out = 1.22f, k_sym_fit = 0.97f, k_sym_w = 1.35f * 1.6f, k_face_a = 0.92f;
 
 // -- the blade and the swept test ----------------------------------------------------------------------------------------------
 /// A blade pose: the grip p, the blade's direction d (the grip's -Z tilted by the pitch about the grip's X), the spine side u.
@@ -320,6 +328,7 @@ struct In {
     double phys_age = 1e9;                                      // s since the player last newly pressed a game button (k_cancel_mask)
     uint32_t phys_n = 0;                                        // ... how many such presses so far (a new value: a new press to settle)
     bool read_now = true;                                       // the od block was read at this Present (a fresh read of the game's state)
+    bool elapsed_ok = false; float elapsed = 0.f;               // the countdown's frame count f32 0x133F788, read at this Present (Stretch)
 };
 struct Hit { int i = -1, hand = 0; float speed = 0.f, deg = 0.f; double t = 0.0; bool pre = false; };
 struct TickOut {
@@ -328,6 +337,7 @@ struct TickOut {
     bool hold = false;                                          // a round is on: triggers held back, the grips do not grab, no quick squeeze
     int nh = 0; odg::Haptic hap[8];
     int nhit = 0; Hit hit[8]; int ndefl = 0; int defl[8] = {}, defl_hand[8] = {};
+    bool time_write = false; float time_val = 0.f;              // write time_val to the countdown's frame count (f32 0x133F788) now (Stretch)
     void pulse(int hand, float amp, float sec) { if (nh < 8) { hap[nh].hand = hand; hap[nh].amp = amp; hap[nh].sec = sec; nh++; } }
 };
 struct Tgt {
@@ -372,6 +382,7 @@ struct Stats {
     int n = 0, struck = 0, hits[2] = { 0, 0 }, pre = 0, sweeps = 0, deflects = 0, defl_dropped = 0, rewinds = 0, snaps = 0, jumps = 0;
     double first = -1.0, last = -1.0, done = -1.0; uint32_t presses = 0, resends = 0, cancels = 0; int end = E_NONE; bool practice = false; int stop_why = 0;
     uint32_t verts_max = 0, dropped = 0;
+    float mult = 1.f; uint32_t time_writes = 0;                 // the countdown's multiplier for the round; the frame-count writes made
 };
 struct Round {
     bool on = false, practice = false, stopped = false; int end = E_NONE; double t_open = 0.0, t_end = -1e300;
@@ -379,6 +390,7 @@ struct Round {
     Frame fr; Geo g; uint32_t epoch = 0; float left0 = 4.f, left_now = 4.f; int prog_shown = 0;
     int cur = -1; double cur_t = 0.0;                           // the current target (the lowest neither struck nor done) and when it began to materialise
     int flash_i = -1; double flash_t = -1e300;                  // the pip whose progress just registered, and when (the confirmation flash)
+    float mult = 1.f;                                           // od_targets_time at the open (the countdown's stretch; practice's bar)
 };
 
 /// Splits the convex polygon (x, y; n points) by the line through o along d: side >= 0 -> half 0, <= 0 -> half 1 (both
@@ -395,9 +407,32 @@ inline int clip_half(const float* x, const float* y, int n, float ox, float oy, 
     return m;
 }
 
+/// More time for Bushido (od_targets_time; the owner's second test). The game's countdown (disassembly, our exe): each logic frame
+/// while the timer word 0x133F77C == 2, 0x891AC0 adds 1.0 to the f32 frame count 0x133F788 and recomputes the seconds left
+/// 0x133F790 = total 0x133F78C - count / 30 (25 in the 50 Hz mode), clamped at 0; Auron's state 4 (0x890FE5) then goes to state 7
+/// when the seconds left are not above 0. The seconds left are derived every frame, so the lever is the frame count: each Present
+/// with a fresh read, while a strike-the-targets window is open and the timer runs, the count is written back as
+/// prev + (now - prev) / mult (prev: what we wrote or saw at the last such Present), so a frame counts 1 / mult. A count that went
+/// down (the game's reset at a window's end or a battle's start: a new window) or a Present without a fresh read starts afresh with
+/// no write; mult 1 never writes. The game's logic and the Present run on one thread, so the write lands between logic frames.
+struct Stretch {
+    bool have = false; float prev = 0.f;
+    void reset() { have = false; }
+    /// on: the window is open and the count was read now; returns true with *out when a write is due.
+    bool step(bool on, float now, float mult, float* out) {
+        if (!on || !(mult > 1.0001f) || !std::isfinite(now) || now < 0.f) { have = false; return false; }
+        if (!have || now < prev) { have = true; prev = now; return false; }   // first sight, or the count went back (a new window)
+        const float w = prev + (now - prev) / mult;
+        prev = w;
+        if (!(w < now)) return false;                                           // no logic frame since: nothing to pull back
+        *out = w; return true;
+    }
+};
+
 struct Runner {
     Cfg cfg; Round r; HandTrack ht[2]; Inject inj; Stats st, last_st; Cut cut[k_cut_n]; int cut_next = 0;
     uint32_t rounds = 0; double hap_t[2] = { -1.0, -1.0 };
+    Stretch tm;                                                  // the countdown's stretch (od_targets_time)
     uint32_t phys_seen = 0; int phys_frames = 1000; double phys_note_t = -1e300;   // the settle in frames (review S2); when the last new press was noticed
     double gate_off_t = -1.0;                                    // the injection gate off since (review S1); -1 on
     /// The player's new presses: a new count starts the frame count (the noticing Present itself does not count).
@@ -442,9 +477,11 @@ struct Runner {
         latch_now(in);
         for (int i = 0; i < r.n; ++i) { Tgt& g = r.tg[i]; g = Tgt{}; g.val = seq[i]; r.seq[i] = seq[i]; g.sym = odv::glyph_of(m, seq[i]); }
         update_current(in.t);   // the first target materialises at once (no fly-in)
-        r.left0 = practice ? static_cast<float>(k_practice_s) : (in.left > 0.2f ? in.left : 4.f); r.left_now = r.left0;
+        r.mult = clampf(fin(cfg.time_mult, 1.f), 1.f, 3.f);
+        r.left0 = practice ? static_cast<float>(k_practice_s) * r.mult : (in.left > 0.2f ? in.left : 4.f) * r.mult; r.left_now = r.left0;   // real seconds (the stretched count)
+        tm.reset();
         inj.reset(); ht[0].clear_round(); ht[1].clear_round();
-        st = Stats{}; st.n = r.n; st.practice = practice; rounds++;
+        st = Stats{}; st.n = r.n; st.practice = practice; st.mult = r.mult; rounds++;
         hap_t[0] = hap_t[1] = -1.0;
     }
     void latch_now(const In& in) {
@@ -459,7 +496,7 @@ struct Runner {
     }
     void finish(int kind, double t, TickOut& o) {
         if (!r.on) return;
-        r.on = false; r.end = kind; r.t_end = t; inj.inflight = -1;
+        r.on = false; r.end = kind; r.t_end = t; inj.inflight = -1; tm.reset();   // (no countdown write after the window closed)
         st.end = kind; st.presses = inj.presses; st.resends = inj.resends; st.cancels = inj.cancels; st.stop_why = r.stopped ? inj.stop_why : 0;
         st.verts_max = verts_max; st.dropped = verts_dropped; verts_max = 0; verts_dropped = 0;
         last_st = st;
@@ -636,6 +673,11 @@ struct Runner {
         if (r.on && in.space_epoch != r.epoch) { r.epoch = in.space_epoch; latch_now(in); }   // a recentre: the room moved
         r.g.pitch = geo(cfg).pitch;   // the pitch slider is live (practice is where it is set)
         if (r.on && !r.practice) inj_observe(in, o);
+        {   // the countdown's stretch: only in an open strike-the-targets window of Auron's with the timer running and the count read now
+            const bool on = r.on && !r.practice && in.targets_mode && in.win == odg::OD_AURON && in.auron == 4 && in.timer == 2 && in.elapsed_ok;
+            float w = 0.f;
+            if (tm.step(on, in.elapsed, r.mult, &w)) { o.time_write = true; o.time_val = w; st.time_writes++; }
+        }
         if (r.on) update_current(t);
         if (in.sample_new) {
             int nh[2] = { 0, 0 };
@@ -645,16 +687,16 @@ struct Runner {
         if (r.on) update_current(t);
         for (int h = 0; h < 2; ++h) settle_deflect(h, t, o);
         if (r.on && !r.practice) {
-            r.left_now = in.left;
+            r.left_now = in.left * r.mult;   // the game's seconds left run 1 / mult as fast: real seconds
             const uint16_t b = inj_decide(in, o);
             if (b) { o.press = b; o.press_idx = inj.inflight; const int hh = inj.inflight >= 0 ? r.tg[inj.inflight].hand : 1; o.press_hand = hh < 0 ? 1 : hh; }
         }
         if (r.on && r.practice) {
             int s = 0; for (int i = 0; i < r.n; ++i) if (r.tg[i].struck) s++;
             if (s > r.prog_shown && s >= 1) { r.flash_i = s - 1; r.flash_t = t; }   // practice's pips follow the strikes
-            r.prog_shown = s; r.left_now = static_cast<float>(k_practice_s - (t - r.t_open));
+            r.prog_shown = s; r.left_now = static_cast<float>(k_practice_s * r.mult - (t - r.t_open));
             if (s == r.n) finish(E_SUCCESS, t, o);
-            else if (t - r.t_open >= k_practice_s) finish(E_TIMEOUT, t, o);
+            else if (t - r.t_open >= k_practice_s * r.mult) finish(E_TIMEOUT, t, o);
         }
         for (int j = 0; j < 2; ++j) if (hap_t[j] > 0.0 && t >= hap_t[j]) { o.pulse(0, 0.5f, 0.03f); o.pulse(1, 0.5f, 0.03f); hap_t[j] = -1.0; }
         o.hold = r.on;
@@ -665,8 +707,9 @@ struct Runner {
         s[0] = 0; int k = 0;
         if (x.practice) {
             if (x.end == E_ABORTED) return odg::fmt_append(s, n, k, "practice: interrupted (an overdrive window opened) after %d of %d", x.struck, x.n);
-            const double total = x.end == E_SUCCESS ? x.last : k_practice_s;
+            const double total = x.end == E_SUCCESS ? x.last : k_practice_s * x.mult;
             k = odg::fmt_append(s, n, k, "practice: %d of %d in %.2f s%s", x.struck, x.n, total, x.end == E_SUCCESS ? "" : ", time out");
+            if (x.mult > 1.0001f) k = odg::fmt_append(s, n, k, " (time x%.2f)", static_cast<double>(x.mult));
             if (x.struck >= 1) {
                 k = odg::fmt_append(s, n, k, " (first %.2f s", x.first);
                 if (x.struck >= 2) k = odg::fmt_append(s, n, k, ", then %.2f s an input", (x.last - x.first) / (x.struck - 1));
@@ -681,6 +724,7 @@ struct Runner {
         k = odg::fmt_append(s, n, k, "; presses %u (resends %u, cancelled by a button %u), deflects %d (dropped as part of a cut %d), rewinds %d, snaps dropped %d, jumps skipped %d",
                             x.presses, x.resends, x.cancels, x.deflects, x.defl_dropped, x.rewinds, x.snaps, x.jumps);
         if (x.stop_why) k = odg::fmt_append(s, n, k, "; STOPPED injecting (%s): buttons only", x.stop_why == 1 ? "a reset right after our press: the map or a racing button" : "the game missed a press twice");
+        k = odg::fmt_append(s, n, k, "; time x%.2f (%u writes)", static_cast<double>(x.mult), x.time_writes);
         k = odg::fmt_append(s, n, k, "; verts max %u, dropped %u; closed: %s", x.verts_max, x.dropped, k_end_name[x.end < 0 || x.end >= E_N ? 0 : x.end]);
         return k;
     }
@@ -735,8 +779,9 @@ struct Runner {
         const float ax = x0 - ux, ay = y0 - uy, bx = x1 + ux, by = y1 + uy, px = -uy, py = ux;
         o.quad(c + R * (ax + px) + U * (ay + py), k, c + R * (bx + px) + U * (by + py), k, c + R * (bx - px) + U * (by - py), k, c + R * (ax - px) + U * (ay - py), k);
     }
-    /// The symbol (units of the plate's radius s): a soft shadow under the core; wm: the stroke weight (thick on the big plate).
-    static void symbol(Out& o, int sym, V3 c, V3 R, V3 U, float s, Col k, float wm = 1.f) {
+    /// The symbol (units of s): a slightly larger, dimmer copy of the same strokes (gk; its alpha 0 for none) under the core k;
+    /// wm: the stroke weight.
+    static void symbol(Out& o, int sym, V3 c, V3 R, V3 U, float s, Col k, float wm = 1.f, Col gk = col(0.f, 0.f, 0.f, 0.f)) {
         static const float A[][4] = { { -0.36f, -0.46f, 0.f, 0.46f }, { 0.f, 0.46f, 0.36f, -0.46f }, { -0.19f, -0.07f, 0.19f, -0.07f } };
         static const float X[][4] = { { -0.34f, -0.46f, 0.34f, 0.46f }, { -0.34f, 0.46f, 0.34f, -0.46f } };
         static const float Y[][4] = { { -0.34f, 0.46f, 0.f, 0.f }, { 0.34f, 0.46f, 0.f, 0.f }, { 0.f, 0.f, 0.f, -0.46f } };
@@ -746,19 +791,20 @@ struct Runner {
         static const float L[][4] = { { -0.22f, 0.46f, -0.22f, -0.46f }, { -0.22f, -0.46f, 0.28f, -0.46f } };
         static const float Rr[][4] = { { -0.26f, -0.46f, -0.26f, 0.46f }, { -0.26f, 0.46f, 0.10f, 0.46f }, { 0.10f, 0.46f, 0.26f, 0.31f }, { 0.26f, 0.31f, 0.26f, 0.15f },
                                        { 0.26f, 0.15f, 0.10f, 0.f }, { 0.10f, 0.f, -0.26f, 0.f }, { 0.f, 0.f, 0.30f, -0.46f } };
-        const Col glow = col(k.r, k.g, k.b, 0.22f * k.a);
+        const bool gl = gk.a > 0.f; const Col glow = gk;
         auto strokes = [&](const float (*t)[4], int n, float sc, float ox, float oy, float w) {
-            for (int pass = 0; pass < 2; ++pass)
-                for (int i = 0; i < n; ++i) stroke(o, c, R, U, (ox + t[i][0] * sc) * s, (oy + t[i][1] * sc) * s, (ox + t[i][2] * sc) * s, (oy + t[i][3] * sc) * s, (pass ? w * wm : 1.8f * w * wm) * s, pass ? k : glow);
+            for (int pass = gl ? 0 : 1; pass < 2; ++pass)
+                for (int i = 0; i < n; ++i) stroke(o, c, R, U, (ox + t[i][0] * sc) * s, (oy + t[i][1] * sc) * s, (ox + t[i][2] * sc) * s, (oy + t[i][3] * sc) * s, (pass ? w * wm : 1.6f * w * wm) * s, pass ? k : glow);
         };
-        if (sym_arrow(sym)) {
+        if (sym_arrow(sym)) {   // a bold arrow: the head widens with the shaft (never under 0.42)
             V3 a = U, b = R;
             if (sym == odv::G_RIGHT) { a = R; b = U * -1.f; } else if (sym == odv::G_DOWN) { a = U * -1.f; b = R * -1.f; } else if (sym == odv::G_LEFT) { a = R * -1.f; b = U; }
-            for (int pass = 0; pass < 2; ++pass) {
-                const float g = pass ? 1.f : 1.15f; const Col cc = pass ? k : glow;
-                o.tri(c + a * (0.62f * s * g), cc, c + a * (0.05f * s) - b * (0.42f * s * g), cc, c + a * (0.05f * s) + b * (0.42f * s * g), cc);
-                const float hw = 0.13f * wm * s * (pass ? 1.f : 1.5f);
-                o.quad(c + a * (0.08f * s) - b * hw, cc, c + a * (0.08f * s) + b * hw, cc, c - a * (0.55f * s) + b * hw, cc, c - a * (0.55f * s) - b * hw, cc);
+            const float hw0 = 0.13f * wm, hb = (std::max)(0.42f, 2.f * hw0);
+            for (int pass = gl ? 0 : 1; pass < 2; ++pass) {
+                const float g = pass ? 1.f : 1.12f; const Col cc = pass ? k : glow;
+                o.tri(c + a * (0.62f * s * g), cc, c + a * (0.05f * s) - b * (hb * s * g), cc, c + a * (0.05f * s) + b * (hb * s * g), cc);
+                const float hw = hw0 * s * (pass ? 1.f : 1.45f);
+                o.quad(c + a * (0.08f * s) - b * hw, cc, c + a * (0.08f * s) + b * hw, cc, c - a * (0.55f * s * g) + b * hw, cc, c - a * (0.55f * s * g) - b * hw, cc);
             }
             return;
         }
@@ -771,7 +817,8 @@ struct Runner {
                 const bool lf = sym == odv::G_L1;
                 odv::rect(o, c, R, U, -0.62f * s, -0.30f * s, 0.62f * s, 0.30f * s, col(k.r, k.g, k.b, 0.28f * k.a));
                 const float tab[][4] = { { -0.62f, -0.30f, 0.62f, -0.30f }, { 0.62f, -0.30f, 0.62f, 0.30f }, { 0.62f, 0.30f, -0.62f, 0.30f }, { -0.62f, 0.30f, -0.62f, -0.30f } };
-                for (int i = 0; i < 4; ++i) stroke(o, c, R, U, tab[i][0] * s, tab[i][1] * s, tab[i][2] * s, tab[i][3] * s, 0.08f * s, k);
+                if (gl) for (int i = 0; i < 4; ++i) stroke(o, c, R, U, tab[i][0] * s, tab[i][1] * s, tab[i][2] * s, tab[i][3] * s, 0.08f * wm * 1.6f * s, glow);
+                for (int i = 0; i < 4; ++i) stroke(o, c, R, U, tab[i][0] * s, tab[i][1] * s, tab[i][2] * s, tab[i][3] * s, 0.08f * wm * s, k);
                 odv::rect(o, c, R, U, (lf ? -0.76f : 0.62f) * s, -0.10f * s, (lf ? -0.62f : 0.76f) * s, 0.10f * s, k);
                 if (lf) strokes(L, 2, 0.5f, 0.f, 0.f, 0.11f); else strokes(Rr, 7, 0.5f, 0.f, 0.f, 0.11f);
                 return;
@@ -779,24 +826,46 @@ struct Runner {
             default: odv::arc(o, c, R, U, 0.22f * s, 0.10f * s, 0.f, odg::k_two_pi, k, 8); return;   // off the map: a ring ("use the button")
         }
     }
-    /// The bright plate: a short octagonal prism (darker sides, a thick white rim, a saturated face), front toward ax.N. rim: the rim's
-    /// colour (white; red on a deflect).
-    static void plate(Out& o, V3 c, const Axes3& ax, float rad, float th, Col face, Col rim, float alpha) {
+    /// The symbol's extent at scale 1 with the contrast pass's weight (its core's farthest vertex from the centre), per glyph,
+    /// measured once; and the scale that makes it as large as the plate allows inside the rim.
+    static float sym_extent(int sym) {
+        static float ext[odv::G_N] = {};
+        static const bool init = [] {
+            for (int gl = 0; gl < odv::G_N; ++gl) {
+                Vtx b[192]; Out o; o.v = b; o.max = 192;
+                symbol(o, gl, v3(0.f, 0.f, 0.f), v3(1.f, 0.f, 0.f), v3(0.f, 1.f, 0.f), 1.f, col(1.f, 1.f, 1.f, 1.f), k_sym_w);
+                float m = 0.f; for (int v = 0; v < o.n; ++v) m = (std::max)(m, std::sqrt(b[v].p[0] * b[v].p[0] + b[v].p[1] * b[v].p[1]));
+                ext[gl] = m > 0.05f ? m : 1.f;
+            }
+            return true;
+        }();
+        (void)init;
+        return sym >= 0 && sym < odv::G_N ? ext[sym] : 1.f;
+    }
+    static float sym_scale(int sym, float rad) { return k_sym_fit * k_rim_in * rad / sym_extent(sym); }
+    /// The plate (contrast pass): a short octagonal prism with a near-black face (k_face_a), a thick bright rim in the plate's
+    /// colour (k_rim_in .. 1 of the radius; red on a deflect) and a soft glow ring outside it (to k_glow_out), front toward ax.N.
+    /// (Alpha-blended layers: the marker pass blends straight alpha only, so the glows are dim layers drawn under what they light.)
+    static void plate(Out& o, V3 c, const Axes3& ax, float rad, float th, Col rim, float alpha) {
         V3 dir[8];
         for (int j = 0; j < 8; ++j) { const float a = (22.5f + 45.f * static_cast<float>(j)) * k_deg; dir[j] = ax.R * std::cos(a) + ax.U * std::sin(a); }
         const V3 F = ax.N * (0.5f * th), Bk = ax.N * (-0.5f * th), Fo = ax.N * (0.25f * th);
-        const float ri = 0.82f * rad;
-        for (int j = 0; j < 8; ++j) {   // the sides (behind the front: painted first)
-            const int k = (j + 1) % 8; const V3 en = norm(dir[j] + dir[k]); const float lit = 0.40f + 0.20f * dot(en, ax.U);
-            const Col sc = col(face.r * lit, face.g * lit, face.b * lit, alpha);
+        const float ri = k_rim_in * rad;
+        {   // the glow ring outside the rim (in the back face's plane, under the plate)
+            const Col gi = col(rim.r, rim.g, rim.b, 0.55f * alpha), go = col(rim.r, rim.g, rim.b, 0.f);
+            for (int j = 0; j < 8; ++j) { const int k = (j + 1) % 8; o.quad(c + Bk + dir[j] * rad, gi, c + Bk + dir[k] * rad, gi, c + Bk + dir[k] * (k_glow_out * rad), go, c + Bk + dir[j] * (k_glow_out * rad), go); }
+        }
+        for (int j = 0; j < 8; ++j) {   // the sides (behind the front: painted first): the rim's colour, darker
+            const int k = (j + 1) % 8; const V3 en = norm(dir[j] + dir[k]); const float lit = 0.45f + 0.20f * dot(en, ax.U);
+            const Col sc = col(rim.r * lit, rim.g * lit, rim.b * lit, alpha);
             o.quad(c + Bk + dir[j] * rad, sc, c + Bk + dir[k] * rad, sc, c + Fo + dir[k] * rad, sc, c + Fo + dir[j] * rad, sc);
         }
-        for (int j = 0; j < 8; ++j) {   // the rim: thick, lit a little from above
-            const int k = (j + 1) % 8; const V3 en = norm(dir[j] + dir[k]); const float lit = clampf(0.88f + 0.12f * dot(en, ax.U), 0.75f, 1.f);
-            const Col bc = col(rim.r * lit, rim.g * lit, rim.b * lit, alpha);
+        for (int j = 0; j < 8; ++j) {   // the rim: thick, bright, lit a little from above
+            const int k = (j + 1) % 8; const V3 en = norm(dir[j] + dir[k]); const float lit = clampf(0.90f + 0.10f * dot(en, ax.U), 0.8f, 1.f);
+            const Col bc = col(fminf(1.f, rim.r * lit + 0.08f), fminf(1.f, rim.g * lit + 0.08f), fminf(1.f, rim.b * lit + 0.08f), alpha);
             o.quad(c + Fo + dir[j] * rad, bc, c + Fo + dir[k] * rad, bc, c + F + dir[k] * ri, bc, c + F + dir[j] * ri, bc);
         }
-        const Col fi = col(fminf(1.f, face.r * 1.08f + 0.06f), fminf(1.f, face.g * 1.08f + 0.06f), fminf(1.f, face.b * 1.08f + 0.06f), alpha), fe = col(face.r * 0.92f, face.g * 0.92f, face.b * 0.92f, alpha);
+        const Col fi = col(0.035f + 0.05f * rim.r, 0.035f + 0.05f * rim.g, 0.04f + 0.05f * rim.b, k_face_a * alpha), fe = col(0.02f, 0.02f, 0.025f, k_face_a * alpha);   // near-black, a hint of the colour at the centre
         for (int j = 0; j < 8; ++j) { const int k = (j + 1) % 8; o.tri(c + F, fi, c + F + dir[j] * ri, fe, c + F + dir[k] * ri, fe); }
     }
     /// The soft dark halo behind a plate: alpha a out to 1.15 rad, fading to nothing at 1.4 rad.
@@ -810,7 +879,7 @@ struct Runner {
         }
     }
     /// One chevron: a V pointing along d (in the plate's plane, across b), its tip at c; dark outline under a white core.
-    static void chevron(Out& o, V3 c, V3 d, V3 b, float hw, float depth, float w, float a) {
+    static void chevron(Out& o, V3 c, V3 d, V3 b, float hw, float depth, float w, float a, Col core = col(1.f, 1.f, 1.f, 1.f)) {
         const V3 l = c - d * depth + b * hw, rr = c - d * depth - b * hw;
         auto seg = [&](V3 p0, V3 p1, float wd, Col k) {
             const V3 dir = norm(p1 - p0), side = norm(cross(dir, cross(d, b))) * (0.5f * wd);
@@ -818,7 +887,7 @@ struct Runner {
             o.quad(e0 - side, k, e1 - side, k, e1 + side, k, e0 + side, k);
         };
         seg(l, c, 1.9f * w, ink(0.75f * a)); seg(rr, c, 1.9f * w, ink(0.75f * a));
-        seg(l, c, w, col(1.f, 1.f, 1.f, a)); seg(rr, c, w, col(1.f, 1.f, 1.f, a));
+        seg(l, c, w, col(core.r, core.g, core.b, a)); seg(rr, c, w, col(core.r, core.g, core.b, a));
     }
     /// The current target: halo, guide line (arrows), plate, symbol, chevrons (arrows), all materialising and pulsing.
     void draw_current(int i, double t, float A, const In& in, Out& o) const {
@@ -831,8 +900,9 @@ struct Runner {
         const float rad = r.g.rad * sc, th = r.g.th * sc;
         const bool grey = r.stopped || (!r.on && r.end == E_TIMEOUT);
         const double da = t - g.defl_t; const bool defl = da >= 0.0 && da < k_defl_show_s;
-        const Col face = grey ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
-        const Col rim = defl ? col(1.f, 0.18f, 0.12f, 1.f) : grey ? col(0.78f, 0.78f, 0.8f, 1.f) : col(0.98f, 0.98f, 0.98f, 1.f);
+        const Col face = grey ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);   // the plate's colour (the rim, the glows, the symbol's tint)
+        const Col rim = defl ? col(1.f, 0.18f, 0.12f, 1.f) : face;
+        const Col ink_k = bright(face, al), glow_k = col(face.r, face.g, face.b, 0.45f * al);
         halo(o, C - ax.N * th, ax, rad, 0.6f * al);
         const bool arrow = sym_arrow(g.sym) && !grey;
         const V3 d = arrow_dir(g.sym, ax), b = cross(ax.N, d);
@@ -840,16 +910,16 @@ struct Runner {
             const float L = rad + k_guide_m * r.g.size;
             odv::glow_line(o, C - d * L, C + d * L, 0.0025f * r.g.size, col(1.f, 1.f, 1.f, 0.35f * al), col(1.f, 1.f, 1.f, 0.35f * al), in.eye);
         }
-        plate(o, C, ax, rad, th, face, rim, al);
+        plate(o, C, ax, rad, th, rim, al);
         const V3 F = C + ax.N * (0.5f * th + 0.0008f);
-        symbol(o, g.sym, F, ax.R, ax.U, rad, ink(al), 1.35f);
-        if (arrow) {   // three chevrons sliding along the cut, looping every 0.9 s; they swell on a deflect
+        symbol(o, g.sym, F, ax.R, ax.U, sym_scale(g.sym, rad), ink_k, k_sym_w, glow_k);
+        if (arrow) {   // three chevrons sliding along the cut, looping every 0.9 s, in the symbol's tint (thicker: 0.08 of the radius); they swell on a deflect
             const float L = rad + k_guide_m * r.g.size, big = defl ? 1.5f : 1.f;
             const float ph = static_cast<float>(std::fmod((t - r.t_open) / k_chev_period_s, 1.0));
             for (int j = 0; j < 3; ++j) {
                 float q = ph + static_cast<float>(j) / 3.f; if (q >= 1.f) q -= 1.f;
-                const float x = (-1.f + 2.f * q) * L, a = al * std::sin(3.14159265f * q);
-                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big, 0.18f * rad * big, 0.05f * rad * big, a);
+                const float env = std::sin(3.14159265f * q), x = (-1.f + 2.f * q) * L, a = al * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than the first build's plain sine
+                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big, 0.18f * rad * big, 0.08f * rad * big, a, ink_k);
             }
         }
     }
@@ -857,10 +927,11 @@ struct Runner {
     void draw_preview(int i, float A, Out& o) const {
         const Tgt& g = r.tg[i];
         const V3 P = preview_spot(); const Axes3 ax = plate_axes(r.fr, P);
-        const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.45f * A;
+        const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.65f * A;   // brighter than the first build's 0.45, still small and dimmer than the plate
+        const Col k = r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
         halo(o, P - ax.N * th, ax, rad, 0.4f * al);
-        plate(o, P, ax, rad, th, r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym), col(0.9f, 0.9f, 0.9f, 1.f), al);
-        symbol(o, g.sym, P + ax.N * (0.5f * th + 0.0005f), ax.R, ax.U, rad, ink(al), 1.2f);
+        plate(o, P, ax, rad, th, col(0.8f * k.r, 0.8f * k.g, 0.8f * k.b, 1.f), al);
+        symbol(o, g.sym, P + ax.N * (0.5f * th + 0.0005f), ax.R, ax.U, sym_scale(g.sym, rad), bright(k, 0.85f * al), k_sym_w);
     }
     void draw_fx(const In& in, Out& o) const {
         const double t = in.t;
@@ -869,13 +940,13 @@ struct Runner {
             const float af = static_cast<float>(a), k = 1.f - static_cast<float>(a / k_half_s);
             for (int s = 0; s < 2; ++s) {
                 const int m = c.hn[s]; if (m < 3) continue;
-                const Col side = col(0.45f * c.k.r, 0.45f * c.k.g, 0.45f * c.k.b, 0.9f * k), hot = col(1.f, 1.f, 1.f, k);
+                const Col side = col(0.8f * c.k.r, 0.8f * c.k.g, 0.8f * c.k.b, 0.9f * k), hot = col(1.f, 1.f, 1.f, k);   // the plate's look: bright coloured edges, a dark face
                 for (int j = 0; j < m; ++j) {
                     const int q = (j + 1) % m; const Col e = c.hcut[s][j] ? hot : side;
                     o.quad(half_v(c, s, j, af, -1.f), e, half_v(c, s, q, af, -1.f), e, half_v(c, s, q, af, 1.f), e, half_v(c, s, j, af, 1.f), e);
                 }
                 const V3 fc = half_c(c, s, af); const V3 N = rot_axis(c.ax.N, c.cd, c.tumble[s] * af);
-                const Col fi = col(0.15f + 0.8f * c.k.r, 0.15f + 0.8f * c.k.g, 0.15f + 0.8f * c.k.b, 0.95f * k), fe = col(0.85f * c.k.r, 0.85f * c.k.g, 0.85f * c.k.b, 0.95f * k);
+                const Col fi = col(0.04f + 0.08f * c.k.r, 0.04f + 0.08f * c.k.g, 0.05f + 0.08f * c.k.b, k_face_a * k), fe = col(c.k.r, c.k.g, c.k.b, 0.95f * k);
                 for (int j = 0; j < m; ++j) { const int q = (j + 1) % m; o.tri(fc + N * (0.5f * c.th), fi, half_v(c, s, j, af, 1.f), fe, half_v(c, s, q, af, 1.f), fe); }
             }
             if (a < k_spark_s) {

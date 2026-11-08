@@ -88,13 +88,14 @@ constexpr uint32_t k_blk_va = 0x133D6F2, k_blk_len = 0x54;
 constexpr int k_res_auron = 0x00, k_res_tidus = 0x01, k_auron = 0x02, k_lulu = 0x16, k_tidus = 0x42, k_zone_lo = 0x4A, k_zone_hi = 0x4C, k_cursor = 0x50;
 constexpr uint32_t k_wakka_va = 0x133C93F, k_timer_va = 0x133F77C, k_timer_len = 0x18;
 constexpr int k_timer_left = 0x14;   // f32 0x133F790
+constexpr int k_timer_count = 0x0C;  // f32 0x133F788: the countdown's frame count (+1 a logic frame while running; left = total - count / 30)
 
 struct Raw {
     bool    ok = false;        // the state block was read
     int16_t auron = 0, lulu = 0, tidus = 0; uint8_t wakka = 0;
     uint8_t res_tidus = 0, res_auron = 0;
     int16_t cursor = 0, zone_lo = 0, zone_hi = 0;
-    bool    timer_ok = false; int32_t timer = 0; float left = 0.f;
+    bool    timer_ok = false; int32_t timer = 0; float left = 0.f; float count = 0.f;
 };
 inline int16_t s16_at(const uint8_t* b, int o) { return static_cast<int16_t>(static_cast<uint16_t>(b[o]) | static_cast<uint16_t>(b[o + 1]) << 8); }
 inline int32_t s32_at(const uint8_t* b, int o) { return static_cast<int32_t>(static_cast<uint32_t>(b[o]) | static_cast<uint32_t>(b[o + 1]) << 8 | static_cast<uint32_t>(b[o + 2]) << 16 | static_cast<uint32_t>(b[o + 3]) << 24); }
@@ -108,6 +109,7 @@ inline void parse_state(Raw& r, const uint8_t* blk, uint8_t wakka) {
 inline void parse_timer(Raw& r, const uint8_t* t) {
     r.timer_ok = true; r.timer = s32_at(t, 0);
     uint32_t u = static_cast<uint32_t>(s32_at(t, k_timer_left)); float f; static_assert(sizeof(f) == 4, "f32"); std::memcpy(&f, &u, 4); r.left = f;
+    u = static_cast<uint32_t>(s32_at(t, k_timer_count)); std::memcpy(&f, &u, 4); r.count = f;
 }
 /// The game's own "an overdrive minigame is up" test (the battle HUD, 0x89B38D..0x89B3B2).
 inline bool active(const Raw& r) { return r.ok && (r.auron != 0 || r.lulu != 0 || r.tidus != 0 || r.wakka != 0); }
