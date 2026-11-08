@@ -2232,7 +2232,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
-        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
+        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body && !_fpk_on ? 1 : 0, _fp_hide_radius);   // finding 4: nothing to hide while the eye is held (no followed body)
     }
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
@@ -2648,7 +2648,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         btg_guard(in_battle);   // battle tag: a hold the follow logic did not send this frame
         if (in_battle) ej_face_tick(btl_v.battle_state);   // eye jumps: the pending face request (waits through the load chain: review B1)
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
-        if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; }
+        if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; if (_fpk_on) fpk_release("a battle"); }
         else {
             // FP-1: the field player. fp_actor is a list of model names, best first (Tidus is c001 for most of the game,
             // c101 in the opening). Every live actor gets a score, lower is better: a listed name = its rank; a party
@@ -2671,6 +2671,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             Actor* snap = null;
             ulong scene = fp_scene_sig();
             int gp = fp_game_player(actors, scene);   // finding 1: the game's player actor (a tie goes to it)
+            // finding 4: first person on foot (strict) never follows an NPC and never hops to another body mid-scene; the eye is held
+            // where it was while nothing listed is live (FpPick.Allowed; fp_follow.cs). A map change, a new event or another view ends it.
+            bool strict = !in_battle && _fp_mode == 1 && !_in_blitz;
+            if (!strict || scene != _fpk_scene) { if (_fpk_on) fpk_release(!strict ? "first person left (another view, a battle or blitzball)" : "a map change or a new event"); _fp_strict_had = false; _fpk_scene = scene; }
             int score_of(in Actor a, int i, Actor* tbl) {
                 if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
                 int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
@@ -2680,6 +2684,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             int cur_score = -1;
             if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
+            if (cur_score >= 0 && !FpPick.Allowed(cur_score, strict, true, _fp_chr_id)) cur_score = -1;   // finding 4: e.g. an NPC followed in the diorama, then first person
+            bool first = cur_score < 0 && !_fpk_on && !_fp_strict_had;   // finding 4: nothing followed (or held) yet on this scene in first person: the first pick
+            int skip_s = int.MaxValue, skip_i = -1;   // the best candidate strict left out (for the hold's line)
             _fp_scan_tick++;
             if ((_fp_scan_tick % 30) == 0) _fpn_frame_clear = true;   // the name ranks are read again with the 30-frame rescan (a backstop)
             if (FpPick.Keep(cur_score, (_fp_scan_tick % 30) == 0, gp >= 0 && gp != _fp_actor_idx)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
@@ -2693,6 +2700,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     if (snap == null && !read(actors + i, out slot)) break;
                     if (!live(*ap) || i == _fp_actor_idx && cur_score >= 0) continue;
                     int s = score_of(*ap, i, actors);
+                    if (!FpPick.Allowed(s, strict, first, (int)ap->chr_id)) { if (s >= 0 && s < skip_s) { skip_s = s; skip_i = i; } continue; }   // finding 4
                     if (FpPick.Better(s, i, best, best_i, gp)) { best = s; best_i = i; }
                 }
                 pick = best_i;
@@ -2705,6 +2713,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 }
             }
             if (pick < 0) { _fp_how = ""; _fp_chr_id = -1; }
+            if (strict) {   // finding 4: the hold starts when the pick is lost mid-scene and ends with the next listed model
+                if (pick >= 0) { if (_fpk_on) fpk_release("following " + _fp_how); }
+                else if (_fp_strict_had && !_fpk_on) fpk_start(actors, skip_i);
+                else if (!_fpk_on) fp_none_log(actors, skip_i, scene);
+            }
             // gates (4 Nov): the pick against the game's own player actor ([0x1300788], Sg_GetPlayer), every 10th scan tick in
             // the field in first person: a mismatch is logged (rate-limited), the pick is not changed yet (game_gates.cs).
             if (!in_battle && _fp_mode == 1 && (_fp_scan_tick % 10) == 0) gates_pick_check(actors, pick);
@@ -2747,7 +2760,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // the re-pick key: the index and the model (N1: lc/lchb0500 swaps c001 -> c101 in the same slot)
             int root_kind = body_hide_root(actors, pick, att, out Vector3 root3);
             body_hide_push(actors, pick, (pick << 16) | ((int)p.chr_id & 0xFFFF), !in_battle, root3, root_kind, att ? _ride_rider : pos3);
+            fpk_note(!in_battle && _fp_mode == 1 && !_in_blitz, pos3, head3, hv);   // finding 4: where the eye would be held
         }
+        else if (_fpk_on) fpk_frame();   // finding 4: the eye held where it was (nothing listed to follow mid-scene)
         else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }

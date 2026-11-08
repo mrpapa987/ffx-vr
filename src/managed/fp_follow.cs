@@ -47,6 +47,53 @@ public sealed unsafe partial class FFXVRModule {
         }
         else if (slot == _ib_bad_slot) _ib_bad_slot = -1;
     }
+    // -- finding 4: no NPC heads, no hopping ---------------------------------------------------------------------------------
+    // s1 (6 Nov): first person sat in an NPC ('n130', actor 0) for 23 s on ki/kino0800 and hopped c102 -> c003 -> c108 -> c002
+    // in 34 s on ki/kino0300, each a new body (hidden) and a new head. In first person on foot the pick is now FpPick.Allowed: the
+    // first pick of a scene as before but never an NPC, then no other body until a listed model (Tidus) is live; when the
+    // followed actor goes mid-scene the eye stays where it was (its last root, head and eye height), with nothing hidden, until a
+    // listed model is live (a re-pick: the eye-jump blink) or the scene ends (a map change, a new event, another view). The
+    // game camera was the fallback for "nothing at all" and stays so for a scene that starts with nothing to follow: holding
+    // the last place is the least jarring for a body that leaves mid-scene (the game camera would cut to wherever it is).
+    private bool _fpk_on, _fp_strict_had; private ulong _fpk_scene, _fp_none_scene; private Vector3 _fpk_pos, _fpk_head; private int _fpk_hv;
+    private int _fpk_lines; private ulong _fpk_from; private string _fpk_who = "";
+    /// <summary>A normal followed frame: in strict mode, where the eye is (game space), for a later hold.</summary>
+    private void fpk_note(bool strict, Vector3 pos, Vector3 head, int hv) {
+        _fp_strict_had = strict;
+        if (!strict) return;
+        _fpk_pos = pos; _fpk_head = head; _fpk_hv = hv & 1;   // no displaced-body bit while held
+        _fpk_who = _fp_how;   // "actor N 'c001' (model c001)", set at the pick (no allocation here)
+    }
+    private void fpk_start(Actor* actors, int skip_i) {
+        _fpk_on = true; _fpk_from = _frames;
+        if (_fpk_lines >= 40) return;
+        _fpk_lines++;
+        string skip = skip_i >= 0 && read(actors + skip_i, out Actor sa) ? I($"; not followed: actor {skip_i} '{actor_name(sa.chr_name)}' ({(FpPick.IsNpc((int)sa.chr_id) ? "an NPC" : "another body")})") : "";
+        _logger.Info(I($"first person: the followed {_fpk_who} is gone and no listed model is live on map {map_name()}: the eye stays where it was ({_fpk_pos.X:F1}, {_fpk_pos.Y:F1}, {_fpk_pos.Z:F1}) until one is (finding 4: no hop to another body mid-scene){skip}") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
+    }
+    private void fpk_release(string why) {
+        _fpk_on = false;
+        if (_fpk_lines >= 40) return;
+        _fpk_lines++;
+        _logger.Info(I($"first person: the held eye is released after {(_frames - _fpk_from) / 60.0:F1} s: {why}") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
+    }
+    /// <summary>A held frame: the last place again (player_set first: the head is an offset from it), no body hide (fp_set gets hide 0).</summary>
+    private void fpk_frame() {
+        _fn_player_set(-_fpk_pos.X, -_fpk_pos.Y, _fpk_pos.Z, 1);
+        if (_fn_player_head_set != null) _fn_player_head_set(-_fpk_head.X, -_fpk_head.Y, _fpk_head.Z, _fpk_hv);
+        body_hide_push(null, -1, -1, false, default, 0, default);
+        _sa_used = false; _sa_status = "the eye held where the followed actor was (nothing listed to follow)";
+        _fp_how = "held: " + _fpk_who + " left; waiting for a listed model";
+    }
+    /// <summary>Strict, nothing allowed at the scene's first pick (only an NPC actor 0, or a hidden party model): the game's camera,
+    /// as before for "nothing"; one line per scene.</summary>
+    private void fp_none_log(Actor* actors, int skip_i, ulong scene) {
+        if (skip_i < 0 || scene == _fp_none_scene || _fpk_lines >= 40) return;
+        _fp_none_scene = scene; _fpk_lines++;
+        string who = read(actors + skip_i, out Actor sa) ? I($"actor {skip_i} '{actor_name(sa.chr_name)}' ({(FpPick.IsNpc((int)sa.chr_id) ? "an NPC" : "a party model the game hides")})") : I($"actor {skip_i}");
+        _logger.Info(I($"first person: nothing to follow on map {map_name()} ({who} is not followed: finding 4); the game's camera until a listed model is live") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
+    }
+
     /// <summary>finding 1: is slot i the marked one, with the same model and chr_id (tbl: this frame's snapshot or the live table)?</summary>
     private bool fp_chain_bad(int i, Actor* tbl, int chr_id) {
         if (i != _ib_bad_slot || tbl == null) return false;
@@ -82,5 +129,20 @@ internal static class FpPick {
     public static bool Keep(int cur, bool scan, bool gp_other) {
         if (cur == 0) return !(scan && gp_other);
         return cur > 0 && cur < k_party && (cur < 500 || cur >= k_listed) && !scan;
+    }
+    /// <summary>finding 4: an NPC model ('n', chr_id type 2: chr_id >> 12).</summary>
+    public static bool IsNpc(int chr_id) => ((chr_id >> 12) & 0xF) == 2;
+    /// <summary>finding 4: may a candidate at score s (chr_id) be followed? strict = first person on foot in the field (fp_mode 1,
+    /// not battle, not blitzball); first = nothing is followed and nothing held on this scene (the first pick after a map change, a
+    /// load, a battle or another view). Outside strict: anything FpScore accepts, as before. In strict: a listed model always (Tidus,
+    /// visible or hidden by the game, or with a bad chain); the first pick of a scene may also be the party fallback or actor 0,
+    /// but never an NPC actor 0 ('n130' on ki/kino0800 for 23 s) nor a party model the game hides (parked at (0, 0, 0)); after
+    /// that, no hop to another body mid-scene (c102 -> c003 -> c108 -> c002 on ki/kino0300): the caller keeps the current pick
+    /// while it is live and otherwise holds the eye where it was. The current pick is tested with first = true.</summary>
+    public static bool Allowed(int s, bool strict, bool first, int chr_id) {
+        if (s < 0) return false;
+        if (!strict || s < k_listed) return true;
+        if (!first || s >= 200000) return false;
+        return !(s >= k_party && IsNpc(chr_id));
     }
 }

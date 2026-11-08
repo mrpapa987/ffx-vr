@@ -10,6 +10,8 @@
 // Units are game units (about 9 cm); frames are native frames (g_frames, one per Present). Running moves the eye about 1
 // unit a frame at 60 fps (2 at 30), the chocobo about 2.5; a jump is a move of more than Cfg::units (default 8) in a frame.
 #pragma once
+// fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump (the shared scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 2
 #include <cmath>
 #include <cstdint>
 
@@ -26,7 +28,7 @@ struct Cfg {
 struct Ctx {
     uint32_t frame = 0;       // g_frames
     int      mode = 0;        // g_fp_mode: 1 first person, 3 third person blink; 0 / 2 (seat, diorama) never
-    bool     dragging = false;// g_gest_active: a grab moves the view on purpose
+    bool     dragging = false;// g_gest_active (fix-eye: no longer mutes a jump, see step)
     bool     latched = false; // g_fp_yaw_latched was set before this call (false on the latch frame itself)
     uint32_t latch_seq = 0;   // bumped by the native side at every heading latch: a change since the last step = a latch frame
     int      blink_left = 0;  // g_blink_frames now (a running blink can be extended)
@@ -62,7 +64,11 @@ inline bool finite3(const float p[3]) { return std::isfinite(p[0]) && std::isfin
 
 /// One frame: P = this frame's eye base. Blink when the eye base moved more than cfg.units since the last frame, and the
 /// last frame was also a first-person 3D frame (at most 2 frames ago), the heading was latched before (not the latch
-/// frame, nor a re-latch since the last step), nobody is dragging, the mode is 1 or 3, and P is finite.
+/// frame, nor a re-latch since the last step), the mode is 1 or 3, and P is finite.
+/// fix-eye (finding 4): a grab no longer mutes the blink. The grips never grab in first person (gesture_tick grabs in the seat,
+/// the diorama and third person only), and in third person the grab moves the camera's offset (g_gest_move), applied after the
+/// eye base this tests: a grab cannot move P, so a jump during one is a re-pick or a scripted move like any other. (The s1 hops
+/// without a blink, 16:43:21-55, were in the diorama, which never blinks: W_MODE.)
 inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     Result r; r.prev_dist = s.last_d; s.last_d = 0.f;
     if (!finite3(P)) { s.valid = false; r.why = W_NAN; return r; }
@@ -76,7 +82,6 @@ inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     if (gap > 2)                      { r.why = W_GAP;   return r; }
     if (!c.latched || relatched)      { r.why = W_LATCH; return r; }
     if (c.mode != 1 && c.mode != 3)   { r.why = W_MODE;  return r; }
-    if (c.dragging)                   { r.why = W_DRAG;  return r; }
     r.why = W_MOVE; r.dist = d; s.last_d = d;
     if (!(d > cfg.units)) return r;
     s.n_jumps++;
