@@ -1443,6 +1443,13 @@ float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was
 // advanced (a gap of more than 2 frames snaps it).
 uint32_t g_view_tick_frame = 0xFFFFFFFFu, g_anchor_frame = 0;
 uint32_t g_view_ticks = 0, g_view_uploads = 0, g_view_othercam = 0, g_view_early = 0; float g_tick_v[12] = {};   // diag: the 10 s "view:" line
+// fix-render (logs-1107 behaviour G): a second real 3D camera in the frame (kino0800: ~70 uploads a frame). Its uploads still get
+// the head pose relative to their own view (they draw scene geometry: the engine's second camera, renderer+0x654, culls node
+// list 3, exe-analysis.md), but the per-frame main-camera state is written by the tick's camera only (g_ov_other); the 10 s
+// line below says what the other camera is (how far from the main one, which target it drew into).
+bool g_ov_other = false;               // build_override_view: this upload is another camera's (no main-camera state written)
+float g_tick_p0 = 0.f;                 // the tick camera's main projection P[0]
+rnd::OtherCam g_other_cam;             // the other camera's uploads over the 10 s window
 // Diorama floor: the eye never goes below this many units above the anchor
 // (the player's feet / the fight's centre), except while a grip is held so a
 // deliberate drag below is possible; 0 = off.
@@ -2193,7 +2200,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
 
     // First person / follow: replace the base with a view at the player.
     const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled && !g_backdrop_room;
-    const bool primary = (g_eye_shift == 0.f);
+    const bool primary = (g_eye_shift == 0.f) && !g_ov_other;   // fix-render: another camera's upload writes no main-camera state
     if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
         const bool ej_latched = g_fp_yaw_latched;      // eye jumps: the latch frame is not a jump
@@ -2457,11 +2464,20 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         const float* mp = reinterpret_cast<const float*>(orig + base + 192);   // main projection (|P0|,|P5| <= 0.2: the intro's near-2D camera)
         const bool real3d = fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f;
         const bool rt = g_render_tid == 0 || GetCurrentThreadId() == g_render_tid;
-        if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); }
-        else if (g_view_tick_frame == g_frames && real3d && memcmp(v, g_tick_v, sizeof(g_tick_v)) != 0) g_view_othercam++;
+        if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); g_tick_p0 = mp[0]; }
+        else if (g_view_tick_frame == g_frames && real3d && memcmp(v, g_tick_v, sizeof(g_tick_v)) != 0) {
+            g_view_othercam++;
+            g_ov_other = true;   // fix-render: this camera's view gets the head pose, the frame's main-camera state stays the tick's
+            const float* pn = reinterpret_cast<const float*>(orig + base + 64);   // near variant: orthographic = light_proj's first test
+            const bool ortho = fabsf(pn[15] - 1.f) < 1e-3f && fabsf(pn[14]) < 1e-3f && fabsf(pn[12]) < 1e-4f && fabsf(pn[13]) < 1e-4f;
+            if (!(ortho && g_shadow_cam == 0 && size >= k_lc_min_size))   // shadow_cam 0 overrides the game's light cameras on purpose
+                g_other_cam.note(rnd::cam_diff(g_tick_v, v), g_cur_rtv0_tex != nullptr && (g_cur_rtv0_tex == g_scene_tex || g_cur_rtv0_tex == g_scene_live_tex),
+                                 ortho, size, mp[0], g_tick_p0);
+        }
         else if (g_view_tick_frame != g_frames) g_view_early++;   // before the tick (not 3D, or another thread): drawn with last frame's anchor
     }
     build_override_view(v, Vn, In, Pn, advance);
+    g_ov_other = false;
 
     // Layout relative to the view block.
     const UINT o_pos = base - 16, o_view = base, o_projn = base + 64, o_vp = base + 128,
@@ -7267,6 +7283,13 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
                 diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u; eye jumps %u (blinks %u, extended %u, held back %u)", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early,
                       g_ej_10s[0], g_ej_10s[1], g_ej_10s[2], g_ej_10s[3]);
+            if (g_other_cam.n != 0) {   // fix-render (behaviour G): what the other camera is, whenever there is one (not verbose-only; 120 a session)
+                static int lines = 0;
+                if (lines++ < 120)
+                    diag("view: another 3D camera this window: %u uploads (bound to the scene target %u, orthographic near projection %u), up to %.1f units and %.1f deg from the frame's main camera, first %u B with P0 %.3f (main %.3f) -> %s | it got the head pose relative to its own view; the main camera's state (stick heading, hands base) is the tick's",
+                         g_other_cam.n, g_other_cam.into_scene, g_other_cam.ortho_near, g_other_cam.dpos_max, g_other_cam.dang_max, g_other_cam.size0, g_other_cam.p0, g_other_cam.p0_main, g_other_cam.verdict());
+                g_other_cam = rnd::OtherCam();
+            }
             g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0; g_ej_10s[0] = g_ej_10s[1] = g_ej_10s[2] = g_ej_10s[3] = 0;
         }
     }

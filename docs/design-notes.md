@@ -5489,3 +5489,22 @@ reads); scratch tests in render_chk/tests.
   Only FFX.exe's own image is kept (heap and other modules keep the per-frame rules). Model (render_chk keep_test, s2's shape
   and the owner's measured costs): 350-366 us -> 1.6 us a frame. The `cpu:` line adds `kept exe runs N (of S sections; safe
   reads through them, proofs a frame over P pages, section probes)`.
+- **The second 3D camera (behaviour G).** kino0800 (s1 16:27:41-51) had about 70 uploads a frame whose view differs from the
+  frame's main (tick) camera, and the aeon in battle 1 about 0.8 a frame. What the code shows:
+  - Mirrored (reflection) cameras are already rejected (the inverse view must agree), the ShadowManager's light cameras are left
+    alone (`light_proj`, shadow_cam 1), the painted layers' dummy camera has its own path. What is left is a perspective camera
+    whose inverse agrees: a scene camera. The engine has one: renderer+0x654, the frustum for node list 3 (probably the dynamic
+    / skinned objects; exe-analysis.md). In a moving cutscene (kino0800's projection zooms from P0 2.87 to 1.93 over 15 s on the
+    pan-scan lines) the two can differ by a frame.
+  - The override is relative to each upload's own view (seat: its own position under the seat heading; first person: the
+    player's eye for every camera), so those draws need the head pose: leaving it off would put about 70 draws a frame (the
+    characters, if node list 3 is them) in the game's flat view, head-locked, with no stereo. That is not done.
+  - What *was* wrong: `build_override_view` wrote the frame's main-camera state on every eye-1 upload, so the last camera of the
+    frame won: `g_yaw_cam` / `g_move_delta` (the first-person stick remap's heading) and the VR hands' base (`g_hb_*`). Now an
+    upload of another camera (`g_ov_other`, set by `write_camera` when the view differs from the tick's) writes none of it.
+  - **The log line that confirms it:** every 10 s with another camera, `view: another 3D camera this window: N uploads (bound
+    to the scene target K, orthographic near projection L), up to X units and Y deg from the frame's main camera, first B bytes
+    with P0 (main P0) -> verdict` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
+    same camera a moment apart (head pose right); "partly into another render target" = an off-screen pass (then the head pose
+    is wrong for it: a follow-up would leave those uploads alone); "LIGHT-LIKE" = a shadow light the light-camera rule missed
+    (e.g. under 1872 B; same follow-up). The render target is the one bound when the constant buffer was uploaded.
