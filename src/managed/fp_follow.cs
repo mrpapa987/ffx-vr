@@ -11,7 +11,8 @@ namespace FFXVR;
 public sealed unsafe partial class FFXVRModule {
 
     private int _fp_gp_idx = -1, _fp_gp_id; private ulong _fp_gp_scene;   // the last slot [0x1300788] named, its chr_id, on which scene
-    private nint _ib_bad_h; private ulong _ib_bad_scene; private int _ib_bad_lines;   // finding 1: the model object (+0x830) whose chain failed to read, on which scene
+    private FpMarks _fp_marks; private int _ib_bad_lines;   // finding 1: the model objects (+0x830) whose chain failed to read (FpMark)
+    private uint* _fpm_q; private byte* _fpm_seg;              // review R2-S2: scratch for the marks' own re-reads (kept for the session)
     private double _fp_how_t = -1e9; private int _fp_how_skip;   // review B1: the "following" line, one a second
 
     /// <summary>The map words and the event id (body_hide_scene_gen's signature without the followed actor's model): changes with
@@ -42,14 +43,25 @@ public sealed unsafe partial class FFXVRModule {
     /// (+0x830) ranks after every healthy listed model until a whole read of the object (any slot) or a new scene. Review B1: the
     /// object, not the slot: in A1 actors 0 and 36 shared one object, and a per-slot mark moved with the pick, flipping it every frame;
     /// keyed on the object both rank the same and the tie goes to the game's player actor.</summary>
-    private void fp_chain_mark(int slot, nint h, bool failed, char* name) {
-        if (h == 0) return;
-        if (failed) {
-            if (h == _ib_bad_h) return;
-            _ib_bad_h = h; _ib_bad_scene = fp_scene_sig();
-            if (_ib_bad_lines < 20) { _ib_bad_lines++; _logger.Info(I($"first person: actor {slot} '{actor_name(name)}''s model chain (+0x830 0x{(ulong)h:X}) did not read whole: every actor on that object ranks after every listed model whose chain reads (a stale or rebuilt model; finding 1) on map {map_name()}") + (_ib_bad_lines == 20 ? " (no more of these lines this session)" : "")); }
+    /// Review round 2: a set of up to FpMark.k_n objects (R2-S1: two failing objects no longer take turns in one mark), each re-read
+    /// by itself every 30 frames wherever its actors stand and cleared on a whole read, and expired after k_expire_s (R2-S2: a
+    /// transient failure of the real Tidus no longer sticks while the eye sits on a model parked away). The rule is FpMark (pure).
+    private void fp_chain_mark(int slot, nint h, bool failed, bool followed, char* name) {
+        if (FpMark.Walked(ref _fp_marks, (long)h, failed, followed, _now) && _ib_bad_lines < 20) {
+            _ib_bad_lines++;
+            _logger.Info(I($"first person: actor {slot} '{actor_name(name)}''s model chain (+0x830 0x{(ulong)h:X}) did not read whole: every actor on that object ranks after every listed model whose chain reads (a stale or rebuilt model; finding 1; re-read every 30 frames) on map {map_name()}") + (_ib_bad_lines == 20 ? " (no more of these lines this session)" : ""));
         }
-        else if (h == _ib_bad_h) _ib_bad_h = 0;
+    }
+    /// <summary>Review R2-S2: push_player, at the 30-frame rescan tick: each marked object walked by itself (one IbChain.Walk, wherever
+    /// its actors are); a whole read clears it, a failed one keeps it fresh.</summary>
+    private void fp_marks_reread() {
+        if (_fn_safe_read == null) return;
+        for (int i = 0; i < FpMark.k_n; i++) {
+            long h = FpMark.At(ref _fp_marks, i, _now); if (h == 0) continue;
+            if (_fpm_q == null) { _fpm_q = (uint*)Marshal.AllocHGlobal(k_ib_max * 16); _fpm_seg = (byte*)Marshal.AllocHGlobal(k_ib_segs * 0x6C); }
+            int n = 0; IbChain.Walk((nint)h, 0, _fpm_q, ref n, k_ib_max, _fpm_seg, k_ib_segs, _fn_safe_read, out bool fail);
+            FpMark.Walked(ref _fp_marks, h, fail, true, _now);
+        }
     }
     // -- finding 4: no NPC heads, no hopping ---------------------------------------------------------------------------------
     // s1 (6 Nov): first person sat in an NPC ('n130', actor 0) for 23 s on ki/kino0800 and hopped c102 -> c003 -> c108 -> c002
@@ -165,7 +177,61 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     /// <summary>finding 1: is h (an actor's +0x830) the marked model object?</summary>
-    private bool fp_chain_bad(nint h) => h != 0 && h == _ib_bad_h;
+    private bool fp_chain_bad(nint h) => FpMark.Has(ref _fp_marks, (long)h, _now);
+}
+
+/// <summary>fix-eye review round 2: the marked model objects (FpMark); 0 = an empty entry.</summary>
+internal struct FpMarks { public long h0, h1, h2, h3; public double t0, t1, t2, t3; public ulong scene; }
+/// <summary>fix-eye finding 1 / review B1, R2-S1, R2-S2: the model objects (+0x830) whose chain did not read whole. Set by a failed
+/// walk of the followed actor's object (or of a marked one: its re-read keeps it fresh), cleared by any whole walk of it; up to k_n at
+/// once (the oldest gives way), each expiring after k_expire_s; a new scene clears them all. Pure: the scratch test transpiles it.</summary>
+internal static class FpMark {
+    public const int k_n = 4;
+    public const double k_expire_s = 5.0;
+    public static bool Live(long h, double t, double now) => h != 0 && now - t < k_expire_s;
+    /// <summary>Entry i's object if it is set and not expired, else 0.</summary>
+    public static long At(ref FpMarks m, int i, double now) {
+        if (i == 0) return Live(m.h0, m.t0, now) ? m.h0 : 0;
+        if (i == 1) return Live(m.h1, m.t1, now) ? m.h1 : 0;
+        if (i == 2) return Live(m.h2, m.t2, now) ? m.h2 : 0;
+        return Live(m.h3, m.t3, now) ? m.h3 : 0;
+    }
+    public static bool Has(ref FpMarks m, long h, double now) {
+        if (h == 0) return false;
+        return At(ref m, 0, now) == h || At(ref m, 1, now) == h || At(ref m, 2, now) == h || At(ref m, 3, now) == h;
+    }
+    /// <summary>A walk of object h: failed and (the followed actor's or a mark's own re-read): set or refresh; whole: clear. Returns
+    /// true when h was newly set (the caller's log line).</summary>
+    public static bool Walked(ref FpMarks m, long h, bool failed, bool followed, double now) {
+        if (h == 0) return false;
+        if (!failed) {
+            if (m.h0 == h) m.h0 = 0;
+            if (m.h1 == h) m.h1 = 0;
+            if (m.h2 == h) m.h2 = 0;
+            if (m.h3 == h) m.h3 = 0;
+            return false;
+        }
+        if (!followed) return false;
+        bool was = Has(ref m, h, now);
+        if (m.h0 == h) { m.t0 = now; return !was; }
+        if (m.h1 == h) { m.t1 = now; return !was; }
+        if (m.h2 == h) { m.t2 = now; return !was; }
+        if (m.h3 == h) { m.t3 = now; return !was; }
+        // an empty or expired entry, else the oldest
+        int k = 0; double oldest = m.t0;
+        if (!Live(m.h0, m.t0, now)) k = 0;
+        else if (!Live(m.h1, m.t1, now)) k = 1;
+        else if (!Live(m.h2, m.t2, now)) k = 2;
+        else if (!Live(m.h3, m.t3, now)) k = 3;
+        else { if (m.t1 < oldest) { k = 1; oldest = m.t1; } if (m.t2 < oldest) { k = 2; oldest = m.t2; } if (m.t3 < oldest) { k = 3; } }
+        if (k == 0) { m.h0 = h; m.t0 = now; } else if (k == 1) { m.h1 = h; m.t1 = now; } else if (k == 2) { m.h2 = h; m.t2 = now; } else { m.h3 = h; m.t3 = now; }
+        return true;
+    }
+    /// <summary>A new scene (map words, event id) clears every mark.</summary>
+    public static void Scene(ref FpMarks m, ulong scene) {
+        if (scene == m.scene) return;
+        m.h0 = 0; m.h1 = 0; m.h2 = 0; m.h3 = 0; m.scene = scene;
+    }
 }
 
 /// <summary>fix-eye: the automatic capture's state (FpCap.Step).</summary>

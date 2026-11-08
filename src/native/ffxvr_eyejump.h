@@ -12,8 +12,8 @@
 #pragma once
 // fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again; 4: the
 // event hold (EvHold); 5: a no-control episode's summary (Episode); 6 (review): min_gap 6, the hold's no_start (a cut at the
-// edge), EV_PULL / EV_BLOCKED (the shared scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 6
+// edge), EV_PULL / EV_BLOCKED; 7 (review 2): min_start 20 (the shared scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 7
 #include <cmath>
 #include <cstdint>
 
@@ -33,6 +33,10 @@ struct Cfg {
     // held back (a teleport seen once, right after a dark period, rather than a flicker). A run of big jumps stays one dark period.
     float big = 20.f;     // units
     int   min_gap = 6;    // frames of picture between two blinks
+    // Review R2-S3: min_gap alone still allowed 5 dark periods a second (a jump every 12 frames); flash guidelines warn from 3. A
+    // fresh blink inside the window also needs min_start frames since the last blink began; a big jump before that is held back
+    // (seen once) as under min_gap. A restart of the dark period (no picture shown yet) is not a new onset.
+    int   min_start = 20; // frames between two blink onsets (60 fps: 3 a second)
 };
 
 // This frame's context (native globals at the call).
@@ -118,7 +122,9 @@ inline Result step(State& s, const float P[3], const Ctx& c, const Cfg& cfg) {
     if (c.blink_left <= 0 && d > cfg.big) {   // fix-eye (finding 6): the blink is over and this is a big jump
         // frames of picture shown since the last black frame (a blink cut short, e.g. by the screen, counts as none)
         const int32_t pic = s.black_valid ? static_cast<int32_t>(c.frame - s.black_last) - 1 : 0x7FFFFFFF;
-        if (pic <= 0 || pic >= cfg.min_gap) {
+        // review R2-S3: a fresh blink also needs min_start frames since the last one began (3 a second at most at 60 fps)
+        const bool fresh_ok = pic >= cfg.min_gap && static_cast<int32_t>(c.frame - s.start_frame) >= cfg.min_start;
+        if (pic <= 0 || fresh_ok) {
             s.started = true; s.start_frame = c.frame; s.ext = 0;
             if (pic <= 0) { s.n_ext++; r.kind = K_EXTEND; } else { s.n_start++; r.kind = K_START; }   // none shown: the dark period goes on
             r.frames = cfg.blink; note_black(s, c.frame + static_cast<uint32_t>(r.frames) - 1u);

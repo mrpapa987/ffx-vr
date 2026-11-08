@@ -2709,7 +2709,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // where it was while nothing listed is live (FpPick.Allowed; fp_follow.cs). A map change, a new event or another view ends it.
             bool strict = !in_battle && _fp_mode == 1 && !_in_blitz;
             if (!strict || scene != _fpk_scene) { if (_fpk_on) fpk_release(!strict ? "first person left (another view, a battle or blitzball)" : "a map change or a new event"); _fp_strict_had = false; _fpk_done = false; _fpk_scene = scene; }
-            if (scene != _ib_bad_scene) _ib_bad_h = 0;   // review B1: the bad-model mark lives on its scene only
+            FpMark.Scene(ref _fp_marks, scene);   // review B1: the bad-model marks live on their scene only
+            if ((_fp_scan_tick % 30) == 29) fp_marks_reread();   // review R2-S2: each marked object re-read by itself (before the rescan tick)
             int score_of(in Actor a, int i, Actor* tbl, nint h830) {
                 if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
                 int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
@@ -2758,6 +2759,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 else if (_fpk_on && FpPick.HoldEnds(_now - _fpk_t0, (int)_fpev_st[16] != _fpk_cuts0)) { fpk_release((int)_fpev_st[16] != _fpk_cuts0 ? "a camera cut: the game's camera" : I($"{FpPick.k_hold_s:F0} s: the game's camera")); _fpk_done = true; _fpk_blink = true; }
                 else if (_fp_strict_had && !_fpk_on && !_fpk_done) fpk_start(actors, skip_i);
                 else if (!_fpk_on) fp_none_log(actors, skip_i, scene);
+            }
+            // review R2-N1: re-picks skipped by the one-a-second limit: once the second is over, the actor followed now
+            if (_fp_how_skip > 0 && _now - _fp_how_t >= 1.0) {
+                string mp = map_name(); _fp_how_logged = _fp_how + mp; _fp_how_t = _now;
+                _logger.Info(I($"first person: {(_fp_how.Length > 0 ? "following " + _fp_how : "following nobody")} on map {mp} (after {_fp_how_skip} re-picks in the second before)")); _fp_how_skip = 0;
             }
             // gates (4 Nov): the pick against the game's own player actor ([0x1300788], Sg_GetPlayer), every 10th scan tick in
             // the field in first person: a mismatch is logged (rate-limited), the pick is not changed yet (game_gates.cs).

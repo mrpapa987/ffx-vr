@@ -186,7 +186,7 @@ public sealed unsafe partial class FFXVRModule {
             uint owner = IbChain.Owner(k == 0, rank);
             int n0 = _ib_n; int segs = IbChain.Walk(*(nint*)(a + 0x830), owner, _ib_q, ref _ib_n, k_ib_max, _ib_seg, k_ib_segs, _fn_safe_read, out bool fail);
             if (fail) _ib_incomplete = true;
-            if (k == 0 || !fail) fp_chain_mark(idx[k], *(nint*)(a + 0x830), fail && k == 0, snap[idx[k]].chr_name);   // fix-eye finding 1: the followed actor's model object failed (any whole read of it clears it; review B1: keyed on the object)
+            if (k == 0 || !fail) fp_chain_mark(idx[k], *(nint*)(a + 0x830), fail, k == 0, snap[idx[k]].chr_name);   // fix-eye finding 1: the followed actor's model object failed (any whole read of it clears it; review B1: keyed on the object)
             uint res = *(uint*)(a + 0x1C4);
             if (sb != null) {
             sb.Append(I($" | actor {idx[k]} '{actor_name(snap[idx[k]].chr_name)}' {(k == 0 ? "the player's" : owner == 0 ? "the player's (a listed model: fp_actor)" : res == res0 ? "another actor's, SAME MODEL as the player's (its keys decide nothing)" : "another actor's")}: +0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{res:X}, {segs} segments, {_ib_n - n0} keys{(fail ? " (a read failed: retried)" : "")}"));
