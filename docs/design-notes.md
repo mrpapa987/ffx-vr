@@ -5598,11 +5598,16 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   no console colour scheme.
 - **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 15 cm sphere at the plate; 1.2 m/s
   at the contact. Only the current plate can be cut (no lanes, nothing ahead of time). An arrow is judged on the stroke's path
-  in the plate's plane over the pass (at least 7 cm of it, from the first contact sample), which must lie within 65 degrees of
-  the arrow; one pass is one judgement, and a new pass starts afresh. Across a 30 / 60 Hz test of noisy strokes, a stroke at
+  in the plate's plane over the pass (at least 7 cm of it, from the first contact sample or the last turn back), which must lie
+  within 65 degrees of the arrow; a new pass starts afresh, and so does a turn back inside the sphere (a wind-up from a ready
+  pose already in the 30 cm sphere would otherwise have to be cancelled by the chop first: review R5-S1). Across a 30 / 60 Hz test of noisy strokes, a stroke at
   right angles is accepted 3 % of the time (bound 5 %), the opposite way never, the right way always. Buttons take any
   direction (stabs too). One hit per plate; the striking hand re-arms when its blade leaves the sphere or after 0.2 s, the
-  other hand can cut the next plate at once. A wrong direction deflects and sends nothing. Pose snaps and spikes (rest around
+  other hand can cut the next plate at once. A wrong direction deflects and sends nothing; a deflect shows 0.3 s after its
+  pass ends and is dropped if the plate is cut (or done) meanwhile (a raise through the plate before the chop), and a pass that
+  began less than 0.15 s after its plate became current never deflects (a two-handed grip: the second blade is already in the
+  sphere when the next plate appears) (review R5-S2). One stroke may cut two plates that way (correct input): the second's
+  halves show with a ring flashing out from the spot (R5-N1). Pose snaps and spikes (rest around
   a big step, or a step straight back) and jumps over 8 m/s at the grip are skipped.
 - **What is sent.** Closed loop on the game's progress: a press goes out only when the slot is free, the plate at the game's
   progress was struck, and the player's last new button press has settled: 80 ms AND two Presents with a fresh read of the game's
@@ -5629,7 +5634,7 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   test and visuals, nothing sent. It ends with `practice: 8 of 8 in 2.31 s (first 0.57 s, then 0.25 s an input; deflects 2)` in
   F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate) (ini
   `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`; the first build's `od_targets_dist` /
-  `od_targets_height`, defaults 0.6 / -0.2, are read and ignored so the new 0.5 / -0.3 apply).
+  `od_targets_height`, defaults 0.6 / -0.2, are read and ignored so the new 0.5 / -0.3 apply; one log line says so).
 - **Drawing:** the plate, preview, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn
   last with a reserve, anything else that does not fit is dropped and counted in the window's `odt:` line. The first scheme's
@@ -5639,6 +5644,9 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   finals as before (never both). The eye-2 copy is released after 10 s unused. Fahrenheit's F8 panel is its own composition layer above the eye images, so the targets
   cannot be drawn over it from inside the eye image: the practice tooltip says to close F8.
 - **Log:** `odt:` lines for each cut, a cancel, a resend, a rewind, a stop, and one summary per window or practice round.
+- **The game's bindings:** the owner's first test read `LB: 0x8000004 (not one of the ten game bits)` and fell back to the
+  built-in map (which was right). The low 16 bits are 0x0004 (L1), so the high bit may be a flag in the binding word; masking to
+  16 bits before the check would probably accept the game's own map. Left as it is until another binding confirms it.
 - **Not verified (nobody here can run the game):** the feel and the defaults (practice is the place to tune them), whether the
   blade's direction suits the Quest grips (the pitch slider), the draw path's placement in every view, and the game facts the
   first scheme also rests on.

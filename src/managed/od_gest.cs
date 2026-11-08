@@ -36,6 +36,7 @@ namespace FFXVR;
 public sealed unsafe partial class FFXVRModule {
     private bool  _od_gestures = true, _od_gest_lulu = true, _od_gest_tidus = false, _od_gest_haptics = true;
     private int   _od_gest_auron = 0;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52)
+    private bool _od_tgt_old_logged;                                                                                     // R5-N2: the old keys' one line
     private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.50f, _od_tgt_height = -0.30f, _od_tgt_size = 1f;   // ini od_targets_blade_pitch / _dist2 / _height2 / _size
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
@@ -70,8 +71,13 @@ public sealed unsafe partial class FFXVRModule {
                 else _ini_bad.Add($"{k}='{v}'");
                 return true;
             case "od_targets_blade_pitch": pf(k, v, ref _od_tgt_pitch, -45f, 45f); return true;
-            case "od_targets_dist":   return true;   // the first build's keys (its row of plates: 0.6 / -0.2) are ignored: the one-target defaults
-            case "od_targets_height": return true;
+            case "od_targets_dist":     // the first build's keys (its row of plates: 0.6 / -0.2) are ignored: the one-target defaults;
+            case "od_targets_height":   // one log line a session says so (review R5-N2: else the plate moves without a word)
+                if (!_od_tgt_old_logged) {
+                    _od_tgt_old_logged = true;
+                    _logger.Info($"settings: {k}={v} is from the first targets build (a row of plates): od_targets_dist and od_targets_height are ignored; the one big plate uses od_targets_dist2 / od_targets_height2 (defaults 0.5 m / -0.3 m; F8 'target distance (m)' / 'target height (m)')");
+                }
+                return true;
             case "od_targets_dist2":   pf(k, v, ref _od_tgt_dist, 0.35f, 0.9f); return true;
             case "od_targets_height2": pf(k, v, ref _od_tgt_height, -0.5f, 0f); return true;
             case "od_targets_size":   pf(k, v, ref _od_tgt_size, 0.6f, 1.6f); return true;
