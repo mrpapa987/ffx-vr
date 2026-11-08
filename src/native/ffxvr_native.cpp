@@ -10894,88 +10894,146 @@ static int odv_emit(MkVertex* verts, int room) {
 }
 // -- strike the targets / Practice targets (ffxvr_odtarget.h): their own share of the marker buffer (odt::k_max_verts), drawn last ----
 static odv::Vtx g_odt_raw[odt::k_max_verts]; static MkVertex g_odt_mk[odt::k_max_verts]; static int g_odt_nv = 0;   // render thread only
-// -- the target art: the local pack (<mod>\art\targets\*.png, never in the repository) -----------------------------------------------
-// Loaded once, lazily, on the render thread at the first targets with F8 "target art (local pack)" on: each piece read and decoded
-// with WIC (hv_wic_decode), its size checked (odt::art::size_bad), packed into atlas A (2048: frame, glow, swirl, back) and B
-// (1024: halo, burst, sparks, edge) with full mip chains built on the CPU (alpha-weighted), uploaded immutable (about 27 MB).
-// Anything missing, odd or failing: nothing is kept, the flat plates, and the reason in one log line and F8 (ffxvr_odg_text 6).
-// Turning it off releases the textures (the next "on" loads again); the game's device lives as long as the process.
+// -- the target art: the local pack (<mod>\art\targets\*.png; an optional download or your own, never in the repository) ------------
+// Asked for at the first targets drawn with F8 "target art (local pack)" on. A worker thread (as the hands' pack loader) reads
+// and decodes each piece with WIC (hv_wic_decode), checks its size (odt::art::size_bad), packs atlas A (2048: frame, glow,
+// swirl, back) and B (1024: halo, burst, sparks, edge) and builds their full mip chains (alpha-weighted), all on the CPU; it
+// touches nothing but its own heap result, handed over through one atomic slot (g_odt_art_ready) and a busy flag. The render
+// thread takes the result at a Present and makes one immutable texture a Present (A, then B: about 27 MB), drawing the flat
+// plates until both are made. A result asked for by an older request (the box turned off, or off and on again, during the load)
+// is dropped unread (its generation). Anything missing, odd or failing: nothing is kept, the flat plates, and the reason in one
+// log line and F8 (ffxvr_odg_text 6). Turning it off releases the textures. The game's device lives as long as the process.
 struct OdtArt { bool tried = false, ok = false; ID3D11Texture2D* tex[2] = {}; ID3D11ShaderResourceView* srv[2] = {}; };
 static OdtArt g_odt_art;
+/// The worker's result (owned by the worker until it is put in the slot, by the render thread once taken out).
+struct OdtArtCpu {
+    uint32_t gen = 0; bool ok = false; char why[240] = ""; int loaded = 0, edge_h = 0; double ms = 0.0;
+    std::vector<std::vector<uint32_t>> mip[2];   // atlas A, B: their chains (level 0 first)
+};
+struct OdtArtReq { uint32_t gen = 0; wchar_t dir[MAX_PATH] = {}; };
+static std::atomic<OdtArtCpu*> g_odt_art_ready{ nullptr };
+static std::atomic<bool> g_odt_art_busy{ false };
+static uint32_t g_odt_art_gen = 0;             // render thread: the request now (bumped by each request and each "off")
+static OdtArtCpu* g_odt_art_pend = nullptr;    // render thread: a taken result whose textures are being made (one a Present)
+static double g_odt_art_up_ms = 0.0;
 static void odt_art_release() {
     for (int a = 0; a < 2; ++a) { if (g_odt_art.srv[a]) g_odt_art.srv[a]->Release(); if (g_odt_art.tex[a]) g_odt_art.tex[a]->Release(); }
     g_odt_art = OdtArt{};
+    delete g_odt_art_pend; g_odt_art_pend = nullptr; g_odt_art_up_ms = 0.0;
 }
-/// One atlas (side n, mip 0 in `top`) as an immutable texture with its full chain and a view; false on any failure.
-static bool odt_art_upload(std::vector<uint32_t>& top, int n, int a) {
-    const int lv = odt::art::levels(n);
-    std::vector<std::vector<uint32_t>> mips(static_cast<size_t>(lv));
-    mips[0].swap(top);
-    for (int l = 1, w = n; l < lv; ++l, w /= 2) { mips[static_cast<size_t>(l)].assign(static_cast<size_t>(w / 2) * static_cast<size_t>(w / 2), 0u); odt::art::mip_down(mips[static_cast<size_t>(l) - 1].data(), w, mips[static_cast<size_t>(l)].data()); }
+/// The worker: read, decode, check, pack, mip. No logging, no globals but the slot and the busy flag. `arg`: a heap request, freed here.
+static DWORD WINAPI odt_art_worker(LPVOID arg) {
+    OdtArtReq* q = static_cast<OdtArtReq*>(arg);
+    OdtArtCpu* r = new (std::nothrow) OdtArtCpu();
+    if (r != nullptr) {
+        r->gen = q->gen;
+        LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+        const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
+        try {
+            std::vector<uint32_t> atl[2];
+            atl[0].assign(static_cast<size_t>(odt::art::k_a) * odt::art::k_a, 0u); atl[1].assign(static_cast<size_t>(odt::art::k_b) * odt::art::k_b, 0u);
+            for (int p = 0; p < odt::art::P_N && !r->why[0]; ++p) {
+                const char* nm = odt::art::file(p);
+                wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", q->dir, nm);
+                std::vector<uint8_t> bytes; char err[160] = "";
+                if (!hv_read_file(path, 64u << 20, &bytes, err, sizeof(err))) { snprintf(r->why, sizeof(r->why), "%s not found or unreadable (%s)", nm, err); break; }
+                HvImage im;
+                if (!hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) { snprintf(r->why, sizeof(r->why), "%s: %s", nm, err); break; }
+                if (const char* bad = odt::art::size_bad(p, im.w, im.h)) { snprintf(r->why, sizeof(r->why), "%s is %dx%d (%s)", nm, im.w, im.h, bad); break; }
+                if (p == odt::art::P_EDGE) r->edge_h = im.h;
+                const odt::art::Cell c = odt::art::cell(p, im.h);
+                odt::art::put(atl[c.atlas].data(), c.atlas == 0 ? odt::art::k_a : odt::art::k_b, im.rgba.data(), im.w, im.h, c);
+                r->loaded++;
+            }
+            for (int a = 0; a < 2 && !r->why[0]; ++a) {   // the chains
+                const int n = a == 0 ? odt::art::k_a : odt::art::k_b, lv = odt::art::levels(n);
+                r->mip[a].resize(static_cast<size_t>(lv));
+                r->mip[a][0].swap(atl[a]);
+                for (int l = 1, w = n; l < lv; ++l, w /= 2) {
+                    r->mip[a][static_cast<size_t>(l)].assign(static_cast<size_t>(w / 2) * static_cast<size_t>(w / 2), 0u);
+                    odt::art::mip_down(r->mip[a][static_cast<size_t>(l) - 1].data(), w, r->mip[a][static_cast<size_t>(l)].data());
+                }
+            }
+        }
+        catch (...) { snprintf(r->why, sizeof(r->why), "out of memory while packing"); r->mip[0].clear(); r->mip[1].clear(); }
+        if (SUCCEEDED(co)) CoUninitialize();
+        QueryPerformanceCounter(&q1); r->ms = qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
+        r->ok = !r->why[0];
+    }
+    delete q;
+    if (r != nullptr) { OdtArtCpu* old = g_odt_art_ready.exchange(r); delete old; }   // (an unconsumed older one: dropped)
+    g_odt_art_busy.store(false);
+    return 0;
+}
+/// One atlas's texture from a taken chain (render thread); its CPU chain is freed once the texture is made.
+static bool odt_art_upload(std::vector<std::vector<uint32_t>>& mips, int n, int a) {
+    const int lv = static_cast<int>(mips.size());
+    if (lv != odt::art::levels(n)) return false;
     std::vector<D3D11_SUBRESOURCE_DATA> sd(static_cast<size_t>(lv));
     for (int l = 0, w = n; l < lv; ++l, w = w > 1 ? w / 2 : 1) { sd[static_cast<size_t>(l)].pSysMem = mips[static_cast<size_t>(l)].data(); sd[static_cast<size_t>(l)].SysMemPitch = static_cast<UINT>(w) * 4u; sd[static_cast<size_t>(l)].SysMemSlicePitch = 0; }
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = td.Height = static_cast<UINT>(n); td.MipLevels = static_cast<UINT>(lv); td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    if (FAILED(g_device->CreateTexture2D(&td, sd.data(), &g_odt_art.tex[a])) || g_odt_art.tex[a] == nullptr) return false;
-    return SUCCEEDED(g_device->CreateShaderResourceView(g_odt_art.tex[a], nullptr, &g_odt_art.srv[a])) && g_odt_art.srv[a] != nullptr;
+    const bool ok = SUCCEEDED(g_device->CreateTexture2D(&td, sd.data(), &g_odt_art.tex[a])) && g_odt_art.tex[a] != nullptr
+                    && SUCCEEDED(g_device->CreateShaderResourceView(g_odt_art.tex[a], nullptr, &g_odt_art.srv[a])) && g_odt_art.srv[a] != nullptr;
+    std::vector<std::vector<uint32_t>>().swap(mips);
+    return ok;
 }
-static void odt_art_load() {
-    g_odt_art.tried = true;
-    if (g_device == nullptr) { snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: no device yet, flat plates"); return; }
-    LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
-    wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\targets", g_dir);
-    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC on this thread (RPC_E_CHANGED_MODE: already initialised, also fine)
-    char why[240] = ""; int loaded = 0, edge_h = 0;
-    try {
-        std::vector<uint32_t> A(static_cast<size_t>(odt::art::k_a) * odt::art::k_a, 0u), B(static_cast<size_t>(odt::art::k_b) * odt::art::k_b, 0u);
-        for (int p = 0; p < odt::art::P_N && !why[0]; ++p) {
-            const char* nm = odt::art::file(p);
-            wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", dir, nm);
-            FILE* f = nullptr;
-            if (_wfopen_s(&f, path, L"rb") != 0 || f == nullptr) { snprintf(why, sizeof(why), "%s not found", nm); break; }
-            std::vector<uint8_t> bytes; uint8_t buf[65536]; size_t got;
-            while ((got = fread(buf, 1, sizeof(buf), f)) > 0 && bytes.size() < (64u << 20)) bytes.insert(bytes.end(), buf, buf + got);
-            fclose(f);
-            HvImage im; char err[160] = "";
-            if (!hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) { snprintf(why, sizeof(why), "%s: %s", nm, err); break; }
-            if (const char* bad = odt::art::size_bad(p, im.w, im.h)) { snprintf(why, sizeof(why), "%s is %dx%d (%s)", nm, im.w, im.h, bad); break; }
-            if (p == odt::art::P_EDGE) edge_h = im.h;
-            const odt::art::Cell c = odt::art::cell(p, im.h);
-            odt::art::put(c.atlas == 0 ? A.data() : B.data(), c.atlas == 0 ? odt::art::k_a : odt::art::k_b, im.rgba.data(), im.w, im.h, c);
-            loaded++;
-        }
-        if (!why[0] && !odt_art_upload(A, odt::art::k_a, 0)) snprintf(why, sizeof(why), "the 2048 atlas could not be made");
-        if (!why[0] && !odt_art_upload(B, odt::art::k_b, 1)) snprintf(why, sizeof(why), "the 1024 atlas could not be made");
-    }
-    catch (...) { snprintf(why, sizeof(why), "out of memory while packing"); }
-    if (SUCCEEDED(co)) CoUninitialize();
-    QueryPerformanceCounter(&q1);
-    const double ms = qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
-    char d8[MAX_PATH * 2]; WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
-    if (why[0]) {
-        odt_art_release(); g_odt_art.tried = true;
-        snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: %s at %s (loaded %d of %d), flat plates", why, d8, loaded, odt::art::P_N);
-    }
-    else {
-        g_odt_art.ok = true;
-        snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms)", loaded, odt::art::P_N, odt::art::k_a, odt::art::k_b,
-                 static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0), edge_h, ms);
-    }
-    diag("odt: %s", g_odt_art_why);
-}
-/// Every Present (odt_tick): the art follows the F8 box; the Runner draws it only with the pack loaded and the targets' shader ready.
+/// Every Present (odt_tick: wanted_now false; odt_build: true): the F8 box (off: released, an in-flight load dropped); the first
+/// targets drawn ask the worker; a finished result is made into textures, one a Present; g_odt.art set (the pack's textures
+/// made and the targets' shader ready).
 static void odt_art_frame(bool wanted_now) {
     const bool on = g_odt_art_on != 0;
     if (!on && (g_odt_art.ok || g_odt_art.tried)) {
         if (g_odt_art.ok) diag("odt: art pack released (target art off)");
-        odt_art_release(); snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: off (flat plates)");
-    }
-    if (on && !g_odt_art.tried && wanted_now && marker_pass_init()) {
-        if (g_mk_pst && g_mk_blend_pm && g_mk_smp_art) odt_art_load();
-        else { g_odt_art.tried = true; snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the targets' shader is not ready (see the log), flat plates"); }
+        odt_art_release(); g_odt_art_gen++;   // a load still running is dropped when it ends
+        snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: off (flat plates)");
     }
     if (on && !g_odt_art.tried && strncmp(g_odt_art_why, "art pack: off", 13) == 0) snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: not loaded yet (it loads at the first targets)");
+    // a finished load: ours (made into textures from the next step) or an older request's (dropped)
+    if (OdtArtCpu* r = g_odt_art_ready.exchange(nullptr)) {
+        if (on && g_odt_art.tried && !g_odt_art.ok && g_odt_art_pend == nullptr && r->gen == g_odt_art_gen) {
+            if (r->ok) { g_odt_art_pend = r; r = nullptr; }
+            else {
+                char d8[MAX_PATH * 2] = ""; wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\targets", g_dir); WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
+                snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: %s at %s (loaded %d of %d), flat plates", r->why, d8, r->loaded, odt::art::P_N);
+                diag("odt: %s (%.0f ms in the background)", g_odt_art_why, r->ms);
+            }
+        }
+        delete r;
+    }
+    if (g_odt_art_pend != nullptr) {   // one texture a Present: A, then B
+        LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+        const int a = g_odt_art.tex[0] == nullptr ? 0 : 1;
+        const bool ok = odt_art_upload(g_odt_art_pend->mip[a], a == 0 ? odt::art::k_a : odt::art::k_b, a);
+        QueryPerformanceCounter(&q1); g_odt_art_up_ms += qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
+        if (!ok) {
+            const int loaded = g_odt_art_pend->loaded;
+            odt_art_release(); g_odt_art.tried = true;
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the %d atlas could not be made (loaded %d of %d), flat plates", a == 0 ? odt::art::k_a : odt::art::k_b, loaded, odt::art::P_N);
+            diag("odt: %s", g_odt_art_why);
+        }
+        else if (a == 1) {
+            g_odt_art.ok = true;
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms in the background, %.0f ms for the textures)",
+                     g_odt_art_pend->loaded, odt::art::P_N, odt::art::k_a, odt::art::k_b, static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0), g_odt_art_pend->edge_h,
+                     g_odt_art_pend->ms, g_odt_art_up_ms);
+            diag("odt: %s", g_odt_art_why);
+            delete g_odt_art_pend; g_odt_art_pend = nullptr;
+        }
+    }
+    if (on && !g_odt_art.tried && wanted_now && !g_odt_art_busy.load() && marker_pass_init()) {   // the first targets drawn: ask the worker
+        g_odt_art.tried = true;
+        if (!(g_mk_pst && g_mk_blend_pm && g_mk_smp_art)) snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the targets' shader is not ready (see the log), flat plates");
+        else {
+            OdtArtReq* q = new (std::nothrow) OdtArtReq();
+            if (q != nullptr) { q->gen = ++g_odt_art_gen; _snwprintf_s(q->dir, _TRUNCATE, L"%s\\art\\targets", g_dir); }
+            g_odt_art_busy.store(true);
+            HANDLE th = q ? CreateThread(nullptr, 256 * 1024, odt_art_worker, q, 0, nullptr) : nullptr;
+            if (th != nullptr) { CloseHandle(th); snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loading in the background (flat plates meanwhile)"); }   // detached: it ends by itself
+            else { delete q; g_odt_art_busy.store(false); snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: no worker thread, flat plates"); diag("odt: %s", g_odt_art_why); }
+        }
+    }
     g_odt.art = on && g_odt_art.ok && g_mk_pst != nullptr;
 }
 /// The targets to draw now (a round, its end's fade, a cut still falling): the headset's 3D view only (as odv_wanted).

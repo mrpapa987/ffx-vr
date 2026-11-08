@@ -4,7 +4,9 @@
 # Fahrenheit's load order. Your settings (ffxvr.ini) and anything else in that folder are kept,
 # so installing a newer zip over an older one is safe. The shipped hand packs (hands\generic-glove\,
 # hands\generic\) are replaced; a hand pack folder of your own under hands\ is never touched. Neither is fmvdepth\ (FMV depth
-# made on your PC by convert-fmv-depth.ps1, private): not even -Uninstall -Purge deletes it.
+# made on your PC by convert-fmv-depth.ps1, private): not even -Uninstall -Purge deletes it. The optional target art
+# (ffxvr-target-art-<version>.zip extracted into the same folder as this zip: mod\ffxvr\art\targets\) is copied when it
+# is there; an installed art\ folder is never deleted by an install whose zip has none (only -Uninstall -Purge deletes it).
 # It also checks what the mod needs at run time and says what is missing.
 #
 #   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini, logs and your own hand packs are kept, and listed)
@@ -249,6 +251,21 @@ foreach ($pk in $FfxvrHandPacks) {
         Unblock-File -LiteralPath (Join-Path $to $f.Name) -ErrorAction SilentlyContinue
     }
     Write-Host "  hands\$pk\  (the generic hand)"
+}
+# The optional target art (its own zip, extracted over this one): copied when present, its files replaced; nothing is deleted.
+$artFrom = Join-Path $src 'art\targets'
+if (Test-Path -LiteralPath $artFrom) {
+    $artTo = Join-Path $dest 'art\targets'
+    New-Item -ItemType Directory -Force -Path $artTo | Out-Null
+    $artN = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $artFrom -File)) {
+        Copy-Item -LiteralPath $f.FullName -Destination $artTo -Force
+        Unblock-File -LiteralPath (Join-Path $artTo $f.Name) -ErrorAction SilentlyContinue
+        $artN++
+    }
+    Write-Host "  art\targets\  ($artN files: the optional target art)"
+} elseif (Test-Path -LiteralPath (Join-Path $dest 'art\targets')) {
+    Write-Host '  art\targets\  (kept: the target art installed before)'
 }
 
 # ---------------------------------------------------------------- loadorder

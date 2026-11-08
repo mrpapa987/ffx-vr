@@ -40,9 +40,10 @@ file is newer than the DLLs. It warns if a packed DLL contains a `C:\Users\<name
 
 **The optional target art zip.** Next to the mod's zip, `package-release.ps1` also makes
 `ffxvr-target-art-<label>.zip` (+ `.sha256`) when the Bushido target art pack is on the packing PC (in
-`<game>\fahrenheit\mods\ffxvr\art\targets\`, or `-ArtDir <folder>`; `-NoArt` skips it). It unpacks to
-`fahrenheit/mods/ffxvr/art/targets/` (extract it into the game folder) and holds the eight PNGs and
-`ART-NOTICE.txt` ("Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights
+`<game>\fahrenheit\mods\ffxvr\art\targets\`, or `-ArtDir <folder>`; `-NoArt` skips it). It mirrors the mod
+zip's layout, `ffx-vr-<label>/mod/ffxvr/art/targets/`, so a player extracts both zips into the same folder and runs
+`tools\install-mod.ps1`, which copies the art when it is there (and never deletes an installed `art\` when a later zip has
+none; only `-Uninstall -Purge` does). It holds the eight PNGs and `ART-NOTICE.txt` ("Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights
 claimed, free to use. Optional: without it the mod draws plain targets."). Without the pack the step prints a note and the
 release goes on. The art is the owner's own AI-generated art: it is never in the repository, and never in the mod's zip
 (a guard fails the package on any `art\` folder there). Attach it to the GitHub release as a separate, optional download.

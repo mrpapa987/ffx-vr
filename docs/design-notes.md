@@ -5605,7 +5605,8 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 
 The textured medallions use an art pack. **The art is not in the repository and not in the mod's zip**: it is the owner's
 own AI-generated art (Google Gemini, upscaled with Upscayl), offered with releases as a separate optional download,
-`ffxvr-target-art-<version>.zip`, which unpacks to `fahrenheit/mods/ffxvr/art/targets/` (docs/release.md). The repository
+`ffxvr-target-art-<version>.zip`, laid out like the mod's zip (`ffx-vr-<version>/mod/ffxvr/art/targets/`): extracted into the
+same folder as the mod's zip, `tools\install-mod.ps1` installs it with the mod (docs/release.md). The repository
 has only the loader, the cutting script and these notes; `assets/art/` is ignored, and the release script refuses any `art\`
 folder in the mod's zip. To make your own pack:
 
@@ -5628,12 +5629,13 @@ folder in the mod's zip. To make your own pack:
 4. **F8 > Controllers:** "target art (local pack)" (ini `od_targets_art`, on by default) and its status line, e.g. `art pack:
    loaded 8 of 8 (atlas 2048 + 1024, 27 MB; ...)` or `art pack: frame.png not found at ..., flat plates`.
 
-How the mod loads it: once, at the first targets drawn (render thread), each file decoded with WIC (Windows' own codecs) and
-its size checked (1024 x 1024; the edge strip 1024 x 32..512); the pieces packed into atlas A (2048: frame, glow, swirl, back
-at 1024) and atlas B (1024: halo, burst, sparks, edge at 512, shrunk 2:1), each with a full mip chain made on the CPU
-(alpha-weighted), uploaded as immutable textures: 26.7 MB of VRAM. Anything missing, odd-sized or failing: nothing is kept,
-the flat plates, and the reason in one `odt:` log line and in F8. Turning the box off releases the textures. The first load
-takes a moment on the render thread (its time is in the log line).
+How the mod loads it: at the first targets drawn, a worker thread (as the hand packs' loader) reads each file, decodes it
+with WIC (Windows' own codecs), checks its size (1024 x 1024; the edge strip 1024 x 32..512), packs atlas A (2048: frame,
+glow, swirl, back at 1024) and atlas B (1024: halo, burst, sparks, edge at 512, shrunk 2:1) and builds each one's full mip
+chain (alpha-weighted); the render thread then makes one immutable texture a Present (26.7 MB of VRAM in all) and draws the
+flat plates until both are made. A load the box was turned off during is dropped when it ends. Anything missing, odd-sized
+or failing: nothing is kept, the flat plates, and the reason in one `odt:` log line and in F8; the success line gives the
+background time and the textures' time. Turning the box off releases the textures.
 
 - **Two places** (the owner, 9 Nov 2026: "two places where the icons can appear"). The single spot became two, at the same
   distance and height, 0.36 m apart (`od_targets_spread`, F8 "target spacing (m)", 0.25-0.6 between the centres, never less

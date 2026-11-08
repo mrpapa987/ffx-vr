@@ -224,7 +224,8 @@ arrows appear on the left, A / B / X / Y and L1 / R1 on the right; cut the big p
 A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
 and set the blade pitch, target distance, target height, target size and target spacing first; "Bushido time" (1-3x) slows the game's input timer
 while the targets window is open, if the time is too short. The targets can be textured medallions from the optional art download
-(`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the game folder) or a pack you make yourself
+(`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the same folder as the mod's zip, then run
+`tools\install-mod.ps1`) or a pack you make yourself
 (docs/design-notes.md, "Bushido target art (local pack)").
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old

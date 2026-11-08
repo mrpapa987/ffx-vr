@@ -16,8 +16,9 @@
 #   dist\ffx-vr-<label>.zip.sha256
 #   dist\ffxvr-target-art-<label>.zip (+ .sha256)   OPTIONAL, a separate download: the Bushido target art pack (the owner's
 #                              AI-generated medallion art, never in the repository or in the mod's zip), from
-#                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir; it unpacks to
-#                              fahrenheit\mods\ffxvr\art\targets\ (8 PNGs + ART-NOTICE.txt). No pack: skipped with a note,
+#                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir; it mirrors the mod zip's layout,
+#                              ffx-vr-<label>\mod\ffxvr\art\targets\ (8 PNGs + ART-NOTICE.txt), so extracting both zips
+#                              into one folder and running install-mod installs the art too. No pack: skipped with a note,
 #                              never a failure. -NoArt skips it.
 #
 # Fahrenheit and FFX-60fps are NOT included: they are separate projects with their own licences
@@ -274,7 +275,7 @@ if ($NoArt) {
         } else {
             $artName  = "ffxvr-target-art-$label"
             $artStage = Join-Path $OutDir '_stage_art'
-            $artTo    = [IO.Path]::Combine($artStage, 'fahrenheit', 'mods', $modId, 'art', 'targets')
+            $artTo    = [IO.Path]::Combine($artStage, $name, 'mod', $modId, 'art', 'targets')   # the mod zip's layout (install-mod copies it)
             if (Test-Path -LiteralPath $artStage) { Remove-Item -LiteralPath $artStage -Recurse -Force }
             New-Item -ItemType Directory -Force -Path $artTo | Out-Null
             foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
