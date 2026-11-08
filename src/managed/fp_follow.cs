@@ -105,7 +105,7 @@ public sealed unsafe partial class FFXVRModule {
     // actor within 20 units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
     private bool _fp_event_hold = true; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 1), fp_event_leash (units, 2..40)
     private delegate* unmanaged[Cdecl]<int, float, float*, int, int> _fn_fp_event;   // ABI 50
-    private long _fpev_key = -1; private readonly float[] _fpev_st = new float[4];   // the last eligible frame's (slot, scene generation); native's state for F8
+    private long _fpev_key = -1; private readonly float[] _fpev_st = new float[16];   // the last eligible frame's (slot, scene generation); native's state for F8
     /// <summary>push_player, every frame after the eye is sent: eligible = the field, first person, on foot (not riding), not
     /// blitzball, a followed actor; with control off ([0x1300788] 0) native holds the eye. release = the followed slot or the
     /// scene generation (map, event, the model instance a load re-creates) changed since the last eligible frame.</summary>
@@ -115,7 +115,35 @@ public sealed unsafe partial class FFXVRModule {
         long key = eligible ? ((long)pick << 32) | body_hide_scene_gen(actors, pick) : -1;
         bool rel = eligible && _fpev_key >= 0 && key != _fpev_key;
         if (eligible) _fpev_key = key;
-        fixed (float* o = _fpev_st) _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0), _fp_event_leash, o, 4);
+        // the automatic capture: the motion log for 20-40 s from the frame control goes off (a diagnostic profile only)
+        bool can = false;
+        if (off && !_fpcap.off_prev) {
+            can = diag_any() && _fn_motion_log != null && !(read(FhUtil.ptr_at<uint>(GameGates.k_menu), out uint menu) && menu != 0);   // not for a field menu
+            _fpcap_share_slot = -1; _fpcap_share = ""; _fpcap_share_dmin = 0f;
+        }
+        int ml = FpCap.Step(ref _fpcap, off, can, _now);
+        if (ml > 0) {
+            _fn_motion_log(ml);
+            if (ml == FpCap.k_frames) { string m = I($"eye capture: player control off in first person on map {map_name()}: the motion log runs {FpCap.k_frames / 60} s ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; run {_fpcap.runs} of {FpCap.k_runs} this session"); _logger.Info(m); d7_log(m); }
+        }
+        if (_fpcap.episode && off && _eye_share_frame == _frames && _eye_share_slot >= 0) {   // the actor on his root during the episode (the nearest seen)
+            if (_eye_share_slot != _fpcap_share_slot) { _fpcap_share_slot = _eye_share_slot; _fpcap_share = I($"actor {_eye_share_slot} '{actor_name((char*)_eye_share_name)}' (chr_id 0x{_eye_share_id:X}, {chr_kind(_eye_share_id)})"); _fpcap_share_dmin = _eye_share_d; }
+            else if (_eye_share_d < _fpcap_share_dmin) _fpcap_share_dmin = _eye_share_d;
+        }
+        fixed (float* o = _fpev_st) {
+            _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0), _fp_event_leash, o, 16);
+            if (o[4] != _fpcap_seq) { _fpcap_seq = o[4]; if (_fpcap.episode && !off) fpcap_summary(o); }
+        }
+    }
+    private FpCapState _fpcap; private float _fpcap_seq; private int _fpcap_share_slot = -1; private string _fpcap_share = ""; private float _fpcap_share_dmin;
+    private int _eye_share_slot = -1, _eye_share_id; private nint _eye_share_name; private float _eye_share_d; private ulong _eye_share_frame = ulong.MaxValue;   // eye_disp_step's shared-root actor this frame
+    private static string chr_kind(int chr_id) { uint t = (uint)chr_id >> 12; return t == 0 ? "a party / event character model" : t == 2 ? "an NPC" : t == 4 ? "a 'w' model" : t == 5 ? "an object (chr/obj)" : I($"type {t}"); }
+    /// <summary>The capture's one summary line when control is back (native's episode, ej::Episode): the diag log, with the motion lines.</summary>
+    private void fpcap_summary(float* o) {
+        int dir = (int)o[7];
+        string d = dir == 1 ? "forward" : dir == 2 ? "sideways" : dir == 3 ? "back" : "nowhere (under half a unit)";
+        string m = I($"eye capture: control back (or first person left) on map {map_name()} after {o[5]:F0} frames (about {o[5] / 60f:F1} s): the root moved {o[6]:F1} units, {d} of the view at the start ({o[8]:F1} along, {o[9]:F1} across); the largest single-frame step {o[10]:F1} at +{o[11]:F0} frames; the eye at most {o[12]:F1} units from where it was when control went off; black frames {o[13]:F0}, camera cuts {o[14]:F0}, hold restarts {o[15]:F0} (fp_event_hold {(_fp_event_hold ? 1 : 0)}, leash {_fp_event_leash:F0}); on his root: {(_fpcap_share_slot >= 0 ? I($"{_fpcap_share}, nearest {_fpcap_share_dmin:F2}") : "nobody")}; the nearest scene depth: the uidepth: lines");
+        _logger.Info(m); d7_log(m);
     }
     /// <summary>F8, under the eye jumps.</summary>
     private void fpev_ui() {
@@ -129,6 +157,30 @@ public sealed unsafe partial class FFXVRModule {
         if (i != _ib_bad_slot || tbl == null) return false;
         if (chr_id != _ib_bad_id || !read((byte*)(tbl + i) + 0x830, out nint h) || h != _ib_bad_h) { _ib_bad_slot = -1; return false; }
         return true;
+    }
+}
+
+/// <summary>fix-eye: the automatic capture's state (FpCap.Step).</summary>
+internal struct FpCapState { public int runs, left; public bool ext, off_prev, episode; public double last; }
+/// <summary>fix-eye: the automatic capture (research/sphere-grab-eye.md section 4): when control goes off in first person on foot (the
+/// caller's can: a diagnostic profile, no field menu), the motion log runs k_frames (20 s), extended once to k_frames_max (40 s)
+/// in all while control stays off; k_runs a session, k_gap seconds apart. Step returns the frames to (re)start the log with this
+/// frame (0: nothing to do). Pure: the scratch test transpiles it.</summary>
+internal static class FpCap {
+    public const int k_runs = 6, k_frames = 1200, k_frames_max = 2400, k_ext_at = 60;
+    public const double k_gap = 30.0;
+    public static int Step(ref FpCapState s, bool off, bool can, double now) {
+        int r = 0;
+        if (off && !s.off_prev) {
+            s.episode = false;
+            if (can && s.runs < k_runs && (s.runs == 0 || now - s.last >= k_gap)) { s.runs++; s.last = now; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
+        }
+        if (s.left > 0) {
+            s.left--;
+            if (off && s.episode && !s.ext && s.left == k_ext_at) { s.ext = true; s.left += k_frames_max - k_frames; r = s.left; }
+        }
+        s.off_prev = off;
+        return r;
     }
 }
 

@@ -86,12 +86,16 @@ public sealed unsafe partial class FFXVRModule {
     /// step between the snapshots used at consecutive Presents (1 every line = paired; 0 / 2 = a repeated / skipped snapshot).</summary>
     private void sa_motion_cols(nint act) {
         if (_fn_motion_cols == null) return;
-        float* mc = stackalloc float[17];
+        float* mc = stackalloc float[23];
         Vector3 ptd = default; bool pok = act != 0 && read((byte*)act + 0x200, out ptd);
         Vector3 jd = d7_render(_r7j.td), pd = d7_render(ptd), jp = d7_render(_r7j.pos);
         mc[0] = jd.X; mc[1] = jd.Y; mc[2] = jd.Z; mc[3] = pok ? pd.X : 0f; mc[4] = pok ? pd.Y : 0f; mc[5] = pok ? pd.Z : 0f;
         mc[6] = jp.X; mc[7] = jp.Y; mc[8] = jp.Z; mc[9] = _r7j.exec; mc[10] = Math.Min(_sa_age, 999); mc[11] = _r7j_seq != 0 && _r7j.valid != 0 ? 1f : 0f;
         mc[12] = _sa_used ? 1f : 0f; mc[13] = Math.Min(_sa_age, 999); mc[14] = _sa_step; mc[15] = _sa_step_logic; mc[16] = Math.Clamp(_sa_stamp_step, -999, 999);
-        _fn_motion_cols(mc, 17);
+        // fix-eye (the capture): player control (gs_player: read once a frame), the actor on his root this frame (eye_disp_step), +0x0C now
+        mc[17] = gs_player(out uint pl) ? (pl != 0 ? 1f : 0f) : -1f;
+        bool sh = _eye_share_frame == _frames && _eye_share_slot >= 0; mc[18] = sh ? _eye_share_slot : -1f; mc[19] = sh ? _eye_share_d : 0f;
+        Vector3 lg = default; Vector3 lr = act != 0 && read((byte*)act + 0x0C, out lg) ? d7_render(lg) : default; mc[20] = lr.X; mc[21] = lr.Y; mc[22] = lr.Z;
+        _fn_motion_cols(mc, 23);
     }
 }

@@ -708,7 +708,7 @@ HapHand g_hap[2] = {}; uint8_t g_hap_b[2] = {}; int g_hap_src = 0;
 bool g_xis_install_failed = false;   // HP-1: an install attempt failed (logged once; retried only when haptics are switched on again)
 bool g_hap_first_logged = false;     // HP-4: the first nonzero raw rumble of the session was logged   // the decoded bytes and their source (0 none, 1 XInputSetState, 2 the game's pad block, 3 vibration off) for the overlay
 uint32_t g_bb_desc_logged = 0;                             // backbuffer desc lines (6.7), at most 10
-float g_motion_cols[20] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4); 12-16: the smooth anchor (used, age, step used, step +0x0C, stamp step)
+float g_motion_cols[24] = {}; bool g_motion_cols_fresh = false;   // managed's post-join snapshot columns for the Motion log (6.4); 12-16: the smooth anchor (used, age, step used, step +0x0C, stamp step); fix-eye 17-22: control (1 / 0 / -1 not read), the actor on his root (slot, -1 none) and its distance, +0x0C now (render space)
 volatile LONG g_present_ms = 0;                            // GetTickCount at the last begin_frame: the watchdog's input
 volatile LONG g_stall_open = 0; LONG g_stall_from_ms = 0; uint32_t g_stalls = 0;   // a stall logged and not yet ended; stalls logged
 DWORD g_main_tid = 0; uint32_t g_main_other = 0;           // the game's main thread (first caller of ffxvr_main_note); joins seen elsewhere
@@ -2148,6 +2148,7 @@ int        g_evh_flags = 0; uint32_t g_evh_flags_frame = 0;   // managed's flags
 uint32_t   g_evh_rel_seq = 0, g_evh_rel_seen = 0, g_evh_cut_seen = 0;
 bool       g_evh_out_on = false; float g_evh_out[2] = {};     // this frame's held / gliding horizontal eye position (render x, z)
 uint32_t   g_evh_lines = 0, g_evh_holds = 0;
+ej::Episode g_evep; float g_evep_out[11] = {}; uint32_t g_evep_seq = 0;   // the last finished no-control episode (ffxvr_fp_event's out 4..14)
 static void evh_tick(float P[3]) {
     const bool fresh = g_frames - g_evh_flags_frame <= 2u;   // managed stopped sending (no actor table, a load): no control-off frame
     const bool want = fresh && (g_evh_flags & 1) != 0 && g_fp_mode == 1;
@@ -2157,6 +2158,11 @@ static void evh_tick(float P[3]) {
     const float bx = P[0], bz = P[2];
     const int ev = ej::ev_step(g_evh, P, want, enabled, release, cut, g_dt, g_evh_cfg, g_frames);
     g_evh_out_on = ej::ev_active(g_evh); g_evh_out[0] = P[0]; g_evh_out[1] = P[2];
+    if (ej::ep_step(g_evep, want, g_fp_pos, P, g_yaw_view, g_blink_frames > 0, cut, g_frames) == ej::EP_END) {   // the capture's summary (managed logs it)
+        const ej::Episode& e = g_evep;
+        const float v[11] = { static_cast<float>(e.frames), e.disp, static_cast<float>(e.dir), e.along, e.across, e.step_max, static_cast<float>(e.step_at), e.eye_far, static_cast<float>(e.black), static_cast<float>(e.cuts), static_cast<float>(g_evh.resets) };
+        memcpy(g_evep_out, v, sizeof(v)); g_evep_seq++;
+    }
     if (ev == ej::EV_START) g_evh_holds++;
     if (ev == ej::EV_SNAP && g_evh.end_off >= 1.f) ej_blink();   // control back (or the hold released) far from the root: blink and snap
     if (ev == ej::EV_NONE || g_evh_lines >= 60) return;
@@ -5558,7 +5564,7 @@ extern "C" __declspec(dllexport) int ffxvr_main_note() {
 /// snapshot logic position xyz (render space), exec byte, frames since the snapshot, snapshot valid.
 extern "C" __declspec(dllexport) void ffxvr_motion_cols(const float* v, int n) {
     if (v == nullptr || n <= 0) { g_motion_cols_fresh = false; return; }
-    for (int i = 0; i < 20; ++i) g_motion_cols[i] = i < n ? v[i] : 0.f;
+    for (int i = 0; i < 24; ++i) g_motion_cols[i] = i < n ? v[i] : 0.f;
     g_motion_cols_fresh = true;
 }
 
@@ -12541,28 +12547,40 @@ static void motion_log_tick() {
     }
     float hy = 0.f;
     { const float fwd[3] = { 0, 0, -1 }; float d[3]; quat_rotate(g_xr_raw_q, fwd, d); hy = atan2f(-d[0], -d[2]); }
-    char ex[360] = "";   // build 7 (6.4): managed's main-thread post-join snapshot of the followed actor, render space; then the smooth anchor
+    char ex[360] = "", fx[160] = "";   // build 7 (6.4): managed's main-thread post-join snapshot of the followed actor, render space; then the smooth anchor
     if (g_motion_cols_fresh) {
         const float* m = g_motion_cols;
         snprintf(ex, sizeof(ex), " | snap drawn (%.2f %.2f %.2f) present drawn (%.2f %.2f %.2f) snap logic (%.2f %.2f %.2f) exec %d snap age %d%s | smooth anchor %s (age %d, stamp step %d) step used %.2f step logic %.2f",
                  m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], (int)m[9], (int)m[10], m[11] != 0.f ? "" : " (no snapshot)", m[12] != 0.f ? "USED" : "off", (int)m[13], (int)m[16], m[14], m[15]);
+        // fix-eye (the capture): player control, the actor on his root and its distance, the logic root +0x0C now
+        snprintf(fx, sizeof(fx), " | control %s, on his root %d (%.2f), +0x0C (%.2f %.2f %.2f)", m[17] > 0.5f ? "yes" : m[17] < -0.5f ? "?" : "NO", (int)m[18], m[19], m[20], m[21], m[22]);
         g_motion_cols_fresh = false;
     }
-    diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f%s", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy, ex);
+    // fix-eye (the capture): the eye base after the hold and the final eye (eye 1, headset), the head (smoothed / raw offsets from the
+    // root), the displaced-body bit, the blink, this frame's eye-jump distance, the event hold
+    char ey[300];
+    snprintf(ey, sizeof(ey), " | eye base (%.2f %.2f %.2f) eye (%.2f %.2f %.2f) head_s (%.2f %.2f %.2f) head (%.2f %.2f %.2f) disp %d blink %d ej %.2f hold %s %.2f",
+             g_hb_P[0], g_hb_P[1], g_hb_P[2], g_hb_eye[0], g_hb_eye[1], g_hb_eye[2], g_fp_head_s[0], g_fp_head_s[1], g_fp_head_s[2], g_fp_head[0], g_fp_head[1], g_fp_head[2],
+             g_fp_head_disp ? 1 : 0, g_blink_frames, g_ej.last_d, g_evh.on ? "on" : g_evh.glide ? "glide" : "off", g_evh_out_on ? ej::hlen(g_evh_out[0] - g_evh.prev[0], g_evh_out[1] - g_evh.prev[1]) : 0.f);
+    diag("motion: frame %u dt %.1f ms actor (%.2f %.2f %.2f) rendered (%.2f %.2f %.2f) d %.1f | view yaw %.3f head yaw %.3f%s%s%s", g_frames, g_dt * 1000.f, g_fp_pos[0], g_fp_pos[1], g_fp_pos[2], best[0], best[1], best[2], sqrtf(bd), g_fp_yaw, hy, ex, fx, ey);
 }
 
 /// fix-eye (ABI 50): the event hold, every frame from push_player. flags: 1 = an eligible frame with no player control (the field,
 /// first person, on foot, not battle / riding / blitzball, a followed actor, [0x1300788] 0), 2 = fp_event_hold on, 4 = release
 /// (a map change, a load or a re-pick: the hold ends at the next step). leash = fp_event_leash (units, 2..40). out (may be
 /// null): the hold for F8: on (1) / gliding (2) / off (0), seconds held, the eye's offset from its base now, holds this session;
-/// returns the count written.
+/// then the last finished no-control episode (ej::Episode, the automatic capture's summary): 4 its sequence number (0 none yet), 5
+/// frames, 6 the root's horizontal displacement, 7 its direction (0 none, 1 forward, 2 sideways, 3 back of the view at the start),
+/// 8 / 9 its parts along / across, 10 the largest single-frame root step, 11 its frame after the start, 12 the eye's largest
+/// distance from where it was, 13 black frames, 14 camera cuts, 15 the hold's restarts. Returns the count written (16 at most).
 extern "C" __declspec(dllexport) int ffxvr_fp_event(int flags, float leash, float* out, int n) {
     g_evh_flags = flags; g_evh_flags_frame = g_frames;
     if (flags & 4) g_evh_rel_seq++;
     g_evh_cfg.leash = std::isfinite(leash) ? (leash < 2.f ? 2.f : leash > 40.f ? 40.f : leash) : 12.f;
     int k = 0;
-    const float v[4] = { g_evh.on ? 1.f : g_evh.glide ? 2.f : 0.f, g_evh.t, g_evh_out_on ? ej::hlen(g_evh_out[0] - g_evh.prev[0], g_evh_out[1] - g_evh.prev[1]) : 0.f, static_cast<float>(g_evh_holds) };
-    for (; out != nullptr && k < n && k < 4; ++k) out[k] = v[k];
+    float v[16] = { g_evh.on ? 1.f : g_evh.glide ? 2.f : 0.f, g_evh.t, g_evh_out_on ? ej::hlen(g_evh_out[0] - g_evh.prev[0], g_evh_out[1] - g_evh.prev[1]) : 0.f, static_cast<float>(g_evh_holds), static_cast<float>(g_evep_seq) };
+    memcpy(v + 5, g_evep_out, sizeof(g_evep_out));
+    for (; out != nullptr && k < n && k < 16; ++k) out[k] = v[k];
     return k;
 }
 extern "C" __declspec(dllexport) void ffxvr_player_set(float x, float y, float z, int valid) {

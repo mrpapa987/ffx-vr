@@ -11,8 +11,8 @@
 // unit a frame at 60 fps (2 at 30), the chocobo about 2.5; a jump is a move of more than Cfg::units (default 8) in a frame.
 #pragma once
 // fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again; 4: the
-// event hold (EvHold) (the shared scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 4
+// event hold (EvHold); 5: a no-control episode's summary (Episode) (the shared scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 5
 #include <cmath>
 #include <cstdint>
 
@@ -335,5 +335,53 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
 }
 /// The eye's horizontal offset from the base this frame applies (held or gliding), for the other callers of the frame.
 inline bool ev_active(const EvHold& h) { return h.on || h.glide; }
+
+// ---- fix-eye: a no-control episode's summary (the automatic capture, research/sphere-grab-eye.md section 4) -----------------
+// From the frame control goes off in first person on foot to the frame it is back (or first person is left): how far and which
+// way the game moved the root (against the view's heading at the start), its largest single-frame step, how far the eye got from
+// where it was, the black frames and the camera cuts. Whether or not the hold is on: with it off this is what the eye went through.
+struct Episode {
+    bool     on = false;
+    uint32_t start_frame = 0, frames = 0;
+    float    root0[2] = {}, eye0[2] = {}, prev[2] = {};   // horizontal (render x, z): the root and the eye at the start; the last root
+    float    fwd[2] = {};                                  // the view's horizontal forward at the start
+    float    step_max = 0.f; uint32_t step_at = 0;         // the largest single-frame root step, frames after the start
+    float    eye_far = 0.f;                                // the eye's largest distance from where it was at the start
+    uint32_t black = 0, cuts = 0;
+    float    disp = 0.f, along = 0.f, across = 0.f;        // at the end: the root's displacement, its parts along / across fwd
+    int      dir = 0;                                      // 0 none (under half a unit), 1 forward, 2 sideways, 3 back
+};
+enum EpEvent : int { EP_NONE = 0, EP_START, EP_END };
+static const char* const k_ep_dir[] = { "nowhere (under half a unit)", "forward", "sideways", "back" };
+/// One advance frame: want = an eligible frame with control off (ev_step's), root = the eye's root (g_fp_pos), eye = the eye base
+/// after the hold, yaw = the view's yaw (forward (-sin, -cos)), black = this frame's Present is black, cut = a camera cut.
+inline int ep_step(Episode& e, bool want, const float root[3], const float eye[3], float yaw, bool black, bool cut, uint32_t frame) {
+    if (!e.on) {
+        if (!want || !finite3(root) || !finite3(eye)) return EP_NONE;
+        e = Episode{};
+        e.on = true; e.start_frame = frame;
+        e.root0[0] = e.prev[0] = root[0]; e.root0[1] = e.prev[1] = root[2]; e.eye0[0] = eye[0]; e.eye0[1] = eye[2];
+        if (std::isfinite(yaw)) { e.fwd[0] = -std::sin(yaw); e.fwd[1] = -std::cos(yaw); }
+        return EP_START;
+    }
+    if (!want) {
+        const float dx = e.prev[0] - e.root0[0], dz = e.prev[1] - e.root0[1];
+        e.disp = hlen(dx, dz); e.along = dx * e.fwd[0] + dz * e.fwd[1]; e.across = dx * e.fwd[1] - dz * e.fwd[0];
+        const float c = e.disp > 1e-6f ? e.along / e.disp : 0.f;
+        e.dir = e.disp < 0.5f || (e.fwd[0] == 0.f && e.fwd[1] == 0.f) ? 0 : c > 0.5f ? 1 : c < -0.5f ? 3 : 2;
+        e.on = false;
+        return EP_END;
+    }
+    e.frames++;
+    if (black) e.black++;
+    if (cut) e.cuts++;
+    if (finite3(root)) {
+        const float st = hlen(root[0] - e.prev[0], root[2] - e.prev[1]);
+        if (st > e.step_max) { e.step_max = st; e.step_at = frame - e.start_frame; }
+        e.prev[0] = root[0]; e.prev[1] = root[2];
+    }
+    if (finite3(eye)) { const float d = hlen(eye[0] - e.eye0[0], eye[2] - e.eye0[1]); if (d > e.eye_far) e.eye_far = d; }
+    return EP_NONE;
+}
 
 }  // namespace ej
