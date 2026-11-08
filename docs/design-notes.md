@@ -5491,7 +5491,8 @@ reads); scratch tests in render_chk/tests.
   pages last as long as a query's answer did (the frame, or the 50 ms bound); a failed plain copy through a kept run drops it.
   The start-up self-test has two more steps (review S3): the test page made PAGE_NOACCESS must not answer Valid with another
   protection (else the whole working-set check is off), and the exe's header page, read first, must answer resident and
-  readable (else only the kept runs are off, `kept exe runs ... OFF: <why>` on the cpu: line). The pages read through kept runs are remembered,
+  readable, read and asked once more if a trim came in between (else only the kept runs are off, `kept exe runs ... OFF: <why>`
+  on the cpu: line). The pages read through kept runs are remembered,
   so the next frame proves them all in one call: about one QueryWorkingSetEx call a frame instead of two 25 MB scans. A refused
   proof drops the run and the read walks as before; a failed kernel copy, fast_reads=0 or the check off drop every kept run.
   Only FFX.exe's own image is kept (heap and other modules keep the per-frame rules). Model (render_chk keep_test, s2's shape

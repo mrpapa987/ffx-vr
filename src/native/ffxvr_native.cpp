@@ -2890,6 +2890,7 @@ static void ws_selftest() {
         if (hp != 0 && cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(hp, 1, cpu_vq, nullptr, 0, nullptr)) {
             volatile uint8_t sink = *reinterpret_cast<const volatile uint8_t*>(hp); (void)sink;
             ok4 = ws_query_raw(&hp, &f4, 1);
+            if (ok4 && (f4 & 1u) == 0) { sink = *reinterpret_cast<const volatile uint8_t*>(hp); ok4 = ws_query_raw(&hp, &f4, 1); }   // trimmed in between: once more (review R2-3, as step 1)
         }
         const int vi = cpu::ws_selftest_image(ok4, f4);
         g_keep_off = vi != cpu::k_wst_pass;
