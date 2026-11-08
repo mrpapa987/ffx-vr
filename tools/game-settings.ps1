@@ -36,6 +36,15 @@ if ($Profile -eq 'flat') {
 else {
     if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $ini -Destination $bak; Write-Host "Backed up original to $bak" }
     $text = "$(Get-Content -LiteralPath $ini -Raw)"
+    # A key that is not in the file is not added (its format is the game's); say so, so a missing key cannot pass silently
+    # (fix-render review N6). F8's "game renders WxH" line shows what the game actually used.
+    $missing = @()
+    foreach ($key in 'Resolution', 'MSAA') {
+        if (-not [regex]::IsMatch($text, "(?mi)^$key[ \t]*=")) {
+            $missing += $key
+            Write-Warning "$key= is not in $ini - not changed. Set it once in the game's launcher (FFX&X-2_LAUNCHER.exe), then run this again."
+        }
+    }
     # [^\r\n]*, not .*$: '.' also eats the CR of a CRLF line. Keys match case-insensitively.
     $text = [regex]::Replace($text, '(?mi)^Resolution[ \t]*=[^\r\n]*', "Resolution=$Width*$Height")
     $text = [regex]::Replace($text, '(?mi)^MSAA[ \t]*=[^\r\n]*', "MSAA=$Msaa")
@@ -47,6 +56,14 @@ else {
     elseif ($b.Length -ge 2 -and $b[0] -eq 0xFE -and $b[1] -eq 0xFF)                     { $enc = @{ Encoding = 'BigEndianUnicode' } }
     elseif ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { $enc = @{ Encoding = 'UTF8' } }
     Set-Content -LiteralPath $ini -Value $text -NoNewline @enc
-    Write-Host "VR profile: Resolution=$Width*$Height MSAA=$Msaa"
+    $set = @()
+    if ($missing -notcontains 'Resolution') { $set += "Resolution=$Width*$Height" }
+    if ($missing -notcontains 'MSAA') { $set += "MSAA=$Msaa" }
+    if ($set.Count -eq 0) { $msg = "VR profile: nothing changed (neither key is in $ini)" }
+    else {
+        $msg = "VR profile: $($set -join ' ')"
+        if ($missing.Count -gt 0) { $msg += " (not set: $($missing -join ', '))" }
+    }
+    Write-Host $msg
 }
 Get-Content -LiteralPath $ini | Where-Object { $_ -match '^(Resolution|MSAA|HDAO|PostAA|VSync|ScreenMode)=' }

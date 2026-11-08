@@ -5463,3 +5463,114 @@ Off by default for the first build (`dmg3d=0`; F8 main page, under "battle start
 - **The flat numbers** stay on the panel by default. `dmg3d_hide2d=1` (ini, its hook installed at launch only then; off by default) hooks the queue draw 0x893290 (single call site 0x89B3CB; prologue `57 E8` checked first): the detour records there and, while native draws the digits (`ffxvr_dmg_skip`, decided beside C2's skip), takes exactly those entries off the queue, only when every entry of this frame matches the placement predicted from the nodes; on any doubt nothing changes. Digits at a stand-in anchor, or past the 64 we draw, stay on the panel.
 - **Logs.** One `dmg3d:` line per new number for the first 40 (value, kind, target, the game's anchor and screen point against ours through the game's camera, where the quad went, its distance and size); a 10 s `dmg3d:` line in battle (snapshots, cut walks, stand-in anchors, the queue check: our predicted entries against the game's own, still in memory after the draw).
 - ini: `dmg3d` (0), `dmg3d_scale` (1.0, 0.3-3), `dmg3d_lift` (0, -10..20 units), `dmg3d_hide2d` (0). ABI 47: `ffxvr_dmg_walk`, `ffxvr_dmg_queue`, `ffxvr_dmg_set`, `ffxvr_dmg_cfg`, `ffxvr_dmg_skip`, `ffxvr_dmg_status`; ABI 50: `ffxvr_dmg_anchor`.
+
+- ini: `dmg3d` (0), `dmg3d_scale` (1.0, 0.3-3), `dmg3d_lift` (0, -10..20 units), `dmg3d_hide2d` (0). ABI 47: `ffxvr_dmg_walk`, `ffxvr_dmg_queue`, `ffxvr_dmg_set`, `ffxvr_dmg_cfg`, `ffxvr_dmg_skip`, `ffxvr_dmg_status`.
+
+## Render and performance fixes from the 6-7 Nov logs (branch `fix-render`, 7 Nov 2026)
+
+Sources: scratchpad research/logs-1107-perf.md and logs-1107-behaviour.md. Pure parts in `ffxvr_render.h` (and `ffxvr_cpu.h` for the
+reads); scratch tests in render_chk/tests.
+
+- **The flat-screen rule needs the painted layers to dominate (behaviour E1/E2).** A 3D cutscene in kino0400 (s2 07:25:17) went to
+  the virtual screen for 9.3 s on 2 painted-layer (dummy camera) uploads beside 349 real 3D camera uploads: any layer upload made
+  the frame a "painted-backdrop room". Now (`rnd::ModeRule`) a room is entered when there are at least 4 layer uploads, or the
+  layer uploads x 4 >= the real 3D uploads (or there is no real 3D upload), and kept while 4+ layers or layers x 8 >= real (the
+  hysteresis band); 10 frames in a row outside the band, or a frame with no layer at all, end it. The 2D verdict still needs 2
+  frames before the screen and 3D comes back at once. Expected: E1 stays 3D (2 layers, 2 x 4 < 349); every room of 4+ layers
+  (the title-like frame's 28, a hut, the Djose side rooms if they are painted) stays flat whatever its character count.
+  - Review B1: without the 4-layer floor, a painted room with many 3D characters (real > 4 x layers, plausible in the Djose side
+    rooms) would have come up in 3D with the painting glued to the face. Replaying all 141 logged mode lines of both sessions
+    through the new rule (render_test): only E1 changes.
+  - First person, the hands, the stick remap and the stereo screen stay off whenever any layer is drawn, this frame or the one
+    before (`ModeRule::any_layers` -> `g_backdrop_room`), as before the change: only the screen decision uses the ratio. So
+    E1's scene is 3D now, but in the seat view while its 2 layers are drawn.
+  - **The mode lines say why.** `mode -> SCREEN|3D at frame F: ... | why: <reason with the counts and the rule>`; reasons: a real
+    3D camera, 3D with layers that do not dominate, no real 3D camera, too few scene draws, a painted room, screen_mode 1 / 2,
+    a battle transition's pin, Fahrenheit's save screen, the slow-GPU guard. While the mode stays, a new reason held for 30
+    frames gets `mode: still SCREEN at frame F, now because: ...` (40 a session per reason): a room entered through a load is first
+    logged as "no real 3D camera" (the load frame), then as the room with its counts, which is what confirms or rules out the
+    Djose side rooms' 126 s (E2).
+  - If a painted room with many characters now shows in 3D with the painting stuck to the face, the line gives its counts
+    (`k_bd_enter` / `k_bd_stay` in `ffxvr_render.h`).
+- **The exe's image runs are kept across frames (perf finding 5).** s2 paid about 0.4 ms of render-thread time a frame on two
+  4-byte reads into one 25 MB run of FFX.exe's image (0x0116B994 through ffxvr_safe_read, 0x0117ED3C through range_readable):
+  both caches were cleared at every Present and kept the run from the *queried* page, so the lower read never hit the higher
+  one's run. Now (`cpu::ImageKeep`, render thread, fast_reads on and the working-set check on): every image run a query answers
+  is kept across frames (a lower query of the same run supersedes it), and a miss in the image first queries its PE section's
+  start, once a section, so the run is learnt from its start where it starts there. **Safety:** a run kept from an earlier
+  frame is never trusted as it stands. A read in it is answered only when QueryWorkingSetEx says every page of the read is
+  resident and readable now (lean2's rule: Valid, not bad, range_readable's protections; nothing uses it before the start-up
+  self-test passed), which a page freed, decommitted, made no-access or turned into a guard page since cannot pass; the proven
+  pages last as long as a query's answer did (the frame, or the 50 ms bound); a failed plain copy through a kept run drops it.
+  The start-up self-test has two more steps (review S3): the test page made PAGE_NOACCESS must not answer Valid with another
+  protection (else the whole working-set check is off), and the exe's header page, read first, must answer resident and
+  readable, read and asked once more if a trim came in between (else only the kept runs are off, `kept exe runs ... OFF: <why>`
+  on the cpu: line). The pages read through kept runs are remembered,
+  so the next frame proves them all in one call: about one QueryWorkingSetEx call a frame instead of two 25 MB scans. A refused
+  proof drops the run and the read walks as before; a failed kernel copy, fast_reads=0 or the check off drop every kept run.
+  Only FFX.exe's own image is kept (heap and other modules keep the per-frame rules). Model (render_chk keep_test, s2's shape
+  and the owner's measured costs): 350-366 us -> 1.6 us a frame. The `cpu:` line adds `kept exe runs N (of S sections; safe
+  reads through them, proofs a frame over P pages, pages refused a frame, calls unanswered, section probes)`.
+- **The second 3D camera (behaviour G).** kino0800 (s1 16:27:41-51) had about 70 uploads a frame whose view differs from the
+  frame's main (tick) camera, and the aeon in battle 1 about 0.8 a frame. What the code shows:
+  - Mirrored (reflection) cameras are already rejected (the inverse view must agree), the ShadowManager's light cameras are left
+    alone (`light_proj`, shadow_cam 1), the painted layers' dummy camera has its own path. What is left is a perspective camera
+    whose inverse agrees: a scene camera. The engine has one: renderer+0x654, the frustum for node list 3 (probably the dynamic
+    / skinned objects; exe-analysis.md). In a moving cutscene (kino0800's projection zooms from P0 2.87 to 1.93 over 15 s on the
+    pan-scan lines) the two can differ by a frame.
+  - The override is relative to each upload's own view (seat: its own position under the seat heading; first person: the
+    player's eye for every camera), so those draws need the head pose: leaving it off would put about 70 draws a frame (the
+    characters, if node list 3 is them) in the game's flat view, head-locked, with no stereo. That is not done.
+  - What *was* wrong: `build_override_view` wrote the frame's main-camera state on every eye-1 call, so the last camera of the
+    frame won: `g_yaw_cam` / `g_move_delta` (the first-person stick remap's heading), the VR hands' base (`g_hb_*`) and the
+    first-person heading latch. Now only a call with `g_ov_publish` set writes it: write_camera for an upload of the frame's
+    main camera, and hands_draw_frame for the main view. ffxvr_project, the markers and eye 2 only read (review S1). The
+    per-frame filter steps (eye jumps, the stickrep record) stay on the frame's first 3D upload (`advance`), whichever camera.
+  - **Which camera is main (review S2, round 2 R2-1):** tracked by its view, not by its upload order. `rnd::MainPick` gives each
+    distinct view of the frame a slot; an upload's slot is main when its view lies within a tracking gate of the previous
+    frame's main view (4 units and 4 degrees, widened by twice the camera's recent per-frame motion, each frame's motion capped
+    at 25 units / 10 degrees), and a later slot nearer that view takes over (the nearest wins). With no slot in the gate yet (a
+    cut, the first frame), the previous frame's busiest slot (most uploads into the scene target, then most uploads) is main
+    from its second upload, or else the first slot to reach 8 uploads, so a one-upload stray camera never qualifies. The next
+    reference is the gate-picked main view, else the busiest camera's. The reviewer's simulation (a stray uploading first in 11
+    of 16 frames) now gives no stray pick and no frame without a main upload. hands_draw_frame uses the main view (`g_main_v`).
+  - **The log line that confirms it:** every 10 s with another camera, `view: another 3D camera this window: N uploads (bound
+    to the scene target K, orthographic near projection L), up to X units and Y deg from the frame's main camera, first B bytes
+    with P0 (main P0) -> verdict | the main camera's own uploads M (per frame); main = a later camera than the frame's first in
+    F of T frames, no main upload in K [(the pick flipped within the window)]` (120 a session, not verbose-only). "Within 5 units / 3 deg, into the scene target" = the
+    same camera a moment apart (head pose right); "partly into another render target" = an off-screen pass (then the head pose
+    is wrong for it: a follow-up would leave those uploads alone); "LIGHT-LIKE" = a shadow light the light-camera rule missed
+    (e.g. under 1872 B; same follow-up). The render target is the one bound when the constant buffer was uploaded.
+- **The GPU budget in F8 (perf finding 2).** The heavy scenes are GPU-bound: above a span of about 13.5 ms the 120 Hz extra
+  frames collapse. The planned drop (perf-plan S1: the game at 2560x1440, then S3 `msaa=2`) is a game setting
+  (`tools/game-settings.ps1 -Profile vr`, GameSetting.ini) plus the existing `msaa` key, so nothing new is stored and no default
+  changes; setup.md "GPU-bound scenes" gives the steps. `ffxvr_perf_status` (same export, ABI 49) now returns a second line:
+  `GPU budget: span X ms (max Y) against the ~13.5 ms knee[: OVER] | extra frames N/s, dropped (slots repeated) N/s, fresh
+  frames late N% | game renders WxH, scene MSAA Nx (msaa=M), eye image WxH`, and when over the knee a third line naming the two
+  settings to try. Rates come from the last 10 s sr window (`rnd::gpu_budget_rates`), the span from the perf window. The overlay
+  reads 768 bytes (an older ffxvr.dll's 256 bytes show the first line and the start of the second).
+- **Virtual Desktop's late-session slowdown: logging only (perf finding 3).** VDXR's xrEndFrame grew from 0.1-0.2 ms to 4-8 ms
+  after 25-37 minutes in both sessions, flat screen and FMVs included (its `waitForAsyncSubmissionIdle`: the previous frame's
+  hand-off to the streamer). No fix here; what was added so the next session can tell the causes apart:
+  - `rnd::EndTrend` per headset session (this mod's view: the headset active): the extra frames' End time per 10 s sr window
+    (an extra frame does nothing of ours but xrEndFrame), its average over the session's first 5 minutes, the session's maximum.
+  - The first time a window passes 1 ms, and again at 3 ms, one line (not verbose-only): `xr: the runtime's xrEndFrame is
+    slowing: the extra frames' End X ms ... (Y ms in this headset session's first 5 minutes), a fresh frame's End, extras/s,
+    photon latency, display Hz, headset session N min (session K of this run)` with the owner's next steps. With every `perf:`
+    line: `xr: End trend: headset session N min, extra frames' End X ms (first 5 min Y, max Z)`. F8 shows the same as a third
+    line, so the onset can be spotted in the headset.
+  - What the runtime does not give: VDXR exposes XR_FB_display_refresh_rate only as a mock (the fixed refresh), no performance
+    metrics extension; its ASW state only doubles the predicted display period (already shown as "half rate"). The streamer's
+    encode / network / decode figures are only in Virtual Desktop's own overlay; VDXR's ETW provider (its
+    `scripts/Capture-ETL.bat`) splits the wait into `OVR_WaitToBeginFrame` and `OVR_EndFrame` on its submission thread.
+  - Owner steps: fixes/fix-render-impl.md (scratchpad), section 6.
+- **Spell hitches are FFX-60fps' (perf finding 1): nothing changed here.** Every spell end with a hooked magic overlay freezes the
+  picture 0.1-0.6 s (on the game's main thread, so no Present and no extra frames: the flush gate is held), and a hooked overlay's load
+  0.1-0.5 s. fps60.log's own lines show it: `magic_0605.dll unload: 9 callbacks 563.40 ms (slowest MAG-022 412.36 ms)`; hookless
+  unloads take 0.00 ms. Cause: the MAG-016 / 017 / 022 rows hook and unhook the overlay through MinHook, and each `MH_EnableHook`
+  / `MH_RemoveHook` runs `Freeze()` (a system-wide Toolhelp thread snapshot, then suspend + context of every thread of the
+  process): ~100-150 ms a call on this PC, 1-4 calls per DLL event. Suggested upstream: no freeze for magic DLLs (no thread can be
+  in an overlay at its load or unload notification; at unload nothing even needs restoring), or one `MH_ApplyQueued` per event
+  (queue the enables / disables), or a per-process thread walk in MinHook. FFX-60fps is Apache-2.0 (MinHook BSD-2-Clause): a
+  local patch is allowed (modified files marked; licence kept when distributed). The issue draft with the evidence:
+  scratchpad research/fps60-spell-hitch.md.

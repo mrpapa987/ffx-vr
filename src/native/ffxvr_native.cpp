@@ -42,6 +42,7 @@
 #include "ffxvr_dmg3d.h"   // 3D damage numbers (4.2): the node walk, the game's placement and fade, the queue check, the quads (pure logic)
 #include "ffxvr_odgest.h"  // overdrive gestures (4.3): Lulu's circles, Auron's slashes and punches, Tidus's swing (pure logic)
 #include "ffxvr_odvis.h"   // overdrive visuals: trails, bursts, Lulu's ring, Tidus's blade and bar, Auron's glyph row (pure geometry)
+#include "ffxvr_render.h"  // fix-render: the flat-screen rule and its reason, the second 3D camera, the GPU budget, the xrEndFrame trend (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -676,6 +677,11 @@ volatile LONG g_sr_in_extra = 0;  // SR-1: extra frames in flight (sr_extra); ff
 double   g_sr_fresh_accum = 0.0; // SR-6: g_turn_accum at the last fresh base layer (the extra frames' yaw bound when the held image is not a live view)
 uint32_t g_sr_clears = 0;         // the game's clears (ffxvr_on_clear outside InEye2): the ring wait's "next frame has started" test
 double   g_sr_rate_extras = 0.0;  // extra frames per second over the last 10 s (the perf: line, the overlay)
+rnd::GpuBudget g_gpu_budget;      // fix-render (perf finding 2): the F8 readout's GPU span against the knee, extras and repeated slots (sr_present / perf_tick)
+// fix-render (perf finding 3): Virtual Desktop's xrEndFrame trend over a headset session (sr_present): the extra frames' End time
+// (an extra frame does nothing of ours but xrEndFrame) against its first 5 minutes, an onset line at 1 ms and at 3 ms, and the
+// session's age and the trend on every perf: line.
+rnd::EndTrend g_end_trend; ULONGLONG g_end_t0 = 0; double g_end_last = -1.0; uint32_t g_end_sessions = 0;
 
 // Movement remap: in first person the game still maps the left stick against
 // its own camera, so the stick is rotated by (view heading - game camera
@@ -1193,6 +1199,8 @@ float   g_hands_sh_w = 0.17f, g_hands_sh_down = 0.13f, g_hands_sh_back = 0.04f; 
 float   g_delta[G_COUNT][16]; bool g_delta_on[G_COUNT]; uint32_t g_delta_frame = 0;
 uint32_t g_hands_frames = 0; char g_hands_why[96] = "off";
 uint32_t g_frames_without_cam = 0;
+rnd::ModeRule g_mode_rule;             // fix-render: the frame-type decision (flat screen or 3D) and its reason (ffxvr_render.h)
+rnd::WhyWatch g_mode_why;              // ... the reason last logged, and a new one held long enough to log again
 bool  g_xr_screen_now = false;          // decided per frame
 float g_xr_screen_q[4] = { 0, 0, 0, 1 }, g_xr_screen_p[3] = {};
 
@@ -1448,6 +1456,18 @@ float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was
 // advanced (a gap of more than 2 frames snaps it).
 uint32_t g_view_tick_frame = 0xFFFFFFFFu, g_anchor_frame = 0;
 uint32_t g_view_ticks = 0, g_view_uploads = 0, g_view_othercam = 0, g_view_early = 0; float g_tick_v[12] = {};   // diag: the 10 s "view:" line
+// fix-render (logs-1107 behaviour G): a second real 3D camera in the frame (kino0800: ~70 uploads a frame). Its uploads still get
+// the head pose relative to their own view (they draw scene geometry: the engine's second camera, renderer+0x654, culls node
+// list 3, exe-analysis.md), but the per-frame main-camera state is written by the main camera's uploads only; the 10 s
+// line below says what the other camera is (how far from the main one, which target it drew into).
+// Review S1 / S2: build_override_view writes the main-camera state (the stick heading g_yaw_cam / g_move_delta, the hands' base
+// g_hb_*, the first-person heading latch) only when g_ov_publish is set: by write_camera for an eye-1 upload of the frame's
+// main camera (rnd::MainPick: the view nearest the previous frame's main view, else the previous frame's busiest camera),
+// and by hands_draw_frame for the main view. ffxvr_project, the markers and eye 2 only read.
+bool g_ov_publish = false;             // build_override_view: this call may write the main-camera state
+rnd::MainPick g_main_pick;             // the frame's cameras and its main one
+float g_main_v[12] = {}; uint32_t g_main_v_frame = 0xFFFFFFFFu; float g_main_p0 = 0.f;   // the main camera's view this frame (hands_draw_frame), its P[0]
+rnd::OtherCam g_other_cam;             // the other camera's uploads over the 10 s window
 // Diorama floor: the eye never goes below this many units above the anchor
 // (the player's feet / the fight's centre), except while a grip is held so a
 // deliberate drag below is possible; 0 = off.
@@ -2243,24 +2263,24 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             In[r*4+0] = R[0*3+r]; In[r*4+1] = R[1*3+r]; In[r*4+2] = R[2*3+r]; In[r*4+3] = Pn[r];
         }
         Vn[12] = Vn[13] = Vn[14] = 0.f; Vn[15] = 1.f; In[12] = In[13] = In[14] = 0.f; In[15] = 1.f;
-        if (g_eye_shift == 0.f) g_move_delta = 0.f;   // the game's camera: its own stick directions
+        if (g_ov_publish) g_move_delta = 0.f;   // the game's camera: its own stick directions
         return;
     }
 
     // First person / follow: replace the base with a view at the player.
     const bool fp = (g_fp_mode != 0) && g_fp_have_pos && g_xr_active && g_ovr_enabled && !g_backdrop_room;
-    const bool primary = (g_eye_shift == 0.f);
+    const bool primary = g_ov_publish;   // fix-render (review S1 / S2): only the frame's main camera (and hands_draw_frame) write the main-camera state
     if (primary) g_yaw_cam = atan2f(R[6], R[8]);                          // authored heading: forward = -row 2 -> atan2(-f.x, -f.z)
     if (fp) {
         const bool ej_latched = g_fp_yaw_latched;      // eye jumps: the latch frame is not a jump
-        if (!g_fp_yaw_latched) {                        // heading: where the authored camera looked when toggled
+        if (!g_fp_yaw_latched && primary) {             // heading: where the authored camera looked when toggled (review N7: the main camera's)
             const float f[3] = { -R[6], 0.f, -R[8] };
             g_fp_yaw = atan2f(-f[0], -f[2]); g_fp_yaw_latched = true;
             g_seat_latched = false;
             g_sr_epoch++;                               // stickrep: a new heading, not a stick turn
             g_ej_latch_seq++;
         }
-        if (primary && advance) ej_heading();          // eye jumps: face the enemies (battle follow), or the field heading back after a battle
+        if (advance) ej_heading();          // eye jumps: face the enemies (battle follow), or the field heading back after a battle
         if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
             // travel. Proportional with a rate cap, and weighted by how far
@@ -2278,10 +2298,10 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
         const float Rf[9] = { -fy[2], 0.f, fy[0],   0.f, 1.f, 0.f,   -fy[0], -fy[1], -fy[2] };   // rows: right (f x up), up, back
         memcpy(R, Rf, sizeof(R));
         fp_eye_base(fy, P);
-        if (primary && advance) evh_tick(P);           // fix-eye: the event hold (control off in first person on foot)
+        if (advance) evh_tick(P);                      // fix-eye: the event hold (control off in first person on foot); on the frame's first 3D upload like ej_tick, not only the main camera (fix-render)
         else if (g_evh_out_on) { P[0] = g_evh_out[0]; P[2] = g_evh_out[1]; }   // ... the same place for eye 2 and the other callers
         if (tag_hold_live()) tag::apply(g_tag_hold, g_fp_pos, P);   // battle tag: the eye on the outgoing character's spot, at the incoming one's eye height (first person)
-        if (primary && advance) ej_tick(P, ej_latched);   // eye jumps: a one-step move of the eye base blinks
+        if (advance) ej_tick(P, ej_latched);   // eye jumps: a one-step move of the eye base blinks
         if (g_fp_mode >= 2) {
             // Diorama / third person: anchored to the player (smoothed), the offset
             // lives in the heading frame as g_gest_move (right, up, forward; behind =
@@ -2387,7 +2407,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
     if (g_fp_mode == 0)      { for (int i = 0; i < 3; ++i) mv[i] = g_ovr_move[i] + g_gest_move[i]; }   // authored seat: numpad + grab
     else if (g_fp_mode >= 2) { for (int i = 0; i < 3; ++i) mv[i] = g_gest_move[i]; }                  // diorama / third person: the grab offset from the player
     if (primary && xr) { g_hb_mv[0] = mv[0]; g_hb_mv[1] = mv[1]; g_hb_mv[2] = -mv[2]; g_hb_mode = fp ? g_fp_mode : 0; }   // VR hands v2: w = P + Rb^T (sc r + mv')
-    if (primary && xr && advance) {
+    if (xr && advance) {   // (advance: the frame's tick upload, eye 1: a per-frame filter step, whichever camera is main)
         // stickrep: what this frame's image is rendered with (spec 3.3). The world-to-reference map is r = (Rb (w - P) - mv') / sc
         // with mv' = (mv0, mv1, -mv2); a stick turn changes Rb(yaw, pitch) to Rb(yaw + d, pitch), which moves every reference
         // position by s' = Q (s - c) + c, Q = Rb1 Rb0^T, c = -mv' / sc (the turn pivot). "live": the stick drives this view's
@@ -2515,11 +2535,26 @@ static unsigned write_camera(const uint8_t* orig, uint8_t* p, UINT size, UINT ba
         const float* mp = reinterpret_cast<const float*>(orig + base + 192);   // main projection (|P0|,|P5| <= 0.2: the intro's near-2D camera)
         const bool real3d = fabsf(mp[0]) > 0.2f && fabsf(mp[5]) > 0.2f;
         const bool rt = g_render_tid == 0 || GetCurrentThreadId() == g_render_tid;
-        if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); }
-        else if (g_view_tick_frame == g_frames && real3d && memcmp(v, g_tick_v, sizeof(g_tick_v)) != 0) g_view_othercam++;
+        bool other = false;
+        if (g_view_tick_frame != g_frames && real3d && rt) { advance = true; g_view_tick_frame = g_frames; g_view_ticks++; memcpy(g_tick_v, v, sizeof(g_tick_v)); g_main_pick.new_frame(); }
+        if (g_view_tick_frame == g_frames && real3d) {   // fix-render (review S2): which camera of the frame this is, and whether it is the main one
+            const bool scene_rt = g_cur_rtv0_tex != nullptr && (g_cur_rtv0_tex == g_scene_tex || g_cur_rtv0_tex == g_scene_live_tex);
+            const int slot = g_main_pick.note(v, scene_rt);   // (may decide the frame's main slot: compared after the call)
+            if (slot == g_main_pick.main) { memcpy(g_main_v, v, sizeof(g_main_v)); g_main_v_frame = g_frames; g_main_p0 = mp[0]; g_other_cam.main_n++; }
+            else {
+                other = true;   // this camera's view gets the head pose; the frame's main-camera state stays the main camera's
+                g_view_othercam++;
+                const float* pn = reinterpret_cast<const float*>(orig + base + 64);   // near variant: orthographic = light_proj's first test
+                const bool ortho = fabsf(pn[15] - 1.f) < 1e-3f && fabsf(pn[14]) < 1e-3f && fabsf(pn[12]) < 1e-4f && fabsf(pn[13]) < 1e-4f;
+                if (!(ortho && g_shadow_cam == 0 && size >= k_lc_min_size))   // shadow_cam 0 overrides the game's light cameras on purpose
+                    g_other_cam.note(rnd::cam_diff(g_main_v, v), scene_rt, ortho, size, mp[0], g_main_p0);   // (the main view: this frame's, or the last one seen)
+            }
+        }
         else if (g_view_tick_frame != g_frames) g_view_early++;   // before the tick (not 3D, or another thread): drawn with last frame's anchor
+        g_ov_publish = !other;   // eye 1, not another camera's upload: the main-camera state is written (as before for every non-3D upload)
     }
     build_override_view(v, Vn, In, Pn, advance);
+    g_ov_publish = false;
 
     // Layout relative to the view block.
     const UINT o_pos = base - 16, o_view = base, o_projn = base + 64, o_vp = base + 128,
@@ -2827,12 +2862,38 @@ static cpu::Mbi g_rs_last;                 // the current call's last VirtualQue
 static uintptr_t g_cpu_exe_end = 0;        // the end of FFX.exe's image (SizeOfImage; ~0 if unknown: safe_read_fast then makes no
                                            // working-set check, and no caller is labelled ffx+ on the cpu: line; review N4)
 static cpu::Mbi cpu_vq_rt(uintptr_t q) { const cpu::Mbi m = cpu_vq(q); g_rs_last = m; return m; }   // render thread only
+// fix-render (logs-1107 perf 5): FFX.exe's image runs kept across frames for both render-thread caches (ffxvr_cpu.h ImageKeep),
+// each use proven by QueryWorkingSetEx; with the exe's section table, a miss queries its section's start once.
+static cpu::ImageKeep<8, 16> g_keep;
+static uint32_t g_keep_sections = 0;
+static bool g_keep_off = false; static char g_keep_why[160] = "not tested yet";   // review S3: the self-test's image-page step failed: no kept runs
+/// The exe's sections from its PE headers (the header page checked readable first; a loaded image's headers always are).
+static void cpu_exe_sections() {
+    const uintptr_t b = g_cpu_exe_base;
+    if (b == 0 || g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return;
+    if (!cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(b, 0x1000, cpu_vq, nullptr, 0, nullptr)) return;
+    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0xC00) return;
+    const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + static_cast<uintptr_t>(dos->e_lfanew));
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    const IMAGE_SECTION_HEADER* sh = IMAGE_FIRST_SECTION(nt);
+    const int n = nt->FileHeader.NumberOfSections;
+    if (n <= 0 || reinterpret_cast<uintptr_t>(sh + n) > b + 0x1000) return;   // the table must lie in the checked page
+    uintptr_t lo[16], hi[16]; int k = 0;
+    for (int i = 0; i < n && k < 16; ++i) {
+        const uintptr_t l = b + sh[i].VirtualAddress, sz = sh[i].Misc.VirtualSize ? sh[i].Misc.VirtualSize : sh[i].SizeOfRawData;
+        if (sz == 0 || l < b || l + sz > g_cpu_exe_end || l + sz < l) continue;
+        lo[k] = l; hi[k] = (l + sz + 0xFFF) & ~static_cast<uintptr_t>(0xFFF); k++;
+    }
+    g_keep.set_sections(lo, hi, k); g_keep_sections = static_cast<uint32_t>(k);
+}
 static void cpu_exe_init() {
     if (g_cpu_exe_base != 0) return;
     g_cpu_exe_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     MODULEINFO mi = {};
     g_cpu_exe_end = g_cpu_exe_base != 0 && GetModuleInformation(GetCurrentProcess(), reinterpret_cast<HMODULE>(g_cpu_exe_base), &mi, sizeof(mi)) && mi.SizeOfImage != 0
                   ? g_cpu_exe_base + mi.SizeOfImage : ~static_cast<uintptr_t>(0);
+    cpu_exe_sections();
 }
 
 // lean2: QueryWorkingSetEx on our own process (the pseudo-handle has PROCESS_QUERY_INFORMATION; K32QueryWorkingSetEx, kernel32),
@@ -2841,6 +2902,7 @@ static void cpu_exe_init() {
 // self-test failed, or the render thread saw it answer "not resident" for 64 ranges in a row that VirtualQuery then found
 // readable: the Wine case). g_ws_why: the reason, on the cpu: line. A failed call is only counted (that read falls back).
 static volatile LONG g_ws_state = 0, g_ws_fails = 0;
+static volatile LONG g_fast_reads = 0;   // vq-lean (ini fast_reads): see below, with g_fr (defined here: range_readable_at reads it, fix-render)
 static char g_ws_why[128] = "not tested yet";
 static bool ws_query_raw(const uintptr_t* va, uint32_t* at, int n) {
     if (n <= 0 || n > cpu::k_ws_max_pages) return false;
@@ -2862,7 +2924,7 @@ static bool ws_query(const uintptr_t* va, uint32_t* at, int n) {
 /// address) and is released at once. Either expectation failing turns the check off for the session; the verdict is logged.
 static void ws_selftest() {
     int v = cpu::k_wst_pass; const char* step = nullptr;
-    uint32_t f1 = 0, f2 = 0; bool ok1 = false, ok2 = false;
+    uint32_t f1 = 0, f2 = 0, f3 = 0, f4 = 0; bool ok1 = false, ok2 = false;
     void* p = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (p == nullptr) step = "VirtualAlloc failed";
     else {
@@ -2873,14 +2935,33 @@ static void ws_selftest() {
         DWORD old = 0;
         if (!VirtualProtect(p, 0x1000, PAGE_READWRITE | PAGE_GUARD, &old)) step = "VirtualProtect(PAGE_GUARD) failed";
         else ok2 = ws_query_raw(&va, &f2, 1);
+        bool ok3 = false;   // fix-render (review S3): step 3, the same page made PAGE_NOACCESS (never read)
+        if (step == nullptr) { if (!VirtualProtect(p, 0x1000, PAGE_NOACCESS, &old)) step = "VirtualProtect(PAGE_NOACCESS) failed"; else ok3 = ws_query_raw(&va, &f3, 1); }
         VirtualFree(p, 0, MEM_RELEASE);
         if (step == nullptr) v = cpu::ws_selftest_verdict(ok1, f1, ok2, f2);
+        if (step == nullptr && v == cpu::k_wst_pass) v = cpu::ws_selftest_noaccess(ok3, f3);
     }
     const bool pass = step == nullptr && v == cpu::k_wst_pass;
-    snprintf(g_ws_why, sizeof(g_ws_why), "self-test %s%s (resident page 0x%X, guard page 0x%X)", pass ? "passed" : "failed: ",
-             pass ? "" : (step ? step : cpu::ws_selftest_why(v)), f1, f2);
+    // fix-render (review S3): step 4, an image page: the exe's header page, read first (a loaded image's headers are readable;
+    // checked anyway), must answer resident and readable, or the kept image runs (ffxvr_cpu.h ImageKeep) stay off for the session.
+    if (pass) {
+        cpu_exe_init();
+        const uintptr_t hp = g_cpu_exe_base;
+        bool ok4 = false;
+        if (hp != 0 && cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(hp, 1, cpu_vq, nullptr, 0, nullptr)) {
+            volatile uint8_t sink = *reinterpret_cast<const volatile uint8_t*>(hp); (void)sink;
+            ok4 = ws_query_raw(&hp, &f4, 1);
+            if (ok4 && (f4 & 1u) == 0) { sink = *reinterpret_cast<const volatile uint8_t*>(hp); ok4 = ws_query_raw(&hp, &f4, 1); }   // trimmed in between: once more (review R2-3, as step 1)
+        }
+        const int vi = cpu::ws_selftest_image(ok4, f4);
+        g_keep_off = vi != cpu::k_wst_pass;
+        snprintf(g_keep_why, sizeof(g_keep_why), "%s (header page 0x%X)", cpu::ws_selftest_why(vi), f4);
+    }
+    snprintf(g_ws_why, sizeof(g_ws_why), "self-test %s%s (resident page 0x%X, guard page 0x%X, no-access page 0x%X)", pass ? "passed" : "failed: ",
+             pass ? "" : (step ? step : cpu::ws_selftest_why(v)), f1, f2, f3);
     InterlockedExchange(&g_ws_state, pass ? 1 : -1);
-    diag("fast reads: QueryWorkingSetEx %s: %s", pass ? "on" : "off for the session", g_ws_why);
+    diag("fast reads: QueryWorkingSetEx %s: %s%s%s", pass ? "on" : "off for the session", g_ws_why,
+         pass ? (g_keep_off ? "; the kept exe runs OFF for the session: " : "; image page: ") : "", pass ? g_keep_why : "");
 }
 
 /// Every page of [p, p+len) is committed and readable (no guard / no-access). The stage-0 debugger makes an
@@ -2897,7 +2978,11 @@ static bool range_readable_at(const void* p, size_t len, const void* site) {
     const LONGLONG t0 = cpu_q();
     const uint32_t q0 = g_cpu_rr.queries;
     g_rs_last = cpu::Mbi{};
-    const bool ok = cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
+    // fix-render: with fast_reads on and the working-set check on, the exe's image runs are kept across frames (each use proven
+    // resident and readable by QueryWorkingSetEx); otherwise the cpu-lean walk exactly.
+    const bool ok = (g_fast_reads != 0 && g_ws_state == 1 && !g_keep_off && g_cpu_exe_end != ~static_cast<uintptr_t>(0))
+        ? cpu::range_check_keep(a, len, cpu_vq_rt, ws_query, g_cpu_rcache, g_keep, g_cpu_exe_base, g_cpu_exe_end, &g_cpu_rr)
+        : cpu::range_check<cpu::Mbi (&)(uintptr_t), 4>(a, len, cpu_vq_rt, &g_cpu_rcache, g_cpu_exe_base, &g_cpu_rr);
     const LONGLONG d = cpu_q() - t0;
     g_cpu_rr_q += d;
     if (g_cpu_rr.queries != q0) g_rs.note(reinterpret_cast<uintptr_t>(site), g_cpu_rr.queries - q0, 0, d, static_cast<uint32_t>(len), a, g_rs_last.alloc_base, g_rs_last.size);
@@ -2925,8 +3010,7 @@ static __declspec(noinline) bool range_readable(const void* p, size_t len) { ret
 // page. Resident and readable (a guard page is never resident until its first touch) -> its pages are kept for the frame,
 // never as image, and the kernel copies it; anything else -> the walk above, unchanged. The other threads use the same
 // check before range_readable's walk and copy as before. fast_reads=0 turns all of it off (the old path, unchanged).
-static volatile LONG g_fast_reads = 0;
-static cpu::FastReader<32, 16> g_fr;
+static cpu::FastReader<32, 16> g_fr;   // (g_fast_reads: defined with the working-set state above, fix-render)
 static uint32_t g_fr_frames = 0, g_fr_off = 0;   // frames of this cpu: window with fast_reads on / off (cpu_frame_roll)
 static LONGLONG g_fr_copy_q = 0;           // this frame's QPC ticks in ReadProcessMemory (render thread)
 static uint32_t g_fr_big_n = 0;            // this frame's kernel copies over 4 KB (the actor table snapshot, 104 KB) (review N7)
@@ -2965,6 +3049,7 @@ static int safe_read_fast(const void* src, void* dst, unsigned len, const void* 
     LONGLONG copy_q = 0, plain_q = 0, ws_q = 0;
     const cpu::FastStats before = g_fr.st;
     g_rs_last = cpu::Mbi{};
+    g_fr.keep = g_ws_state == 1 && !g_keep_off ? &g_keep : nullptr;   // fix-render: the kept image runs, only while QueryWorkingSetEx is on
     const int ok = g_fr.read(a, len, t0, g_fr_qpf / 20, g_cpu_exe_base, g_cpu_exe_end, cpu_vq_rt,
         [&](const uintptr_t* va, uint32_t* at, int n) {
             if (g_cpu_exe_end == ~static_cast<uintptr_t>(0)) return false;   // review N4: the exe's end unknown: no check
@@ -5757,6 +5842,8 @@ static cpu::Acc g_cpu_cpyn, g_cpu_cpyms, g_cpu_prbn;            // vq-lean, per 
 static cpu::Acc g_cpu_bign, g_cpu_bigms;                        // vq-lean (review N7), per frame: kernel copies over 4 KB, their ms
 static uint32_t g_cpu_cpy_fail = 0;                             // vq-lean: failed kernel copies over the window
 static cpu::Acc g_cpu_wsn, g_cpu_wsy, g_cpu_wsms;                // lean2, per frame: working-set checks, the reads they answered, their ms
+static cpu::Acc g_cpu_kph, g_cpu_kpr, g_cpu_kpp, g_cpu_kps;       // fix-render, per frame: safe reads answered by the kept image runs, proofs (working-set calls), pages proven, section probes
+static cpu::Acc g_cpu_kpn; static uint32_t g_cpu_kpf = 0;         // review S3, per frame: pages the proofs refused; over the window: proof calls not answered
 static cpu::Acc g_cpu_gap, g_cpu_late;                           // after our hook to the ring wait (ms); past the deadline there (ms, late entries only)
 static uint32_t g_cpu_frames = 0, g_cpu_late_n = 0, g_cpu_late_slot = 0, g_cpu_skip_ours = 0, g_cpu_rings = 0;
 static LONGLONG g_cpu_wait_q0 = 0, g_cpu_wait_acc = 0, g_cpu_slow_acc = 0, g_cpu_hook_end_q = 0;
@@ -5784,6 +5871,14 @@ static void cpu_frame_roll() {
         diag("fast reads: QueryWorkingSetEx off for the session: %s", g_ws_why);
     }
     if (g_fast_reads != 0) g_fr_frames++; else g_fr_off++;
+    {   // fix-render: the kept image runs' proofs end with the frame; a failed copy, fast_reads off or the check off drop them all
+        g_cpu_kph.add(g_fr.keep_hits); g_cpu_kpr.add(g_keep.proofs); g_cpu_kpp.add(g_keep.proof_pages); g_cpu_kps.add(g_keep.probes);
+        g_cpu_kpn.add(g_keep.pages_no); g_cpu_kpf += g_keep.refused;   // review S3: pages refused by the proofs, calls not answered
+        g_fr.keep = &g_keep; g_fr.keep_roll(); g_fr.keep_hits = 0;
+        g_keep.proofs = g_keep.proof_pages = g_keep.answered = g_keep.refused = g_keep.probes = g_keep.pages_no = 0;
+        g_keep.new_frame();
+        if (g_fast_reads == 0 || g_ws_state != 1 || g_keep_off) g_keep.clear();
+    }
     g_fr.copies = g_fr.fails = 0; g_fr.st = cpu::FastStats{}; g_fr_copy_q = 0; g_fr_big_n = 0; g_fr_big_q = 0;
     g_fr.clear();           // vq-lean: the kept runs end with the frame (and after 50 ms or a failed copy, ffxvr_cpu.h FastReader)
     g_cpu_sr_calls = 0; g_cpu_rr = cpu::RangeStats{}; g_cpu_rr_q = 0;
@@ -5888,16 +5983,19 @@ static void cpu_log_line() {
                   M[M_GC0].sum, M[M_GC1].sum, M[M_GC2].sum);
     char gt[1200];
     gt_line_part(gt, sizeof(gt));   // grid-timer: the timer, the game window, the main loop and the limiter's Sleep (a new window)
-    char fr[512];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
+    char fr[768];                   // vq-lean: fast_reads and its kernel copies (their time is not in range_readable's)
     if (g_fr_frames == 0) snprintf(fr, sizeof(fr), ", fast_reads off");
     else {
         char ws[200];   // lean2: QueryWorkingSetEx's state (review SF1: the self-test's verdict, or why it is off)
         snprintf(ws, sizeof(ws), "; QueryWorkingSetEx %s: %s%s", g_ws_state == 1 ? "on" : g_ws_state < 0 ? "off" : "not tested", g_ws_why,
                  g_ws_fails != 0 ? ", some calls failed" : "");
-        snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)",
+        snprintf(fr, sizeof(fr), ", fast_reads on%s: kernel copies %.0f/%.0f a frame %.3f/%.2f ms (over 4 KB %.1f/%.0f, %.3f/%.2f ms), %u failed, base probes %.0f/%.0f, working-set checks %.1f/%.0f a frame (answered %.1f/%.0f, %.3f/%.2f ms; big-run hints %d%s)"
+                                 ", kept exe runs %d (of %u sections; safe reads through them %.1f/%.0f a frame, proofs %.1f/%.0f a frame over %.1f/%.0f pages, pages refused %.1f/%.0f, calls unanswered %u, section probes %.0f/%.0f%s%s)",
                  g_fr_off != 0 ? " (part of the window)" : "", g_cpu_cpyn.avg(), g_cpu_cpyn.mx, g_cpu_cpyms.avg(), g_cpu_cpyms.mx,
                  g_cpu_bign.avg(), g_cpu_bign.mx, g_cpu_bigms.avg(), g_cpu_bigms.mx, g_cpu_cpy_fail, g_cpu_prbn.avg(), g_cpu_prbn.mx,
-                 g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws);
+                 g_cpu_wsn.avg(), g_cpu_wsn.mx, g_cpu_wsy.avg(), g_cpu_wsy.mx, g_cpu_wsms.avg(), g_cpu_wsms.mx, g_fr.hints.count(), ws,
+                 g_keep.count(), g_keep_sections, g_cpu_kph.avg(), g_cpu_kph.mx, g_cpu_kpr.avg(), g_cpu_kpr.mx, g_cpu_kpp.avg(), g_cpu_kpp.mx, g_cpu_kpn.avg(), g_cpu_kpn.mx, g_cpu_kpf,
+                 g_cpu_kps.avg(), g_cpu_kps.mx, g_keep_off ? "; OFF: " : "", g_keep_off ? g_keep_why : "");
     }
     char sites[900];   // lean2: the render thread's reads that queried or checked, by caller, the top four by time
     cpu_sites_part(sites, sizeof(sites), g_cpu_frames);
@@ -5911,6 +6009,7 @@ static void cpu_log_line() {
     for (auto& a : g_cpu_man) a = cpu::Acc{};
     g_cpu_srn = g_cpu_vqn = g_cpu_hitn = g_cpu_rrms = g_cpu_gap = g_cpu_late = g_cpu_cpyn = g_cpu_cpyms = g_cpu_prbn = g_cpu_bign = g_cpu_bigms = cpu::Acc{};
     g_cpu_wsn = g_cpu_wsy = g_cpu_wsms = cpu::Acc{};
+    g_cpu_kph = g_cpu_kpr = g_cpu_kpp = g_cpu_kps = g_cpu_kpn = cpu::Acc{}; g_cpu_kpf = 0;
     g_cpu_cpy_fail = 0; g_fr_frames = g_fr_off = 0;
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;
@@ -7117,6 +7216,7 @@ static void perf_tick() {
     g_perf.wait_ms = g_acc_wait / g_acc_n; g_perf.end_ms = g_acc_end / g_acc_n; g_perf.e2_ms = g_acc_e2 / g_acc_n;
     g_acc_frame = g_acc_xr = g_acc_wait = g_acc_end = g_acc_e2 = g_acc_max = 0; g_acc_n = 0;
     if (g_acc_gpu_n > 0) { g_perf.gpu_ms = g_acc_gpu / g_acc_gpu_n; g_perf.gpu_max_ms = g_acc_gpu_max; g_acc_gpu = g_acc_gpu_max = 0; g_acc_gpu_n = 0; }
+    g_gpu_budget.gpu_ms = g_perf.gpu_ms; g_gpu_budget.gpu_max_ms = g_perf.gpu_max_ms;   // fix-render: the F8 GPU-budget readout
     if (g_acc_can_n > 0) { g_perf.can_ms = g_acc_can / g_acc_can_n; g_perf.can_max_ms = g_acc_can_max; g_perf.can_over = g_acc_can_over; g_acc_can = g_acc_can_max = 0; g_acc_can_n = 0; g_acc_can_over = 0; }
     g_perf.twins = (uint32_t)g_twins.size(); g_perf.twin_srvs = 0; for (auto& kv : g_twins) g_perf.twin_srvs += (uint32_t)kv.second.srvs.size();
     { std::lock_guard<std::mutex> lock(g_mutex); g_perf.buffers = (uint32_t)g_buffers.size(); g_perf.in_flight = (uint32_t)g_in_flight.size(); }
@@ -7147,6 +7247,9 @@ static void perf_tick() {
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
              g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
+        if (g_end_t0 != 0 && g_end_last >= 0.0)   // fix-render (perf finding 3): the runtime's End trend, with every perf: line
+            diag("xr: End trend: headset session %.1f min, extra frames' End %.2f ms (last 10 s; first 5 min %.2f ms, max this session %.2f ms)",
+                 (GetTickCount64() - g_end_t0) / 60000.0, g_end_last, g_end_trend.base(), g_end_trend.max_ms);
         cpu_log_line();   // cpu-lean: the cpu: line, with every perf: line
         g_ui_verts_read = g_ui_trunc = g_ui_start_nonzero = g_ui_start_bail = g_ui_base_nonzero = g_skip_overflow = 0;   // R39/R48: since the last perf: line
     }
@@ -7284,6 +7387,16 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             if (g_view_ticks && (g_xr_want || diag_armed()))   // headset on, or debugging: not every 10 s on the flat desktop
                 diagv("view: frames %u, ticks %u, eye-1 camera uploads/frame %.1f, uploads with another camera %u, eye-1 uploads before the tick %u; eye jumps %u (blinks %u, extended %u, held back %u)", nf, g_view_ticks, nf ? g_view_uploads / (float)nf : 0.f, g_view_othercam, g_view_early,
                       g_ej_10s[0], g_ej_10s[1], g_ej_10s[2], g_ej_10s[3]);
+            if (g_other_cam.n != 0 || g_main_pick.later != 0 || g_main_pick.none != 0) {   // fix-render (behaviour G): what the other camera is, whenever there is one (not verbose-only; 120 a session)
+                static int lines = 0;
+                if (lines++ < 120)
+                    diag("view: another 3D camera this window: %u uploads (bound to the scene target %u, orthographic near projection %u), up to %.1f units and %.1f deg from the frame's main camera, first %u B with P0 %.3f (main %.3f) -> %s | "
+                         "the main camera's own uploads %u (%.1f a frame); main = a later camera than the frame's first in %u of %u frames, no main upload in %u%s | the other camera got the head pose relative to its own view; the main camera's state (stick heading, hands base) is the main camera's",
+                         g_other_cam.n, g_other_cam.into_scene, g_other_cam.ortho_near, g_other_cam.dpos_max, g_other_cam.dang_max, g_other_cam.size0, g_other_cam.p0, g_other_cam.p0_main, g_other_cam.verdict(),
+                         g_other_cam.main_n, g_main_pick.frames ? g_other_cam.main_n / static_cast<float>(g_main_pick.frames) : 0.f, g_main_pick.later, g_main_pick.frames, g_main_pick.none,
+                         g_main_pick.later != 0 && g_main_pick.later != g_main_pick.frames ? " (the pick flipped within the window)" : "");
+            }
+            g_other_cam = rnd::OtherCam(); g_main_pick.frames = g_main_pick.later = g_main_pick.none = 0;
             g_view_ticks = g_view_uploads = g_view_othercam = g_view_early = 0; g_ej_10s[0] = g_ej_10s[1] = g_ej_10s[2] = g_ej_10s[3] = 0;
         }
     }
@@ -11330,9 +11443,9 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
     float V[2][16], I[16], Pn[3], P[3], Rb[9], sc, mvp[3], dy; int mode; float pv_last[16], pv_last2[16]; bool have_pv;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        float v[12]; memcpy(v, g_tick_v, sizeof(v));
+        float v[12]; memcpy(v, g_main_v_frame == g_frames ? g_main_v : g_tick_v, sizeof(v));   // fix-render (S2): the frame's main camera
         const float es = g_eye_shift;
-        g_eye_shift = 0.f;   build_override_view(v, V[0], I, Pn, false);   // read-only (advance = false); publishes g_hb_* for this view
+        g_eye_shift = 0.f; g_ov_publish = true; build_override_view(v, V[0], I, Pn, false); g_ov_publish = false;   // read-only (advance = false); publishes g_hb_* for this view
         memcpy(P, g_hb_P, sizeof(P)); memcpy(Rb, g_hb_Rb, sizeof(Rb)); sc = g_hb_sc; memcpy(mvp, g_hb_mv, sizeof(mvp)); mode = g_hb_mode; dy = g_hb_dy;
         g_eye_shift = 1e-6f; build_override_view(v, V[1], I, Pn, false);  // eye 2: the headset's right-eye offset (non-zero marks eye 2)
         g_eye_shift = es;
@@ -12170,6 +12283,7 @@ static void leave_xr_state() {
     g_xr_want = false; g_xr_active = false;
     g_ovr_suspend = false; g_xr_screen_now = false; g_screen3d_now = false; g_backdrop_room = false;
     g_frames_without_cam = 0; g_blink_frames = 0; g_move_delta = 0.f; g_move_held = false;
+    g_mode_rule.reset(); g_mode_why = rnd::WhyWatch();   // fix-render: no painted room or reason carried across a headset stop
     g_ej_hold = ej::Hold(); g_ej_face_rq.on = false; g_ej_head_snap = false;   // eye jumps (N6): no stale restore, face or head snap across a headset stop
     g_ui_state = UI_IDLE; g_ui_early = g_ui_early_keep = false; g_ui_last_frame_had_pass = false;   // robustness
     g_gest_active = false; g_vrpad_suppress = false; g_gest_grab[0] = g_gest_grab[1] = false;
@@ -12316,9 +12430,26 @@ extern "C" __declspec(dllexport) void ffxvr_turn(float deg) { bt_user("a turn ke
 extern "C" __declspec(dllexport) uint32_t ffxvr_turn_count() { return g_turn_count; }
 extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
     if (buf == nullptr || n <= 0) return;   // a 0 size would hit the CRT's invalid-parameter handler (process abort)
-    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB",
+    // fix-render (perf finding 2): a second line, the GPU budget (an older ffxvr.dll's 256-byte buffer shows the first line and
+    // the start of this one: _TRUNCATE). The game's render size and scene MSAA, the GPU span against the knee where the 120 Hz
+    // extra frames collapse, the extra frames a second and the slots the runtime repeated (extra frames dropped), late fresh frames.
+    unsigned ew = 0, eh = 0; xr_eye_size(&ew, &eh);
+    const rnd::GpuBudget& G = g_gpu_budget;
+    char msaa[48];
+    if (g_msaa_last_n != 0) snprintf(msaa, sizeof(msaa), "%ux (msaa=%d)", g_msaa_last_n, g_msaa_override);
+    else snprintf(msaa, sizeof(msaa), "not seen yet (msaa=%d)", g_msaa_override);
+    char hz[96] = "";
+    if (G.extras_s > 0.0 || G.dropped_s > 0.0)
+        snprintf(hz, sizeof(hz), " | extra frames %.0f/s, dropped (slots repeated) %.0f/s, fresh frames late %.0f%%", G.extras_s, G.dropped_s, G.late_pct);
+    char vd[128] = "";   // fix-render (perf finding 3): the runtime's End trend, so the slowdown's onset shows in F8 too
+    if (g_end_t0 != 0 && g_end_last >= 0.0)
+        snprintf(vd, sizeof(vd), "\nRuntime (Virtual Desktop) End: extra frames %.2f ms (first 5 min %.2f), headset session %.0f min", g_end_last, g_end_trend.base(), (GetTickCount64() - g_end_t0) / 60000.0);
+    _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB\n"
+        "GPU budget: span %.1f ms (max %.0f) against the ~%.1f ms knee%s%s | game renders %ux%u, scene MSAA %s, eye image %ux%u%s%s",
         g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
-        (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb);
+        (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb,
+        G.gpu_ms, G.gpu_max_ms, rnd::k_gpu_knee_ms, G.over() ? ": OVER" : "", hz, g_bb_w, g_bb_h, msaa, ew, eh,
+        G.over() ? "\nOver the knee: try the game at 2560x1440 (tools\\game-settings.ps1 -Profile vr, game closed), then msaa=2 (next start); setup.md, GPU-bound scenes" : "", vd);
 }
 /// ABI 21: + `menu` (saveui): 0, or 1 | (state << 8) while fh_menu_on_screen is on and Fahrenheit's save screen is open (managed
 /// latches 0x8CB994 from OPEN to CLOSED, guarded read; `state` is this frame's raw word, 2 = OPEN). Managed, every frame; xr_tick
@@ -14343,10 +14474,12 @@ static void xr_tick() {
     // The title screen and menus upload a dummy camera whose projection is
     // near-2D (|P[0]| <= 0.2), so only real cameras count. A draw-count
     // threshold of 20 was wrong: a hut interior is a 10-draw scene pass.
-    const bool backdrop = (g_bg_uploads_frame > 0 && g_backdrop_mode == 1);
-    const bool frame2d = (g_cam3d_uploads_frame == 0 || g_scene_live_draws < 3 || backdrop);
-    if (frame2d) g_frames_without_cam++; else g_frames_without_cam = 0;
-    const bool is2d = g_frames_without_cam >= 2;
+    // fix-render (logs-1107 E1): a painted-backdrop room needs its layer uploads to dominate the real 3D uploads (or no real
+    // 3D upload at all), with hysteresis (ffxvr_render.h ModeRule); a stray layer or two in a 3D scene no longer sends it flat.
+    g_mode_rule.step(rnd::FrameIn{ g_cam3d_uploads_frame, g_bg_uploads_frame, g_scene_live_draws, g_backdrop_mode });
+    g_frames_without_cam = g_mode_rule.without;
+    const bool frame2d = rnd::why_flat(g_mode_rule.why);   // this frame's own 2D verdict (fmv-relief's relief_present reads it)
+    const bool is2d = g_mode_rule.flat;
     bool screen_next = (g_xr_screen_mode == 1) || (g_xr_screen_mode == 0 && is2d);
     // od-guard, the screen item: the mono screen while the guard tests it, and one Present more after (the tail), so the
     // frame rendered right after the test has its eye 2 again before a 3D frame can be submitted
@@ -14355,19 +14488,30 @@ static void xr_tick() {
     g_slow_scr_was = slow_scr;
     const bool slow_force = slow_scr || g_slow_scr_tail > 0;
     if (!slow_scr && g_slow_scr_tail > 0) g_slow_scr_tail--;
-    if (bt_no_split()) screen_next = g_bt_screen_pin;   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
-    else if (menu) screen_next = true;                  // saveui C: Fahrenheit's save screen is shown on the virtual screen, as on the monitor
-    else if (slow_force) screen_next = true;
+    int mode_why = g_mode_rule.why;                    // fix-render: why this frame is shown as it is (the mode lines)
+    if (g_xr_screen_mode == 1) mode_why = rnd::W_FORCED; else if (g_xr_screen_mode == 2) mode_why = rnd::W_NEVER;
+    if (bt_no_split()) { screen_next = g_bt_screen_pin; mode_why = rnd::W_BT; }   // a battle transition window keeps the view it started in (no 3D -> screen flip at the map free, no dropped hold)
+    else if (menu) { screen_next = true; mode_why = rnd::W_MENU; }                // saveui C: Fahrenheit's save screen is shown on the virtual screen, as on the monitor
+    else if (slow_force) { screen_next = true; mode_why = rnd::W_SLOW; }
     if (screen_next != g_xr_screen_now) {
         static int logged = 0;
+        g_mode_why.switched(screen_next, mode_why);
         if (logged++ < 400) {
             D3D11_TEXTURE2D_DESC sd = {}; if (g_scene_live_tex) g_scene_live_tex->GetDesc(&sd);
-            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u, backdrop %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u",
+            char why[256]; rnd::why_text(why, sizeof(why), mode_why, g_mode_rule.last);
+            diag("mode -> %s at frame %u: stereo %d override %d, camera uploads %u (real %u, backdrop %u), scene draws %u into %ux%u fmt %u samples %u, eye-2 draws %u, begin failures %u | why: %s",
                  screen_next ? "SCREEN" : "3D", g_frames, g_stereo ? 1 : 0, g_ovr_enabled ? 1 : 0, g_cam_uploads_frame, g_cam3d_uploads_frame, g_bg_uploads_frame, g_scene_live_draws, sd.Width, sd.Height,
-                 static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail);
+                 static_cast<unsigned>(sd.Format), sd.SampleDesc.Count, g_eye2_draws, g_e2_begin_fail, why);
         }
     }
-    g_backdrop_room = g_bg_uploads_frame > 0;
+    else if (g_mode_why.step(mode_why)) {               // fix-render (E2): the same mode for a new reason (held 30 frames): a room entered through a load
+        static int relogged[rnd::W_COUNT] = {};   // review N2: 40 per reason, so 3D <-> 3D-with-layers flapping cannot spend a room's lines
+        if (mode_why >= 0 && mode_why < rnd::W_COUNT && relogged[mode_why]++ < 40) {
+            char why[256]; rnd::why_text(why, sizeof(why), mode_why, g_mode_rule.last);
+            diag("mode: still %s at frame %u, now because: %s", screen_next ? "SCREEN" : "3D", g_frames, why);
+        }
+    }
+    g_backdrop_room = g_mode_rule.any_layers;           // fix-render (review B1): first person, the hands, the remap and the stereo screen stay off while any layer is drawn (this frame or the last); only the screen uses the room rule
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV
@@ -15811,11 +15955,27 @@ static void sr_present() {
     g_sr_present_ms = now; g_sr_episode = false;
     if (want && g_xr_want && xr_active()) sr_arm();
     const ULONGLONG tn = GetTickCount64();
+    if (!(g_xr_want && xr_active())) g_end_t0 = 0;   // fix-render: the End trend is per headset session (as this mod sees it: active)
+    else if (g_end_t0 == 0) { g_end_t0 = tn; g_end_trend.reset(); g_end_last = -1.0; g_end_sessions++; }
     if (g_sr_line_t == 0) g_sr_line_t = tn;
     if (tn - g_sr_line_t < 10000) return;
     const double secs = (tn - g_sr_line_t) / 1000.0; g_sr_line_t = tn;
     SrStats& S = g_sr_s;
     g_sr_rate_extras = S.extras / secs; g_sr_rate_skipped = S.skipped / secs;
+    rnd::gpu_budget_rates(g_gpu_budget, S.fresh, S.late, S.extras, S.skipped, secs);   // fix-render: the F8 GPU-budget readout
+    if (g_end_t0 != 0) {   // fix-render (perf finding 3): the runtime's End time trend; an onset line the first time it passes 1 ms, then 3 ms
+        const double age_s = (tn - g_end_t0) / 1000.0;
+        g_end_last = S.extras ? S.end_sum / S.extras : -1.0;
+        const int crossed = g_end_trend.step(age_s, g_end_last);
+        if (crossed >= 0) {
+            double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
+            double fw = 0.0, fe = 0.0; xr_timing(&fw, &fe);
+            diag("xr: the runtime's xrEndFrame is slowing: the extra frames' End %.2f ms avg over the last %.0f s (over %.0f ms; %.2f ms in this headset session's first 5 minutes), a fresh frame's End %.2f ms, extras %.1f/s, photon latency %.1f ms, display %.1f Hz%s; headset session %.0f min (session %u of this run). "
+                 "Owner steps (fixes/fix-render-impl.md): open Virtual Desktop's performance overlay now and note encode / network / decode latency and bitrate; then take the headset off for ~10 s",
+                 g_end_last, secs, rnd::k_end_onset_ms[crossed], g_end_trend.base(), fe, S.extras / secs, S.lat_n ? S.lat_sum / S.lat_n : 0.0, pm > 0.0 ? 1000.0 / pm : 0.0,
+                 half ? " (half rate: SSW)" : "", age_s / 60.0, g_end_sessions);
+        }
+    }
     g_sr_rate_yaw = S.rot ? S.yaw_sum / S.rot : 0.0; g_sr_rate_delay_max = S.delay_max;
     static int s_sr_windows = 0; static char s_sr_why[96] = "";   // the default (non-verbose) sr: lines, per headset session
     if (!(want && g_xr_want && xr_active())) { s_sr_windows = 0; s_sr_why[0] = 0; }

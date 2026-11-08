@@ -152,6 +152,43 @@ eyes. The margin is thin. `MSAA=` in `GameSetting.ini` is ignored on the
 Fahrenheit launch path (0 and 2 both left the target at 8 samples); AA has to
 be changed through `FFX&X-2_LAUNCHER.exe` or, later, by the mod itself.
 
+### GPU-bound scenes: the game's render size and MSAA (7 Nov 2026)
+
+Once the GPU span (the `gpu` figure) passes about **13.5 ms**, the 120 Hz extra
+frames that keep stick turns and head motion smooth collapse (60/s down to
+6-25/s) and fresh frames reach the headset late. The 6-7 Nov logs had that in
+a quarter of all windows (worst: Djose djyt0100/0300/0800, Mushroom Rock Road
+kino0200/0300). The game still renders at **3840x2160 with 4x MSAA**
+(`msaa=4`) for both eyes, while each eye image is about 2496x1404: the extra
+pixels only buy supersampling. Nothing is changed by default; these are the
+settings to try, in this order, one at a time:
+
+1. **Game resolution 2560x1440** (close the game and its launcher first):
+
+       powershell -ExecutionPolicy Bypass -File .\tools\game-settings.ps1 -Profile vr
+
+   It edits `GameSetting.ini` in Documents (a backup is made the first time;
+   `-Profile flat` restores it). If you miss the 4K sharpness, use
+   `-Width 2880 -Height 1620` (or 3200x1800). Check in F8 that the line says
+   `game renders 2560x1440`: if it still says 3840x2160, this launch path does
+   not read `Resolution=` (as it ignores `MSAA=`), so set it in the game's
+   launcher (`FFX&X-2_LAUNCHER.exe`) instead. The headset's eye image stays
+   2496x1404, so no low-resolution warning should appear.
+2. **Then `msaa=2`** (F8: MSAA for the scene targets, "2x"; or `msaa=2` in
+   ffxvr.ini). It takes effect at the next start. Edges alias a little more.
+3. Optional comparisons, only to measure: the texture pack off (same spot),
+   and `cull_scene=0` ("keep all geometry drawn" off: cheaper, but scenery the
+   authored camera does not see can disappear when you look around).
+
+**What to read** (F8, the line under the frame time, updated every second
+with 10 s windows): `GPU budget: span X ms (max Y) against the ~13.5 ms knee`
+(`OVER` when above), `extra frames N/s` (60/s at 120 Hz with fps=60 is
+ideal), `dropped (slots repeated) N/s` (should be near 0) and `fresh frames
+late N%`. Compare the same spots before and after: the djyt0300 entrance,
+djyt0100, kino0300 near the bridge. The `perf:` and `sr:` lines in
+`ffxvr_diag.log` carry the same numbers. Expected with 2560x1440: a span of
+about 6-9 ms in the field (perf-plan S1).
+
 ## Settings (ffxvr.ini)
 
 `fahrenheit\mods\ffxvr\ffxvr.ini` holds every overlay setting; the overlay
