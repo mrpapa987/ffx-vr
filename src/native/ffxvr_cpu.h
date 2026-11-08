@@ -217,7 +217,7 @@ inline int ws_selftest_noaccess(bool ok3, uint32_t f3) {
 }
 inline int ws_selftest_image(bool ok4, uint32_t f4) {
     if (!ok4) return k_wst_img_call;
-    return ws_readable(f4) ? k_wst_pass : k_wst_img_not_readable;
+    return ws_readable(f4) ? static_cast<int>(k_wst_pass) : static_cast<int>(k_wst_img_not_readable);
 }
 
 inline const char* ws_selftest_why(int v) {
