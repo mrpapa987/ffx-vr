@@ -837,8 +837,9 @@ static int fp_part_of(const float* w, fpown::Why* why = nullptr) {
 }
 // The body hide: line (first person on foot, the main draw site): this frame's matched draws grouped by place (0.25 units; all the
 // parts of one character share its root), the draws refused as another actor's, the radius and its step. At most one line a
-// second, 200 a session, only on frames with a draw refused or a match beyond 0.75 units of the player (his drawn root when known,
-// else the centre; review SF1: not on the radius, so running alone spends nothing); and every 10 s, when anything was refused,
+// second, 200 a session, only on frames with a draw refused (or kept by the IB table); a frame with only a match beyond fpown::own
+// of the player (his drawn root when known, else the centre; review SF1: not on the radius; fix-eye: own() widens 0.75 by half the
+// step, so running alone spends nothing) one every 10 s, 40 a session; and every 10 s, when anything was refused,
 // a body hide (10 s): line (100 a session).
 struct FpHideClu { float p[3]; float d; uint32_t n; };
 FpHideClu g_fph_clu[4] = {}; int g_fph_clu_n = 0; uint32_t g_fph_clu_more = 0, g_fph_matched = 0;
@@ -846,6 +847,7 @@ bool     g_fph_frame = false; float g_fph_radius = 0.f, g_fph_match_max = 0.f, g
 uint32_t g_fph_lines = 0, g_fph_w_frames = 0, g_fph_w_ref_frames = 0, g_fph_w_refused = 0, g_fph_w_wide = 0, g_fph_w_lines = 0;
 uint32_t g_fph_w_tie_frames = 0, g_fph_w_tie = 0, g_fph_w_tie_kept = 0;   // the 10 s window's shared-anchor ties (frames, draws, kept visible)
 uint32_t g_fph_tie_lines = 0;   // review N4: the tie lines' own budget (120 a session, one every 2 s), apart from the refusal lines'
+uint32_t g_fph_far_lines = 0;   // fix-eye (finding 8): a frame whose only news is a match beyond own(step) of the player: 40 a session, one every 10 s
 uint32_t g_fph_w_ib_player = 0, g_fph_w_ib_other = 0, g_fph_w_ib_both = 0, g_fph_w_ib_miss = 0, g_fph_w_ib_cnt = 0;   // the 10 s window's IB-table decisions
 float    g_fph_w_rmax = 0.f, g_fph_w_match_max = 0.f;
 /// One skinned draw tested by the body hide on foot (fp_hiding): counted for this frame's diagnostics.
@@ -879,13 +881,17 @@ static void fp_hide_frame_end() {
         if (g_fph_radius > 1.5f) g_fph_w_wide++;
         // SF1: a refusal, or a match 0.75 from the player (an NPC whose root was not sent?), or (round 2) a draw the IB table kept
         // visible outside a tie; review N4: a frame with only ties writes on its own budget, so a long shared-anchor scene does not
-        // silence the refusal lines
-        const bool wide = g_fph_refused > 0 || g_fph_match_pmax > 0.75f || g_fph_ib_free > 0;
-        static ULONGLONG next = 0, next_tie = 0;
-        const bool line = wide ? g_fph_lines < 200 && now >= next : g_fph_tie > 0 && g_fph_tie_lines < 120 && now >= next_tie;
+        // silence the refusal lines. fix-eye (finding 8): ordinary running spent the 200 (his draws one call's step, 0.8-1.0, off the
+        // snapshot root): a match counts only beyond fpown::own(step) (k_own plus half the step, the ownership rule's own reach), and a
+        // frame with nothing else has its own budget (40, one every 10 s), so the refusal lines (200, 1 a second) keep theirs.
+        const bool refuse = g_fph_refused > 0 || g_fph_ib_free > 0;
+        const bool far_only = !refuse && g_fph_match_pmax > fpown::own(g_fp_step_hide);
+        static ULONGLONG next = 0, next_tie = 0, next_far = 0;
+        const bool line = refuse ? g_fph_lines < 200 && now >= next : far_only ? g_fph_far_lines < 40 && now >= next_far : g_fph_tie > 0 && g_fph_tie_lines < 120 && now >= next_tie;
         if (line) {
             const char* last = "";
-            if (wide) { next = now + 1000; if (++g_fph_lines == 200) last = " (no more of these lines this session)"; }
+            if (refuse) { next = now + 1000; if (++g_fph_lines == 200) last = " (no more of these lines this session)"; }
+            else if (far_only) { next_far = now + 10000; if (++g_fph_far_lines == 40) last = " (no more far-match lines this session)"; }
             else { next_tie = now + 2000; if (++g_fph_tie_lines == 120) last = " (no more shared-anchor lines this session)"; }
             char places[200] = "none"; int len = 0;
             for (int i = 0; i < g_fph_clu_n && len >= 0 && len < (int)sizeof(places); ++i)
