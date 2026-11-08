@@ -5516,3 +5516,18 @@ reads); scratch tests in render_chk/tests.
   frames late N% | game renders WxH, scene MSAA Nx (msaa=M), eye image WxH`, and when over the knee a third line naming the two
   settings to try. Rates come from the last 10 s sr window (`rnd::gpu_budget_rates`), the span from the perf window. The overlay
   reads 768 bytes (an older ffxvr.dll's 256 bytes show the first line and the start of the second).
+- **Virtual Desktop's late-session slowdown: logging only (perf finding 3).** VDXR's xrEndFrame grew from 0.1-0.2 ms to 4-8 ms
+  after 25-37 minutes in both sessions, flat screen and FMVs included (its `waitForAsyncSubmissionIdle`: the previous frame's
+  hand-off to the streamer). No fix here; what was added so the next session can tell the causes apart:
+  - `rnd::EndTrend` per headset session (this mod's view: the headset active): the extra frames' End time per 10 s sr window
+    (an extra frame does nothing of ours but xrEndFrame), its average over the session's first 5 minutes, the session's maximum.
+  - The first time a window passes 1 ms, and again at 3 ms, one line (not verbose-only): `xr: the runtime's xrEndFrame is
+    slowing: the extra frames' End X ms ... (Y ms in this headset session's first 5 minutes), a fresh frame's End, extras/s,
+    photon latency, display Hz, headset session N min (session K of this run)` with the owner's next steps. With every `perf:`
+    line: `xr: End trend: headset session N min, extra frames' End X ms (first 5 min Y, max Z)`. F8 shows the same as a third
+    line, so the onset can be spotted in the headset.
+  - What the runtime does not give: VDXR exposes XR_FB_display_refresh_rate only as a mock (the fixed refresh), no performance
+    metrics extension; its ASW state only doubles the predicted display period (already shown as "half rate"). The streamer's
+    encode / network / decode figures are only in Virtual Desktop's own overlay; VDXR's ETW provider (its
+    `scripts/Capture-ETL.bat`) splits the wait into `OVR_WaitToBeginFrame` and `OVR_EndFrame` on its submission thread.
+  - Owner steps: fixes/fix-render-impl.md (scratchpad), section 6.

@@ -676,6 +676,10 @@ double   g_sr_fresh_accum = 0.0; // SR-6: g_turn_accum at the last fresh base la
 uint32_t g_sr_clears = 0;         // the game's clears (ffxvr_on_clear outside InEye2): the ring wait's "next frame has started" test
 double   g_sr_rate_extras = 0.0;  // extra frames per second over the last 10 s (the perf: line, the overlay)
 rnd::GpuBudget g_gpu_budget;      // fix-render (perf finding 2): the F8 readout's GPU span against the knee, extras and repeated slots (sr_present / perf_tick)
+// fix-render (perf finding 3): Virtual Desktop's xrEndFrame trend over a headset session (sr_present): the extra frames' End time
+// (an extra frame does nothing of ours but xrEndFrame) against its first 5 minutes, an onset line at 1 ms and at 3 ms, and the
+// session's age and the trend on every perf: line.
+rnd::EndTrend g_end_trend; ULONGLONG g_end_t0 = 0; double g_end_last = -1.0; uint32_t g_end_sessions = 0;
 
 // Movement remap: in first person the game still maps the left stick against
 // its own camera, so the stick is rotated by (view heading - game camera
@@ -7148,6 +7152,9 @@ static void perf_tick() {
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
              g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
+        if (g_end_t0 != 0 && g_end_last >= 0.0)   // fix-render (perf finding 3): the runtime's End trend, with every perf: line
+            diag("xr: End trend: headset session %.1f min, extra frames' End %.2f ms (last 10 s; first 5 min %.2f ms, max this session %.2f ms)",
+                 (GetTickCount64() - g_end_t0) / 60000.0, g_end_last, g_end_trend.base(), g_end_trend.max_ms);
         cpu_log_line();   // cpu-lean: the cpu: line, with every perf: line
         g_ui_verts_read = g_ui_trunc = g_ui_start_nonzero = g_ui_start_bail = g_ui_base_nonzero = g_skip_overflow = 0;   // R39/R48: since the last perf: line
     }
@@ -12323,12 +12330,15 @@ extern "C" __declspec(dllexport) void ffxvr_perf_status(char* buf, int n) {
     char hz[96] = "";
     if (G.extras_s > 0.0 || G.dropped_s > 0.0)
         snprintf(hz, sizeof(hz), " | extra frames %.0f/s, dropped (slots repeated) %.0f/s, fresh frames late %.0f%%", G.extras_s, G.dropped_s, G.late_pct);
+    char vd[128] = "";   // fix-render (perf finding 3): the runtime's End trend, so the slowdown's onset shows in F8 too
+    if (g_end_t0 != 0 && g_end_last >= 0.0)
+        snprintf(vd, sizeof(vd), "\nRuntime (Virtual Desktop) End: extra frames %.2f ms (first 5 min %.2f), headset session %.0f min", g_end_last, g_end_trend.base(), (GetTickCount64() - g_end_t0) / 60000.0);
     _snprintf_s(buf, (size_t)n, _TRUNCATE, "frame %.1f ms (max %.0f, gpu %.1f, xr wait %.1f end %.1f, eye2 %.1f) | twins %u, srvs %u, buffers %u | private %llu MB, vram %llu / %llu MB\n"
-        "GPU budget: span %.1f ms (max %.0f) against the ~%.1f ms knee%s%s | game renders %ux%u, scene MSAA %s, eye image %ux%u%s",
+        "GPU budget: span %.1f ms (max %.0f) against the ~%.1f ms knee%s%s | game renders %ux%u, scene MSAA %s, eye image %ux%u%s%s",
         g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_perf.buffers,
         (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb,
         G.gpu_ms, G.gpu_max_ms, rnd::k_gpu_knee_ms, G.over() ? ": OVER" : "", hz, g_bb_w, g_bb_h, msaa, ew, eh,
-        G.over() ? "\nOver the knee: try the game at 2560x1440 (tools\\game-settings.ps1 -Profile vr, game closed), then msaa=2 (next start); setup.md, GPU-bound scenes" : "");
+        G.over() ? "\nOver the knee: try the game at 2560x1440 (tools\\game-settings.ps1 -Profile vr, game closed), then msaa=2 (next start); setup.md, GPU-bound scenes" : "", vd);
 }
 /// ABI 21: + `menu` (saveui): 0, or 1 | (state << 8) while fh_menu_on_screen is on and Fahrenheit's save screen is open (managed
 /// latches 0x8CB994 from OPEN to CLOSED, guarded read; `state` is this frame's raw word, 2 = OPEN). Managed, every frame; xr_tick
@@ -15803,12 +15813,27 @@ static void sr_present() {
     g_sr_present_ms = now; g_sr_episode = false;
     if (want && g_xr_want && xr_active()) sr_arm();
     const ULONGLONG tn = GetTickCount64();
+    if (!(g_xr_want && xr_active())) g_end_t0 = 0;   // fix-render: the End trend is per headset session (as this mod sees it: active)
+    else if (g_end_t0 == 0) { g_end_t0 = tn; g_end_trend.reset(); g_end_last = -1.0; g_end_sessions++; }
     if (g_sr_line_t == 0) g_sr_line_t = tn;
     if (tn - g_sr_line_t < 10000) return;
     const double secs = (tn - g_sr_line_t) / 1000.0; g_sr_line_t = tn;
     SrStats& S = g_sr_s;
     g_sr_rate_extras = S.extras / secs; g_sr_rate_skipped = S.skipped / secs;
     rnd::gpu_budget_rates(g_gpu_budget, S.fresh, S.late, S.extras, S.skipped, secs);   // fix-render: the F8 GPU-budget readout
+    if (g_end_t0 != 0) {   // fix-render (perf finding 3): the runtime's End time trend; an onset line the first time it passes 1 ms, then 3 ms
+        const double age_s = (tn - g_end_t0) / 1000.0;
+        g_end_last = S.extras ? S.end_sum / S.extras : -1.0;
+        const int crossed = g_end_trend.step(age_s, g_end_last);
+        if (crossed >= 0) {
+            double pm = 0.0, hz = 0.0; bool half = false; xr_display(&pm, &hz, &half);
+            double fw = 0.0, fe = 0.0; xr_timing(&fw, &fe);
+            diag("xr: the runtime's xrEndFrame is slowing: the extra frames' End %.2f ms avg over the last %.0f s (over %.0f ms; %.2f ms in this headset session's first 5 minutes), a fresh frame's End %.2f ms, extras %.1f/s, photon latency %.1f ms, display %.1f Hz%s; headset session %.0f min (session %u of this run). "
+                 "Owner steps (fixes/fix-render-impl.md): open Virtual Desktop's performance overlay now and note encode / network / decode latency and bitrate; then take the headset off for ~10 s",
+                 g_end_last, secs, rnd::k_end_onset_ms[crossed], g_end_trend.base(), fe, S.extras / secs, S.lat_n ? S.lat_sum / S.lat_n : 0.0, pm > 0.0 ? 1000.0 / pm : 0.0,
+                 half ? " (half rate: SSW)" : "", age_s / 60.0, g_end_sessions);
+        }
+    }
     g_sr_rate_yaw = S.rot ? S.yaw_sum / S.rot : 0.0; g_sr_rate_delay_max = S.delay_max;
     static int s_sr_windows = 0; static char s_sr_why[96] = "";   // the default (non-verbose) sr: lines, per headset session
     if (!(want && g_xr_want && xr_active())) { s_sr_windows = 0; s_sr_why[0] = 0; }
