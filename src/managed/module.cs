@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 49;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals)
+    private const int k_abi = 50;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_fp_event, the first-person event hold, fix-eye)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -407,6 +407,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
             _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
             _fn_bt_tag_step = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float*, int, int>)req("ffxvr_bt_tag_step"); _fn_bt_tag_hold = (delegate* unmanaged[Cdecl]<int, float, float, float, int>)req("ffxvr_bt_tag_hold");   // ABI 46: battle tag (bt_tag.cs)
+            _fn_fp_event = (delegate* unmanaged[Cdecl]<int, float, float*, int, int>)req("ffxvr_fp_event");   // ABI 50: the first-person event hold (fp_follow.cs)
             _fn_dmg_walk = (delegate* unmanaged[Cdecl]<byte*, uint, uint, DmgNode*, int, uint*, int>)req("ffxvr_dmg_walk"); _fn_dmg_queue = (delegate* unmanaged[Cdecl]<byte*, int, int, DmgNode*, int, DmgChr*, int, byte*, uint*, int>)req("ffxvr_dmg_queue");   // ABI 47: 3D damage numbers (dmg3d.cs)
             _fn_dmg_set = (delegate* unmanaged[Cdecl]<DmgNode*, int, DmgChr*, int, uint, uint, uint, int, void>)req("ffxvr_dmg_set"); _fn_dmg_cfg = (delegate* unmanaged[Cdecl]<int, float, float, byte*, int>)req("ffxvr_dmg_cfg");
             _fn_dmg_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_dmg_skip"); _fn_dmg_status = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_dmg_status");
@@ -576,6 +577,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_eye_jump_set = null; _fn_eye_event = null;   // ABI 44 (eye jumps)
         _fn_bt_tag_step = null; _fn_bt_tag_hold = null;   // ABI 46 (battle tag)
+        _fn_fp_event = null;   // ABI 50 (the event hold)
         _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null;   // ABI 47 (3D damage numbers)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
@@ -1052,6 +1054,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "cut_recentre":      pb(k, v, ref _cut_recentre); break;
                 case "cut_blink":         pb(k, v, ref _cut_blink); break;
                 case "eye_jump_blink": case "eye_jump_units": case "battle_face": ej_parse(k, v); break;   // eye jumps (eye_jump.cs)
+                case "fp_event_hold":     pb(k, v, ref _fp_event_hold); break;                 // fix-eye: the eye held while control is off in first person (fp_follow.cs)
+                case "fp_event_leash":    pf(k, v, ref _fp_event_leash, 2f, 40f); break;      // ... how far the game may move him before the eye trails (units)
                 case "turn_stick":        pb(k, v, ref _turn_stick); break;
                 case "turn_mode":         pi(k, v, ref _turn_mode, 0, 1); break;
                 case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
@@ -1427,6 +1431,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
             ej_ini_text() +   // eye jumps (eye_jump.cs)
+            $"fp_event_hold={(_fp_event_hold ? 1 : 0)}\n" +
+            $"fp_event_leash={_fp_event_leash.ToString("F1", ci)}\n" +
             $"turn_stick={(_turn_stick ? 1 : 0)}\n" +
             $"turn_mode={_turn_mode.ToString(ci)}\n" +
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
@@ -1593,6 +1599,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 360f);
         if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
         ej_ui();   // eye jumps: eye_jump_blink, eye_jump_units, battle_face (eye_jump.cs)
+        fpev_ui();   // fix-eye: fp_event_hold, fp_event_leash (fp_follow.cs)
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
         ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
@@ -2761,9 +2768,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             int root_kind = body_hide_root(actors, pick, att, out Vector3 root3);
             body_hide_push(actors, pick, (pick << 16) | ((int)p.chr_id & 0xFFFF), !in_battle, root3, root_kind, att ? _ride_rider : pos3);
             fpk_note(!in_battle && _fp_mode == 1 && !_in_blitz, pos3, head3, hv);   // finding 4: where the eye would be held
+            fpev_push(!in_battle && _fp_mode == 1 && !_in_blitz && !att, actors, pick);   // the event hold (fp_follow.cs)
         }
-        else if (_fpk_on) fpk_frame();   // finding 4: the eye held where it was (nothing listed to follow mid-scene)
-        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
+        else if (_fpk_on) { fpk_frame(); fpev_push(false, null, -1); }   // finding 4: the eye held where it was (nothing listed to follow mid-scene)
+        else {
+            fpev_push(false, null, -1); _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }
     /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,

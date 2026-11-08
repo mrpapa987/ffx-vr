@@ -94,6 +94,36 @@ public sealed unsafe partial class FFXVRModule {
         _logger.Info(I($"first person: nothing to follow on map {map_name()} ({who} is not followed: finding 4); the game's camera until a listed model is live") + (_fpk_lines == 40 ? " (no more of these lines this session)" : ""));
     }
 
+    // -- the event hold (research/sphere-grab-eye.md): native ffxvr_eyejump.h ej::EvHold, ffxvr_fp_event (ABI 50) ----------------
+    // In the Djose cloister (7 Nov) the game moved Tidus's root to the interaction mark when control went off (a sphere taken from a
+    // wall socket) and the eye went with it into the wall. While control is off in first person on foot, native holds the eye's
+    // horizontal position where it was, on a leash of fp_event_leash units (a single move over twice that is a staging: the hold
+    // starts again there, with the blink); at control's return it glides back over 0.3 s under half the leash, else blinks and
+    // snaps. A map change, a load or a re-pick (a new scene generation or followed slot: the release bit), a camera cut, or 45 s end it.
+    // Cutscenes (control off for minutes) end it at their first camera cut, and the 45 s cap ends one without cuts (a scripted
+    // walk under a following camera): an interaction rarely lasts longer (the djyt0000 grab: 27 s with control off). An "object or
+    // actor within 20 units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
+    private bool _fp_event_hold = true; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 1), fp_event_leash (units, 2..40)
+    private delegate* unmanaged[Cdecl]<int, float, float*, int, int> _fn_fp_event;   // ABI 50
+    private long _fpev_key = -1; private readonly float[] _fpev_st = new float[4];   // the last eligible frame's (slot, scene generation); native's state for F8
+    /// <summary>push_player, every frame after the eye is sent: eligible = the field, first person, on foot (not riding), not
+    /// blitzball, a followed actor; with control off ([0x1300788] 0) native holds the eye. release = the followed slot or the
+    /// scene generation (map, event, the model instance a load re-creates) changed since the last eligible frame.</summary>
+    private void fpev_push(bool eligible, Actor* actors, int pick) {
+        if (_fn_fp_event == null) return;
+        bool off = eligible && gs_player(out uint pl) && pl == 0;
+        long key = eligible ? ((long)pick << 32) | body_hide_scene_gen(actors, pick) : -1;
+        bool rel = eligible && _fpev_key >= 0 && key != _fpev_key;
+        if (eligible) _fpev_key = key;
+        fixed (float* o = _fpev_st) _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0), _fp_event_leash, o, 4);
+    }
+    /// <summary>F8, under the eye jumps.</summary>
+    private void fpev_ui() {
+        ImGui.Checkbox("hold the eye while the game moves you (control off)##fpev", ref _fp_event_hold); ImGui.SameLine();
+        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("leash (units)##fpev", ref _fp_event_leash, 2f, 40f, "%.0f");
+        if (_fn_fp_event != null) { ImGui.SameLine(); ImGui.TextDisabled(I($"{(_fpev_st[0] == 1f ? $"holding {_fpev_st[1]:F1} s, the eye {_fpev_st[2]:F1} units off" : _fpev_st[0] == 2f ? "gliding back" : "not holding")}; holds {_fpev_st[3]:F0}")); }
+    }
+
     /// <summary>finding 1: is slot i the marked one, with the same model and chr_id (tbl: this frame's snapshot or the live table)?</summary>
     private bool fp_chain_bad(int i, Actor* tbl, int chr_id) {
         if (i != _ib_bad_slot || tbl == null) return false;

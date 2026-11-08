@@ -10,9 +10,9 @@
 // Units are game units (about 9 cm); frames are native frames (g_frames, one per Present). Running moves the eye about 1
 // unit a frame at 60 fps (2 at 30), the chocobo about 2.5; a jump is a move of more than Cfg::units (default 8) in a frame.
 #pragma once
-// fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again (the shared
-// scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 3
+// fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again; 4: the
+// event hold (EvHold) (the shared scratch test keys its expectations on this).
+#define FFXVR_EJ_REV 4
 #include <cmath>
 #include <cstdint>
 
@@ -243,5 +243,97 @@ inline bool limit_start(Limit& l, uint32_t frame, int window) {
     l.started = true; l.start = frame;
     return true;
 }
+
+// ---- fix-eye: the event hold (the sphere grab, research/sphere-grab-eye.md) ------------------------------------------------
+// In the Djose cloister (7 Nov) the game moved Tidus's root when player control went off for an interaction (9.1 and 10.5 units
+// in one frame on dj/djyt0600; a scripted run of a second on dj/djyt0000), and the first-person eye, which stands on the root,
+// went with it into the wall. While control is off in first person on foot, the eye's horizontal position is held where it was
+// when control went off, on a leash: when the game moves the root further than `leash`, the eye trails it at that distance. A
+// single root step over 2 x leash is a scene staging: the hold starts again at the new root (the eye-jump blink covers it). The
+// height keeps the head rule over the root (stairs, a kneel). When control returns the eye glides back over glide_s if it is
+// under leash / 2 off, else it snaps with a blink. A camera cut or max_s seconds end the hold the same way; a map change, a load
+// or a re-pick (managed) and the setting off end it with a snap. One hold per no-control episode: it starts on the edge only.
+// Pure: the native glue (build_override_view's primary advance call) passes the eye base and the frame's inputs.
+struct EvCfg {
+    float leash  = 12.f;   // ini fp_event_leash: units (12 = about 1.05 m)
+    float glide_s = 0.3f;  // the glide back, seconds
+    float max_s  = 45.f;   // the hold ends after this long (a cutscene without a cut; 0 = no cap)
+    float reset() const { return 2.f * leash; }       // a single root step over this restarts the hold at the root
+    float glide_max() const { return 0.5f * leash; }  // an offset under this glides back, else a blink and a snap
+};
+enum EvEvent : int { EV_NONE = 0, EV_START, EV_RESET, EV_GLIDE, EV_SNAP };   // EV_GLIDE / EV_SNAP: the hold ended this frame
+enum EvWhy : int { EVW_NONE = 0, EVW_CONTROL, EVW_RELEASE, EVW_CUT, EVW_CAP, EVW_OFF };
+static const char* const k_ev_why[] = { "-", "control back", "a map change, a load or a re-pick", "a camera cut", "the time cap", "fp_event_hold off or not first person" };
+struct EvHold {
+    bool     on = false;
+    bool     want_prev = false;   // the last step's want (the start is on its rising edge)
+    float    H[2] = {};           // the held horizontal eye position (render x, z)
+    float    prev[2] = {};        // the last step's eye base (x, z)
+    bool     prev_ok = false;
+    float    t = 0.f;             // seconds held
+    uint32_t start_frame = 0;
+    bool     glide = false;       // gliding back after the hold
+    float    G[2] = {};           // the glide's offset from the eye base (decays to 0)
+    float    glide_left = 0.f;    // seconds
+    // the hold's statistics (the start / end lines)
+    float    start[2] = {};       // the eye base at the start
+    float    off_max = 0.f;       // the largest eye offset from the base while held
+    float    step_max = 0.f;      // the largest single-frame base step while held
+    int      resets = 0;
+    float    end_off = 0.f;       // the offset when it ended
+    int      why = EVW_NONE;      // why it ended
+};
+inline float hlen(float x, float z) { return std::sqrt(x * x + z * z); }
+/// One advance frame. P = the eye base (x and z replaced while held or gliding). want = an eligible frame with control off
+/// (managed); enabled = fp_event_hold; release = managed's map change / load / re-pick; cut = a camera cut since the last step;
+/// dt = seconds since the last frame. Returns this frame's event.
+inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release, bool cut, float dt, const EvCfg& c, uint32_t frame) {
+    const bool rising = want && !h.want_prev;
+    h.want_prev = want;
+    if (!finite3(P) || !std::isfinite(dt)) { h.on = false; h.glide = false; h.prev_ok = false; return EV_NONE; }
+    const float bx = P[0], bz = P[2];
+    const float step = h.prev_ok ? hlen(bx - h.prev[0], bz - h.prev[1]) : 0.f;
+    h.prev[0] = bx; h.prev[1] = bz; h.prev_ok = true;
+    const float L = c.leash > 0.5f ? c.leash : 0.5f;
+    int ev = EV_NONE;
+    if (h.on) {
+        const int why = !enabled ? EVW_OFF : !want ? EVW_CONTROL : release ? EVW_RELEASE : cut ? EVW_CUT : (c.max_s > 0.f && h.t >= c.max_s) ? EVW_CAP : EVW_NONE;
+        if (why == EVW_NONE) {
+            if (step > c.reset()) { h.H[0] = bx; h.H[1] = bz; h.resets++; ev = EV_RESET; }   // a staging: the usual blink (the jump)
+            else {
+                const float vx = bx - h.H[0], vz = bz - h.H[1], d = hlen(vx, vz);
+                if (d > L) { const float k = L / d; h.H[0] = bx - vx * k; h.H[1] = bz - vz * k; }   // the leash: trail at L
+            }
+            if (step > h.step_max) h.step_max = step;
+            h.t += dt > 0.f ? dt : 0.f;
+            const float off = hlen(h.H[0] - bx, h.H[1] - bz);
+            if (off > h.off_max) h.off_max = off;
+            P[0] = h.H[0]; P[2] = h.H[1];
+            return ev;
+        }
+        h.on = false; h.why = why;
+        h.end_off = hlen(h.H[0] - bx, h.H[1] - bz);
+        // a glide back for control, a cut or the cap; a release (another map, a load, a re-pick) or the setting off: snap
+        if (h.end_off < c.glide_max() && c.glide_s > 0.f && why != EVW_RELEASE && why != EVW_OFF) { h.glide = true; h.G[0] = h.H[0] - bx; h.G[1] = h.H[1] - bz; h.glide_left = c.glide_s; ev = EV_GLIDE; }
+        else { h.glide = false; ev = EV_SNAP; }
+    }
+    else if (rising && enabled && !release) {
+        // from where the eye is now (a glide still under way included)
+        const float ox = h.glide ? h.G[0] : 0.f, oz = h.glide ? h.G[1] : 0.f;
+        h.on = true; h.glide = false; h.H[0] = bx + ox; h.H[1] = bz + oz; h.t = 0.f; h.start_frame = frame;
+        h.start[0] = bx; h.start[1] = bz; h.off_max = hlen(ox, oz); h.step_max = 0.f; h.resets = 0; h.end_off = 0.f; h.why = EVW_NONE;
+        P[0] = h.H[0]; P[2] = h.H[1];
+        return EV_START;
+    }
+    if (h.glide) {
+        const float k = dt > 0.f && h.glide_left > 0.f ? (dt < h.glide_left ? dt / h.glide_left : 1.f) : 0.f;   // linear: what is left over the time left
+        h.G[0] -= h.G[0] * k; h.G[1] -= h.G[1] * k; h.glide_left -= dt > 0.f ? dt : 0.f;
+        if (h.glide_left <= 0.f || hlen(h.G[0], h.G[1]) < 0.01f) h.glide = false;
+        else { P[0] = bx + h.G[0]; P[2] = bz + h.G[1]; }
+    }
+    return ev;
+}
+/// The eye's horizontal offset from the base this frame applies (held or gliding), for the other callers of the frame.
+inline bool ev_active(const EvHold& h) { return h.on || h.glide; }
 
 }  // namespace ej
