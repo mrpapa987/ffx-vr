@@ -6494,13 +6494,13 @@ extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, 
     c.circle_r = odg::clampf(circle_cm, 1.f, 20.f) * 0.01f; c.slash_speed = odg::clampf(slash_speed, 0.8f, 5.f);
     c.lulu_stick = lulu_stick < 0 || lulu_stick > 2 ? 0 : lulu_stick; g_odg_lulu_stick = c.lulu_stick;
 }
-/// Strike the targets (ABI 52): ini od_targets_blade_pitch (-45..45 deg), od_targets_dist (0.35-0.9 m), od_targets_height (-0.5..0 m),
-/// od_targets_size (0.6-1.6), every frame from managed's push (render thread). The pitch applies at once (practice is where it is set);
-/// the rest from the next round.
+/// Strike the targets (ABI 52): ini od_targets_blade_pitch (-45..45 deg), od_targets_dist2 (0.35-0.9 m, 0.50), od_targets_height2
+/// (-0.5..0 m, -0.30), od_targets_size (0.6-1.6: a multiplier on the 24 cm plate), every frame from managed's push (render thread). The
+/// pitch applies at once (practice is where it is set); the rest from the next round.
 extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist, float height, float size) {
     odt::Cfg& c = g_odt.cfg;
-    c.pitch_deg = std::isfinite(pitch_deg) ? odg::clampf(pitch_deg, -45.f, 45.f) : 0.f; c.dist = std::isfinite(dist) ? odg::clampf(dist, 0.35f, 0.9f) : 0.6f;
-    c.height = std::isfinite(height) ? odg::clampf(height, -0.5f, 0.f) : -0.2f; c.size = std::isfinite(size) ? odg::clampf(size, 0.6f, 1.6f) : 1.f;
+    c.pitch_deg = std::isfinite(pitch_deg) ? odg::clampf(pitch_deg, -45.f, 45.f) : 0.f; c.dist = std::isfinite(dist) ? odg::clampf(dist, 0.35f, 0.9f) : 0.5f;
+    c.height = std::isfinite(height) ? odg::clampf(height, -0.5f, 0.f) : -0.3f; c.size = std::isfinite(size) ? odg::clampf(size, 0.6f, 1.6f) : 1.f;
 }
 /// Practice targets (ABI 52): which 1 a random 3-8 symbols, 2 the last Bushido sequence seen this session. Only a request: the render
 /// thread starts it at its next Present, and F8's text 4 says how it went. Returns 1 when requested.

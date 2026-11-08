@@ -11,9 +11,10 @@ namespace FFXVR;
 //                   (0x8923F8..0x89244F: the cursor back to its start while the timer runs), so a false A costs a traversal
 //   Auron's Bushido od_gest_auron: 0 off (the default), 1 slashes and punches: slashes left / right / up / down = the d-pad, a punch
 //                   forward = LB (left hand) / RB (right hand), the face buttons on the controllers; 2 strike the targets (native
-//                   ffxvr_odtarget.h, ABI 52): each input of the sequence is a seal plate that flies in along one of two lanes; a blade
-//                   per hand cuts it (an arrow in its direction, a face or shoulder button any way), the two fronts in either order;
-//                   the press sent is always the game's expected one for its own progress (never a wrong press), one at a time
+//                   ffxvr_odtarget.h, ABI 52): one big bright plate straight ahead at chest height shows the current input (the
+//                   next one small above it); a blade in either hand cuts it (an arrow along the sliding chevrons, a face or
+//                   shoulder button any way), and the next appears in the same spot; the press sent is always the game's expected
+//                   one for its own progress (never a wrong press), one at a time
 // Practice targets (F8, any time with the headset on and no overdrive window open, outside battle too): a random 3-8 symbols or
 // the last Bushido seen, a 4 s bar, the full hit test, visuals and buzz, nothing sent; F8 and the log get "practice: N of N in x s".
 // Native decides and logs (odg: lines: one per window, Auron's expected sequence and every press the game saw); this file
@@ -26,15 +27,16 @@ namespace FFXVR;
 // bring-back of the same hand within 0.3 s is ignored.
 // ini: od_gestures (1), od_gest_lulu (1), od_gest_tidus_swing (0; the old key od_gest_tidus, saved as 1 by the first build,
 // is ignored so the new default reaches every ini), od_gest_auron (0 / 1 / 2, default 0; an older ini's bool 1 / true reads as 1,
-// slashes and punches, as before), od_targets_blade_pitch (-45..45 deg; 0), od_targets_dist (0.35-0.9 m; 0.6), od_targets_height (-0.5..0 m;
-// -0.2), od_targets_size (0.6-1.6; 1), od_gest_haptics (1), od_circle_cm (1-20; 4),
+// slashes and punches, as before), od_targets_blade_pitch (-45..45 deg; 0), od_targets_dist2 (0.35-0.9 m; 0.5), od_targets_height2
+// (-0.5..0 m; -0.3), od_targets_size (0.6-1.6, a multiplier on the 24 cm plate; 1); the first build's od_targets_dist / _height
+// (0.6 / -0.2 for its row of plates) are ignored so the one-target defaults reach every ini; od_gest_haptics (1), od_circle_cm (1-20; 4),
 // od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0), od_visuals (1) and od_visual_size (0.5-2; 1): the
 // overdrive visuals (native ffxvr_odvis.h: trails, bursts, Lulu's ring and spin count, Tidus's blade and bar, Auron's input row),
 // drawn near the hands in the headset only while that overdrive's window is open with its gestures on.
 public sealed unsafe partial class FFXVRModule {
     private bool  _od_gestures = true, _od_gest_lulu = true, _od_gest_tidus = false, _od_gest_haptics = true;
     private int   _od_gest_auron = 0;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52)
-    private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.60f, _od_tgt_height = -0.20f, _od_tgt_size = 1f;   // ini od_targets_blade_pitch / _dist / _height / _size
+    private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.50f, _od_tgt_height = -0.30f, _od_tgt_size = 1f;   // ini od_targets_blade_pitch / _dist2 / _height2 / _size
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
     private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
@@ -68,8 +70,10 @@ public sealed unsafe partial class FFXVRModule {
                 else _ini_bad.Add($"{k}='{v}'");
                 return true;
             case "od_targets_blade_pitch": pf(k, v, ref _od_tgt_pitch, -45f, 45f); return true;
-            case "od_targets_dist":   pf(k, v, ref _od_tgt_dist, 0.35f, 0.9f); return true;
-            case "od_targets_height": pf(k, v, ref _od_tgt_height, -0.5f, 0f); return true;
+            case "od_targets_dist":   return true;   // the first build's keys (its row of plates: 0.6 / -0.2) are ignored: the one-target defaults
+            case "od_targets_height": return true;
+            case "od_targets_dist2":   pf(k, v, ref _od_tgt_dist, 0.35f, 0.9f); return true;
+            case "od_targets_height2": pf(k, v, ref _od_tgt_height, -0.5f, 0f); return true;
             case "od_targets_size":   pf(k, v, ref _od_tgt_size, 0.6f, 1.6f); return true;
             case "od_gest_haptics": pb(k, v, ref _od_gest_haptics); return true;
             case "od_circle_cm":    pf(k, v, ref _od_circle_cm, 1f, 20f); return true;
@@ -88,8 +92,8 @@ public sealed unsafe partial class FFXVRModule {
             $"od_gest_tidus_swing={(_od_gest_tidus ? 1 : 0)}\n" +
             $"od_gest_auron={_od_gest_auron.ToString(ci)}\n" +
             $"od_targets_blade_pitch={_od_tgt_pitch.ToString("0.#", ci)}\n" +
-            $"od_targets_dist={_od_tgt_dist.ToString("0.0#", ci)}\n" +
-            $"od_targets_height={_od_tgt_height.ToString("0.0#", ci)}\n" +
+            $"od_targets_dist2={_od_tgt_dist.ToString("0.0#", ci)}\n" +
+            $"od_targets_height2={_od_tgt_height.ToString("0.0#", ci)}\n" +
             $"od_targets_size={_od_tgt_size.ToString("0.0#", ci)}\n" +
             $"od_gest_haptics={(_od_gest_haptics ? 1 : 0)}\n" +
             $"od_circle_cm={_od_circle_cm.ToString("0.#", ci)}\n" +
@@ -143,7 +147,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.RadioButton("off##odga", ref _od_gest_auron, 0); ImGui.SameLine();
         ImGui.RadioButton("slashes and punches (experimental)##odga", ref _od_gest_auron, 1); ImGui.SameLine();
         ImGui.RadioButton("strike the targets##odga", ref _od_gest_auron, 2);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Each input of the sequence flies in as a seal plate along one of two lanes; cut it with the blade in either hand: an arrow in its direction, a letter or L / R any way. The two front plates can be cut in either order. The mod sends the game's own expected button, one at a time, so a stroke never sends a wrong press; your buttons still work.");
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("One big plate straight ahead at chest height shows the input to give now (the next one small above it). Cut it with the blade in either hand: an arrow along its sliding chevrons, a letter or L / R any way. The next appears in the same spot. The mod sends the game's own expected button, one at a time, so a stroke never sends a wrong press; your buttons still work.");
         ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f");
         ImGui.SameLine(); ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("slash / swing speed (m/s)##odg", ref _od_slash_speed, 0.8f, 5f, "%.1f");
         ImGui.SameLine(); ImGui.SetNextItemWidth(120f);
@@ -159,7 +163,7 @@ public sealed unsafe partial class FFXVRModule {
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }
         ImGui.TextDisabled(esc(odg_text(0)));
         if (_od_gest_auron == 1) ImGui.TextDisabled("Bushido: an opposite pair in a row (Left, Right) goes at once when the game asks for it; any other bring-back of the same hand within 0.3 s is ignored; L1 / R1 is a punch (a quick squeeze is not L1 / R1 there, and the triggers are held back)");
-        if (_od_gest_auron == 2) ImGui.TextDisabled("Bushido targets: cut the plates as they come, either hand, either front first; a wrong button of yours makes them return; while they are up a quick squeeze is not L1 / R1, the grips do not grab and the triggers are held back");
+        if (_od_gest_auron == 2) ImGui.TextDisabled("Bushido targets: cut the big plate, either hand (alternating is fastest); arrows along the chevrons (a wrong way flashes the rim red and buzzes); a wrong button of yours starts them over; while they are up a quick squeeze is not L1 / R1, the grips do not grab and the triggers are held back");
         ImGui.TextDisabled("last: " + esc(odg_text(1)));
         odt_ui();
     }

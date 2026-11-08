@@ -220,7 +220,7 @@ Battle: Y = Defend, right trigger held = scroll the turn order forward, left tri
 member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
 game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
 gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (cut the
-symbols as they fly in, either hand). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
+big plate in front of you with either hand: an arrow along its sliding chevrons, a letter or L / R any way). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
 and set the blade pitch, target distance, target height and target size first.
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old

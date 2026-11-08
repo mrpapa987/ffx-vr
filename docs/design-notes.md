@@ -5581,25 +5581,29 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 / 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`
 (its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
-- **What the player sees.** When the window opens, each input of the sequence swoops into its spot from 0.22 m beyond, 0.40 m
-  above and 0.15 m outside it (fronts first, 60 ms apart, 0.40-0.5 s each, ease-out; the upward part is cut down for a low, near
-  spot so it never comes nearer the eyes than its spot; the first build came from 3 m straight ahead at about 20 m/s, too fast
-  toward the face). Every motion (the fly-in, the queue's slide into the strike row, a rewind) lasts long enough that its
-  opening speed toward the eyes stays under 2.8 m/s, at every slider setting (the slide takes about 0.15-0.3 s).
-  Two alternating lanes, the strike row 0.60 m ahead and 0.20 m below the eyes, up to two queued plates behind and above each
-  front, dots for the rest. Each target is an octagonal seal plate (2 cm thick, beveled, a darker face) with an engraved,
-  glowing symbol: arrows cool white-cyan, A / B / X / Y amber stroke letters, L1 / R1 a violet tab. Each hand holds a
-  single-edged, slightly curved blade with a small round guard (left gold, right steel-cyan) that brightens above the speed
-  threshold and leaves a short ribbon trail. A cut splits the plate along the stroke; the halves part at 0.8 m/s, fall, spin
-  and fade (450 ms), with sparks and a bright line along the cut; they never move toward the eyes (the near-eye fade still
-  applies). Progress pips show the game's own progress, a bar its seconds left. The look is this mod's own: no game assets,
+- **What the player sees** (the "one big target" redesign, 8 Nov 2026; the first build's fly-in and two lanes failed the
+  owner's play test: hard to see and unclear what to do). One plate at a time in one fixed spot, 0.50 m ahead and 0.30 m below
+  the eyes, latched from the head's yaw at the open (blended toward the body). The plate is an octagon prism about 24 cm across
+  (the size slider scales it), with a soft dark halo behind it (about 1.4x the plate, alpha 0.6), a bright saturated face
+  (arrows cyan, A / B / X / Y amber, L1 / R1 violet), a thick white rim and a thick near-black symbol, and a gentle pulse
+  (scale 1.00-1.04). The arrow points the way to cut: three chevrons slide along it, looping every 0.9 s, over a faint guide
+  line reaching 12 cm beyond both edges; letters and L / R have no chevrons (any direction). The next input shows small (40 %)
+  and faint above and behind the plate, never hittable. When a plate is cut the next materialises in the same spot in 0.12 s
+  (scale and alpha, no travel); the first materialises at the open. A wrong direction flashes the rim red and enlarges the
+  chevrons. Thin progress pips (the game's own progress; a pip flashes when it moves) and a timer bar sit under the plate.
+  Each hand holds a single-edged, slightly curved blade with a small round guard (left gold, right steel-cyan) that brightens
+  above the speed threshold and leaves a short ribbon trail. A cut splits the plate along the stroke; the halves part at
+  0.8 m/s, fall, spin and fade (450 ms), with sparks and a bright line along the cut; they never move toward the eyes (the
+  near-eye fade still applies). Nothing is drawn nearer the eyes than the plate. The look is this mod's own: no game assets,
   no console colour scheme.
-- **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 10 cm sphere that follows the
-  drawn plate; 1.2 m/s at the contact; arrows within 55 degrees in the plate's plane, buttons any direction (stabs too). Only
-  the two fronts, in either order; a plate is hittable only once it has arrived. One hit per plate, a re-arm per hand and lane
-  (a slash continuing through the replacement does not cut it; the other hand, or the natural return stroke, does). A wrong
-  direction deflects (the plate tilts, the rim flashes) and sends nothing. Pose snaps and spikes (rest around a big step, or a
-  step straight back) and jumps over 8 m/s at the grip are skipped.
+- **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 15 cm sphere at the plate; 1.2 m/s
+  at the contact. Only the current plate can be cut (no lanes, nothing ahead of time). An arrow is judged on the stroke's path
+  in the plate's plane over the pass (at least 7 cm of it, from the first contact sample), which must lie within 65 degrees of
+  the arrow; one pass is one judgement, and a new pass starts afresh. Across a 30 / 60 Hz test of noisy strokes, a stroke at
+  right angles is accepted 3 % of the time (bound 5 %), the opposite way never, the right way always. Buttons take any
+  direction (stabs too). One hit per plate; the striking hand re-arms when its blade leaves the sphere or after 0.2 s, the
+  other hand can cut the next plate at once. A wrong direction deflects and sends nothing. Pose snaps and spikes (rest around
+  a big step, or a step straight back) and jumps over 8 m/s at the grip are skipped.
 - **What is sent.** Closed loop on the game's progress: a press goes out only when the slot is free, the plate at the game's
   progress was struck, and the player's last new button press has settled: 80 ms AND two Presents with a fresh read of the game's
   state, counted from the poll whose new packet carried the press to the game (the game compares at its next logic frame and the
@@ -5618,14 +5622,15 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   the player's last packet (else it would make no new-press edge), and its 400 ms cap counts from the end of the wait. During a
   targets round the triggers are held back, a quick squeeze is not L1 / R1, the grips do not grab and do not pass as LB / RB
   (also with `grip_lbrb=0`).
-- **Haptics:** a hit 0.7 / 15 ms on the striking hand, two in one sample 0.9 / 25 ms, success three 0.5 / 30 ms pulses; the
-  window's open and a reset as before.
+- **Haptics:** a hit 0.7 / 15 ms on the striking hand, a deflect 0.3 / 20 ms (on by default), success three 0.5 / 30 ms
+  pulses; the window's open and a reset as before.
 - **Practice targets** (F8, under the overdrive gesture rows): any time with the headset's 3D view and no overdrive window open,
   outside battle too: a random 3-8 symbols (or "Replay last Bushido": the last sequence seen this session), a 4 s bar, the full
   test and visuals, nothing sent. It ends with `practice: 8 of 8 in 2.31 s (first 0.57 s, then 0.25 s an input; deflects 2)` in
-  F8 and the log. Sliders: blade pitch, target distance, target height, target size (ini `od_targets_blade_pitch`, `_dist`,
-  `_height`, `_size`).
-- **Drawing:** the plates, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
+  F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate) (ini
+  `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`; the first build's `od_targets_dist` /
+  `od_targets_height`, defaults 0.6 / -0.2, are read and ignored so the new 0.5 / -0.3 apply).
+- **Drawing:** the plate, preview, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn
   last with a reserve, anything else that does not fit is dropped and counted in the window's `odt:` line. The first scheme's
   glyph row does not draw under the targets. A 3D frame without the game's UI pass (most field frames) has no marker pass, so
