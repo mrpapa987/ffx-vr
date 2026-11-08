@@ -36,6 +36,13 @@ if ($Profile -eq 'flat') {
 else {
     if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $ini -Destination $bak; Write-Host "Backed up original to $bak" }
     $text = "$(Get-Content -LiteralPath $ini -Raw)"
+    # A key that is not in the file is not added (its format is the game's); say so, so a missing key cannot pass silently
+    # (fix-render review N6). F8's "game renders WxH" line shows what the game actually used.
+    foreach ($key in 'Resolution', 'MSAA') {
+        if (-not [regex]::IsMatch($text, "(?mi)^$key[ \t]*=")) {
+            Write-Warning "$key= is not in $ini - not changed. Set it once in the game's launcher (FFX&X-2_LAUNCHER.exe), then run this again."
+        }
+    }
     # [^\r\n]*, not .*$: '.' also eats the CR of a CRLF line. Keys match case-insensitively.
     $text = [regex]::Replace($text, '(?mi)^Resolution[ \t]*=[^\r\n]*', "Resolution=$Width*$Height")
     $text = [regex]::Replace($text, '(?mi)^MSAA[ \t]*=[^\r\n]*', "MSAA=$Msaa")
