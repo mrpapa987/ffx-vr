@@ -223,8 +223,10 @@ constexpr float k_rim_in = 0.64f, k_glow_out = 1.22f, k_sym_fit = 0.97f, k_sym_w
 /// The pack: <mod>/art/targets/*.png (tools/target-art/target_art.py cuts it from a 3x3 sheet; docs "Bushido target art"). The
 /// native glue (render thread, at the first use) decodes the eight pieces with WIC, checks each size, packs them here into two
 /// atlases with full mip chains (A 2048: frame, glow, swirl, back at 1024; B 1024: halo, burst, sparks, edge at 512) and uploads
-/// them; anything missing or odd keeps the flat plates. The marker pass samples atlas A in slot 1 and B in slot 2 (Vtx t.z 2 / 3;
-/// + 4: an additive layer, drawn premultiplied in the targets' own draw). Pure: sizes, layout, UVs, packing and mips.
+/// them; anything missing or odd keeps the flat plates. The optional arrow.png gets a texture of its own (C 512, with mips; R9-N1:
+/// not shrunk to a 256 cell). The targets' own draw samples A in slot 1, B in slot 2 and C in slot 3 (Vtx t.z 2 / 3 / 1; + 4: an
+/// additive layer, drawn premultiplied; t.z 1 is battle.dds only in the markers' ps, which the targets never use). Pure: sizes,
+/// layout, UVs, packing and mips.
 namespace art {
 enum Piece { P_FRAME = 0, P_GLOW, P_SWIRL, P_BACK, P_HALO, P_BURST, P_SPARKS, P_EDGE, P_ARROW, P_N };
 constexpr int P_REQUIRED = 8;                    // the eight pieces a pack needs; arrow.png (a white glowing arrow pointing up) is optional
@@ -234,10 +236,12 @@ inline const char* file(int p) {
 }
 constexpr int k_src = 1024;                      // every piece 1024 x 1024 but the edge strip: 1024 x 32..512
 constexpr int k_edge_hmin = 32, k_edge_hmax = 512;
-constexpr int k_a = 2048, k_b = 1024;            // the atlases' sides
+constexpr int k_a = 2048, k_b = 1024, k_c = 512;   // the atlases' sides; C: arrow.png's own texture
 constexpr float k_outer = 0.960f, k_hole = 0.465f, k_swirl = 0.925f;   // of a piece's half-size: the frame's edge and hole, the swirl's opaque disc
 constexpr float k_halo_peak = 0.65f;             // the halo ring's brightest radius (of its half-size)
-/// A piece's place: atlas 0 (A) or 1 (B), its cell (texels). edge_h: the edge strip's height as decoded.
+/// A texture's side (0 A, 1 B, 2 C).
+inline int side(int atlas) { return atlas == 0 ? k_a : atlas == 1 ? k_b : k_c; }
+/// A piece's place: atlas 0 (A), 1 (B) or 2 (C, the arrow alone), its cell (texels). edge_h: the edge strip's height as decoded.
 struct Cell { int atlas = 0, x = 0, y = 0, w = 0, h = 0; };
 inline Cell cell(int p, int edge_h = 188) {
     Cell c;
@@ -250,7 +254,7 @@ inline Cell cell(int p, int edge_h = 188) {
         case P_BURST:  c.atlas = 1; c.x = 512;  c.y = 0;    c.w = c.h = 512; break;
         case P_SPARKS: c.atlas = 1; c.x = 0;    c.y = 512;  c.w = c.h = 512; break;
         case P_EDGE:   c.atlas = 1; c.x = 512;  c.y = 512;  c.w = 512; c.h = (edge_h < k_edge_hmin ? k_edge_hmin : edge_h > k_edge_hmax ? k_edge_hmax : edge_h) / 2; break;
-        case P_ARROW:  c.atlas = 1; c.x = 512;  c.y = 768;  c.w = c.h = 256; break;   // (under the edge strip's cell: 1024 shrunk 4:1)
+        case P_ARROW:  c.atlas = 2; c.x = 0;    c.y = 0;    c.w = c.h = 512; break;   // its own texture C (1024 shrunk 2:1)
         default: break;
     }
     return c;
@@ -258,12 +262,12 @@ inline Cell cell(int p, int edge_h = 188) {
 /// A piece's UV rectangle in its atlas (half a texel in from each side, so bilinear never reads the neighbour at mip 0).
 struct Uv { float u0 = 0.f, v0 = 0.f, u1 = 0.f, v1 = 0.f; };
 inline Uv uv(int p, int edge_h = 188) {
-    const Cell c = cell(p, edge_h); const float n = c.atlas == 0 ? static_cast<float>(k_a) : static_cast<float>(k_b);
+    const Cell c = cell(p, edge_h); const float n = static_cast<float>(side(c.atlas));
     Uv u; u.u0 = (static_cast<float>(c.x) + 0.5f) / n; u.v0 = (static_cast<float>(c.y) + 0.5f) / n; u.u1 = (static_cast<float>(c.x + c.w) - 0.5f) / n; u.v1 = (static_cast<float>(c.y + c.h) - 0.5f) / n;
     return u;
 }
-/// The vertex texture code for a piece's layer (Vtx t.z): 2 atlas A, 3 atlas B, + 4 additive.
-inline float code(int p, bool add) { return static_cast<float>((cell(p).atlas == 0 ? 2 : 3) + (add ? 4 : 0)); }
+/// The vertex texture code for a piece's layer (Vtx t.z): 2 atlas A, 3 atlas B, 1 the arrow's C, + 4 additive.
+inline float code(int p, bool add) { const int a = cell(p).atlas; return static_cast<float>((a == 0 ? 2 : a == 1 ? 3 : 1) + (add ? 4 : 0)); }
 /// A decoded piece's size check: nullptr when it fits, else the reason (for the log line and F8).
 inline const char* size_bad(int p, int w, int h) {
     if (w <= 0 || h <= 0) return "empty";
@@ -308,8 +312,8 @@ inline void mip_down(const uint32_t* src, int w, uint32_t* dst) {
         dst[static_cast<size_t>(y) * static_cast<size_t>(h) + static_cast<size_t>(x)] = avg(t, 4);
     }
 }
-/// Both atlases with their chains, RGBA8 (4 bytes a texel): about 21.3 + 5.3 MB of VRAM.
-inline size_t vram_bytes() { return 4u * (chain_texels(k_a) + chain_texels(k_b)); }
+/// The textures with their chains, RGBA8 (4 bytes a texel): about 21.3 + 5.3 MB of VRAM, + 1.3 MB with arrow.png's C.
+inline size_t vram_bytes(bool arrow) { return 4u * (chain_texels(k_a) + chain_texels(k_b) + (arrow ? chain_texels(k_c) : 0u)); }
 }   // namespace art
 
 // -- the blade and the swept test ----------------------------------------------------------------------------------------------
@@ -442,6 +446,19 @@ inline bool hold_triggers(int inject, bool round_on) { return inject == odg::OD_
 /// The grips during a targets round (review N8): with grip_lbrb=0 they pass as LB / RB at once, so a hard grip on a swing would be
 /// L1 / R1 (a reset): held back (hv_grip_strip's latch: until let go) while the tap build holds them or a round is on.
 inline bool strip_grips(bool tap_hold, bool round_on) { return tap_hold || round_on; }
+/// The game's Bushido row hidden (its detour on 0x892740, ffxvr_odt_hide2d; the game draws the row in Auron's states 3 and 4):
+/// while a strike-the-targets round is open and drawn, and from state 3 (the window pending, R9-N3) with the targets scheme on,
+/// in a battle, the gestures able to inject (the headset, the VR pad), the 3D view, no other overdrive. Never with practice on,
+/// in slashes and punches (no targets scheme), in another overdrive's window, or in state 4 without a round (the row stays then).
+struct RowIn {
+    bool round_on = false, practice = false, drawn = false;   // a round (practice or not); its targets drawn in the headset now
+    bool targets_mode = false, battle = false, fresh = false, gate = false, view = false;   // gate: the headset and the VR pad live
+    int auron = 0, lulu = 0, tidus = 0, wakka = 0;
+};
+inline bool hide_row(const RowIn& x) {
+    if (x.round_on) return !x.practice && x.drawn;
+    return x.targets_mode && x.battle && x.fresh && x.gate && x.view && x.auron == 3 && x.lulu == 0 && x.tidus == 0 && x.wakka == 0;
+}
 /// The latch (input thread): a trigger held when the hold starts or that is pulled during it reads 0 until it is let go (no
 /// edge when the hold ends).
 inline void trig_hold(uint8_t& v, bool& back, bool hold) { if (v == 0) back = false; else if (hold) back = true; if (back) v = 0; }

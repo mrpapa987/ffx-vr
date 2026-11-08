@@ -5598,8 +5598,15 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   glow pulses with the chevrons, which stream along the arrow (at full strength) and on along the guide beyond the plate. The
   spot and the colour still tell the kind. F8 "show the button letter (small)" (ini `od_targets_badge`, off) adds the button's
   letter on a dark disc at the rim's bottom (A / B / X / Y, L1 / R1; none for the d-pad). The art pack may hold `arrow.png` (a
-  glowing arrow pointing up, 1024 x 1024; `target_art.py --arrow`): turned to each direction, multiplied by the colour, over a
-  black silhouette of itself (1.08 x, 0.7) and the colour's glow; without it, or odd-sized, the procedural arrow.
+  white or grey glowing arrow pointing up, 1024 x 1024; `target_art.py --arrow`): kept in a texture of its own (512 with mips,
+  1.3 MB), turned to each direction, multiplied by the colour (so it must be white or grey: a coloured arrow would darken or
+  shift each symbol's colour), over a black silhouette of itself (1.08 x, 0.7) and the colour's glow; without it, or
+  odd-sized, the procedural arrow.
+- **The row's first frames** (review R9-N3): the game draws the row in Auron's states 3 and 4, and a round opens only at state
+  4 with the timer running. So the row is also hidden from state 3 whenever a targets round is coming (the targets scheme on,
+  a battle, the headset and VR pad live, the 3D view, no other overdrive; `odt::hide_row`). In state 4 without a round (the
+  gestures cannot inject) it stays, as it does in practice, in slashes and punches and in the other overdrives. The detour's own
+  work is wrapped (R9-N4): a failure there draws the row (counted as "faults" in the F8 tooltip).
 - **Textured medallions** (the owner's concept, 10 Nov 2026: engraved silver medallions with a swirling glowing disc and a
   bright symbol, each symbol its own colour). From a local art pack when present (next section); without it the flat plates as
   before. Each plate, back to front: a soft halo ring (tinted, pulsing, additive), the swirl disc in the frame's hole (tinted,
@@ -5644,19 +5651,20 @@ folder in the mod's zip. To make your own pack:
    frame, glow, halo, swirl, back, burst, sparks (1024 x 1024 RGBA) and edge (1024 wide), and prints the frame's measured hole
    and edge (the mod assumes 0.465 and 0.960 of the half-size) and the swirl's disc (0.925).
 3. **Optional, the arrow:** generate one image of an ornate glowing arrow pointing UP on pure black (a metal outline, a white
-   glowing fill), upscale it, then `python tools/target-art/target_art.py --arrow arrow-image.png out`: a square on its content
+   glowing fill; white or grey only, since the mod multiplies it by each symbol's colour), upscale it, then `python tools/target-art/target_art.py --arrow arrow-image.png out`: a square on its content
    with a 4 % margin, 1024 x 1024, alpha from the brightness, the colour kept (the metal stays grey). Without it the mod draws
    its own bold arrow.
 4. **Put them** in `<the mod folder>\art\targets\` (eight files: frame.png, glow.png, halo.png, swirl.png, back.png, edge.png,
    burst.png, sparks.png; and arrow.png if made). The mod's build and install never touch that folder.
 5. **F8 > Controllers:** "target art (local pack)" (ini `od_targets_art`, on by default) and its status line, e.g. `art pack:
-   loaded 8 of 8 (atlas 2048 + 1024, 27 MB; ...)` or `art pack: frame.png not found at ..., flat plates`.
+   loaded 8 of 8 + arrow.png (atlas 2048 + 1024 + arrow 512, 28 MB; ...)` or `art pack: frame.png not found at ..., flat plates`.
 
 How the mod loads it: at the first targets drawn, a worker thread (as the hand packs' loader) reads each file, decodes it
 with WIC (Windows' own codecs), checks its size (1024 x 1024; the edge strip 1024 x 32..512), packs atlas A (2048: frame,
 glow, swirl, back at 1024) and atlas B (1024: halo, burst, sparks, edge at 512, shrunk 2:1) and builds each one's full mip
-chain (alpha-weighted); the render thread then makes one immutable texture a Present (26.7 MB of VRAM in all) and draws the
-flat plates until both are made. A load the box was turned off during is dropped when it ends. Anything missing, odd-sized
+chain (alpha-weighted), and arrow.png, when present, its own 512 texture (shrunk 2:1, with its chain); the render thread then
+makes one immutable texture a Present (26.7 MB of VRAM in all, 28.0 MB with the arrow) and draws the flat plates until A and B
+are made (the arrow's texture failing costs the arrow image only). A load the box was turned off during is dropped when it ends. Anything missing, odd-sized
 or failing: nothing is kept, the flat plates, and the reason in one `odt:` log line and in F8; the success line gives the
 background time and the textures' time. Turning the box off releases the textures.
 

@@ -52,7 +52,7 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int> _fn_odt_hide2d;                                               // ABI 56
     private d7_void? _h_odt_row, _o_odt_row; private nint _a_odt_row; private bool _odt_row_hook_ok;
     private string _odt_row_status = "not hooked (od_targets_hide2d=0 at launch)";
-    private int _odt_row_calls, _odt_row_hidden; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
+    private int _odt_row_calls, _odt_row_hidden, _odt_row_faults; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
     private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
@@ -104,12 +104,17 @@ public sealed unsafe partial class FFXVRModule {
     private void h_odt_row() {
         d7_void o = System.Threading.Volatile.Read(ref _o_odt_row) ?? d7_resolve_main(ref _o_odt_row, _a_odt_row, _h_odt_row!);
         _odt_row_calls++;
-        var sk = _fn_odt_hide2d;
-        if (sk != null) {
-            uint f = FhUtil.get_at<uint>(0x1FCBBF0);
-            if (f != _odt_row_frame) { _odt_row_frame = f; _odt_row_val = sk() != 0; }
-            if (_odt_row_val) { _odt_row_hidden++; return; }
+        bool skip = false;
+        try {   // our own work (as h_dmg_draw's): any failure falls through to the original, so the row is drawn
+            var sk = _fn_odt_hide2d;
+            if (sk != null) {
+                uint f = FhUtil.get_at<uint>(0x1FCBBF0);
+                if (f != _odt_row_frame) { _odt_row_frame = f; _odt_row_val = sk() != 0; }
+                skip = _odt_row_val;
+            }
         }
+        catch { _odt_row_faults++; skip = false; }
+        if (skip) { _odt_row_hidden++; return; }
         o();
     }
     private bool odg_parse(string k, string v) {
@@ -260,7 +265,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Checkbox("show the button letter (small)##odt", ref _od_tgt_badge);
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
         ImGui.SameLine(); ImGui.Checkbox("hide the game's Bushido row (from the next launch)##odt", ref _od_tgt_hide2d);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"While the targets are up, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Now: {_odt_row_status}; calls {_odt_row_calls}, hidden {_odt_row_hidden}."));
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Now: {_odt_row_status}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}."));
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>

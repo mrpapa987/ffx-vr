@@ -6254,7 +6254,7 @@ static uint32_t g_xr_space_epoch = 0;
 static volatile LONG g_odt_art_on = 1;
 static char g_odt_art_why[320] = "art pack: not loaded yet (it loads at the first targets)";
 static void odt_art_frame(bool wanted_now);   // (defined with the marker pass)
-static bool odt_wanted();                     // (the same)
+static bool odt_wanted(); static bool odt_view();                     // (the same)
 // The game's own Bushido input row (0x892740: the remaining inputs' button icons and their label, drawn by the battle UI at
 // 0x89B411 while Auron's state is 3 or 4) is hidden while a strike-the-targets window's targets are drawn: the UI panel is its
 // own head-locked quad layer ABOVE the eye images our targets are drawn into, so the row covered them (the owner, 10 Nov 2026).
@@ -6442,7 +6442,13 @@ static void od_gest_tick() {
     { const LONG ht = odt::hold_triggers(o.inject, g_odt.holding()) ? 1 : 0; if (g_odg_hold_trig != ht) InterlockedExchange(&g_odg_hold_trig, ht); }   // the triggers (above odg_input; a targets round too)
     { const LONG ar = o.inject == odg::OD_AURON && g_odt.r.on && !g_odt.r.practice ? 1 : 0; if (g_odt_arb != ar) InterlockedExchange(&g_odt_arb, ar); }   // the arbitration (odg_input)
     { const LONG gh = g_odt.holding() ? 1 : 0; if (g_odt_grip_hold != gh) InterlockedExchange(&g_odt_grip_hold, gh); }   // the grips (vrpad_apply)
-    { const LONG hd = g_odt.r.on && !g_odt.r.practice && odt_wanted() ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd); }   // the game's Bushido row (its detour)
+    {   // the game's Bushido row (its detour): an open round's, and from Auron's state 3 when a targets round is coming (R9-N3)
+        odt::RowIn ri; ri.round_on = g_odt.r.on; ri.practice = g_odt.r.practice; ri.drawn = odt_wanted();
+        ri.targets_mode = g_odg.cfg.on && (g_odg.open ? g_odg.sess.targets : g_odg.targets_now());   // (as odt_tick's)
+        ri.battle = in.battle; ri.fresh = in.fresh && in.r.ok; ri.gate = in.headset && in.vrpad; ri.view = odt_view();
+        ri.auron = in.r.auron; ri.lulu = in.r.lulu; ri.tidus = in.r.tidus; ri.wakka = in.r.wakka;
+        const LONG hd = odt::hide_row(ri) ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd);
+    }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
     // the targets' lines (the odg: cap)
@@ -10393,16 +10399,17 @@ Marker g_markers[32]; int g_marker_n = 0;
 static const char k_marker_hlsl[] =
     "cbuffer C : register(b0) { row_major float4x4 VP; };\n"
     "Texture2D T : register(t0); SamplerState S : register(s0);\n"
-    "Texture2D A : register(t1); Texture2D B : register(t2); SamplerState SA : register(s1);\n"
+    "Texture2D A : register(t1); Texture2D B : register(t2); Texture2D C3 : register(t3); SamplerState SA : register(s1);\n"
     "struct VI { float3 p : POSITION; float4 c : COLOR; float3 t : TEXCOORD; };\n"
     "struct VO { float4 p : SV_Position; float4 c : COLOR; float3 t : TEXCOORD; };\n"
     "VO vs(VI i) { VO o; o.p = mul(VP, float4(i.p, 1)); o.p.z = 0.5 * o.p.w; o.c = i.c; o.t = i.t; return o; }\n"
     "float4 ps(VO i) : SV_Target { return i.c * lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), i.t.z); }\n"
-    // the targets' own draw (strike the targets, the art pack): t.z 0 plain, 2 atlas A, 3 atlas B, + 4 additive; premultiplied
-    // output for its blend (ONE, INV_SRC_ALPHA), so an additive layer is alpha 0 (the same look as ps for the plain ones)
+    // the targets' own draw (strike the targets, the art pack): t.z 0 plain, 1 arrow.png's C, 2 atlas A, 3 atlas B, + 4 additive;
+    // premultiplied output for its blend (ONE, INV_SRC_ALPHA), so an additive layer is alpha 0 (the same look as ps for the plain
+    // ones). (In ps t.z 1 is battle.dds; the targets never use it.)
     "float4 pst(VO i) : SV_Target {\n"
-    "  float4 a = A.Sample(SA, i.t.xy), b = B.Sample(SA, i.t.xy); float k = fmod(i.t.z, 4.0);\n"
-    "  float4 tx = k < 1.5 ? lerp(float4(1, 1, 1, 1), T.Sample(S, i.t.xy), k) : (k < 2.5 ? a : b);\n"
+    "  float4 a = A.Sample(SA, i.t.xy), b = B.Sample(SA, i.t.xy), r = C3.Sample(SA, i.t.xy); float k = fmod(i.t.z, 4.0);\n"
+    "  float4 tx = k < 0.5 ? float4(1, 1, 1, 1) : (k < 1.5 ? r : (k < 2.5 ? a : b));\n"
     "  float4 c = i.c * tx; c.rgb *= c.a; if (i.t.z > 3.5) c.a = 0; return c; }\n";
 ID3D11VertexShader* g_mk_vs = nullptr; ID3D11PixelShader* g_mk_ps = nullptr; ID3D11InputLayout* g_mk_il = nullptr;
 ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendState* g_mk_blend = nullptr; ID3D11SamplerState* g_mk_smp = nullptr;
@@ -10915,13 +10922,13 @@ static odv::Vtx g_odt_raw[odt::k_max_verts]; static MkVertex g_odt_mk[odt::k_max
 // plates until both are made. A result asked for by an older request (the box turned off, or off and on again, during the load)
 // is dropped unread (its generation). Anything missing, odd or failing: nothing is kept, the flat plates, and the reason in one
 // log line and F8 (ffxvr_odg_text 6). Turning it off releases the textures. The game's device lives as long as the process.
-struct OdtArt { bool tried = false, ok = false, arrow = false; ID3D11Texture2D* tex[2] = {}; ID3D11ShaderResourceView* srv[2] = {}; };
+struct OdtArt { bool tried = false, ok = false, arrow = false; ID3D11Texture2D* tex[3] = {}; ID3D11ShaderResourceView* srv[3] = {}; };   // A, B, C (arrow.png's own, R9-N1)
 static OdtArt g_odt_art;
 /// The worker's result (owned by the worker until it is put in the slot, by the render thread once taken out).
 struct OdtArtCpu {
     uint32_t gen = 0; bool ok = false; char why[240] = ""; int loaded = 0, edge_h = 0; double ms = 0.0;
     bool arrow = false; char arrow_why[120] = "";   // the optional arrow.png: packed, or why not (the procedural arrow)
-    std::vector<std::vector<uint32_t>> mip[2];   // atlas A, B: their chains (level 0 first)
+    std::vector<std::vector<uint32_t>> mip[3];   // A, B and (with arrow.png) C: their chains (level 0 first)
 };
 struct OdtArtReq { uint32_t gen = 0; wchar_t dir[MAX_PATH] = {}; };
 static std::atomic<OdtArtCpu*> g_odt_art_ready{ nullptr };
@@ -10930,7 +10937,7 @@ static uint32_t g_odt_art_gen = 0;             // render thread: the request now
 static OdtArtCpu* g_odt_art_pend = nullptr;    // render thread: a taken result whose textures are being made (one a Present)
 static double g_odt_art_up_ms = 0.0;
 static void odt_art_release() {
-    for (int a = 0; a < 2; ++a) { if (g_odt_art.srv[a]) g_odt_art.srv[a]->Release(); if (g_odt_art.tex[a]) g_odt_art.tex[a]->Release(); }
+    for (int a = 0; a < 3; ++a) { if (g_odt_art.srv[a]) g_odt_art.srv[a]->Release(); if (g_odt_art.tex[a]) g_odt_art.tex[a]->Release(); }
     g_odt_art = OdtArt{};
     delete g_odt_art_pend; g_odt_art_pend = nullptr; g_odt_art_up_ms = 0.0;
 }
@@ -10943,7 +10950,7 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
         LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
         const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
         try {
-            std::vector<uint32_t> atl[2];
+            std::vector<uint32_t> atl[3];
             atl[0].assign(static_cast<size_t>(odt::art::k_a) * odt::art::k_a, 0u); atl[1].assign(static_cast<size_t>(odt::art::k_b) * odt::art::k_b, 0u);
             for (int p = 0; p < odt::art::P_REQUIRED && !r->why[0]; ++p) {
                 const char* nm = odt::art::file(p);
@@ -10955,7 +10962,7 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
                 if (const char* bad = odt::art::size_bad(p, im.w, im.h)) { snprintf(r->why, sizeof(r->why), "%s is %dx%d (%s)", nm, im.w, im.h, bad); break; }
                 if (p == odt::art::P_EDGE) r->edge_h = im.h;
                 const odt::art::Cell c = odt::art::cell(p, im.h);
-                odt::art::put(atl[c.atlas].data(), c.atlas == 0 ? odt::art::k_a : odt::art::k_b, im.rgba.data(), im.w, im.h, c);
+                odt::art::put(atl[c.atlas].data(), odt::art::side(c.atlas), im.rgba.data(), im.w, im.h, c);
                 r->loaded++;
             }
             if (!r->why[0]) {   // the optional arrow.png (1024 x 1024, a white glowing arrow pointing up): absent or odd -> the procedural arrow
@@ -10964,10 +10971,14 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
                 if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) snprintf(r->arrow_why, sizeof(r->arrow_why), "no arrow.png");
                 else if (!hv_read_file(path, 64u << 20, &bytes, err, sizeof(err)) || !hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) snprintf(r->arrow_why, sizeof(r->arrow_why), "arrow.png: %s", err);
                 else if (const char* bad = odt::art::size_bad(odt::art::P_ARROW, im.w, im.h)) snprintf(r->arrow_why, sizeof(r->arrow_why), "arrow.png is %dx%d (%s)", im.w, im.h, bad);
-                else { odt::art::put(atl[1].data(), odt::art::k_b, im.rgba.data(), im.w, im.h, odt::art::cell(odt::art::P_ARROW)); r->arrow = true; }
+                else {   // its own texture C (512: 2:1, R9-N1)
+                    const odt::art::Cell c = odt::art::cell(odt::art::P_ARROW);
+                    atl[c.atlas].assign(static_cast<size_t>(odt::art::k_c) * odt::art::k_c, 0u);
+                    odt::art::put(atl[c.atlas].data(), odt::art::k_c, im.rgba.data(), im.w, im.h, c); r->arrow = true;
+                }
             }
-            for (int a = 0; a < 2 && !r->why[0]; ++a) {   // the chains
-                const int n = a == 0 ? odt::art::k_a : odt::art::k_b, lv = odt::art::levels(n);
+            for (int a = 0; a < (r->arrow ? 3 : 2) && !r->why[0]; ++a) {   // the chains
+                const int n = odt::art::side(a), lv = odt::art::levels(n);
                 r->mip[a].resize(static_cast<size_t>(lv));
                 r->mip[a][0].swap(atl[a]);
                 for (int l = 1, w = n; l < lv; ++l, w /= 2) {
@@ -10976,7 +10987,7 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
                 }
             }
         }
-        catch (...) { snprintf(r->why, sizeof(r->why), "out of memory while packing"); r->mip[0].clear(); r->mip[1].clear(); }
+        catch (...) { snprintf(r->why, sizeof(r->why), "out of memory while packing"); for (auto& m : r->mip) m.clear(); }
         if (SUCCEEDED(co)) CoUninitialize();
         QueryPerformanceCounter(&q1); r->ms = qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
         r->ok = !r->why[0];
@@ -11023,22 +11034,24 @@ static void odt_art_frame(bool wanted_now) {
         }
         delete r;
     }
-    if (g_odt_art_pend != nullptr) {   // one texture a Present: A, then B
+    if (g_odt_art_pend != nullptr) {   // one texture a Present: A, then B, then (with arrow.png) C
         LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
-        const int a = g_odt_art.tex[0] == nullptr ? 0 : 1;
-        const bool ok = odt_art_upload(g_odt_art_pend->mip[a], a == 0 ? odt::art::k_a : odt::art::k_b, a);
+        const int a = g_odt_art.tex[0] == nullptr ? 0 : g_odt_art.tex[1] == nullptr ? 1 : 2;
+        const bool ok = odt_art_upload(g_odt_art_pend->mip[a], odt::art::side(a), a);
         QueryPerformanceCounter(&q1); g_odt_art_up_ms += qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
-        if (!ok) {
+        if (!ok && a < 2) {
             const int loaded = g_odt_art_pend->loaded;
             odt_art_release(); g_odt_art.tried = true;
-            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the %d atlas could not be made (loaded %d of %d), flat plates", a == 0 ? odt::art::k_a : odt::art::k_b, loaded, odt::art::P_REQUIRED);
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the %d atlas could not be made (loaded %d of %d), flat plates", odt::art::side(a), loaded, odt::art::P_REQUIRED);
             diag("odt: %s", g_odt_art_why);
         }
-        else if (a == 1) {
-            g_odt_art.ok = true; g_odt_art.arrow = g_odt_art_pend->arrow;
-            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d%s (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms in the background, %.0f ms for the textures)",
-                     g_odt_art_pend->loaded, odt::art::P_REQUIRED, g_odt_art_pend->arrow ? " + arrow.png" : "", odt::art::k_a, odt::art::k_b, static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0),
-                     g_odt_art_pend->edge_h, g_odt_art_pend->ms, g_odt_art_up_ms);
+        else if (a == 2 || (a == 1 && !g_odt_art_pend->arrow)) {   // done (C failing costs the arrow image only: the procedural arrow)
+            const bool arrow = a == 2 && ok;
+            if (a == 2 && !ok) snprintf(g_odt_art_pend->arrow_why, sizeof(g_odt_art_pend->arrow_why), "arrow.png: its %d texture could not be made", odt::art::k_c);
+            g_odt_art.ok = true; g_odt_art.arrow = arrow; g_odt_art_pend->arrow = arrow;
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d%s (atlas %d + %d%s, %.0f MB; edge strip 1024 x %d; %.0f ms in the background, %.0f ms for the textures)",
+                     g_odt_art_pend->loaded, odt::art::P_REQUIRED, arrow ? " + arrow.png" : "", odt::art::k_a, odt::art::k_b, arrow ? " + arrow 512" : "",
+                     static_cast<double>(odt::art::vram_bytes(arrow)) / (1024.0 * 1024.0), g_odt_art_pend->edge_h, g_odt_art_pend->ms, g_odt_art_up_ms);
             if (!g_odt_art_pend->arrow) diag("odt: art pack: %s: the procedural arrow", g_odt_art_pend->arrow_why);
             diag("odt: %s", g_odt_art_why);
             delete g_odt_art_pend; g_odt_art_pend = nullptr;
@@ -11059,9 +11072,11 @@ static void odt_art_frame(bool wanted_now) {
     g_odt.art = on && g_odt_art.ok && g_mk_pst != nullptr;
     g_odt.art_arrow = g_odt.art && g_odt_art.arrow;
 }
+/// The headset's 3D view (the targets can be drawn there).
+static bool odt_view() { return g_xr_active && !g_xr_screen_now && !g_screen3d_now && !g_ovr_suspend; }
 /// The targets to draw now (a round, its end's fade, a cut still falling): the headset's 3D view only (as odv_wanted).
 static bool odt_wanted() {
-    if (!g_xr_active || g_xr_screen_now || g_screen3d_now || g_ovr_suspend) return false;
+    if (!odt_view()) return false;
     return g_odt.active(odv_now());
 }
 /// This Present's plates, cuts, pips, bar and blades (the Runner's build, XR space; drops counted in its odt: line), mapped to render space.
@@ -11127,8 +11142,8 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
     ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
     ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
-    ID3D11ShaderResourceView* o_srv2[2] = {}; ID3D11SamplerState* o_smp2 = nullptr;
-    if (own) { g_ctx->PSGetShaderResources(1, 2, o_srv2); g_ctx->PSGetSamplers(1, 1, &o_smp2); }
+    ID3D11ShaderResourceView* o_srv2[3] = {}; ID3D11SamplerState* o_smp2 = nullptr;   // slots 1-3 (A, B, C) and sampler 1, the targets' draw only
+    if (own) { g_ctx->PSGetShaderResources(1, 3, o_srv2); g_ctx->PSGetSamplers(1, 1, &o_smp2); }
 
     InEye2 guard;
     ID3D11RenderTargetView* rt[1] = { dst };
@@ -11144,8 +11159,8 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     if (!own) g_ctx->Draw(static_cast<UINT>(nv), 0);
     else {   // the markers, digits and visuals exactly as before; then the targets with pst, the premultiplied blend and the art
         if (nv_pre > 0) g_ctx->Draw(static_cast<UINT>(nv_pre), 0);
-        ID3D11ShaderResourceView* sv[2] = { g_odt_art.srv[0], g_odt_art.srv[1] };   // (null without the pack: no textured vertices then)
-        g_ctx->PSSetShaderResources(1, 2, sv); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
+        ID3D11ShaderResourceView* sv[3] = { g_odt_art.srv[0], g_odt_art.srv[1], g_odt_art.srv[2] };   // (null without the pack or arrow.png: no such vertices then)
+        g_ctx->PSSetShaderResources(1, 3, sv); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
         g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF);
         g_ctx->Draw(static_cast<UINT>(nv - nv_pre), static_cast<UINT>(nv_pre));
     }
@@ -11158,7 +11173,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
     g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
     g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
-    if (own) { g_ctx->PSSetShaderResources(1, 2, o_srv2); g_ctx->PSSetSamplers(1, 1, &o_smp2); for (auto* v : o_srv2) if (v) v->Release(); if (o_smp2) o_smp2->Release(); }
+    if (own) { g_ctx->PSSetShaderResources(1, 3, o_srv2); g_ctx->PSSetSamplers(1, 1, &o_smp2); for (auto* v : o_srv2) if (v) v->Release(); if (o_smp2) o_smp2->Release(); }
     for (auto* v : o_rtv) if (v) v->Release();
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
