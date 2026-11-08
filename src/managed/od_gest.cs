@@ -46,7 +46,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
-    private delegate* unmanaged[Cdecl]<float, float, float, float, float, void> _fn_odt_set; // ABI 52: strike the targets (pitch, distance, height, size, time)
+    private delegate* unmanaged[Cdecl]<float, float, float, float, float, void> _fn_odt_set; // ABI 52: strike the targets; 53: (pitch, distance, height, size, time)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odt_practice;                   // ABI 52: Practice targets (1 random, 2 the last Bushido)
     private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
     private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
@@ -57,7 +57,7 @@ public sealed unsafe partial class FFXVRModule {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
         _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
-        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, void>)req("ffxvr_odt_set");   // ABI 52 (+ time, unshipped)
+        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, void>)req("ffxvr_odt_set");   // ABI 53 (+ time)
         _fn_odt_practice = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_practice");
     }
     private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; }
@@ -192,7 +192,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target height (m)##odt", ref _od_tgt_height, -0.5f, 0f, "%.2f");
         ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target size##odt", ref _od_tgt_size, 0.6f, 1.6f, "%.1f");
         ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("Bushido time (x, strike the targets)##odt", ref _od_tgt_time, 1f, 3f, "%.1f");
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("More time for Bushido in strike the targets: the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. Nothing changes for the slashes and punches or any other overdrive.");
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("More time for Bushido in strike the targets: the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. The game also counts the extra seconds left at the end toward Bushido's damage bonus (up to x1.5 with the whole time left), so a fast finish with more time hits harder. Nothing changes for the slashes and punches or any other overdrive.");
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>

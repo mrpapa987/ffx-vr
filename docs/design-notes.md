@@ -5617,8 +5617,20 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   overdrive, practice, or once the window closed (state 5 / 7, the battle over, the headset off or the gate past its grace end
   the round). The only other writers of the count are that reset (0x897F00) and the battle's start (0x89B780); its only reader
   is the tick itself. The game compares the count after its own +1, before our write, so a window is up to mult - 1 frames
-  short of total x mult (67 ms at x3). The bar under the plate shows the stretched seconds; practice's bar is 4 s x mult; the
-  window line logs `time xM (N writes)`. This is the mod's first write into the game's data (one f32 in .data, guarded).
+  short of total x mult (67 ms at x3). The bar under the plate shows the stretched seconds; practice's bar is 4 s x mult.
+  **Threads (review R6-S1):** the game's logic runs on its main thread and the Present on the render thread (the first build
+  wrongly assumed one thread), so the game may tick, or reset the count at a window's end, between our read (od_frame) and our
+  write. The write is an interlocked compare-exchange of the float's 32 bits against the exact bits read: it lands only if the
+  count is unchanged; otherwise nothing is written and the stretch starts afresh at the next fresh read. So a reset is never
+  overwritten with a window's old count (which no window's open would clear: the next overdrive's timer would start short), and
+  a tick in between is not lost. The count is 4-byte aligned in .data; a read torn across a tick can only fail the exchange.
+  This is the mod's first write into the game's data (one f32 in .data, guarded).
+  **Damage (review R6-S2):** the game turns the time left into Bushido's damage bonus: at the close (state 10) it saves left and
+  total for Auron, and the damage path multiplies by (left + 2 x total) / (2 x total), up to x1.5 with the whole time left. The
+  stretch leaves more of the game's seconds at a given real finish, so the same play hits harder (a 4 s window finished in 2.5 s:
+  x1.19 at x1, x1.29 at x1.5, x1.34 at x2, x1.40 at x3). The F8 tooltip says so; whether to keep it is the owner's call. The
+  window line logs the game's count against the real frames (the stretch's effect), the writes landed and refused, and the
+  game's left and total at the close with that damage factor.
 - **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 15 cm sphere at the plate; 1.2 m/s
   at the contact. Only the current plate can be cut (no lanes, nothing ahead of time). An arrow is judged on the stroke's path
   in the plate's plane over the pass (at least 7 cm of it, from the first contact sample or the last turn back), which must lie

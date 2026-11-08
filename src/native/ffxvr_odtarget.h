@@ -66,7 +66,9 @@ constexpr double k_twin_s = 0.25;                                               
 constexpr double k_resend_s = 0.15, k_settle_s = 0.08, k_ours_s = 0.3;                      // the injection (design 6.2)
 // The settle in frames as well as time (review S2): after the player's new press, and after our press's slot frees before a
 // resend, k_settle_frames Presents with a fresh read of the game's state must pass: the game compares at its next logic frame
-// and the render sees it at the Present that ends that frame (the same thread), so a slow frame stretches the time, not the count.
+// and the render thread sees it at the Present after that frame (the game's logic runs on its main thread, at most about one frame
+// ahead of the Present, so a read at a Present is that frame's or newer, never older: review R6-S1), so a slow frame stretches the
+// time, not the count.
 constexpr int k_settle_frames = 2;
 constexpr double k_gate_grace_s = 0.25;                                                    // the injection gate may drop this long without ending the round (review S1)
 constexpr double k_rearm_s = 0.20; constexpr float k_rearm_m = 0.02f;                      // the re-arm per hand (out of the sphere by 2 cm, or 0.2 s)
@@ -329,6 +331,7 @@ struct In {
     uint32_t phys_n = 0;                                        // ... how many such presses so far (a new value: a new press to settle)
     bool read_now = true;                                       // the od block was read at this Present (a fresh read of the game's state)
     bool elapsed_ok = false; float elapsed = 0.f;               // the countdown's frame count f32 0x133F788, read at this Present (Stretch)
+    float total = 0.f;                                          // ... and the window's total seconds f32 0x133F78C (the close's line)
 };
 struct Hit { int i = -1, hand = 0; float speed = 0.f, deg = 0.f; double t = 0.0; bool pre = false; };
 struct TickOut {
@@ -337,7 +340,8 @@ struct TickOut {
     bool hold = false;                                          // a round is on: triggers held back, the grips do not grab, no quick squeeze
     int nh = 0; odg::Haptic hap[8];
     int nhit = 0; Hit hit[8]; int ndefl = 0; int defl[8] = {}, defl_hand[8] = {};
-    bool time_write = false; float time_val = 0.f;              // write time_val to the countdown's frame count (f32 0x133F788) now (Stretch)
+    bool time_write = false; float time_val = 0.f;              // write time_val to the countdown's frame count (f32 0x133F788) now (Stretch) ...
+    uint32_t time_expect = 0;                                   // ... by a compare-exchange against these bits (the count as read); report with time_result
     void pulse(int hand, float amp, float sec) { if (nh < 8) { hap[nh].hand = hand; hap[nh].amp = amp; hap[nh].sec = sec; nh++; } }
 };
 struct Tgt {
@@ -382,7 +386,9 @@ struct Stats {
     int n = 0, struck = 0, hits[2] = { 0, 0 }, pre = 0, sweeps = 0, deflects = 0, defl_dropped = 0, rewinds = 0, snaps = 0, jumps = 0;
     double first = -1.0, last = -1.0, done = -1.0; uint32_t presses = 0, resends = 0, cancels = 0; int end = E_NONE; bool practice = false; int stop_why = 0;
     uint32_t verts_max = 0, dropped = 0;
-    float mult = 1.f; uint32_t time_writes = 0;                 // the countdown's multiplier for the round; the frame-count writes made
+    float mult = 1.f; uint32_t time_writes = 0, time_fails = 0; // the countdown's multiplier for the round; the frame-count writes landed; refused (changed since the read)
+    bool have_count = false; float count0 = 0.f, count1 = 0.f; double tc0 = 0.0, tc1 = 0.0;   // the game's count at the first and last read in the window, and when (R6-N4)
+    bool have_left = false; float g_left = 0.f, g_total = 0.f;  // the game's seconds left and total at the last read (the close: its damage factor, R6-S2)
 };
 struct Round {
     bool on = false, practice = false, stopped = false; int end = E_NONE; double t_open = 0.0, t_end = -1e300;
@@ -414,16 +420,24 @@ inline int clip_half(const float* x, const float* y, int n, float ox, float oy, 
 /// with a fresh read, while a strike-the-targets window is open and the timer runs, the count is written back as
 /// prev + (now - prev) / mult (prev: what we wrote or saw at the last such Present), so a frame counts 1 / mult. A count that went
 /// down (the game's reset at a window's end or a battle's start: a new window) or a Present without a fresh read starts afresh with
-/// no write; mult 1 never writes. The game's logic and the Present run on one thread, so the write lands between logic frames.
+/// no write; mult 1 never writes.
+/// The game's logic runs on its main thread and the Present on the render thread (review R6-S1: the first build said "one thread",
+/// which was wrong), so the game may tick, or reset the count at a window's end, between our read (od_frame) and our write. The
+/// write is therefore a compare-exchange of the float's 32 bits against the exact bits read (TickOut::time_expect): it lands only
+/// if the count is unchanged; otherwise nothing is written (time_result: refused) and the stretch keeps its value while its base
+/// (the game's count it corresponds to) becomes the count read, so the next write stretches only the frames since the read and a
+/// tick in between is not lost; a reset (a count below the base) starts afresh. A reset can never be overwritten with an old count. (The count is 4-byte aligned in .data; a
+/// read torn across a tick cannot match the current bits unless it equals them, so a torn read only fails the exchange.)
 struct Stretch {
-    bool have = false; float prev = 0.f;
+    bool have = false; float prev = 0.f, base = 0.f, read = 0.f;   // the stretched count; the game's count it stands for; the last read
     void reset() { have = false; }
+    void refused() { base = read; }                                  // the write did not land: the game's count is (at least) what we read
     /// on: the window is open and the count was read now; returns true with *out when a write is due.
     bool step(bool on, float now, float mult, float* out) {
         if (!on || !(mult > 1.0001f) || !std::isfinite(now) || now < 0.f) { have = false; return false; }
-        if (!have || now < prev) { have = true; prev = now; return false; }   // first sight, or the count went back (a new window)
-        const float w = prev + (now - prev) / mult;
-        prev = w;
+        if (!have || now < base) { have = true; prev = base = now; return false; }   // first sight, or the count went back (a reset: a new window)
+        const float w = prev + (now - base) / mult;
+        read = now; prev = base = w;                                              // (as if it lands; refused() corrects the base)
         if (!(w < now)) return false;                                           // no logic frame since: nothing to pull back
         *out = w; return true;
     }
@@ -648,9 +662,13 @@ struct Runner {
         k.trail(blade_pt(b, g, g.s0), blade_pt(b, g, g.s1), t, k.tip_speed > g.speed);
     }
     // -- the tick -------------------------------------------------------------------------------------------------------------------
+    /// The glue's answer to o.time_write: landed, or refused (the count changed since the read: a tick or a reset on the game's
+    /// thread): then nothing was written; the next write stretches the frames since the read (a reset starts afresh).
+    void time_result(bool landed) { if (landed) st.time_writes++; else { st.time_fails++; tm.refused(); } }
     void tick(const In& in, TickOut& o) {
         o = TickOut{};
         const double t = in.t;
+        if (r.on && !r.practice && in.elapsed_ok && in.auron >= 4) { st.have_left = true; st.g_left = in.left; st.g_total = in.total; }   // (before a close at this Present: its last read)
         note_phys(in);
         // the round lives with the driver's window (review S1): a gate drop (the VR pad's sync, the headset's focus) only stops
         // the presses; past k_gate_grace_s it ends the round, and a new one opens when the gate is back in the same window
@@ -676,7 +694,8 @@ struct Runner {
         {   // the countdown's stretch: only in an open strike-the-targets window of Auron's with the timer running and the count read now
             const bool on = r.on && !r.practice && in.targets_mode && in.win == odg::OD_AURON && in.auron == 4 && in.timer == 2 && in.elapsed_ok;
             float w = 0.f;
-            if (tm.step(on, in.elapsed, r.mult, &w)) { o.time_write = true; o.time_val = w; st.time_writes++; }
+            if (tm.step(on, in.elapsed, r.mult, &w)) { o.time_write = true; o.time_val = w; std::memcpy(&o.time_expect, &in.elapsed, 4); }
+            if (on) { if (!st.have_count) { st.have_count = true; st.count0 = in.elapsed; st.tc0 = t; } st.count1 = in.elapsed; st.tc1 = t; }
         }
         if (r.on) update_current(t);
         if (in.sample_new) {
@@ -724,7 +743,15 @@ struct Runner {
         k = odg::fmt_append(s, n, k, "; presses %u (resends %u, cancelled by a button %u), deflects %d (dropped as part of a cut %d), rewinds %d, snaps dropped %d, jumps skipped %d",
                             x.presses, x.resends, x.cancels, x.deflects, x.defl_dropped, x.rewinds, x.snaps, x.jumps);
         if (x.stop_why) k = odg::fmt_append(s, n, k, "; STOPPED injecting (%s): buttons only", x.stop_why == 1 ? "a reset right after our press: the map or a racing button" : "the game missed a press twice");
-        k = odg::fmt_append(s, n, k, "; time x%.2f (%u writes)", static_cast<double>(x.mult), x.time_writes);
+        k = odg::fmt_append(s, n, k, "; time x%.2f", static_cast<double>(x.mult));
+        if (x.have_count) {   // R6-N4: the effect: the game's frames against the real ones (30 a second; 25 in the 50 Hz mode)
+            const double real = x.tc1 - x.tc0, gf = static_cast<double>(x.count1 - x.count0);
+            k = odg::fmt_append(s, n, k, ": the game counted %.1f frames in %.2f s (%.1f at 30 a second: x%.2f)", gf, real, real * 30.0, gf > 0.5 ? real * 30.0 / gf : 0.0);
+        }
+        k = odg::fmt_append(s, n, k, ", %u writes, %u refused (changed since the read)", x.time_writes, x.time_fails);
+        if (x.have_left && x.g_total > 0.f)   // R6-S2: the game's time bonus at the close: damage x (left + 2 total) / (2 total)
+            k = odg::fmt_append(s, n, k, "; at the close the game's left %.2f of %.2f s (its damage factor x%.2f)", static_cast<double>(x.g_left), static_cast<double>(x.g_total),
+                                static_cast<double>((x.g_left + 2.f * x.g_total) / (2.f * x.g_total)));
         k = odg::fmt_append(s, n, k, "; verts max %u, dropped %u; closed: %s", x.verts_max, x.dropped, k_end_name[x.end < 0 || x.end >= E_N ? 0 : x.end]);
         return k;
     }
@@ -927,7 +954,7 @@ struct Runner {
     void draw_preview(int i, float A, Out& o) const {
         const Tgt& g = r.tg[i];
         const V3 P = preview_spot(); const Axes3 ax = plate_axes(r.fr, P);
-        const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.65f * A;   // brighter than the first build's 0.45, still small and dimmer than the plate
+        const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.5f * A;    // a little brighter than the first build's 0.45, clearly dimmer than the plate (R6-N2: 0.65 competed)
         const Col k = r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
         halo(o, P - ax.N * th, ax, rad, 0.4f * al);
         plate(o, P, ax, rad, th, col(0.8f * k.r, 0.8f * k.g, 0.8f * k.b, 1.f), al);
