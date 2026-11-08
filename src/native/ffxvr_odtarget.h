@@ -258,7 +258,8 @@ struct Arb {
         before = seen; if (pkt_now != pkt) { pkt = pkt_now; gnw = static_cast<uint16_t>(phys & ~seen & k_cancel_mask); seen = phys; }
         if (newly) *newly = gnw != 0;
         if (gnw) presses++;
-        if (on && nw && unpolled) { cancels++; return true; }
+        if (on && (nw | gnw) && unpolled) { cancels++; return true; }   // new at this poll, or new to the game with this packet (review R3-S1: a press seen
+                                                                        // during a render stall reaches the game with the next packet: ours must not ride it)
         return false;
     }
     /// Our unpolled press waits (is not ORed in yet) while the player holds that same button, or the game still holds it from the

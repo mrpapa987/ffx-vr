@@ -5612,7 +5612,9 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   injection gate (the VR pad's sync, the headset's focus) may drop for 0.25 s without ending it (presses simply wait).
 - **Buttons racing ours** (odg_input): a new press by the player of any button the game reads (the d-pad, A B X Y, LB / RB,
   Start, Back, the stick clicks: Bushido resets on any non-zero new press) cancels our press while no new packet has carried
-  it (the render thread re-decides from the progress); our press also waits while the game still holds that same button from
+  it, whether the press is new at this poll or new to the game with this packet (one seen during a render stall reaches the
+  game only with the next packet, as the packet number follows the render frames) (the render thread re-decides from the
+  progress); our press also waits while the game still holds that same button from
   the player's last packet (else it would make no new-press edge), and its 400 ms cap counts from the end of the wait. During a
   targets round the triggers are held back, a quick squeeze is not L1 / R1, the grips do not grab and do not pass as LB / RB
   (also with `grip_lbrb=0`).
