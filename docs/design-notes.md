@@ -5582,8 +5582,10 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 (its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
 - **What the player sees.** When the window opens, each input of the sequence swoops into its spot from 0.22 m beyond, 0.40 m
-  above and 0.15 m outside it (fronts first, 60 ms apart, 0.40 s each, ease-out; at most 3 m/s toward the eyes, never nearer
-  than its spot; the first build came from 3 m straight ahead at about 20 m/s, too fast toward the face).
+  above and 0.15 m outside it (fronts first, 60 ms apart, 0.40-0.5 s each, ease-out; the upward part is cut down for a low, near
+  spot so it never comes nearer the eyes than its spot; the first build came from 3 m straight ahead at about 20 m/s, too fast
+  toward the face). Every motion (the fly-in, the queue's slide into the strike row, a rewind) lasts long enough that its
+  opening speed toward the eyes stays under 2.8 m/s, at every slider setting (the slide takes about 0.15-0.3 s).
   Two alternating lanes, the strike row 0.60 m ahead and 0.20 m below the eyes, up to two queued plates behind and above each
   front, dots for the rest. Each target is an octagonal seal plate (2 cm thick, beveled, a darker face) with an engraved,
   glowing symbol: arrows cool white-cyan, A / B / X / Y amber stroke letters, L1 / R1 a violet tab. Each hand holds a
@@ -5600,11 +5602,12 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   step straight back) and jumps over 8 m/s at the grip are skipped.
 - **What is sent.** Closed loop on the game's progress: a press goes out only when the slot is free, the plate at the game's
   progress was struck, and the player's last new button press has settled: 80 ms AND two Presents with a fresh read of the game's
-  state (the game compares at its next logic frame and the render reads it at the Present ending that frame, so a slow frame
-  stretches the time, not the count); its value is always
+  state, counted from the poll whose new packet carried the press to the game (the game compares at its next logic frame and the
+  render reads it at the Present ending that frame, so a slow frame stretches the time, not the count); its value is always
   seq[progress] by the map in use (the game's own bindings read at the window's open, else the built-in map). One resend
   150 ms and two fresh Presents after a press the game did not show (and settled as above); a second miss, or a reset right
-  after our press with no word or press of the player's since, stops injecting for the window (the plates turn grey, the
+  after our press with no word of the player's since and no press of theirs noticed at an earlier Present, stops injecting for
+  the window (the plates turn grey, the
   buttons still work). Any other reset (a wrong button) rewinds the plates. The round lives with the driver's window: the
   injection gate (the VR pad's sync, the headset's focus) may drop for 0.25 s without ending it (presses simply wait).
 - **Buttons racing ours** (odg_input): a new press by the player of any button the game reads (the d-pad, A B X Y, LB / RB,
@@ -5624,8 +5627,9 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn
   last with a reserve, anything else that does not fit is dropped and counted in the window's `odt:` line. The first scheme's
   glyph row does not draw under the targets. A 3D frame without the game's UI pass (most field frames) has no marker pass, so
-  there the targets alone are drawn into the frame copy (eye 1) and a copy of the eye-2 twin, once per eye; UI frames draw into
-  the finals as before (never both). Fahrenheit's F8 panel is its own composition layer above the eye images, so the targets
+  there the targets alone are drawn into the frame copy (eye 1) and a copy of the eye-2 twin, once per eye, on 3D scene frames
+  only (not in a battle transition, under the save screen, or on a frame without a real 3D camera); UI frames draw into the
+  finals as before (never both). The eye-2 copy is released after 10 s unused. Fahrenheit's F8 panel is its own composition layer above the eye images, so the targets
   cannot be drawn over it from inside the eye image: the practice tooltip says to close F8.
 - **Log:** `odt:` lines for each cut, a cancel, a resend, a rewind, a stop, and one summary per window or practice round.
 - **Not verified (nobody here can run the game):** the feel and the defaults (practice is the place to tune them), whether the

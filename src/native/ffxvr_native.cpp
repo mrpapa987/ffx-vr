@@ -627,6 +627,7 @@ ID3D11Texture2D* g_bb_copy = nullptr;        // eye 1: the backbuffer copied at 
 ID3D11RenderTargetView* g_bb_copy_rtv = nullptr;
 ID3D11Texture2D* g_bb_copy2 = nullptr;       // eye 2 on a 3D frame without the UI pass while the targets draw (B1): the twin copied, the targets on top
 ID3D11RenderTargetView* g_bb_copy2_rtv = nullptr;
+ULONGLONG g_bb_copy2_used = 0;               // GetTickCount64 at its last use: released 10 s after (review R2-N1), made again when needed
 
 bool  g_xr_active   = false;       // poses valid this frame
 bool  g_xr_rotate   = true, g_xr_translate = true;
@@ -14627,14 +14628,24 @@ static void xr_tick() {
         // without the UI pass: eye 1 is our copy already; eye 2's twin is copied into our own g_bb_copy2 (the twin is the game's
         // mirrored target, never drawn into), and the pass draws the targets alone into both, once per eye (the UI frames above
         // draw into the finals instead: never both). The blink and the menu black below clear our copies as before.
-        if (e1 == g_bb_copy && e2 != nullptr && g_bb_copy_rtv && odt_wanted()) {
-            D3D11_TEXTURE2D_DESC td; e2->GetDesc(&td);
-            if (td.SampleDesc.Count == 1 && td.MipLevels == 1 && td.ArraySize == 1 && td.Width == bd.Width && td.Height == bd.Height && ensure_copy(g_bb_copy2, g_bb_copy2_rtv, td) && g_bb_copy2_rtv) {
-                { InEye2 guard; g_ctx->CopyResource(g_bb_copy2, e2); }
-                e2 = g_bb_copy2;
-                draw_markers_both(g_bb_copy, g_bb_copy_rtv, g_bb_copy2, g_bb_copy2_rtv, true);
+        // Only on a 3D scene frame (review R2-N2): not in a battle transition's window (no camera), not with the save screen up, not
+        // on a frame that uploaded no real 3D camera (an FMV or menu start, before the screen decision below follows it).
+        // Without an eye-2 twin (mono: eye 1 goes to both eyes, review R2-N5) the targets go into eye 1 alone.
+        const bool scene3d = !bt_no_split() && !menu && g_cam3d_uploads_frame > 0;
+        if (e1 == g_bb_copy && g_bb_copy_rtv && scene3d && odt_wanted()) {
+            if (e2 == nullptr) draw_markers_both(g_bb_copy, g_bb_copy_rtv, nullptr, nullptr, true);
+            else {
+                D3D11_TEXTURE2D_DESC td; e2->GetDesc(&td);
+                if (td.SampleDesc.Count == 1 && td.MipLevels == 1 && td.ArraySize == 1 && td.Width == bd.Width && td.Height == bd.Height && ensure_copy(g_bb_copy2, g_bb_copy2_rtv, td) && g_bb_copy2_rtv) {
+                    { InEye2 guard; g_ctx->CopyResource(g_bb_copy2, e2); }
+                    e2 = g_bb_copy2; g_bb_copy2_used = GetTickCount64();
+                    draw_markers_both(g_bb_copy, g_bb_copy_rtv, g_bb_copy2, g_bb_copy2_rtv, true);
+                }
             }
         }
+    }
+    if (g_bb_copy2 && e2 != g_bb_copy2 && GetTickCount64() - g_bb_copy2_used > 10000ull) {   // R2-N1: idle 10 s (no round, fade or halves drawn): give the VRAM back
+        g_plain_srvs_forget(g_bb_copy2); if (g_bb_copy2_rtv) g_bb_copy2_rtv->Release(); g_bb_copy2_rtv = nullptr; g_bb_copy2->Release(); g_bb_copy2 = nullptr;
     }
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;

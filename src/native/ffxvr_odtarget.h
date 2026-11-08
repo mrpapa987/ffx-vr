@@ -47,8 +47,14 @@ constexpr float k_g = 9.81f;
 constexpr double k_fly_s = 0.40, k_fly_gap_s = 0.06, k_slide_s = 0.10, k_rewind_s = 0.15;   // the fly-in, the queue's slide, a rewind
 // The fly-in starts beyond, above and outside its spot (review N6: from 3 m straight ahead the ease-out came at the eyes at about
 // 20 m/s): 0.22 m deeper, 0.40 m higher, 0.15 m out on its lane's side, over 0.40 s, so it swoops down into place; the ease-out's
-// opening speed toward the eyes stays under 3 m/s (unit-tested) and it never comes nearer than its spot.
+// opening speed toward the eyes stays under 3 m/s (unit-tested). Never nearer than its spot, for every slider setting (review
+// R2-N3): the straight path's distance to the eyes falls monotonically to the spot's exactly when dot(offset, spot - eyes) >= 0,
+// so for a low, near spot the upward part is cut down until that holds (spawn_offset).
 constexpr float k_spawn_fwd = 0.22f, k_spawn_up = 0.40f, k_spawn_out = 0.15f;
+// Every motion (the fly-in, the queue's slide, a rewind) lasts at least its base time and long enough that the ease-out's opening
+// speed toward the eyes stays under k_toward_mps (review round 3: over the slider ranges the fly-in reached 3.25 m/s and the 100 ms
+// slide 8.7 m/s); the fly-in stays within 0.5 s, the slide takes about 0.15-0.3 s.
+constexpr float k_toward_mps = 2.8f;
 constexpr double k_resend_s = 0.15, k_settle_s = 0.08, k_ours_s = 0.3;                      // the injection (design 6.2)
 // The settle in frames as well as time (review S2): after the player's new press, and after our press's slot frees before a
 // resend, k_settle_frames Presents with a fresh read of the game's state must pass: the game compares at its next logic frame
@@ -239,16 +245,19 @@ constexpr uint16_t k_cancel_mask = 0xF3FF;
 /// One poll (input thread): phys = the pad's buttons before ours are ORed (the controllers and a pad: the player's own),
 /// pkt = this poll's packet number, unpolled = our press is set and no new packet has carried it yet. Returns true: cancel ours
 /// (design 6.3: the game ORs every newly pressed button into one word, so ours and the player's in one poll, or the player's
-/// advancing the progress while ours waits, would make a wrong input). newly: the player newly pressed a Bushido button.
+/// advancing the progress while ours waits, would make a wrong input). newly: this poll's NEW packet carries a new press of the
+/// player's to the game (the settle starts there, review round 3: a press seen at a poll whose packet did not change reaches the
+/// game only with the next one, which could put the game's compare one Present past the two-Present count).
 struct Arb {
     uint16_t last = 0;                  // the player's buttons at the last poll
     uint16_t seen = 0, before = 0;      // ... at the last new packet (what the game holds), and before this poll's packet
     uint32_t pkt = 0; uint32_t presses = 0, cancels = 0;
     bool step(uint16_t phys, uint32_t pkt_now, bool on, bool unpolled, bool* newly = nullptr) {
-        const uint16_t nw = static_cast<uint16_t>(phys & ~last & k_cancel_mask); last = phys;
-        before = seen; if (pkt_now != pkt) { pkt = pkt_now; seen = phys; }
-        if (newly) *newly = nw != 0;
-        if (nw) presses++;
+        const uint16_t nw = static_cast<uint16_t>(phys & ~last & k_cancel_mask); last = phys;   // new at this poll: the cancel
+        uint16_t gnw = 0;                                                                         // new to the game with this packet: the settle
+        before = seen; if (pkt_now != pkt) { pkt = pkt_now; gnw = static_cast<uint16_t>(phys & ~seen & k_cancel_mask); seen = phys; }
+        if (newly) *newly = gnw != 0;
+        if (gnw) presses++;
         if (on && nw && unpolled) { cancels++; return true; }
         return false;
     }
@@ -323,7 +332,9 @@ struct Inject {
     int16_t last_prog = 0; bool have_prog = false;
     int free_frames = 0;                                        // fresh Presents since the slot freed after our press (the resend's settle)
     bool other_seen = false;                                    // a non-zero new-press word not ours seen since our last press (review N3)
-    uint32_t phys_at = 0;                                       // the player's press count when our last press went (a later press: the reset may be theirs)
+    uint32_t phys_at = 0;                                       // the player's press count when our last press went
+    bool phys_after = false;                                    // a press of the player's noticed within k_ours_s after ours, in a Present before the one
+                                                                // that sees a reset (review R2-N4: one noticed with the reset may have come after the compare)
     uint32_t presses = 0, resends = 0, cancels = 0; int stop_why = 0;   // 1: a reset right after our press; 2: the game missed a press twice
     void reset() { *this = Inject{}; }
 };
@@ -361,10 +372,10 @@ inline int clip_half(const float* x, const float* y, int n, float ox, float oy, 
 struct Runner {
     Cfg cfg; Round r; HandTrack ht[2]; Inject inj; Stats st, last_st; Cut cut[k_cut_n]; int cut_next = 0;
     uint32_t rounds = 0; double hap_t[2] = { -1.0, -1.0 };
-    uint32_t phys_seen = 0; int phys_frames = 1000;             // the settle in frames (review S2)
+    uint32_t phys_seen = 0; int phys_frames = 1000; double phys_note_t = -1e300;   // the settle in frames (review S2); when the last new press was noticed
     double gate_off_t = -1.0;                                    // the injection gate off since (review S1); -1 on
     /// The player's new presses: a new count starts the frame count (the noticing Present itself does not count).
-    void note_phys(const In& in) { if (in.phys_n != phys_seen) { phys_seen = in.phys_n; phys_frames = 0; } else if (in.read_now && phys_frames < 1000) phys_frames++; }
+    void note_phys(const In& in) { if (in.phys_n != phys_seen) { phys_seen = in.phys_n; phys_frames = 0; phys_note_t = in.t; } else if (in.read_now && phys_frames < 1000) phys_frames++; }
     bool settled(const In& in) const { return phys_frames >= k_settle_frames && in.phys_age >= k_settle_s; }
     char line_buf[400] = "";
     uint32_t verts_max = 0, verts_dropped = 0;
@@ -404,6 +415,22 @@ struct Runner {
     }
     V3 pos(int i, double t) const { return pos_rung(i, t, r.tg[i].rung); }
     V3 far_spot(int lane) const { return slot(r.fr, r.g, lane, r.preview + 1); }
+    /// A motion's duration from a0 to S: at least base, and long enough that the ease-out's opening speed toward the eyes (3x the
+    /// path's part along the line of sight at its start, over the duration) stays under k_toward_mps.
+    double motion_dur(V3 a0, V3 S, double base) const {
+        const V3 u = norm(a0 - r.fr.e0); const float toward = dot(a0 - S, u);
+        const double need = toward > 0.f ? 3.0 * static_cast<double>(toward) / static_cast<double>(k_toward_mps) : 0.0;
+        return need > base ? need : base;
+    }
+    /// The fly-in's start offset from spot S: k_spawn_* (beyond, above, outside), its upward part reduced so that
+    /// dot(offset, S - e0) >= 0 (then the distance to the eyes only falls along the path, to the spot's).
+    V3 spawn_offset(V3 S, int lane) const {
+        const V3 d = S - r.fr.e0;
+        const V3 base = r.fr.f * k_spawn_fwd + r.fr.r * ((lane == 0 ? -1.f : 1.f) * k_spawn_out);
+        float up = k_spawn_up; const float du = dot(r.fr.u, d), db = dot(base, d);
+        if (du < 0.f && db + up * du < 0.f) up = fmaxf(0.f, db / -du);
+        return base + r.fr.u * up;
+    }
     void update_motion(double t) {
         int cnt[2] = { 0, 0 };
         for (int i = 0; i < r.n; ++i) {
@@ -414,7 +441,7 @@ struct Runner {
             else if (k != g.rung) {
                 if (t > g.at0) {   // a slide from where it is now (the hit sphere follows the drawn target)
                     const V3 p = pos_rung(i, t, g.rung); const double rest = g.at0 + g.adur - t;
-                    g.a0 = p; g.adur = g.landed ? k_slide_s : (rest > k_slide_s ? rest : k_slide_s); g.at0 = t;
+                    g.a0 = p; g.adur = motion_dur(p, spot(i, k), g.landed ? k_slide_s : (rest > k_slide_s ? rest : k_slide_s)); g.at0 = t;
                 }
                 g.rung = k;
             }
@@ -436,7 +463,7 @@ struct Runner {
         for (int k = 0; k <= k_n_max; ++k) for (int i = 0; i < r.n; ++i) {
             Tgt& g = r.tg[i]; if (g.rung != k) continue;
             const int o = order < 6 ? order : 6; order++;
-            g.a0 = spot(i, k) + r.fr.f * k_spawn_fwd + r.fr.u * k_spawn_up + r.fr.r * ((g.lane == 0 ? -1.f : 1.f) * k_spawn_out); g.at0 = in.t + k_fly_gap_s * o; g.adur = k_fly_s; g.landed = false;
+            g.a0 = spot(i, k) + spawn_offset(spot(i, k), g.lane); g.at0 = in.t + k_fly_gap_s * o; g.adur = motion_dur(g.a0, spot(i, k), k_fly_s); g.landed = false;
         }
         r.left0 = practice ? static_cast<float>(k_practice_s) : (in.left > 0.2f ? in.left : 4.f); r.left_now = r.left0;
         inj.reset(); ht[0].clear_round(); ht[1].clear_round();
@@ -465,12 +492,17 @@ struct Runner {
     }
     /// The game reset the progress with no press of ours just before (a wrong button of the player's): every target back.
     void rewind(double t, TickOut& o) {
+        V3 cur[k_n_max]; bool again[k_n_max];   // struck / done / not yet flown: they swoop in again as in the fly-in; the rest slide from where they are
+        for (int i = 0; i < r.n; ++i) { again[i] = gone(i) || t < r.tg[i].at0; cur[i] = again[i] ? v3(0.f, 0.f, 0.f) : pos(i, t); }
         for (int i = 0; i < r.n; ++i) {
             Tgt& g = r.tg[i];
-            const V3 p = (gone(i) || t < g.at0) ? far_spot(g.lane) : pos(i, t);
-            g.struck = g.done = false; g.t_hit = -1.0; g.hand = -1; g.landed = false; g.a0 = p; g.at0 = t; g.adur = k_rewind_s; g.rung = -2;
+            g.struck = g.done = false; g.t_hit = -1.0; g.hand = -1; g.landed = false; g.at0 = t; g.adur = k_rewind_s; g.rung = -2;
         }
         update_motion(t);
+        for (int i = 0; i < r.n; ++i) {
+            Tgt& g = r.tg[i]; const V3 S = spot(i, g.rung);
+            g.a0 = again[i] ? S + spawn_offset(S, g.lane) : cur[i]; g.adur = motion_dur(g.a0, S, k_rewind_s);
+        }
         ht[0].clear_round(); ht[1].clear_round(); inj.inflight = -1;
         st.rewinds++; r.prog_shown = 0; o.rewound = true;
     }
@@ -481,12 +513,14 @@ struct Runner {
         if (!in.fresh) return;
         const int16_t p = in.prog;
         if (inj.have_prog && p < inj.last_prog) {   // a reset
-            const bool other = inj.other_seen || phys_seen != inj.phys_at || (in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val);   // a word not ours, or a press of the player's, since our press
+            const bool other = inj.other_seen || inj.phys_after || (in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val);   // a word not ours, or an earlier-noticed press of the player's, since our press
             if (t - inj.ours_t < k_ours_s && !other) { if (!r.stopped) { r.stopped = true; inj.stop_why = 1; o.stopped = true; } inj.inflight = -1; }
             else rewind(t, o);
         }
         inj.last_prog = p; inj.have_prog = true;
         if (in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val && t >= inj.ours_t) inj.other_seen = true;
+        // (after the reset test: a press noticed at this Present counts only for a reset seen at a later one)
+        if (phys_seen != inj.phys_at && phys_note_t >= inj.ours_t && phys_note_t - inj.ours_t < k_ours_s) inj.phys_after = true;
         for (int i = 0; i < r.n && i < p; ++i) if (!r.tg[i].done) { r.tg[i].done = true; if (!r.tg[i].struck) r.tg[i].gone_t = t; }
         if (p >= r.n && st.done < 0.0) st.done = t - r.t_open;
         r.prog_shown = p;
@@ -506,14 +540,14 @@ struct Runner {
             if (p != inj.inflight) { inj.inflight = -1; return 0; }
             if (inj.resent) { r.stopped = true; inj.stop_why = 2; o.stopped = true; inj.inflight = -1; return 0; }   // a second miss: buttons only
             const uint16_t b = r.map.button_of(inj.val); if (!b) { inj.inflight = -1; return 0; }
-            inj.resent = true; inj.resends++; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.other_seen = false; inj.phys_at = phys_seen; o.resent = true;
+            inj.resent = true; inj.resends++; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.other_seen = false; inj.phys_at = phys_seen; inj.phys_after = false; o.resent = true;
             return b;
         }
         if (!in.slot_free || !settled(in)) return 0;
         if (p < 0 || p >= r.n || !r.tg[p].struck) return 0;
         const uint16_t b = r.map.button_of(r.seq[p]);   // ALWAYS seq[progress] by the map in use: a stroke cannot make a wrong press
         if (!b) return 0;
-        inj.inflight = p; inj.val = r.seq[p]; inj.resent = false; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.ours_val = inj.val; inj.other_seen = false; inj.phys_at = phys_seen; inj.presses++;
+        inj.inflight = p; inj.val = r.seq[p]; inj.resent = false; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.ours_val = inj.val; inj.other_seen = false; inj.phys_at = phys_seen; inj.phys_after = false; inj.presses++;
         return b;
     }
     // -- the hands ----------------------------------------------------------------------------------------------------------------
