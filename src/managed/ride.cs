@@ -60,6 +60,7 @@ internal static class RideLogic {
     /// <summary>What a score means, for the "first person: following" line.</summary>
     public static string FpHow(int best, string[] names) {
         if (best < 500) return "model " + names[best];
+        if (best >= FpPick.k_bad && best < 1000) return "model " + (best - FpPick.k_bad < names.Length ? names[best - FpPick.k_bad] : "?") + ", its model chain does not read whole (no listed model whose chain reads)";   // fix-eye finding 1
         if (best < 1000) return "model " + names[best - 500] + ", hidden by the game (no visible listed model)";
         if (best < 100000) return "no listed model on this map: the party model with the lowest id";
         if (best < 200000) return "nothing matched: actor 0";

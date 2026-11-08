@@ -79,7 +79,8 @@ public sealed unsafe partial class FFXVRModule {
         fixed (Actor* pp = &p) {
             Vector3 root = *(Vector3*)((byte*)pp + 0x200);
             float h = EyeLogic.HeadOffset(head, root);
-            int other = eye_root_shared(actors, pick, root, out int other_id, out nint other_name);   // every frame: the shared root
+            int other = eye_root_shared(actors, pick, root, out int other_id, out nint other_name, out float other_d);   // every frame: the shared root
+            _eye_share_slot = other; _eye_share_id = other_id; _eye_share_name = other_name; _eye_share_d = other_d; _eye_share_frame = _frames;   // fix-eye: the capture's columns and summary
             bool dec = EyeLogic.Declines(in _eye_disp, h, other >= 0);
             if (EyeLogic.Step(ref _eye_disp, h, other >= 0) && _eye_lines < 40) {
                 _eye_lines++;
@@ -113,13 +114,13 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>Another live actor the game draws (not script-hidden) with its drawn root within 0.5 of `root` (game space): its slot
     /// (the first such), chr_id and name pointer; -1 when none.</summary>
-    private int eye_root_shared(Actor* actors, int pick, Vector3 root, out int id, out nint name) {
-        id = 0; name = 0;
+    private int eye_root_shared(Actor* actors, int pick, Vector3 root, out int id, out nint name, out float dist) {
+        id = 0; name = 0; dist = 0f;
         Actor* snap = tbl_snap(actors); if (snap == null) return -1;
         for (int i = 0; i < 48; i++) {
             if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name) || slot_hidden(actors, snap, i)) continue;
             Vector3 r = *(Vector3*)((byte*)(snap + i) + 0x200);
-            if (finite(r) && Vector3.DistanceSquared(r, root) < 0.5f * 0.5f) { id = (int)snap[i].chr_id; name = (nint)snap[i].chr_name; return i; }
+            if (finite(r) && Vector3.DistanceSquared(r, root) < 0.5f * 0.5f) { id = (int)snap[i].chr_id; name = (nint)snap[i].chr_name; dist = Vector3.Distance(r, root); return i; }
         }
         return -1;
     }
@@ -185,6 +186,7 @@ public sealed unsafe partial class FFXVRModule {
             uint owner = IbChain.Owner(k == 0, rank);
             int n0 = _ib_n; int segs = IbChain.Walk(*(nint*)(a + 0x830), owner, _ib_q, ref _ib_n, k_ib_max, _ib_seg, k_ib_segs, _fn_safe_read, out bool fail);
             if (fail) _ib_incomplete = true;
+            if (k == 0 || !fail) fp_chain_mark(idx[k], *(nint*)(a + 0x830), fail, k == 0, snap[idx[k]].chr_name);   // fix-eye finding 1: the followed actor's model object failed (any whole read of it clears it; review B1: keyed on the object)
             uint res = *(uint*)(a + 0x1C4);
             if (sb != null) {
             sb.Append(I($" | actor {idx[k]} '{actor_name(snap[idx[k]].chr_name)}' {(k == 0 ? "the player's" : owner == 0 ? "the player's (a listed model: fp_actor)" : res == res0 ? "another actor's, SAME MODEL as the player's (its keys decide nothing)" : "another actor's")}: +0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{res:X}, {segs} segments, {_ib_n - n0} keys{(fail ? " (a read failed: retried)" : "")}"));

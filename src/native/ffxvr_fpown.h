@@ -9,7 +9,8 @@
 //      re-pick of the followed actor or 30 fps logic widened it to several units and NPCs beside Tidus went with him); and
 //   2. it is not nearer another actor's drawn root than the player's, by k_tol: an NPC's parts sit on its own root (distance
 //      about 0), so it is never taken for the player's however wide the margin is. Nor is a draw within k_own of the player
-//      (review N3): while his root is known to within 0.75 his body does not flash on because another root is close. (With
+//      (review N3; fix-eye: own(step), k_own plus half the step while he moves, against the snapshot root, for a draw that does
+//      not sit on another root): while his root is known that closely his body does not flash on because another root is close. (With
 //      both his roots a tick off what is drawn, no snapshot, it still can: all his parts share one translation, so they are
 //      refused together and his whole body shows for that frame. The safer failure.)
 //      The player's parts sit on his drawn root, +0x200 = +0x0C + chr_offset (+0x6C). The hide centre is that root minus
@@ -27,7 +28,22 @@ namespace fpown {
 
 constexpr float k_margin_cap = 4.f;   // units: the step margin's cap (the fixed part, hide_radius, is not included)
 constexpr float k_tol        = 0.5f;  // units: another root must be this much nearer than the player's to take the draw
-constexpr float k_own        = 0.75f; // units: a draw this near the player's (his distance) is never refused (review N3)
+constexpr float k_own        = 0.75f; // units: a draw this near the player's (his distance) is never refused (review N3), standing
+constexpr float k_own_step   = 0.5f;  // units: fix-eye, the most own() widens k_own by while he moves
+constexpr float k_on_root    = 0.25f; // units: fix-eye, a draw this near another actor's root sits on it (an NPC's own part)
+
+/// fix-eye (finding 8, the 6 / 7 Nov logs): while he runs, his own draws sit one ffxvr_player_set call (half the two-call step,
+/// step_hide / 2) off the snapshot root: 0.8 units at a 1.2-1.5 step, 0.9 at 1.8-1.9, 1.23 at most over both sessions, so k_own
+/// alone did not cover his running body (an NPC root within 0.3 of a part could refuse it: a one-frame flash of his body; none
+/// was seen). Against the snapshot root (self_exact) a draw is his within own(step) = k_own plus that half step (the margin's
+/// measure: the margin is 1.5 x step_hide), capped at k_own_step (1.25 in all: a scripted move's big step cannot switch the
+/// refusals off; B2, an NPC 3.64 away kept visible on a frame with a 12.83-unit step), unless it sits on another actor's root
+/// (within k_on_root): an NPC's own parts sit on its root, so N3's "0.05 off another root" and Auron 1.3 off on lc/lchb0500 stay
+/// the NPC's. Standing, and with a Present-time root (a tick off), k_own alone as before.
+inline float own(float step_hide) {
+    const float w = 0.5f * step_hide;
+    return k_own + (w > 0.f ? (w < k_own_step ? w : k_own_step) : 0.f);
+}
 constexpr int   k_others_max = 32;    // other actors' roots per frame (managed sends those within ~30 units, nearest first)
 
 /// The step margin: 1.5 x step_hide, capped; 0 for a negative or NaN step.
@@ -71,9 +87,11 @@ inline int on_foot(const float* w, const Foot& f, Why* why = nullptr) {
     const float dp = std::sqrt(dp2);
     float bo2 = 1e30f; int bo = -1;
     for (int i = 0; i < f.n && i < k_others_max; ++i) { const float o2 = d2(w, f.others[i]); if (o2 < bo2) { bo2 = o2; bo = i; } }
-    // refused iff d_player > k_own and d_other + tol < d_player (a tie, within the tolerance or within k_own of him is his)
+    // refused iff d_player > k_own and d_other + tol < d_player (a tie, within the tolerance or within k_own of him is his); fix-eye:
+    // against the snapshot root, within own(step) of him too unless the draw sits on the other root
     const float lim = dp - k_tol;
-    const bool refused = bo >= 0 && dp > k_own && lim > 0.f && bo2 < lim * lim;
+    const bool mine = dp <= k_own || (f.self_exact && f.self && dp <= own(f.step_hide) && bo2 > k_on_root * k_on_root);
+    const bool refused = bo >= 0 && !mine && lim > 0.f && bo2 < lim * lim;
     if (why) { why->d_centre = std::sqrt(dc2); why->d_player = dp; why->d_other = bo >= 0 ? std::sqrt(bo2) : -1.f; why->other = bo; why->refused = refused; }
     return refused ? 0 : 1;
 }

@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 50;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor)
+    private const int k_abi = 51;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -411,6 +411,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_cuts_set     = (delegate* unmanaged[Cdecl]<int, int, int, float, float, void>)req("ffxvr_cuts_set");
             _fn_eye_jump_set = (delegate* unmanaged[Cdecl]<int, float, int, int, int*, int, int>)req("ffxvr_eye_jump_set"); _fn_eye_event = (delegate* unmanaged[Cdecl]<int, float, float, float, void>)req("ffxvr_eye_event");   // ABI 44: eye jumps (eye_jump.cs)
             _fn_bt_tag_step = (delegate* unmanaged[Cdecl]<int, float, float, float, float, float, float*, int, int>)req("ffxvr_bt_tag_step"); _fn_bt_tag_hold = (delegate* unmanaged[Cdecl]<int, float, float, float, int>)req("ffxvr_bt_tag_hold");   // ABI 46: battle tag (bt_tag.cs)
+            _fn_fp_event = (delegate* unmanaged[Cdecl]<int, float, float*, int, int>)req("ffxvr_fp_event");   // ABI 51 (50 on fix-eye): the first-person event hold (fp_follow.cs)
             _fn_dmg_walk = (delegate* unmanaged[Cdecl]<byte*, uint, uint, DmgNode*, int, uint*, int>)req("ffxvr_dmg_walk"); _fn_dmg_queue = (delegate* unmanaged[Cdecl]<byte*, int, int, DmgNode*, int, DmgChr*, int, byte*, uint*, int>)req("ffxvr_dmg_queue");   // ABI 47: 3D damage numbers (dmg3d.cs)
             _fn_dmg_set = (delegate* unmanaged[Cdecl]<DmgNode*, int, DmgChr*, int, uint, uint, uint, int, void>)req("ffxvr_dmg_set"); _fn_dmg_cfg = (delegate* unmanaged[Cdecl]<int, float, float, byte*, int>)req("ffxvr_dmg_cfg");
             _fn_dmg_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_dmg_skip"); _fn_dmg_status = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_dmg_status");
@@ -581,6 +582,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_eye_jump_set = null; _fn_eye_event = null;   // ABI 44 (eye jumps)
         _fn_bt_tag_step = null; _fn_bt_tag_hold = null;   // ABI 46 (battle tag)
+        _fn_fp_event = null;   // ABI 51 (the event hold)
         _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null; _fn_dmg_anchor = null;   // ABI 47 / 50 (3D damage numbers)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
@@ -1057,6 +1059,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "cut_recentre":      pb(k, v, ref _cut_recentre); break;
                 case "cut_blink":         pb(k, v, ref _cut_blink); break;
                 case "eye_jump_blink": case "eye_jump_units": case "battle_face": ej_parse(k, v); break;   // eye jumps (eye_jump.cs)
+                case "fp_event_hold":     pb(k, v, ref _fp_event_hold); break;                 // fix-eye: the eye held while control is off in first person (fp_follow.cs)
+                case "fp_event_leash":    pf(k, v, ref _fp_event_leash, 2f, 40f); break;      // ... how far the game may move him before the eye trails (units)
                 case "turn_stick":        pb(k, v, ref _turn_stick); break;
                 case "turn_mode":         pi(k, v, ref _turn_mode, 0, 1); break;
                 case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
@@ -1432,6 +1436,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"cut_recentre={(_cut_recentre ? 1 : 0)}\n" +
             $"cut_blink={(_cut_blink ? 1 : 0)}\n" +
             ej_ini_text() +   // eye jumps (eye_jump.cs)
+            $"fp_event_hold={(_fp_event_hold ? 1 : 0)}\n" +
+            $"fp_event_leash={_fp_event_leash.ToString("F1", ci)}\n" +
             $"turn_stick={(_turn_stick ? 1 : 0)}\n" +
             $"turn_mode={_turn_mode.ToString(ci)}\n" +
             $"turn_snap={_turn_snap.ToString("F0", ci)}\n" +
@@ -1598,6 +1604,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 360f);
         if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
         ej_ui();   // eye jumps: eye_jump_blink, eye_jump_units, battle_face (eye_jump.cs)
+        fpev_ui();   // fix-eye: fp_event_hold, fp_event_leash (fp_follow.cs)
         ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
         ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
         ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
@@ -2237,7 +2244,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
-        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body ? 1 : 0, _fp_hide_radius);
+        if (_fn_fp_set != null) _fn_fp_set(_fp_mode, _fp_eye_h, _fp_follow_dist, _fp_follow_h, _fp_hide_body && !_fpk_on ? 1 : 0, _fp_hide_radius);   // finding 4: nothing to hide while the eye is held (no followed body)
     }
 
     /// <summary>Shows the eye-2 render in its own window, scaled down.</summary>
@@ -2447,6 +2454,33 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _logger.Info(System.FormattableString.Invariant($"head: skipped index {old}, {d:F1} units out, for model {name} (index {now} instead; reach {reach:F1}, map {map_name()})"));
     }
 
+    // fix-eye (finding 7, the 7 Nov log): Wakka's head pick flips 1 / 25 / 24 at each tag-in (the "head: skipped index 11" lines),
+    // then the eye jumps exactly 11.2 units about 4 s later in both battles, with nothing logged (fp_head_smooth 1: the raw head).
+    // Read from HeadPick: the flips are the highest of three points at about one height trading places while he runs in (the
+    // height, a maximum, is continuous: no jump); an 11.2-unit jump of the height in one frame needs the candidate set to change.
+    // The likely cause is index 11 (the ball, 14.5 units out and 8-12 above his head in the 4-5 Nov captures) coming within the
+    // 8-unit reach of sub-position 0 in his battle stance: the pick goes to it with old == now, which the skip line cannot show.
+    // Not proven (no optpos dump of Wakka in battle exists), so no rule change: this line settles it. When the followed actor's
+    // head pick moves more than 6 units in height in one frame, the old and new index, each one's height over the root and
+    // horizontal distance from sub-position 0, whether the reach left anything out, and all 26 sub-positions. 12 a session, 4 a
+    // battle. If it shows index 11 within the reach, the fix is to drop from the reach rule the points more than about 4 units
+    // above sub-position 25 (the head helper of the party models) or to hold the index while it stays within the reach.
+    private int _fph_jump_lines, _fph_jump_btl, _fph_prev_actor = -1, _fph_prev_k = -1; private float _fph_prev_y;
+    private static string fph_pt(int i, Vector4 v, Vector4 b, float ry) => I($"{i} (up {ry - v.Y:F1}, out {MathF.Sqrt((v.X - b.X) * (v.X - b.X) + (v.Z - b.Z) * (v.Z - b.Z)):F1})");
+    private void fph_jump_log(ref Actor a, int pick, int k, int old, float reach, bool in_battle) {
+        if (k < 0) { _fph_prev_actor = -1; return; }
+        float y = a.chr_pos_vec.Y - a.chr_optpos[k].Y;   // review S4: the height over the root (a root warp or a jump of the whole body is not a head change)
+        if (pick == _fph_prev_actor && _fph_prev_k >= 0 && MathF.Abs(y - _fph_prev_y) > 6f && _fph_jump_lines < 12 && _fph_jump_btl < 4) {
+            _fph_jump_lines++; _fph_jump_btl++;
+            Vector4 b = a.chr_optpos[0]; float ry = a.chr_pos_vec.Y;
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 26; i++) { Vector4 v = a.chr_optpos[i]; if (v.X == 0f && v.Y == 0f && v.Z == 0f) continue; sb.Append(' ').Append(fph_pt(i, v, b, ry)); }
+            string left = old >= 0 && old != k ? I($", the reach {reach:F1} left out {fph_pt(old, a.chr_optpos[old], b, ry)}") : reach > 0f ? I($", nothing left out by the reach {reach:F1}") : "";
+            _logger.Info(I($"head: the head pick of actor {pick} '{actor_name(a.chr_name)}' moved {y - _fph_prev_y:F1} units up (over the root) in one frame ({(in_battle ? "in battle" : "field")}, map {map_name()}): index {_fph_prev_k} -> {fph_pt(k, a.chr_optpos[k], b, ry)}{left} | sub-positions (index, up from the root, out from sub-position 0):{sb}") + (_fph_jump_lines == 12 ? " (no more of these lines this session)" : ""));
+        }
+        _fph_prev_actor = pick; _fph_prev_k = k; _fph_prev_y = y;
+    }
+
     /// <summary>"log this table" only (diagnostics: Wakka's first-person eye in battle sits ~7 units high): for the followed
     /// actor and every live party model (c0xx), the 26 chr_optpos sub-positions (+0x524; all-zero ones left out), with the
     /// index push_player's head rule picks marked '*' (the lowest actor-space Y with |X| + |Z| > 0.01: the highest point;
@@ -2543,7 +2577,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         System.Threading.Volatile.Write(ref _fp_reach_live, in_battle ? _fp_head_reach : 0f);   // the head rule's reach: battle only (review of 9b406b9, SF); before _d7_follow_actor below
         if (in_battle != _btl_was) {
-            _fph_skip_n = 0; _fph_skip_key = -1;
+            _fph_skip_n = 0; _fph_skip_key = -1; _fph_jump_btl = 0; _fph_prev_actor = -1;
             btg_end(in_battle ? "a new battle" : "the battle ended"); btg_log(in_battle ? "a new battle" : "the battle ended"); _btg_state = 0;   // battle tag
             _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
             for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
@@ -2655,7 +2689,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         btg_guard(in_battle);   // battle tag: a hold the follow logic did not send this frame
         if (in_battle) ej_face_tick(btl_v.battle_state);   // eye jumps: the pending face request (waits through the load chain: review B1)
         _btl_cycle_req = 0;   // a request (Insert, the chord) is used by the manual branch above this frame, or dropped (field, summon, no roster)
-        if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; }
+        if (pick >= 0) { _fp_how = "battle: follows the roster"; _fp_chr_id = -1; if (_fpk_on) fpk_release("a battle"); }
         else {
             // FP-1: the field player. fp_actor is a list of model names, best first (Tidus is c001 for most of the game,
             // c101 in the opening). Every live actor gets a score, lower is better: a listed name = its rank; a party
@@ -2676,40 +2710,68 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // the same (fp_name_rank). The rule, the order and the cadence are unchanged: the actor-0 last resort, a hidden
             // listed model and a hidden party model still rescan every frame, they just cost no reads when nothing changed.
             Actor* snap = null;
-            int score_of(in Actor a, int i, Actor* tbl) {
+            ulong scene = fp_scene_sig();
+            int gp = fp_game_player(actors, scene);   // finding 1: the game's player actor (a tie goes to it)
+            // finding 4: first person on foot (strict) never follows an NPC and never hops to another body mid-scene; the eye is held
+            // where it was while nothing listed is live (FpPick.Allowed; fp_follow.cs). A map change, a new event or another view ends it.
+            bool strict = !in_battle && _fp_mode == 1 && !_in_blitz;
+            if (!strict || scene != _fpk_scene) { if (_fpk_on) fpk_release(!strict ? "first person left (another view, a battle or blitzball)" : "a map change or a new event"); _fp_strict_had = false; _fpk_done = false; _fpk_scene = scene; }
+            FpMark.Scene(ref _fp_marks, scene);   // review B1: the bad-model marks live on their scene only
+            if ((_fp_scan_tick % 30) == 29) fp_marks_reread();   // review R2-S2: each marked object re-read by itself (before the rescan tick)
+            int score_of(in Actor a, int i, Actor* tbl, nint h830) {
                 if ((ulong)i >= 48) return -1;   // (never: the callers pass table indices)
                 int r = fp_name_rank(i, a.chr_name, a.chr_id, names);
-                if (r >= 0) return RideLogic.FpScore(r, slot_hidden(tbl, snap, i), (int)a.chr_id, i);
                 int cid = (int)a.chr_id;
-                return RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
+                int s = r >= 0 ? RideLogic.FpScore(r, slot_hidden(tbl, snap, i), cid, i) : RideLogic.FpScore(-1, cid > 0 && cid < 0x1000 && slot_hidden(tbl, snap, i), cid, i);
+                return s >= 0 && fp_chain_bad(h830) ? FpPick.Bad(s) : s;   // finding 1: a model object whose chain stopped reading whole (review B1: every actor on it)
             }
             int cur_score = -1;
-            if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors);
+            if (_fp_actor_idx >= 0 && read(actors + _fp_actor_idx, out Actor cur) && live(cur) && (int)cur.chr_id == _fp_chr_id) cur_score = score_of(cur, _fp_actor_idx, actors, *(nint*)((byte*)&cur + 0x830));
+            if (cur_score >= 0 && !FpPick.Allowed(cur_score, strict, true, _fp_chr_id)) cur_score = -1;   // finding 4: e.g. an NPC followed in the diorama, then first person
+            bool first = cur_score < 0 && !_fpk_on && !_fp_strict_had;   // finding 4: nothing followed (or held) yet on this scene in first person: the first pick
+            int skip_s = int.MaxValue, skip_i = -1;   // the best candidate strict left out (for the hold's line)
             _fp_scan_tick++;
             if ((_fp_scan_tick % 30) == 0) _fpn_frame_clear = true;   // the name ranks are read again with the 30-frame rescan (a backstop)
-            if (cur_score == 0 || (cur_score > 0 && cur_score < 100000 && (cur_score < 500 || cur_score >= 1000) && (_fp_scan_tick % 30) != 0)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
+            if (FpPick.Keep(cur_score, (_fp_scan_tick % 30) == 0, gp >= 0 && gp != _fp_actor_idx)) pick = _fp_actor_idx;   // the actor-0 last resort (FP-R3) and a hidden listed model (FP-2) rescan every frame
             else {
                 int best = int.MaxValue, best_i = -1;
-                if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor
+                if (cur_score >= 0) { best = cur_score; best_i = _fp_actor_idx; }   // ties keep the current actor, unless the other is the game's player (finding 1)
                 snap = tbl_snap(actors);
                 Actor slot = default;
                 for (int i = 0; i < 48; i++) {
                     Actor* ap = snap != null ? snap + i : &slot;
                     if (snap == null && !read(actors + i, out slot)) break;
-                    if (!live(*ap) || i == best_i) continue;
-                    int s = score_of(*ap, i, actors);
-                    if (s >= 0 && s < best) { best = s; best_i = i; }
+                    if (!live(*ap) || i == _fp_actor_idx && cur_score >= 0) continue;
+                    int s = score_of(*ap, i, actors, *(nint*)((byte*)ap + 0x830));
+                    if (!FpPick.Allowed(s, strict, first, (int)ap->chr_id)) { if (s >= 0 && s < skip_s) { skip_s = s; skip_i = i; } continue; }   // finding 4
+                    if (FpPick.Better(s, i, best, best_i, gp)) { best = s; best_i = i; }
                 }
                 pick = best_i;
                 if (pick >= 0 && (pick != _fp_actor_idx || cur_score < 0) && read(actors + pick, out Actor pa2)) {
-                    string how = RideLogic.FpHow(best, names);
+                    string how = RideLogic.FpHow(best, names) + (pick == gp ? ", the game's player actor" : "");
                     _fp_chr_id = (int)pa2.chr_id;
                     _fp_how = $"actor {pick} '{actor_name(pa2.chr_name)}' ({how})";
                     string mp = map_name();
-                    if (_fp_how + mp != _fp_how_logged) { _fp_how_logged = _fp_how + mp; _logger.Info($"first person: following {_fp_how} on map {mp}"); }
+                    if (_fp_how + mp != _fp_how_logged) {   // review B1: at most one line a second (a flapping pick wrote one every frame)
+                        if (_now - _fp_how_t >= 1.0) { _fp_how_logged = _fp_how + mp; _fp_how_t = _now; _logger.Info($"first person: following {_fp_how} on map {mp}" + (_fp_how_skip > 0 ? I($" ({_fp_how_skip} re-picks in the second before not logged)") : "")); _fp_how_skip = 0; }
+                        else _fp_how_skip++;
+                    }
                 }
             }
             if (pick < 0) { _fp_how = ""; _fp_chr_id = -1; }
+            if (strict) {   // finding 4: the hold starts when the pick is lost mid-scene and ends with the next listed model
+                if (pick >= 0) { if (_fpk_on) fpk_release("following " + _fp_how); _fpk_done = false; }
+                // review S2: the held eye goes back to the game camera (with a blink) after 3 s or at a camera cut; then the game camera
+                // until a listed model is live or the scene ends (no other body: finding 4)
+                else if (_fpk_on && FpPick.HoldEnds(_now - _fpk_t0, (int)_fpev_st[16] != _fpk_cuts0)) { fpk_release((int)_fpev_st[16] != _fpk_cuts0 ? "a camera cut: the game's camera" : I($"{FpPick.k_hold_s:F0} s: the game's camera")); _fpk_done = true; _fpk_blink = true; }
+                else if (_fp_strict_had && !_fpk_on && !_fpk_done) fpk_start(actors, skip_i);
+                else if (!_fpk_on) fp_none_log(actors, skip_i, scene);
+            }
+            // review R2-N1: re-picks skipped by the one-a-second limit: once the second is over, the actor followed now
+            if (_fp_how_skip > 0 && _now - _fp_how_t >= 1.0) {
+                string mp = map_name(); _fp_how_logged = _fp_how + mp; _fp_how_t = _now;
+                _logger.Info(I($"first person: {(_fp_how.Length > 0 ? "following " + _fp_how : "following nobody")} on map {mp} (after {_fp_how_skip} re-picks in the second before)")); _fp_how_skip = 0;
+            }
             // gates (4 Nov): the pick against the game's own player actor ([0x1300788], Sg_GetPlayer), every 10th scan tick in
             // the field in first person: a mismatch is logged (rate-limited), the pick is not changed yet (game_gates.cs).
             if (!in_battle && _fp_mode == 1 && (_fp_scan_tick % 10) == 0) gates_pick_check(actors, pick);
@@ -2721,7 +2783,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // space has Y pointing down (render space negates it), so the head is
             // the one with the LOWEST actor-space Y.
             float hy = float.MaxValue; Vector4 head = default; bool have = false;
-            { int hk = fp_head_pick(ref p, _fp_reach_live, out int hold); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } fph_skip_log(ref p, hk, hold, _fp_reach_live); }
+            { int hk = fp_head_pick(ref p, _fp_reach_live, out int hold); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } fph_skip_log(ref p, hk, hold, _fp_reach_live); fph_jump_log(ref p, pick, hk, hold, _fp_reach_live, in_battle); }
             // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
@@ -2752,8 +2814,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // the re-pick key: the index and the model (N1: lc/lchb0500 swaps c001 -> c101 in the same slot)
             int root_kind = body_hide_root(actors, pick, att, out Vector3 root3);
             body_hide_push(actors, pick, (pick << 16) | ((int)p.chr_id & 0xFFFF), !in_battle, root3, root_kind, att ? _ride_rider : pos3);
+            fpk_note(!in_battle && _fp_mode == 1 && !_in_blitz, pos3, head3, hv);   // finding 4: where the eye would be held
+            fpev_push(!in_battle && _fp_mode == 1 && !_in_blitz && !att, actors, pick);   // the event hold (fp_follow.cs)
         }
-        else { _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
+        else if (_fpk_on) { fpk_frame(); fpev_push(false, null, -1); }   // finding 4: the eye held where it was (nothing listed to follow mid-scene)
+        else {
+            fpev_push(false, null, -1); _fn_player_set(0, 0, 0, 0); if (_fn_player_head_set != null) _fn_player_head_set(0, 0, 0, 0); body_hide_push(null, -1, -1, false, default, 0, default); _sa_used = false; _sa_status = "no followed actor"; }   // SM-5
         push_view_rules(in_battle);
     }
     /// <summary>The rest of push_player: head anchor, battle anchor, floor, hide rules, stereo screen, virtual screen,
