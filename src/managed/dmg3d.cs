@@ -228,9 +228,12 @@ public sealed unsafe partial class FFXVRModule {
         x.ovr = (byte)(ovr != 0 ? 1 : 0);
         if (ovr != 0 && read((byte*)(nint)ovr + 0x30, out Vector3 t)) { x.ovr_t = t; x.ovr_ok = 1; }
         D7Anchor pa = default;
-        if (ovr == 0 && par != 0xFF && par < 0x1F && read((byte*)chrs + par * 0xF90, out nint pact) && pact != 0) {   // 0x795080: the parent chr's actor
-            x.parent_ok = 2;   // it has one: its optpos[Chr+0x441] must read (0x8354F0), or the port fails
-            if (d7_anchor(chrs, par, pidx, ref pa) && (pa.flags & 4) == 0) { x.parent_opt = pa.opt; x.parent_ok = 1; }
+        if (ovr == 0 && par != 0xFF && par < 0x1F) {   // 0x795080: the parent chr's actor (none: the actor's own root)
+            if (!read((byte*)chrs + par * 0xF90, out nint pact)) return 0;   // unreadable: keep the stand-in (review N2)
+            if (pact != 0) {
+                x.parent_ok = 2;   // it has one: its optpos[Chr+0x441] must read (0x8354F0), or the port fails
+                if (d7_anchor(chrs, par, pidx, ref pa) && (pa.flags & 4) == 0) { x.parent_opt = pa.opt; x.parent_ok = 1; }
+            }
         }
         float* o = stackalloc float[3];
         int how = _fn_dmg_anchor(&x, o);

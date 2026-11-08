@@ -27,11 +27,15 @@ public sealed unsafe partial class FFXVRModule {
     // Dead or alive is the game's own test (fix-battle, 7 Nov logs finding 2): the target window's masks (0x898330, read by
     // 0x898640) take a chr when stat_death Chr+0xDCC == 0 (0x795780: != 0 is dead), stat_cursor Chr+0xDD9 == 1 (0x794CA0:
     // targetable) and stat_far Chr+0x4FF == 0 (0x794E00). Only the death byte is used here: an untargetable or far monster
-    // is still an enemy to face. Chr+0x17 (Fahrenheit's stat_hide) is NOT a hide flag: it is 1 on visible, fighting monsters
-    // (all 4 of the Sinspawn fight at 12000 / 4000 / 800 HP, 6 Nov; the turned requests of 7 Nov faced the one monster with
-    // 0), so it is only logged, with the other bytes 0x16..0x1C, for the next capture.
+    // is still an enemy to face.
+    // Shown: Chr+0x16..0x19 are four show votes (0x797080(chr, k, v) writes Chr+0x16+k and sets Chr+0x15 = all four; 0x7966C0
+    // hides the actor when any is 0). 0x16 is stat_visible; 0x17 (Fahrenheit's "stat_hide") is the appear / script vote:
+    // 0x793670 clears it for parts that appear later, 0x796550 sets it at the appear, the AI op 0xAE (0x7B4B70) sets / clears
+    // it, the removal paths clear it. So 0x17 == 0 means the game hides the monster (the filter before 7 Nov had it the
+    // wrong way round: it counted only monsters with 0, 4 turns of 21). 0x18 / 0x19 (effect and camera votes: brief
+    // presentation hides) are not required, only logged with 0x16..0x1C, as a request waits 120 live frames at most.
     private const int   k_ej_mon_n = 11;
-    private const int   k_ej_chr_in = 0x10, k_ej_chr_death = 0xDCC, k_ej_chr_cursor = 0xDD9;
+    private const int   k_ej_chr_in = 0x10, k_ej_chr_show = 0x17, k_ej_chr_death = 0xDCC, k_ej_chr_cursor = 0xDD9;
     private const float k_ej_mon_dist = 400f;
 
     private int    _ej_face_left;          // live frames the face request still looks for monsters (0 = none pending)
@@ -100,8 +104,8 @@ public sealed unsafe partial class FFXVRModule {
         _fn_eye_event(1, -c.X, -c.Y, c.Z);
         if (_ej_face_logs < 60) { ej_monsters(me, out _, true, out string all); ej_face_log(I($"face: battle follow ({_ej_face_why}) at battle_state 0x{bst:X2} -> the centre of {n} monster(s) at ({c.X:F0} {c.Y:F0} {c.Z:F0}), battle_face {_battle_face}; monsters: {all}")); }
     }
-    /// <summary>S3: the monsters that count (Chr+0x10 set, actor live, stat_visible, alive by the game's own test (stat_death
-    /// Chr+0xDCC == 0), HP above 0, not at (0, 0, 0), within k_ej_mon_dist of the followed character). Returns their number
+    /// <summary>S3: the monsters that count (Chr+0x10 set, actor live, stat_visible, the show vote Chr+0x17, alive by the game's
+    /// own test (stat_death Chr+0xDCC == 0), HP above 0, not at (0, 0, 0), within k_ej_mon_dist of the followed character). Returns their number
     /// and position sum (game space); with detail, one entry per slot that has an actor: "i: in/vis/death/cursor/hp/dist",
     /// the bytes 0x16..0x1C, and "ok" or why not.</summary>
     private int ej_monsters(Vector3 me, out Vector3 sum, bool detail, out string text) {
@@ -117,21 +121,21 @@ public sealed unsafe partial class FFXVRModule {
             float d = Vector3.Distance(p, me);
             bool zero = MathF.Abs(p.X) + MathF.Abs(p.Y) + MathF.Abs(p.Z) < 0.01f;
             int hp = mc.ram.current_hp;
-            string why = ej_mon_why(live(ma), inb, mb[0x16], death, hp, zero, d);
+            string why = ej_mon_why(live(ma), inb, mb[0x16], mb[k_ej_chr_show], death, hp, zero, d);
             if (why == null) { sum += p; n++; }
             if (sb != null) {
                 if (sb.Length > 0) sb.Append("; ");
-                sb.Append(I($"{i}: in {inb} vis {mb[0x16]} death {death} cursor {mb[k_ej_chr_cursor]} hp {hp} dist {d:F0} b16-1C {mb[0x16]:X2} {mb[0x17]:X2} {mb[0x18]:X2} {mb[0x19]:X2} {mb[0x1A]:X2} {mb[0x1B]:X2} {mb[0x1C]:X2} {why ?? "ok"}"));
+                sb.Append(I($"{i}: in {inb} vis {mb[0x16]} show {mb[k_ej_chr_show]} death {death} cursor {mb[k_ej_chr_cursor]} hp {hp} dist {d:F0} b16-1C {mb[0x16]:X2} {mb[0x17]:X2} {mb[0x18]:X2} {mb[0x19]:X2} {mb[0x1A]:X2} {mb[0x1B]:X2} {mb[0x1C]:X2} {why ?? "ok"}"));
             }
         }
         if (sb != null) text = sb.Length > 0 ? sb.ToString() : "none";
         return n;
     }
     /// <summary>The filter's verdict for one monster slot (null: it counts). Pure: in = Chr+0x10, vis = stat_visible Chr+0x16,
-    /// death = stat_death Chr+0xDCC (the game's own dead test, 0x795780), hp = the current HP, zero = its root at (0, 0, 0),
+    /// show = the show vote Chr+0x17 (0: hidden by the game: not appeared yet, or a script hide), death = stat_death Chr+0xDCC (the game's own dead test, 0x795780), hp = the current HP, zero = its root at (0, 0, 0),
     /// d = its distance from the followed character. Mirrored by scratchpad/fixb_t/ej_replay.py (the 6 / 7 Nov replay).</summary>
-    internal static string ej_mon_why(bool live, byte inb, byte vis, byte death, int hp, bool zero, float d) =>
-        !live ? "not live" : inb == 0 ? "not in battle" : vis == 0 ? "not visible" : death != 0 ? "dead"
+    internal static string ej_mon_why(bool live, byte inb, byte vis, byte show, byte death, int hp, bool zero, float d) =>
+        !live ? "not live" : inb == 0 ? "not in battle" : vis == 0 ? "not visible" : show == 0 ? "hidden by the game (show vote 0x17)" : death != 0 ? "dead"
         : hp <= 0 ? "no HP" : zero ? "at (0, 0, 0)" : !(d <= k_ej_mon_dist) ? "too far" : null;
     private void ej_face_log(string s) {
         if (_ej_face_logs >= 60) return;

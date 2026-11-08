@@ -14,6 +14,7 @@
 // game's own hop and fade, in both eyes (native: the marker pass at Present).
 #pragma once
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -281,6 +282,11 @@ struct AnchorIn {
     uint8_t btl_9dd, btl_9ce;       // [0x112C9DD], [0x112C9CE] (a battle-wide flag from the btl file: 0x783E20)
 };
 static_assert(sizeof(AnchorIn) == 56, "AnchorIn is mirrored in dmg3d.cs");
+static_assert(offsetof(AnchorIn, ovr_t) == 0 && offsetof(AnchorIn, parent_opt) == 12 && offsetof(AnchorIn, pos) == 24 &&
+              offsetof(AnchorIn, f70) == 36 && offsetof(AnchorIn, c3a4) == 40 && offsetof(AnchorIn, a4f0) == 44 &&
+              offsetof(AnchorIn, ovr) == 48 && offsetof(AnchorIn, ovr_ok) == 49 && offsetof(AnchorIn, parent) == 50 &&
+              offsetof(AnchorIn, parent_ok) == 51 && offsetof(AnchorIn, stat_death) == 52 && offsetof(AnchorIn, flying) == 53 &&
+              offsetof(AnchorIn, btl_9dd) == 54 && offsetof(AnchorIn, btl_9ce) == 55, "AnchorIn's field order is dmg3d.cs DmgAnchorIn's");
 enum AnchorHow : int { AB_FAIL = 0, AB_OVR = 1, AB_PARENT = 2, AB_POS = 3, AB_DEAD_Y = 0x10, AB_FLY = 0x20 };
 /// The game's 0x794AB0(chr, out) for a chr with an actor (our exe, read 7 Nov): (1) actor+0x10C != 0: the override matrix's
 /// translation, and nothing else; else 0x796EA0: (2) Chr+0x43F != 0xFF and that chr has an actor (0x795080): optpos[Chr+0x441]
