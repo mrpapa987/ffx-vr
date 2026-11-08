@@ -570,6 +570,7 @@ struct Runner {
             if (r.on && r.practice) finish(E_ABORTED, t, o);
             if (!same) { if (r.on) finish(E_CLOSED, t, o); open(in.seq, n, in.map, false, in); o.opened = true; }
         }
+        else if (r.on && r.practice && in.win != odg::OD_NONE) finish(E_ABORTED, t, o);   // any overdrive window ends practice (its own gestures, or the buttons)
         else if (r.on && !r.practice) {
             if (in.fresh) r.prog_shown = in.prog;
             finish(in.auron == 5 ? E_SUCCESS : in.auron == 7 ? E_TIMEOUT : E_CLOSED, t, o);

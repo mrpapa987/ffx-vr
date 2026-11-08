@@ -5574,3 +5574,50 @@ reads); scratch tests in render_chk/tests.
   (queue the enables / disables), or a per-process thread walk in MinHook. FFX-60fps is Apache-2.0 (MinHook BSD-2-Clause): a
   local patch is allowed (modified files marked; licence kept when distributed). The issue draft with the evidence:
   scratchpad research/fps60-spell-hitch.md.
+
+## Bushido: strike the targets (branch `od-targets`, 7 Nov 2026; ABI 52)
+
+A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_auron` = 0 off / 1 slashes and punches (unchanged)
+/ 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`,
+unit-tested in the session scratchpad (odt_chk: 155 checks, 44 mutants).
+
+- **What the player sees.** When the window opens, each input of the sequence flies in from about 3 m ahead at eye height to
+  its spot (fronts first, 60 ms apart, 0.35 s each, ease-out; nothing ever passes the strike row or comes toward the face).
+  Two alternating lanes, the strike row 0.60 m ahead and 0.20 m below the eyes, up to two queued plates behind and above each
+  front, dots for the rest. Each target is an octagonal seal plate (2 cm thick, beveled, a darker face) with an engraved,
+  glowing symbol: arrows cool white-cyan, A / B / X / Y amber stroke letters, L1 / R1 a violet tab. Each hand holds a
+  single-edged, slightly curved blade with a small round guard (left gold, right steel-cyan) that brightens above the speed
+  threshold and leaves a short ribbon trail. A cut splits the plate along the stroke; the halves part at 0.8 m/s, fall, spin
+  and fade (450 ms), with sparks and a bright line along the cut; they never move toward the eyes (the near-eye fade still
+  applies). Progress pips show the game's own progress, a bar its seconds left. The look is this mod's own: no game assets,
+  no console colour scheme.
+- **What counts.** A swept test of the blade (8 points, sub-stepped by rotation) against a 10 cm sphere that follows the
+  drawn plate; 1.2 m/s at the contact; arrows within 55 degrees in the plate's plane, buttons any direction (stabs too). Only
+  the two fronts, in either order; a plate is hittable only once it has arrived. One hit per plate, a re-arm per hand and lane
+  (a slash continuing through the replacement does not cut it; the other hand, or the natural return stroke, does). A wrong
+  direction deflects (the plate tilts, the rim flashes) and sends nothing. Pose snaps and spikes (rest around a big step, or a
+  step straight back) and jumps over 8 m/s at the grip are skipped.
+- **What is sent.** Closed loop on the game's progress: a press goes out only when the slot is free, the plate at the game's
+  progress was struck, and no Bushido button of the player's was newly pressed in the last 80 ms; its value is always
+  seq[progress] by the map in use (the game's own bindings read at the window's open, else the built-in map). One resend
+  150 ms after a press the game did not show; a second miss, or a reset right after our press, stops injecting for the window
+  (the plates turn grey, the buttons still work). A reset with no press of ours (a wrong button) rewinds the plates.
+- **Buttons racing ours** (odg_input): a new press of a Bushido button by the player cancels our press while no new packet has
+  carried it (the render thread re-decides from the progress); our press also waits while the game still holds that same
+  button from the player's last packet (else it would make no new-press edge: found by the unit test's poll model). During a
+  targets round the triggers are held back, a quick squeeze is not L1 / R1 and the grips do not grab.
+- **Haptics:** a hit 0.7 / 15 ms on the striking hand, two in one sample 0.9 / 25 ms, success three 0.5 / 30 ms pulses; the
+  window's open and a reset as before.
+- **Practice targets** (F8, under the overdrive gesture rows): any time with the headset's 3D view and no overdrive window open,
+  outside battle too: a random 3-8 symbols (or "Replay last Bushido": the last sequence seen this session), a 4 s bar, the full
+  test and visuals, nothing sent. It ends with `practice: 8 of 8 in 2.31 s (first 0.57 s, then 0.25 s an input; deflects 2)` in
+  F8 and the log. Sliders: blade pitch, target distance, target height, target size (ini `od_targets_blade_pitch`, `_dist`,
+  `_height`, `_size`).
+- **Drawing:** the plates, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
+  3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn
+  last with a reserve, anything else that does not fit is dropped and counted in the window's `odt:` line. The first scheme's
+  glyph row does not draw under the targets.
+- **Log:** `odt:` lines for each cut, a cancel, a resend, a rewind, a stop, and one summary per window or practice round.
+- **Not verified (nobody here can run the game):** the feel and the defaults (practice is the place to tune them), whether the
+  blade's direction suits the Quest grips (the pitch slider), the draw path's placement in every view, and the game facts the
+  first scheme also rests on.

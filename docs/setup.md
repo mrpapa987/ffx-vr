@@ -218,8 +218,10 @@ about 8 %, so a finger resting on a trigger presses nothing; a very light half-p
 Battle: Y = Defend, right trigger held = scroll the turn order forward, left trigger = previous in the switch list. Chords
 (never reach the game): right grip + right stick click = the next view, left grip + right stick click = the next party
 member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
-game gets neither Back nor R3). Auron's and Lulu's overdrive inputs: an Xbox pad for now (Lulu's spin works with the left
-stick).
+game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
+gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (cut the
+symbols as they fly in, either hand). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
+and set the blade pitch, target distance, target height and target size first.
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
