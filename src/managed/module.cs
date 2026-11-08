@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 49;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals)
+    private const int k_abi = 50;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -109,6 +109,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private bool _btl_was = false; private int _btl_mode_before = -1; private string _btl_who = ""; private bool _btl_aeon_out = false; private int _btl_cycle_req = 0;
     private readonly byte[] _btl_roster = new byte[3], _btl_roster_prev = new byte[3];
     private const int k_roster_off = 0xD2C895, k_roster_saved_off = 0xD2C89C, k_aeon_summoner_off = 0x6D1;
+    /// <summary>The roster still holds the last battle's party: MsBtlReadSetScene (0x783E20, battle_state 7) writes this
+    /// battle's through the Chr init 0x79C110 and moves to 8 or 10; 4..7 come before it (MsBtlReadManage 0x783020: 4 wait,
+    /// 5 / 6 the btl read, 7 the set-up). 7 Nov, window 3: the stale [5,2,4] gave "battle start -> chr 2" (Auron) for a second.</summary>
+    internal static bool btl_roster_stale(int bst) => bst >= 4 && bst <= 7;
     private const int k_ply_n = 18, k_mon_n = 16;   // battle entity slots: players 18 (party, Aeons, the Magus Sisters), monsters 16
     private delegate* unmanaged[Cdecl]<float, void> _fn_floor_set; private float _diorama_floor = 8f;
     private delegate* unmanaged[Cdecl]<int, float, float, float, void> _fn_fp_head_set;
@@ -410,6 +414,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_dmg_walk = (delegate* unmanaged[Cdecl]<byte*, uint, uint, DmgNode*, int, uint*, int>)req("ffxvr_dmg_walk"); _fn_dmg_queue = (delegate* unmanaged[Cdecl]<byte*, int, int, DmgNode*, int, DmgChr*, int, byte*, uint*, int>)req("ffxvr_dmg_queue");   // ABI 47: 3D damage numbers (dmg3d.cs)
             _fn_dmg_set = (delegate* unmanaged[Cdecl]<DmgNode*, int, DmgChr*, int, uint, uint, uint, int, void>)req("ffxvr_dmg_set"); _fn_dmg_cfg = (delegate* unmanaged[Cdecl]<int, float, float, byte*, int>)req("ffxvr_dmg_cfg");
             _fn_dmg_skip = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_dmg_skip"); _fn_dmg_status = (delegate* unmanaged[Cdecl]<uint*, int, void>)req("ffxvr_dmg_status");
+            _fn_dmg_anchor = (delegate* unmanaged[Cdecl]<DmgAnchorIn*, float*, int>)req("ffxvr_dmg_anchor");   // ABI 50: the 0x794AB0 damage anchor (dmg3d.cs)
             _fn_turn_set     = (delegate* unmanaged[Cdecl]<int, int, float, float, int, void>)req("ffxvr_turn_set");
             _fn_turn_count   = (delegate* unmanaged[Cdecl]<uint>)req("ffxvr_turn_count");
             _fn_perf_status  = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_perf_status");
@@ -576,7 +581,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_xr_recenter = null; _fn_xr_screen_set = null; _fn_ui_set = null; _fn_ui_draws = null; _fn_xr_pitch_follow = null; _fn_cuts_set = null;
         _fn_eye_jump_set = null; _fn_eye_event = null;   // ABI 44 (eye jumps)
         _fn_bt_tag_step = null; _fn_bt_tag_hold = null;   // ABI 46 (battle tag)
-        _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null;   // ABI 47 (3D damage numbers)
+        _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null; _fn_dmg_anchor = null;   // ABI 47 / 50 (3D damage numbers)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
         _fn_bisect_set = null; _fn_scene_draws = null; _fn_blend_off = null; _fn_blend_restore = null; _fn_hist_set = null; _fn_hist_draws = null;
         _fn_move_set = null; _fn_move_status = null; _fn_cut_count = null; _fn_fp_set = null; _fn_player_set = null; _fn_player_head_set = null; _fn_ride_set = null; _fn_ride_stats = null; _fn_fp_self_set = null; _fn_fp_others_set = null; _fn_fp_ib_set = null; _fn_cpu_report = null; _fn_sg_install = null; _fn_sg_budget = null; _fn_sg_status = null;
@@ -2551,7 +2556,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // The roster: three chr ids, 0xFF = empty slot. Kept by the game at setup, on swaps, summons and dismissals.
             bool roster_ok = true;
             try { for (int i = 0; i < 3; i++) _btl_roster[i] = FhUtil.get_at<byte>(k_roster_off + i); } catch { roster_ok = false; }
-            // before setup has run the bytes are stale (seen: [0,0,0]); a real roster never repeats an id
+            // before setup has run the bytes are stale (seen: [0,0,0]); a real roster never repeats an id; before battle_state 7's
+            // set-up they are the last battle's (the eyes stay with the field pick until this battle's party is there)
+            if (btl_roster_stale(btl_v.battle_state)) roster_ok = false;
             if (_btl_roster[0] == _btl_roster[1] && _btl_roster[0] != 0xFF || _btl_roster[1] == _btl_roster[2] && _btl_roster[1] != 0xFF || _btl_roster[0] == _btl_roster[2] && _btl_roster[0] != 0xFF) roster_ok = false;
             if (roster_ok && plys != null) {
                 static bool is_aeon(byte id) => id >= 8 && id <= 0x11;
@@ -2564,7 +2571,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 int ply_of(int id) { for (int i = 0; i < 18; i++) if (read(plys + i, out Chr pc) && pc.chr_id == id && pc.actor != null) return i; return -1; }
 
                 bool changed = false; for (int i = 0; i < 3; i++) if (_btl_roster[i] != _btl_roster_prev[i]) changed = true;
-                if (changed) _logger.Info($"battle follow: roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] (was [{_btl_roster_prev[0]},{_btl_roster_prev[1]},{_btl_roster_prev[2]}])");
+                if (changed) _logger.Info($"battle follow: roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] (was [{_btl_roster_prev[0]},{_btl_roster_prev[1]},{_btl_roster_prev[2]}]) at battle_state 0x{btl_v.battle_state:X2}");
 
                 int aeon_id = -1; for (int i = 0; i < 3; i++) if (is_aeon(_btl_roster[i])) aeon_id = _btl_roster[i];
                 int want = _btl_follow_id; string why = null;

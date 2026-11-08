@@ -6,14 +6,15 @@
 // The game (our exe, CHECKED 5-6 Nov): MsNumberRegist 0x79FA00 makes one node per digit (0x79FC60) in a pool of 128 x 0x14 B at
 // [0x11360B8] (a singly linked list from [0x11360BC], link at +0x10). Every logic tick 0x79F5E0 counts each node's start delay
 // down and its frame counter up and frees it after `len` (30) frames. Once per drawn frame, in the battle UI draw 0x89B360,
-// 0x79F380 projects each Chr's damage anchor (optpos[Chr+0x442] lifted by Chr+0x4E8) to PS2 px (Chr+0xF44/F48, clamped copy
-// F4C/F50), 0x79F660 turns every node whose delay is 0 into a popup-queue entry at that anchor plus the node's offset and a
+// 0x79F380 projects each Chr's damage anchor (optpos[Chr+0x442], or 0x794AB0(chr) when Chr+0x442 is 0xFF: anchor_794ab0
+// below; then lifted by Chr+0x4E8) to PS2 px (Chr+0xF44/F48, clamped copy F4C/F50), 0x79F660 turns every node whose delay is 0 into a popup-queue entry at that anchor plus the node's offset and a
 // hop from the table at 0xC424B0, and 0x893290 draws the queue (digits from battle.dds at 34 x 45 UI px) and empties it.
 // We read the same nodes at the same point of the frame (managed: the job join right after that draw, or the queue draw's
 // own detour when dmg3d_hide2d is on) and draw each digit as a head-facing quad from battle.dds at its target, with the
 // game's own hop and fade, in both eyes (native: the marker pass at Present).
 #pragma once
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -42,10 +43,13 @@ struct Chr {
     int32_t sx, sy;               // Chr+0xF34 / F38: the cursor anchor on screen, UI units (log only)
     int32_t f44, f48, f4c, f50;   // Chr+0xF44 / F48: the damage anchor on screen, PS2 px; F4C / F50 its clamped copy (flag 0x80)
     uint8_t chr, idx442;          // the chr index; Chr+0x442 (0xFF: the game anchors at 0x794AB0 instead)
-    uint8_t src;                  // 0 the game's own rule (optpos[Chr+0x442]); 1 Chr+0x442 == 0xFF: optpos[1] (approximate); 2 no anchor
+    uint8_t src;                  // 0 the game's own rule (optpos[Chr+0x442], or the 0x794AB0 port for 0xFF: how != 0); 1 a stand-in
+                                  // (optpos[1] for 0xFF when the port's reads failed, an index above 25, d7_anchor's fallback); 2 no anchor
     uint8_t aflags;               // d7_anchor's flags: 1 attached, 2 override matrix (no 30 Hz correction then), 4 index outside 0..25;
                                   // k_self (8, ours): first person looks out of this actor (C3's rule): its digits go to the self spot
-    uint8_t ok, pad[3];           // ok: the read succeeded (src 0 or 1)
+    uint8_t ok;                   // ok: the read succeeded (src 0 or 1)
+    uint8_t how;                  // Chr+0x442 == 0xFF: anchor_794ab0's result (AB_*; 0 = not ported, opt is optpos[1]). Log only
+    uint8_t pad[2];
 };
 /// A popup-queue entry (0x899A40; 16 B at 0x133F110 + 16 * i).
 struct Entry { int16_t x, y; int32_t kind, glyph; uint8_t r, g, b, a; };
@@ -252,6 +256,61 @@ inline bool site(const Chr& c, float lift, const float head[3], const float* sel
     pull(out, head);
     return finite3(out);
 }
+/// No digit nearer the eye than min_units (0.6 m: three of the 80 numbers logged on 6 / 7 Nov were 0.43-0.53 m away, 3-4 cm
+/// digits in the face): a site nearer than that goes out along the ray from the head through it, so it stays where it is on
+/// screen. A site at the head itself (no ray) is left. Returns whether it moved.
+constexpr float k_min_eye_m = 0.6f;
+inline bool keep_out(float a[3], const float head[3], float min_units) {
+    if (!(min_units > 0.f) || !std::isfinite(min_units) || !finite3(a) || !finite3(head)) return false;
+    const float dx = a[0] - head[0], dy = a[1] - head[1], dz = a[2] - head[2], dl = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!(dl > 1e-4f) || dl >= min_units) return false;
+    const float k = min_units / dl;
+    a[0] = head[0] + dx * k; a[1] = head[1] + dy * k; a[2] = head[2] + dz * k;
+    return true;
+}
+
+// ---- 0x794AB0: the damage anchor of a chr whose Chr+0x442 is 0xFF ---------------------------------------------------
+/// What managed reads for it (main thread, guarded reads; mirrored in dmg3d.cs, 56 B). Game space (y down).
+struct AnchorIn {
+    float ovr_t[3];       // the override matrix's translation: *(actor+0x10C) + 0x30..0x38 (ovr_ok)
+    float parent_opt[3];  // optpos[Chr+0x441] of chr Chr+0x43F's actor, by 0x8354F0's rule (parent_ok 1)
+    float pos[3];         // actor +0x0C..0x14 (chr_pos_vec: the logic root on the ground, without +0x6C)
+    float f70, c3a4, a4f0;          // Chr+0xF70 (the dead height), Chr+0x3A4 (a scale, 1.0 at init), actor+0x4F0 (a height)
+    uint8_t ovr, ovr_ok;            // actor+0x10C != 0; its translation read
+    uint8_t parent, parent_ok;      // Chr+0x43F (0xFF none); 0 no parent actor (id 0xFF, >= 0x1F or no actor), 1 read, 2 read failed
+    uint8_t stat_death, flying;     // Chr+0xDCC, Chr+0x505
+    uint8_t btl_9dd, btl_9ce;       // [0x112C9DD], [0x112C9CE] (a battle-wide flag from the btl file: 0x783E20)
+};
+static_assert(sizeof(AnchorIn) == 56, "AnchorIn is mirrored in dmg3d.cs");
+static_assert(offsetof(AnchorIn, ovr_t) == 0 && offsetof(AnchorIn, parent_opt) == 12 && offsetof(AnchorIn, pos) == 24 &&
+              offsetof(AnchorIn, f70) == 36 && offsetof(AnchorIn, c3a4) == 40 && offsetof(AnchorIn, a4f0) == 44 &&
+              offsetof(AnchorIn, ovr) == 48 && offsetof(AnchorIn, ovr_ok) == 49 && offsetof(AnchorIn, parent) == 50 &&
+              offsetof(AnchorIn, parent_ok) == 51 && offsetof(AnchorIn, stat_death) == 52 && offsetof(AnchorIn, flying) == 53 &&
+              offsetof(AnchorIn, btl_9dd) == 54 && offsetof(AnchorIn, btl_9ce) == 55, "AnchorIn's field order is dmg3d.cs DmgAnchorIn's");
+enum AnchorHow : int { AB_FAIL = 0, AB_OVR = 1, AB_PARENT = 2, AB_POS = 3, AB_DEAD_Y = 0x10, AB_FLY = 0x20 };
+/// The game's 0x794AB0(chr, out) for a chr with an actor (our exe, read 7 Nov): (1) actor+0x10C != 0: the override matrix's
+/// translation, and nothing else; else 0x796EA0: (2) Chr+0x43F != 0xFF and that chr has an actor (0x795080): optpos[Chr+0x441]
+/// of that actor through 0x8354F0; (3) else the actor's position (0x82AC90: +0x0C..0x14). Then (0x794AB0 again, not for 1):
+/// [0x112C9DD] != 0 and stat_death == 2: y = Chr+0xF70; Chr+0x505 (flying) or [0x112C9CE]: y += actor+0x4F0 * Chr+0x3A4 * 0.5
+/// (0x7950F0, [0xB92220] = 0.5). 0x79F380 then subtracts Chr+0x4E8 from y for both its branches (anchor() does that).
+/// Returns AB_* (branch | adjustments) with out set, or AB_FAIL (a read the branch needs failed: the caller keeps its stand-in).
+inline int anchor_794ab0(const AnchorIn& in, float out[3]) {
+    int how;
+    if (in.ovr) {
+        if (!in.ovr_ok || !finite3(in.ovr_t)) return AB_FAIL;
+        out[0] = in.ovr_t[0]; out[1] = in.ovr_t[1]; out[2] = in.ovr_t[2];
+        return AB_OVR;
+    }
+    if (in.parent != 0xFF && in.parent_ok != 0) {
+        if (in.parent_ok != 1 || !finite3(in.parent_opt)) return AB_FAIL;
+        out[0] = in.parent_opt[0]; out[1] = in.parent_opt[1]; out[2] = in.parent_opt[2]; how = AB_PARENT;
+    }
+    else { out[0] = in.pos[0]; out[1] = in.pos[1]; out[2] = in.pos[2]; how = AB_POS; }
+    if (in.btl_9dd != 0 && in.stat_death == 2) { out[1] = in.f70; how |= AB_DEAD_Y; }
+    if (in.flying != 0 || in.btl_9ce != 0) { const float k = in.a4f0 * in.c3a4; out[1] = out[1] + k * 0.5f; how |= AB_FLY; }
+    return finite3(out) ? how : AB_FAIL;
+}
+
 /// World units per UI px at distance `dist`: the game's size (size / 14 units per px), with the digit's height kept between
 /// k_min_rad and k_max_rad (times size) so it stays readable from the diorama to first person.
 inline float units_per_px(float size, float dist) {
