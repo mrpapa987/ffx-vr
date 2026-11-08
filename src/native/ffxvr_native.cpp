@@ -5316,7 +5316,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 56;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window)
+constexpr int FFXVR_ABI = 57;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6261,6 +6261,52 @@ static bool odt_wanted(); static bool odt_view();                     // (the sa
 // Decided here each Present (render thread), published interlocked; the managed detour on 0x892740 (main thread, ini
 // od_targets_hide2d, hooked at launch) asks ffxvr_odt_hide2d and skips the call. The shared timer (0x8955E0) stays.
 static volatile LONG g_odt_hide2d = 0;
+// Section 15 (the owner, 461b1bf: the row still showed). Two independent ways to skip the row, either enough:
+// - the managed detour on 0x892740 (Fahrenheit / MinHook; its insertion is checked at the first EXEC frame and retried late);
+// - a call-site patch of our own (ffxvr_odt_row_patch, at init): the battle UI's 5-byte `call 0x892740` at 0x89B411 is pointed
+//   at odt_row_stub, which skips the call while g_odt_hide2d is 1 and otherwise calls 0x892740 (its detour too, when inserted).
+//   The bytes are checked first (E8 and a target of 0x892740, rebased); only the rel32 is rewritten (one interlocked store
+//   inside a cache line), and it is put back on a dynamic unload.
+// The diagnostics for the window line: every question by Auron's state (3, 4, other) and answer; managed's counts (pushed);
+// the stub's calls and skips.
+static volatile LONG g_odt_row_st = 0;                  // Auron's state at the last Present (the questions' bucket)
+static volatile LONG g_odt_row_q[3][2] = {};            // questions: [3 / 4 / other][answer 0 / 1]
+static volatile LONG g_odt_row_m[4] = {};               // managed (ffxvr_odt_row_stat): the detour's install state, calls, hidden, faults
+static volatile LONG g_odt_patch_calls = 0, g_odt_patch_hidden = 0;
+static int g_odt_patch_state = 0;                       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect
+static uintptr_t g_odt_row_fn = 0, g_odt_row_site = 0; static LONG g_odt_row_rel_orig = 0;
+static int odt_row_ask() {
+    const LONG h = InterlockedCompareExchange(&g_odt_hide2d, 0, 0);
+    const LONG st = g_odt_row_st;
+    InterlockedIncrement(&g_odt_row_q[st == 3 ? 0 : st == 4 ? 1 : 2][h ? 1 : 0]);
+    return static_cast<int>(h);
+}
+/// The patched call site's target (the game's main thread, from 0x89B411; cdecl void(), as 0x892740).
+static void __cdecl odt_row_stub() {
+    InterlockedIncrement(&g_odt_patch_calls);
+    if (odt_row_ask()) { InterlockedIncrement(&g_odt_patch_hidden); return; }
+    reinterpret_cast<void(__cdecl*)()>(g_odt_row_fn)();
+}
+static const char* odt_row_hook_name(LONG st) {
+    switch (st) { case 1: return "queued (insertion not checked yet)"; case 2: return "inserted"; case 3: return "late-inserted"; case 4: return "NOT inserted (late insertion failed)";
+                  case 5: return "not hooked (refused or bytes)"; default: return "off"; }
+}
+static const char* odt_row_patch_name(int st) {
+    switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
+                  case -3: return "FAILED (VirtualProtect)"; default: return "not asked"; }
+}
+/// The window line's tail: the row's mechanisms and counts since the last window line (then reset).
+static int odt_row_line(char* s, size_t n, int k) {
+    LONG q[3][2]; for (int a = 0; a < 3; ++a) for (int b = 0; b < 2; ++b) q[a][b] = InterlockedExchange(&g_odt_row_q[a][b], 0);
+    const LONG pc = InterlockedExchange(&g_odt_patch_calls, 0), ph = InterlockedExchange(&g_odt_patch_hidden, 0);
+    static LONG m_prev[3] = { 0, 0, 0 };
+    const LONG hs = g_odt_row_m[0], mc = g_odt_row_m[1], mh = g_odt_row_m[2], mf = g_odt_row_m[3];
+    const LONG dc = mc - m_prev[0], dh = mh - m_prev[1], df = mf - m_prev[2]; m_prev[0] = mc; m_prev[1] = mh; m_prev[2] = mf;
+    return odg::fmt_append(s, n, k, "; row: hook %s, detour calls %ld, hidden %ld, faults %ld; call-site patch %s, calls %ld, hidden %ld; asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld (answers 0/1)%s",
+                           odt_row_hook_name(hs), static_cast<long>(dc), static_cast<long>(dh), static_cast<long>(df), odt_row_patch_name(g_odt_patch_state), static_cast<long>(pc), static_cast<long>(ph),
+                           static_cast<long>(q[0][0]), static_cast<long>(q[0][1]), static_cast<long>(q[1][0]), static_cast<long>(q[1][1]), static_cast<long>(q[2][0]), static_cast<long>(q[2][1]),
+                           dc + pc == 0 ? " (NEITHER RAN this window)" : "");
+}
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
 // from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
 static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.f;
@@ -6448,6 +6494,7 @@ static void od_gest_tick() {
         ri.battle = in.battle; ri.fresh = in.fresh && in.r.ok; ri.gate = in.headset && in.vrpad; ri.view = odt_view();
         ri.auron = in.r.auron; ri.lulu = in.r.lulu; ri.tidus = in.r.tidus; ri.wakka = in.r.wakka;
         const LONG hd = odt::hide_row(ri) ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd);
+        const LONG st = in.fresh && in.r.ok ? in.r.auron : 0; if (g_odt_row_st != st) InterlockedExchange(&g_odt_row_st, st);   // the questions' bucket
     }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
@@ -6467,7 +6514,10 @@ static void od_gest_tick() {
     if (to.stopped && odg_line_ok())
         diag("odt: frame %u: Auron targets: STOPPED injecting this window (%s): the targets are grey, the buttons still work | our last value 0x%04X, the game's word 0x%04X", g_frames,
              g_odt.inj.stop_why == 1 ? "a reset right after our press: the map, or a button racing ours" : "the game missed a press twice", static_cast<unsigned>(g_odt.inj.ours_val), static_cast<unsigned>(in.game_press));
-    if (to.line) { snprintf(g_odt_line, sizeof(g_odt_line), "%s", g_odt.line_buf); if (g_odt.rounds <= 200) diag("odt: frame %u: %s", g_frames, g_odt.line_buf); }
+    if (to.line) {
+        char row[400] = ""; if (!g_odt.r.practice) odt_row_line(row, sizeof(row), 0);   // a window's line: the row's mechanisms and counts
+        snprintf(g_odt_line, sizeof(g_odt_line), "%s", g_odt.line_buf); if (g_odt.rounds <= 200) diag("odt: frame %u: %s%s", g_frames, g_odt.line_buf, row);
+    }
     if (g_odv_on && o.inject != odg::OD_NONE && o.inject == w) {   // the visuals' events: a burst a gesture (green sent, grey refused), Tidus's mark
         for (int h = 0; h < 2; ++h) {
             if (o.fired[h] != odg::C_NONE) {
@@ -6546,7 +6596,40 @@ extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist,
 }
 /// ABI 56 (the game's main thread, from the detour on 0x892740): 1 = skip the game's Bushido input row now (a strike-the-targets
 /// window's targets are being drawn in the headset). One aligned interlocked-published value, at most one Present old.
-extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return static_cast<int>(InterlockedCompareExchange(&g_odt_hide2d, 0, 0)); }
+extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return odt_row_ask(); }   // (counted by Auron's state and answer: section 15)
+/// ABI 57 (managed, at init, with od_targets_hide2d): on = 1 points the battle UI's call of 0x892740 (at 0x89B411) at our stub,
+/// after checking its bytes; 0 records "off". Returns the patch state (1 patched; < 0 why not). Once a session.
+extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
+    if (g_odt_patch_state != 0) return g_odt_patch_state;
+    if (!on) { g_odt_patch_state = 2; return 2; }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (base == 0) { g_odt_patch_state = -1; return -1; }
+    const uintptr_t site = base + (0x89B411u - 0x400000u), fn = base + (0x892740u - 0x400000u);
+    uint8_t b[5] = {};
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(site), b, 5)) { g_odt_patch_state = -2; diag("odt: Bushido row call-site patch: 0x89B411 unreadable: not patched"); return -2; }
+    LONG rel = 0; memcpy(&rel, b + 1, 4);
+    if (b[0] != 0xE8 || site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) != fn) {
+        g_odt_patch_state = -2;
+        diag("odt: Bushido row call-site patch: 0x89B411 reads %02X %02X %02X %02X %02X, not a call of 0x892740: not patched (another mod or another exe)", b[0], b[1], b[2], b[3], b[4]);
+        return -2;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { g_odt_patch_state = -3; diag("odt: Bushido row call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
+    g_odt_row_fn = fn; g_odt_row_site = site; g_odt_row_rel_orig = rel;
+    const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odt_row_stub) - (site + 5));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store (inside one cache line)
+    DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
+    g_odt_patch_state = 1;
+    diag("odt: Bushido row call-site patch: 0x89B411 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x892740 while the targets are up", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    return 1;
+}
+/// ABI 57 (managed, each frame): the detour's install state (0 off, 1 queued, 2 inserted, 3 late-inserted, 4 not inserted,
+/// 5 not hooked) and its running counts, for the window line. Returns the call-site patch's state (F8).
+extern "C" __declspec(dllexport) int ffxvr_odt_row_stat(int state, int calls, int hidden, int faults) {
+    InterlockedExchange(&g_odt_row_m[0], state); InterlockedExchange(&g_odt_row_m[1], calls); InterlockedExchange(&g_odt_row_m[2], hidden); InterlockedExchange(&g_odt_row_m[3], faults);
+    return g_odt_patch_state;
+}
 /// Practice targets (ABI 52): which 1 a random 3-8 symbols, 2 the last Bushido sequence seen this session. Only a request: the render
 /// thread starts it at its next Present, and F8's text 4 says how it went. Returns 1 when requested.
 extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
@@ -16812,7 +16895,14 @@ static void gt_line_part(char* out, size_t n) {
     snprintf(out, n, " | timer %s, timer_fix %s | game window: %s | main loop: %s%s%s", tm, g_gt_fix_state, wn, part_off ? "(limiter_probe was 0 for part of this window) " : "", ml, sl);
 }
 
-BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
+    if (reason == DLL_PROCESS_DETACH && reserved == nullptr && g_odt_patch_state == 1 && g_odt_row_site != 0) {   // a dynamic unload: the game's call back (section 15)
+        DWORD old = 0;
+        if (VirtualProtect(reinterpret_cast<void*>(g_odt_row_site), 5, PAGE_EXECUTE_READWRITE, &old)) {
+            InterlockedExchange(reinterpret_cast<volatile LONG*>(g_odt_row_site + 1), g_odt_row_rel_orig);
+            DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(g_odt_row_site), 5, old, &tmp); FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(g_odt_row_site), 5);
+        }
+    }
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(module);
         GetModuleFileNameW(module, g_dir, MAX_PATH);

@@ -5607,6 +5607,35 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   a battle, the headset and VR pad live, the 3D view, no other overdrive; `odt::hide_row`). In state 4 without a round (the
   gestures cannot inject) it stays, as it does in practice, in slashes and punches and in the other overdrives. The detour's own
   work is wrapped (R9-N4): a failure there draws the row (counted as "faults" in the F8 tooltip).
+- **The row still showed (the owner, 461b1bf), and two ways to hide it now.** The investigation ruled out native's answer and
+  any other drawer of the row, which leaves the detour on 0x892740 not running. Nothing in core.log says why, and every
+  address we use is base-relative: FFX.exe loads at 0x10000 there, not 0x400000. FhCallLocation(module, offset), FhUtil.get_at
+  and native's GetModuleHandle + (VA - 0x400000) all use the real base.
+  - **The detour, checked.** 30 frames into the session (after Fahrenheit's commit) the managed side asks Fahrenheit for the
+    hook's chain entry (an inserted hook has one) and reads 0x892740's first bytes (MinHook's jmp, E9). It logs one line,
+    `odt: Bushido row detour: inserted at 0x... (bytes E9 ...)` or `NOT inserted ...`. If the hook is not in, it tries one late
+    insertion, which Fahrenheit allows on a function with no hooks applied, and logs the result.
+  - **A call-site patch of our own.** At init (ini `od_targets_hide2d`, `ffxvr_odt_row_patch`), native checks the battle UI's
+    5-byte `call 0x892740` at 0x89B411: the byte E8, and a target of 0x892740 at the real base. It then points the call at a
+    native stub, which skips the call while the row is to be hidden and otherwise calls 0x892740 (and so the detour too, when
+    inserted).
+    - Only the rel32 is rewritten, in one interlocked store inside a cache line, under VirtualProtect. It is put back on a
+      dynamic unload.
+    - Other bytes there (another mod, another exe) leave it alone, with a log line.
+    - It does not depend on Fahrenheit's hook commit. Either mechanism alone hides the row.
+  - **Why not the 2D draw skip.** The row's icons go 0x892740 → 0x9029B0 → 0x8E6030 → 0x8E6070 → 0x903EE0 → the 2D quad
+    submit 0x63EEE0, all on the game's main thread. There they are recorded into the command lists that the game's render
+    thread replays later. So at the D3D draws, where our skip ranges work, no return address inside 0x892740 is on the
+    stack. The sprite signatures (the button atlas, the quad sizes) are shared with every other button prompt.
+    - Skipping at 0x63EEE0 by its caller would need another detour, of the same kind as the one that failed, plus a stack walk
+      per quad.
+    - The call site is the narrowest point that is ours alone.
+  - **Diagnostics.**
+    - Native counts every question (the stub's and the detour's) by Auron's state (3, 4, other) and answer.
+    - Managed pushes the detour's install state and counts each frame (`ffxvr_odt_row_stat`).
+    - Each Bushido window's `odt:` line in ffxvr_diag.log ends with `; row: hook <state>, detour calls N, hidden H, faults F;
+      call-site patch <state>, calls P, hidden Q; asked st3 a/b st4 c/d other e/f (answers 0/1)`, with counts since the last
+      window line. "NEITHER RAN this window" flags a window in which neither path was called.
 - **Textured medallions** (the owner's concept, 10 Nov 2026: engraved silver medallions with a swirling glowing disc and a
   bright symbol, each symbol its own colour). From a local art pack when present (next section); without it the flat plates as
   before. Each plate, back to front: a soft halo ring (tinted, pulsing, additive), the swirl disc in the frame's hole (tinted,

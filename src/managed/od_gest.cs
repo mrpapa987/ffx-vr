@@ -50,6 +50,11 @@ public sealed unsafe partial class FFXVRModule {
     // skipped while native says a strike-the-targets window's targets are drawn (ffxvr_odt_hide2d, ABI 56)
     private const int k_odt_row = 0x492740;                                                               // VA 0x892740
     private delegate* unmanaged[Cdecl]<int> _fn_odt_hide2d;                                               // ABI 56
+    private delegate* unmanaged[Cdecl]<int, int> _fn_odt_row_patch;                                       // ABI 57: the call-site patch at 0x89B411 (native, at init)
+    private delegate* unmanaged[Cdecl]<int, int, int, int, int> _fn_odt_row_stat;                        // ABI 57: our counts for the window line; returns the patch's state
+    // the detour's install state (section 15): 0 off, 1 queued, 2 inserted, 3 late-inserted, 4 not inserted (late insertion failed),
+    // 5 not hooked (refused, the bytes, no native); checked once at the first EXEC frame (odt_row_resolve)
+    private int _odt_row_install, _odt_patch_state, _odt_row_check_frames; private bool _odt_row_checked; private string _odt_row_check = "not checked yet (the first frame after launch)";
     private d7_void? _h_odt_row, _o_odt_row; private nint _a_odt_row; private bool _odt_row_hook_ok;
     private string _odt_row_status = "not hooked (od_targets_hide2d=0 at launch)";
     private int _odt_row_calls, _odt_row_hidden, _odt_row_faults; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
@@ -72,15 +77,20 @@ public sealed unsafe partial class FFXVRModule {
         _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
         _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void>)req("ffxvr_odt_set");   // ABI 56 (+ time, + spread, + art, + badge)
         _fn_odt_hide2d = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_odt_hide2d");   // ABI 56
+        _fn_odt_row_patch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_row_patch");   // ABI 57
+        _fn_odt_row_stat = (delegate* unmanaged[Cdecl]<int, int, int, int, int>)req("ffxvr_odt_row_stat");   // ABI 57
         _fn_odt_practice = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_practice");
     }
-    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; _fn_odt_hide2d = null; }
+    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; _fn_odt_hide2d = null; _fn_odt_row_patch = null; _fn_odt_row_stat = null; }
 
     /// <summary>At module init, after dmg3d_init (Fahrenheit's commit stops at the first failing insertion: a refusal here takes
     /// nothing else with it): with od_targets_hide2d=1 the hook on the game's Bushido input row.</summary>
     private void odt_row_init() {
         _od_tgt_hide_at_launch = _od_tgt_hide2d;
+        // section 15: native's own call-site patch first (it does not depend on Fahrenheit's hook commit); the detour as well
+        if (_native_ok && _fn_odt_row_patch != null) _odt_patch_state = _fn_odt_row_patch(_od_tgt_hide2d ? 1 : 0);
         if (!_od_tgt_hide2d) return;
+        _odt_row_install = 5;
         if (!_native_ok || _fn_odt_hide2d == null) { _odt_row_status = "not hooked: the native helper did not load"; return; }
         byte b0 = 0, b1 = 0, b2 = 0, b3 = 0;   // the bytes checked (push ebp; mov ebp, esp; movsx ...): anything else is left alone
         try { b0 = FhUtil.get_at<byte>(k_odt_row); b1 = FhUtil.get_at<byte>(k_odt_row + 1); b2 = FhUtil.get_at<byte>(k_odt_row + 2); b3 = FhUtil.get_at<byte>(k_odt_row + 3); } catch { }
@@ -90,14 +100,45 @@ public sealed unsafe partial class FFXVRModule {
         try {
             _odt_row_hook_ok = new FhCallHandle<d7_void>(new FhCallLocation((void*)_a_odt_row)).hook(this, _h_odt_row!);
             _odt_row_status = _odt_row_hook_ok ? "the Bushido row 0x892740 queued (its calls in a battle prove it)" : "the Bushido row hook was REFUSED (another mod hooks 0x892740?): the game's row stays";
+            if (_odt_row_hook_ok) _odt_row_install = 1;
         }
         catch (Exception e) { _odt_row_status = $"the Bushido row hook FAILED ({e.GetType().Name}): the game's row stays"; }
         _logger.Info("odt: " + _odt_row_status);
     }
     /// <summary>Render thread, with dmg3d_resolve: the detour's original, once.</summary>
     private void odt_row_resolve() {
-        if (_h_odt_row == null || _o_odt_row != null || !_odt_row_hook_ok) return;
-        try { System.Threading.Volatile.Write(ref _o_odt_row, d7_chain(_a_odt_row, _h_odt_row)); } catch (Exception e) { _logger.Error($"odt: resolving the original: {e}"); }
+        if (_h_odt_row == null || !_odt_row_hook_ok) return;
+        bool asked = false;   // Fahrenheit answered (it throws before EXEC: then the check waits)
+        if (_o_odt_row == null) { try { System.Threading.Volatile.Write(ref _o_odt_row, d7_chain(_a_odt_row, _h_odt_row)); asked = true; } catch (Exception e) { _logger.Error($"odt: resolving the original: {e}"); } }
+        else asked = true;
+        // the check: once, 30 frames in (well after Fahrenheit's commit), only when Fahrenheit answered the chain question
+        if (!_odt_row_checked && asked && ++_odt_row_check_frames >= 30) { _odt_row_checked = true; if (_o_odt_row == null) { try { System.Threading.Volatile.Write(ref _o_odt_row, d7_chain(_a_odt_row, _h_odt_row)); } catch { } } odt_row_check(); }
+    }
+    /// <summary>Section 15, render thread, once (the first EXEC frame, after Fahrenheit's commit): is the detour really in? MinHook
+    /// writes a jmp (E9) over 0x892740's first bytes, and Fahrenheit keeps a chain entry for an inserted hook. Not in: one late
+    /// insertion (Fahrenheit allows it on a function with no hooks; it rejects one whose queued hooks were applied). One log line.</summary>
+    private void odt_row_check() {
+        string bytes = odt_row_bytes(); bool chain = _o_odt_row != null;
+        bool jmp = bytes.StartsWith("E9", StringComparison.Ordinal);
+        if (chain) { _odt_row_install = 2; _odt_row_check = jmp ? I($"inserted at 0x{_a_odt_row:X8} (bytes {bytes})") : I($"inserted at 0x{_a_odt_row:X8} (Fahrenheit's chain has it), but the first bytes are {bytes}, not a jmp (E9): another patch over it?"); }
+        else {
+            bool late = false; string why = "";
+            diag7_insert_begin();
+            try { late = new FhCallHandle<d7_void>(new FhCallLocation((void*)_a_odt_row)).hook(this, _h_odt_row!); }
+            catch (Exception e) { why = e.GetType().Name; }
+            finally { diag7_insert_end(); }
+            d7_void? o = null; try { o = d7_chain(_a_odt_row, _h_odt_row!); } catch { }
+            if (o != null) System.Threading.Volatile.Write(ref _o_odt_row, o);
+            string after = odt_row_bytes();
+            if (late && o != null) { _odt_row_install = 3; _odt_row_check = I($"NOT inserted after the commit (bytes {bytes}, no chain entry); late-inserted now (bytes {after})"); }
+            else { _odt_row_install = 4; _odt_row_check = I($"NOT inserted (bytes {bytes}, no chain entry); the late insertion {(late ? "was accepted but has no chain entry (bytes " + after + ")" : "failed" + (why.Length > 0 ? " (" + why + ")" : " (see core.log)"))}: the call-site patch must hide the row"); }
+        }
+        _logger.Info("odt: Bushido row detour: " + _odt_row_check);
+        d7_log("odt: Bushido row detour: " + _odt_row_check + I($"; call-site patch state {_odt_patch_state} (1 patched, 2 off, < 0 not patched: see its own line)"));   // ffxvr_diag.log too
+    }
+    private static string odt_patch_name(int st) => st switch { 1 => "patched", 2 => "off", -1 => "FAILED: FFX.exe", -2 => "not patched: the call site's bytes differ (another mod?)", -3 => "FAILED: VirtualProtect", _ => "not asked (no native helper)" };
+    private string odt_row_bytes() {
+        try { byte* p = (byte*)_a_odt_row; return I($"{p[0]:X2} {p[1]:X2} {p[2]:X2} {p[3]:X2} {p[4]:X2}"); } catch { return "unreadable"; }
     }
     /// <summary>The game's Bushido input row (0x892740, main thread): skipped while native says our targets are drawn, latched per
     /// game frame; otherwise the original runs.</summary>
@@ -183,6 +224,7 @@ public sealed unsafe partial class FFXVRModule {
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
         if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size);
         if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0, _od_tgt_badge ? 1 : 0);
+        if (_fn_odt_row_stat != null) _odt_patch_state = _fn_odt_row_stat(_odt_row_install, _odt_row_calls, _odt_row_hidden, _odt_row_faults);   // section 15: the window line's row part
         odg_always_tick();
     }
     /// <summary>The test aid (design 4.3 step 6): Btl + 0x28 (debug flags) + 0x14 = VA 0x112A90C, the game's own "overdrive always
@@ -265,7 +307,8 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Checkbox("show the button letter (small)##odt", ref _od_tgt_badge);
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
         ImGui.SameLine(); ImGui.Checkbox("hide the game's Bushido row (from the next launch)##odt", ref _od_tgt_hide2d);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Now: {_odt_row_status}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}."));
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Two ways, either is enough: the detour on 0x892740 ({_odt_row_status}; {_odt_row_check}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}) and the call-site patch at 0x89B411 ({odt_patch_name(_odt_patch_state)}). Each Bushido's odt line in ffxvr_diag.log says which ran."));
+
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>
