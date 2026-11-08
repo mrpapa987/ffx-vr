@@ -626,8 +626,9 @@ struct Runner {
     // -- the effects ------------------------------------------------------------------------------------------------------------------
     /// A cut: the plate splits along the stroke (in its plane) through the blade's crossing (clamped near the centre); the halves
     /// part perpendicular to the cut at 0.8 m/s with a little of the blade's velocity, fall, spin and fade (450 ms); never toward
-    /// the eye: the velocity's part toward e0 is removed and the rise is capped below eye height, so with gravity the distance to
-    /// e0 only grows.
+    /// the eye: the velocity's part toward e0 is removed, the rise is capped at eye height and the cut knocks both halves 0.3 m/s
+    /// back from e0 (a half starting above eye level would otherwise come a hair nearer as it falls back through it), so with
+    /// gravity the distance to e0 only grows.
     void add_cut(V3 C, const Axes3& ax, V3 cd, V3 at, V3 bv, Col k, double t) {
         Cut& c = cut[cut_next]; cut_next = (cut_next + 1) % k_cut_n;
         c = Cut{}; c.t0 = t; c.c = C; c.ax = ax; c.rad = r.g.rad; c.th = r.g.th; c.k = k;
@@ -643,9 +644,12 @@ struct Runner {
             if (m > 0) { cx /= static_cast<float>(m); cy /= static_cast<float>(m); }
             c.hn[s] = m; for (int j = 0; j < m; ++j) { c.hx[s][j] = hx[j] - cx; c.hy[s][j] = hy[j] - cy; c.hcut[s][j] = hc[j]; }
             c.hc0[s] = C + ax.R * cx + ax.U * cy;
-            V3 v = c.cn * (s == 0 ? 0.8f : -0.8f) + bv * 0.15f;
+            const V3 nd = c.cn * (s == 0 ? 1.f : -1.f);
+            V3 v = nd * 0.8f + bv * 0.15f;
+            const float vn = dot(v, nd); if (vn < 0.8f) v = v + nd * (0.8f - vn);   // the blade adds to the parting, never takes from it
             const V3 tow = norm(r.fr.e0 - c.hc0[s]);
             const float tv = dot(v, tow); if (tv > 0.f) v = v - tow * tv;
+            v = v - tow * 0.3f;   // knocked back
             const float rise = r.fr.e0.y - c.hc0[s].y;
             const float vmax = rise > 0.f ? std::sqrt(2.f * k_g * rise) : 0.f;
             if (v.y > vmax) v.y = vmax;
