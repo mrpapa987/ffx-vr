@@ -625,6 +625,8 @@ static bool same4(const float* a, const float* b) { return same4_tol(a, b, same4
 bool  g_xr_want     = false;       // the user asked for the headset
 ID3D11Texture2D* g_bb_copy = nullptr;        // eye 1: the backbuffer copied at the hook, then the overlay drawn on top
 ID3D11RenderTargetView* g_bb_copy_rtv = nullptr;
+ID3D11Texture2D* g_bb_copy2 = nullptr;       // eye 2 on a 3D frame without the UI pass while the targets draw (B1): the twin copied, the targets on top
+ID3D11RenderTargetView* g_bb_copy2_rtv = nullptr;
 
 bool  g_xr_active   = false;       // poses valid this frame
 bool  g_xr_rotate   = true, g_xr_translate = true;
@@ -1556,8 +1558,10 @@ static odg::Stick s_odg_stick; static pad::PressHook s_odg_hook;                
 // of a Bushido button by the player cancels our press if no new packet has carried it yet (g_odg_cancel: the value, read and cleared
 // by the render thread, which re-decides from the game's progress), and our unpolled press waits while the game still holds that same
 // button. g_odt_phys_ms: the QPC millisecond of the player's last new Bushido press (the render side waits 80 ms after it before a
-// press: the game's progress must show it first).
-volatile LONG g_odg_cancel = 0, g_odt_arb = 0, g_odt_phys_ms = 0, g_odt_phys_have = 0;
+// press: the game's progress must show it first), g_odt_phys_n how many (the render side also counts two fresh Presents after a new
+// one, review S2). The buttons are odt::k_cancel_mask: every button the game reads (Start, Back and the stick clicks too).
+// g_odt_grip_hold (render thread): a targets round: the grips are held back as LB / RB (odt::strip_grips, review N8).
+volatile LONG g_odg_cancel = 0, g_odt_arb = 0, g_odt_phys_ms = 0, g_odt_phys_have = 0, g_odt_phys_n = 0, g_odt_grip_hold = 0;
 static odt::Arb s_odt_arb;                                                                          // input thread only
 /// Milliseconds on QueryPerformanceCounter (both threads: the arbitration's clock).
 static uint32_t odt_qpc_ms() {
@@ -1590,11 +1594,16 @@ static bool odg_input(XINPUT_GAMEPAD& g) {
     {
         const LONG p0 = g_odg_press; bool newly = false;
         if (s_odt_arb.step(g.wButtons, g_vrpad_packet, arb, p0 != 0 && g_odg_press_polls == 0, &newly)) { InterlockedExchange(&g_odg_cancel, p0); InterlockedCompareExchange(&g_odg_press, 0, p0); }
-        if (newly) { g_odt_phys_ms = static_cast<LONG>(now_ms); g_odt_phys_have = 1; }
+        if (newly) { g_odt_phys_ms = static_cast<LONG>(now_ms); g_odt_phys_have = 1; InterlockedIncrement(&g_odt_phys_n); }
     }
     const LONG pb = g_odg_press;
     const bool wait = pb != 0 && s_odt_arb.wait(g.wButtons, static_cast<uint16_t>(pb), arb, g_odg_press_polls == 0);
-    const LONG el = pb ? static_cast<LONG>(now - static_cast<DWORD>(g_odg_press_t0)) : 0;
+    LONG el = 0;
+    if (pb) {   // while ours waits its clock restarts (odt::hook_el, review N2): the 400 ms cap counts from the first poll it may go out in
+        uint32_t t0 = static_cast<uint32_t>(g_odg_press_t0);
+        el = static_cast<LONG>(odt::hook_el(static_cast<uint32_t>(now), t0, wait));
+        if (wait) g_odg_press_t0 = static_cast<LONG>(t0);
+    }
     const int hk = pad::press_hook(s_odg_hook, pb != 0 && fresh && !wait, g_vrpad_packet, el, odg::k_press_ms, g_odg_press_polls, odg::k_press_polls);
     if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_odg_press_polls);
     if (hk & HV_HOOK_HOLD) { g.wButtons = static_cast<WORD>(g.wButtons | static_cast<WORD>(pb)); touched = true; }
@@ -1627,7 +1636,8 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
         // it is let go (hv_grip_strip, unit-tested), so a gate change or an undrawn frame never makes an LB / RB edge; it only removes bits.
         // Quick-squeeze grips: only the grips gesture_tick passes at once (a deferred squeeze reaches the game only as g_sh_press)
         const bool gd[2] = { L.squeeze > 0.5f, R.squeeze > 0.5f };
-        const bool hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
+        const bool tap_hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
+        const bool hold = odt::strip_grips(tap_hold, g_odt_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_odg_tick) < 100u);   // a targets round too (grip_lbrb=0: no raw LB / RB, review N8)
         pass = hv_grip_strip(s_tap_grip_back, gd, hold) & static_cast<int>(g_grip_pass);
     }
     pad::In in = vrpad_in();
@@ -6344,11 +6354,16 @@ static void odt_tick(const odg::FrameIn& gi, const odg::FrameOut& go, odt::TickO
     ti.seq = g_odg_seq_n > 0 ? g_odg_seq : nullptr; ti.seq_n = g_odg_seq_n; ti.map = g_odg.map;
     ti.slot_free = gi.press_free;                                                   // read first (od_gest_tick), then the cancel word: the input thread sets it before it frees the slot
     ti.cancelled = static_cast<uint16_t>(InterlockedExchange(&g_odg_cancel, 0));
-    ti.phys_age = g_odt_phys_have ? static_cast<double>(odt_qpc_ms() - static_cast<uint32_t>(g_odt_phys_ms)) / 1000.0 : 1e9;
-    const LONG rq = InterlockedExchange(&g_odt_req, 0);
-    if (rq) odt_practice_start(rq, ti);
+    ti.phys_n = static_cast<uint32_t>(g_odt_phys_n);
+    if (g_odt_phys_have) {   // the stamp first, then the clock (review N4): a newer stamp than the clock reads as 0, never as a wrap
+        const uint32_t st = static_cast<uint32_t>(g_odt_phys_ms); const uint32_t now = odt_qpc_ms();
+        const int32_t d = static_cast<int32_t>(now - st); ti.phys_age = d > 0 ? static_cast<double>(d) / 1000.0 : 0.0;
+    }
+    ti.read_now = gi.fresh && g_odg_blk_frame == g_frames;   // the od block read at this Present (the settle's frame count)
     g_odt.cfg.haptics = g_odg.cfg.haptics;
     g_odt.tick(ti, to);
+    const LONG rq = InterlockedExchange(&g_odt_req, 0);
+    if (rq) odt_practice_start(rq, ti);   // after the tick (review N10): a round that just closed no longer refuses it
 }
 static void od_gest_tick() {
     static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
@@ -6395,6 +6410,7 @@ static void od_gest_tick() {
     g_odg_tick = static_cast<LONG>(GetTickCount());
     { const LONG ht = odt::hold_triggers(o.inject, g_odt.holding()) ? 1 : 0; if (g_odg_hold_trig != ht) InterlockedExchange(&g_odg_hold_trig, ht); }   // the triggers (above odg_input; a targets round too)
     { const LONG ar = o.inject == odg::OD_AURON && g_odt.r.on && !g_odt.r.practice ? 1 : 0; if (g_odt_arb != ar) InterlockedExchange(&g_odt_arb, ar); }   // the arbitration (odg_input)
+    { const LONG gh = g_odt.holding() ? 1 : 0; if (g_odt_grip_hold != gh) InterlockedExchange(&g_odt_grip_hold, gh); }   // the grips (vrpad_apply)
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
     // the targets' lines (the odg: cap)
@@ -10853,22 +10869,26 @@ static int odt_emit(MkVertex* verts, int room) {
     return n;
 }
 
-static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12]) {
-    if ((g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0) || dst == nullptr || !marker_pass_init()) return;
+/// only_odt: a 3D frame without the game's UI pass (B1): the targets alone (no markers, damage digits or overdrive visuals,
+/// which keep their UI-frame behaviour).
+static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12], bool only_odt = false) {
+    if (only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) return;
+    if (dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
     P[0] = 2.f / (f.r - f.l); P[2] = (f.r + f.l) / (f.r - f.l);
     P[5] = 2.f / (f.u - f.d); P[6] = (f.u + f.d) / (f.u - f.d);
     P[10] = -1.f; P[14] = -1.f;
     float VP[16]; mul4(P, V, VP);
-    const uint32_t with_sprite = g_markers_3d ? draw_ptr_sprites_eye(dst, w, h, VP) : 0u;   // the game's own pointer art, where it has been captured
+    const bool mk = g_markers_3d && !only_odt;
+    const uint32_t with_sprite = mk ? draw_ptr_sprites_eye(dst, w, h, VP) : 0u;   // the game's own pointer art, where it has been captured
     static MkVertex verts[k_mk_max_verts]; int nv = 0;   // render thread only (static: off the stack)
-    for (int i = 0; g_markers_3d && i < g_marker_n && nv + 12 <= k_mk_max_verts; ++i) {   // (the pass may run for the overdrive visuals alone)
+    for (int i = 0; mk && i < g_marker_n && nv + 12 <= k_mk_max_verts; ++i) {   // (the pass may run for the overdrive visuals alone)
         if (with_sprite & (1u << i)) continue;
         c3_emit(verts, nv, g_markers[i], bb);
     }
-    if (g_markers_3d) nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
-    nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals (their own 3072)
+    if (mk) nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
+    if (!only_odt) nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals (their own 3072)
     nv += odt_emit(verts + nv, k_mk_max_verts - nv);   // the targets, last: on top (their own 4608)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
@@ -10934,12 +10954,20 @@ extern "C" __declspec(dllexport) int ffxvr_cursor_look(int look, float hand, flo
 extern "C" __declspec(dllexport) void ffxvr_cursor_atlas_dump() { g_c3_dump = true; }
 extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_scale = s < 0.2f ? 0.2f : s > 5.f ? 5.f : s; }
 
-/// Draws the markers into both eye images, each with its own view and FOV.
-static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2) {
-    const bool odv = odv_wanted();   // the overdrive visuals may run this pass alone (markers off, nothing marked)
+/// Draws the markers into both eye images, each with its own view and FOV. only_odt (B1): a 3D frame without the UI pass, the eye
+/// images being our frame copies: only the targets are built and drawn; the markers, damage digits and overdrive visuals, and their
+/// per-Present state (dmg_build), are left to the UI frames exactly as before.
+static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2, bool only_odt = false) {
+    const bool odv = !only_odt && odv_wanted();   // the overdrive visuals may run this pass alone (markers off, nothing marked)
     const bool odt_on = odt_wanted();   // ... and the targets
-    g_odv_nv = 0; g_odt_nv = 0;
-    if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv && !odt_on) || !g_cam_valid) { g_dmg_nv = 0; return; }
+    if (only_odt) {
+        g_odt_nv = 0;
+        if (!odt_on || !g_cam_valid) return;
+    }
+    else {
+        g_odv_nv = 0; g_odt_nv = 0;
+        if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv && !odt_on) || !g_cam_valid) { g_dmg_nv = 0; return; }
+    }
     float v[12];
     { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); if (g_dmg_n > 0) memcpy(g_dmg_cam, g_cam, sizeof(g_dmg_cam)); }
     float V1[16], V2[16], I[16], Pn[3];
@@ -10959,13 +10987,13 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
         const float m = g_xr_scale;
         bb[6] = C[0] + fx / fl * 0.5f * m; bb[7] = C[1] - 0.35f * m; bb[8] = C[2] + fz / fl * 0.5f * m;
     }
-    if (g_markers_3d) dmg_build(bb); else g_dmg_nv = 0;   // 3D damage numbers: once for both eyes
+    if (!only_odt) { if (g_markers_3d) dmg_build(bb); else g_dmg_nv = 0; }   // 3D damage numbers: once for both eyes (UI frames only)
     if (odv) odv_build();   // the overdrive visuals: once for both eyes, with the base the eye-1 view just published (g_hb_*)
     if (odt_on) odt_build();   // the targets: the same base
-    if ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0) return;
+    if (only_odt ? g_odt_nv == 0 : ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) return;
     D3D11_TEXTURE2D_DESC d;
-    if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb); }
-    if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb); }
+    if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb, only_odt); }
+    if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb, only_odt); }
 }
 
 // ---------------------------------------------------------------------------
@@ -14595,6 +14623,18 @@ static void xr_tick() {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         { auto it = g_twins.find(g_backbuffer); if (it != g_twins.end()) e2 = it->second.tex; }
         if (ensure_copy(g_bb_copy, g_bb_copy_rtv, bd)) { InEye2 guard; g_ctx->CopyResource(g_bb_copy, g_backbuffer); e1 = g_bb_copy; }
+        // B1 (od-targets review): the targets (Practice targets in the field, where most frames have no UI pass) on a 3D frame
+        // without the UI pass: eye 1 is our copy already; eye 2's twin is copied into our own g_bb_copy2 (the twin is the game's
+        // mirrored target, never drawn into), and the pass draws the targets alone into both, once per eye (the UI frames above
+        // draw into the finals instead: never both). The blink and the menu black below clear our copies as before.
+        if (e1 == g_bb_copy && e2 != nullptr && g_bb_copy_rtv && odt_wanted()) {
+            D3D11_TEXTURE2D_DESC td; e2->GetDesc(&td);
+            if (td.SampleDesc.Count == 1 && td.MipLevels == 1 && td.ArraySize == 1 && td.Width == bd.Width && td.Height == bd.Height && ensure_copy(g_bb_copy2, g_bb_copy2_rtv, td) && g_bb_copy2_rtv) {
+                { InEye2 guard; g_ctx->CopyResource(g_bb_copy2, e2); }
+                e2 = g_bb_copy2;
+                draw_markers_both(g_bb_copy, g_bb_copy_rtv, g_bb_copy2, g_bb_copy2_rtv, true);
+            }
+        }
     }
     const float* P = &g_cam[16];
     const float tx = (P[0] != 0.f) ? 1.f / fabsf(P[0]) : 1.f;

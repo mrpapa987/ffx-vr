@@ -5578,11 +5578,12 @@ reads); scratch tests in render_chk/tests.
 ## Bushido: strike the targets (branch `od-targets`, 7 Nov 2026; ABI 52)
 
 A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_auron` = 0 off / 1 slashes and punches (unchanged)
-/ 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`,
-unit-tested in the session scratchpad (odt_chk: 155 checks, 44 mutants).
+/ 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`
+(its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
-- **What the player sees.** When the window opens, each input of the sequence flies in from about 3 m ahead at eye height to
-  its spot (fronts first, 60 ms apart, 0.35 s each, ease-out; nothing ever passes the strike row or comes toward the face).
+- **What the player sees.** When the window opens, each input of the sequence swoops into its spot from 0.22 m beyond, 0.40 m
+  above and 0.15 m outside it (fronts first, 60 ms apart, 0.40 s each, ease-out; at most 3 m/s toward the eyes, never nearer
+  than its spot; the first build came from 3 m straight ahead at about 20 m/s, too fast toward the face).
   Two alternating lanes, the strike row 0.60 m ahead and 0.20 m below the eyes, up to two queued plates behind and above each
   front, dots for the rest. Each target is an octagonal seal plate (2 cm thick, beveled, a darker face) with an engraved,
   glowing symbol: arrows cool white-cyan, A / B / X / Y amber stroke letters, L1 / R1 a violet tab. Each hand holds a
@@ -5598,14 +5599,20 @@ unit-tested in the session scratchpad (odt_chk: 155 checks, 44 mutants).
   direction deflects (the plate tilts, the rim flashes) and sends nothing. Pose snaps and spikes (rest around a big step, or a
   step straight back) and jumps over 8 m/s at the grip are skipped.
 - **What is sent.** Closed loop on the game's progress: a press goes out only when the slot is free, the plate at the game's
-  progress was struck, and no Bushido button of the player's was newly pressed in the last 80 ms; its value is always
+  progress was struck, and the player's last new button press has settled: 80 ms AND two Presents with a fresh read of the game's
+  state (the game compares at its next logic frame and the render reads it at the Present ending that frame, so a slow frame
+  stretches the time, not the count); its value is always
   seq[progress] by the map in use (the game's own bindings read at the window's open, else the built-in map). One resend
-  150 ms after a press the game did not show; a second miss, or a reset right after our press, stops injecting for the window
-  (the plates turn grey, the buttons still work). A reset with no press of ours (a wrong button) rewinds the plates.
-- **Buttons racing ours** (odg_input): a new press of a Bushido button by the player cancels our press while no new packet has
-  carried it (the render thread re-decides from the progress); our press also waits while the game still holds that same
-  button from the player's last packet (else it would make no new-press edge: found by the unit test's poll model). During a
-  targets round the triggers are held back, a quick squeeze is not L1 / R1 and the grips do not grab.
+  150 ms and two fresh Presents after a press the game did not show (and settled as above); a second miss, or a reset right
+  after our press with no word or press of the player's since, stops injecting for the window (the plates turn grey, the
+  buttons still work). Any other reset (a wrong button) rewinds the plates. The round lives with the driver's window: the
+  injection gate (the VR pad's sync, the headset's focus) may drop for 0.25 s without ending it (presses simply wait).
+- **Buttons racing ours** (odg_input): a new press by the player of any button the game reads (the d-pad, A B X Y, LB / RB,
+  Start, Back, the stick clicks: Bushido resets on any non-zero new press) cancels our press while no new packet has carried
+  it (the render thread re-decides from the progress); our press also waits while the game still holds that same button from
+  the player's last packet (else it would make no new-press edge), and its 400 ms cap counts from the end of the wait. During a
+  targets round the triggers are held back, a quick squeeze is not L1 / R1, the grips do not grab and do not pass as LB / RB
+  (also with `grip_lbrb=0`).
 - **Haptics:** a hit 0.7 / 15 ms on the striking hand, two in one sample 0.9 / 25 ms, success three 0.5 / 30 ms pulses; the
   window's open and a reset as before.
 - **Practice targets** (F8, under the overdrive gesture rows): any time with the headset's 3D view and no overdrive window open,
@@ -5616,7 +5623,10 @@ unit-tested in the session scratchpad (odt_chk: 155 checks, 44 mutants).
 - **Drawing:** the plates, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn
   last with a reserve, anything else that does not fit is dropped and counted in the window's `odt:` line. The first scheme's
-  glyph row does not draw under the targets.
+  glyph row does not draw under the targets. A 3D frame without the game's UI pass (most field frames) has no marker pass, so
+  there the targets alone are drawn into the frame copy (eye 1) and a copy of the eye-2 twin, once per eye; UI frames draw into
+  the finals as before (never both). Fahrenheit's F8 panel is its own composition layer above the eye images, so the targets
+  cannot be drawn over it from inside the eye image: the practice tooltip says to close F8.
 - **Log:** `odt:` lines for each cut, a cancel, a resend, a rewind, a stop, and one summary per window or practice round.
 - **Not verified (nobody here can run the game):** the feel and the defaults (practice is the place to tune them), whether the
   blade's direction suits the Quest grips (the pitch slider), the draw path's placement in every view, and the game facts the

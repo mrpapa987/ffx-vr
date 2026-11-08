@@ -44,9 +44,17 @@ constexpr int k_max_verts = 4608;          // the targets' own share of the mark
 constexpr int k_blade_reserve = 640;       // kept for the two blades and trails (drawn last, on top): the rest drops first
 constexpr float k_deg = 0.01745329252f;
 constexpr float k_g = 9.81f;
-constexpr double k_fly_s = 0.35, k_fly_gap_s = 0.06, k_slide_s = 0.10, k_rewind_s = 0.15;   // the fly-in, the queue's slide, a rewind
-constexpr float k_spawn_m = 3.0f;                                                          // where the fly-in starts (m ahead, eye height)
+constexpr double k_fly_s = 0.40, k_fly_gap_s = 0.06, k_slide_s = 0.10, k_rewind_s = 0.15;   // the fly-in, the queue's slide, a rewind
+// The fly-in starts beyond, above and outside its spot (review N6: from 3 m straight ahead the ease-out came at the eyes at about
+// 20 m/s): 0.22 m deeper, 0.40 m higher, 0.15 m out on its lane's side, over 0.40 s, so it swoops down into place; the ease-out's
+// opening speed toward the eyes stays under 3 m/s (unit-tested) and it never comes nearer than its spot.
+constexpr float k_spawn_fwd = 0.22f, k_spawn_up = 0.40f, k_spawn_out = 0.15f;
 constexpr double k_resend_s = 0.15, k_settle_s = 0.08, k_ours_s = 0.3;                      // the injection (design 6.2)
+// The settle in frames as well as time (review S2): after the player's new press, and after our press's slot frees before a
+// resend, k_settle_frames Presents with a fresh read of the game's state must pass: the game compares at its next logic frame
+// and the render sees it at the Present that ends that frame (the same thread), so a slow frame stretches the time, not the count.
+constexpr int k_settle_frames = 2;
+constexpr double k_gate_grace_s = 0.25;                                                    // the injection gate may drop this long without ending the round (review S1)
 constexpr double k_rearm_s = 0.25; constexpr float k_rearm_m = 0.02f;                      // the re-arm (design 3.3)
 constexpr float k_snap_min = 0.04f, k_snap_rest = 0.08f, k_jump_speed = 8.f;               // a pose snap; a jump (m/s at the grip)
 constexpr double k_gap_s = 0.12;                                                           // a longer gap between samples ends the pair
@@ -222,6 +230,12 @@ inline int judge(const Contact& c, int sym, const Axes3& a, const Geo& g, float*
 
 // -- the input thread: arbitration and the trigger hold-back --------------------------------------------------------------------
 constexpr uint16_t k_bushido_mask = 0x000F | 0x0300 | 0xF000;   // the d-pad, LB / RB, A B X Y (XInput)
+/// The buttons whose new press cancels ours and starts the settle (review N5): every XInput button the game reads (all but the
+/// guide bits 0x0400 / 0x0800): the d-pad, Start, Back, both stick clicks, LB / RB, A B X Y. The game's pad bindings give each a
+/// bit (0x632A30's table: X A B Y LB RB LT RT Back Start LS RS and the d-pad), and Bushido resets on ANY non-zero new press, so a
+/// Start or a stick click in the poll ours first goes out in would merge into a wrong word as surely as a face button. (The
+/// triggers are held back during a targets round; Virtual Desktop's both-clicks chord never reaches the game.)
+constexpr uint16_t k_cancel_mask = 0xF3FF;
 /// One poll (input thread): phys = the pad's buttons before ours are ORed (the controllers and a pad: the player's own),
 /// pkt = this poll's packet number, unpolled = our press is set and no new packet has carried it yet. Returns true: cancel ours
 /// (design 6.3: the game ORs every newly pressed button into one word, so ours and the player's in one poll, or the player's
@@ -231,7 +245,7 @@ struct Arb {
     uint16_t seen = 0, before = 0;      // ... at the last new packet (what the game holds), and before this poll's packet
     uint32_t pkt = 0; uint32_t presses = 0, cancels = 0;
     bool step(uint16_t phys, uint32_t pkt_now, bool on, bool unpolled, bool* newly = nullptr) {
-        const uint16_t nw = static_cast<uint16_t>(phys & ~last & k_bushido_mask); last = phys;
+        const uint16_t nw = static_cast<uint16_t>(phys & ~last & k_cancel_mask); last = phys;
         before = seen; if (pkt_now != pkt) { pkt = pkt_now; seen = phys; }
         if (newly) *newly = nw != 0;
         if (nw) presses++;
@@ -242,9 +256,15 @@ struct Arb {
     /// player's last packet (released between two polls): ORed into a held button it would make no new-press edge.
     bool wait(uint16_t phys, uint16_t ours, bool on, bool unpolled) const { return on && unpolled && ((phys | before) & ours) != 0; }
 };
+/// The press slot's elapsed time for press_hook (input thread; review N2): while our press waits its clock restarts, so the 400 ms
+/// cap counts from the first poll it may go out in, not from its posting (a long wait no longer ends in a release unsent).
+inline uint32_t hook_el(uint32_t now, uint32_t& t0, bool wait) { if (wait) t0 = now; return now - t0; }
 /// The VR triggers during an injecting Bushido window (any scheme) and a targets round (window or practice): a grip
 /// squeezed hard on a swing pulls the trigger, and a trigger's new press would be a wrong input.
 inline bool hold_triggers(int inject, bool round_on) { return inject == odg::OD_AURON || round_on; }
+/// The grips during a targets round (review N8): with grip_lbrb=0 they pass as LB / RB at once, so a hard grip on a swing would be
+/// L1 / R1 (a reset): held back (hv_grip_strip's latch: until let go) while the tap build holds them or a round is on.
+inline bool strip_grips(bool tap_hold, bool round_on) { return tap_hold || round_on; }
 /// The latch (input thread): a trigger held when the hold starts or that is pulled during it reads 0 until it is let go (no
 /// edge when the hold ends).
 inline void trig_hold(uint8_t& v, bool& back, bool hold) { if (v == 0) back = false; else if (hold) back = true; if (back) v = 0; }
@@ -266,7 +286,9 @@ struct In {
     const uint16_t* seq = nullptr; int seq_n = 0; odg::AuronMap map = odg::k_auron_map;
     bool slot_free = true;                                      // the press slot is empty (ours and the quick squeeze's)
     uint16_t cancelled = 0;                                     // the input thread cancelled our press (the value), since the last tick
-    double phys_age = 1e9;                                      // s since the player last newly pressed a Bushido button
+    double phys_age = 1e9;                                      // s since the player last newly pressed a game button (k_cancel_mask)
+    uint32_t phys_n = 0;                                        // ... how many such presses so far (a new value: a new press to settle)
+    bool read_now = true;                                       // the od block was read at this Present (a fresh read of the game's state)
 };
 struct Hit { int i = -1, hand = 0; float speed = 0.f, deg = 0.f; double t = 0.0; bool pre = false; };
 struct TickOut {
@@ -299,6 +321,9 @@ struct Inject {
     int inflight = -1; uint16_t val = 0; double free_t = -1.0; bool resent = false;
     double ours_t = -1e300, prev_ours_t = -1e300; uint16_t ours_val = 0;
     int16_t last_prog = 0; bool have_prog = false;
+    int free_frames = 0;                                        // fresh Presents since the slot freed after our press (the resend's settle)
+    bool other_seen = false;                                    // a non-zero new-press word not ours seen since our last press (review N3)
+    uint32_t phys_at = 0;                                       // the player's press count when our last press went (a later press: the reset may be theirs)
     uint32_t presses = 0, resends = 0, cancels = 0; int stop_why = 0;   // 1: a reset right after our press; 2: the game missed a press twice
     void reset() { *this = Inject{}; }
 };
@@ -336,6 +361,11 @@ inline int clip_half(const float* x, const float* y, int n, float ox, float oy, 
 struct Runner {
     Cfg cfg; Round r; HandTrack ht[2]; Inject inj; Stats st, last_st; Cut cut[k_cut_n]; int cut_next = 0;
     uint32_t rounds = 0; double hap_t[2] = { -1.0, -1.0 };
+    uint32_t phys_seen = 0; int phys_frames = 1000;             // the settle in frames (review S2)
+    double gate_off_t = -1.0;                                    // the injection gate off since (review S1); -1 on
+    /// The player's new presses: a new count starts the frame count (the noticing Present itself does not count).
+    void note_phys(const In& in) { if (in.phys_n != phys_seen) { phys_seen = in.phys_n; phys_frames = 0; } else if (in.read_now && phys_frames < 1000) phys_frames++; }
+    bool settled(const In& in) const { return phys_frames >= k_settle_frames && in.phys_age >= k_settle_s; }
     char line_buf[400] = "";
     uint32_t verts_max = 0, verts_dropped = 0;
     bool gone(int i) const { return r.tg[i].struck || r.tg[i].done; }
@@ -401,12 +431,12 @@ struct Runner {
         assign_lanes(sym, r.n, cfg.shoulder_hand, lane);
         for (int i = 0; i < r.n; ++i) { Tgt& g = r.tg[i]; g = Tgt{}; g.val = seq[i]; g.sym = sym[i]; g.lane = lane[i]; }
         update_motion(in.t);   // the rungs (placed: no slide)
-        // the fly-in: fronts first, 60 ms apart, from 3 m ahead at eye height along their lane (design change: section 11 notes)
+        // the fly-in: fronts first, 60 ms apart, each from beyond, above and outside its spot (k_spawn_*)
         int order = 0;
         for (int k = 0; k <= k_n_max; ++k) for (int i = 0; i < r.n; ++i) {
             Tgt& g = r.tg[i]; if (g.rung != k) continue;
             const int o = order < 6 ? order : 6; order++;
-            g.a0 = r.fr.e0 + r.fr.f * k_spawn_m + r.fr.r * ((g.lane == 0 ? -1.f : 1.f) * r.g.X); g.at0 = in.t + k_fly_gap_s * o; g.adur = k_fly_s; g.landed = false;
+            g.a0 = spot(i, k) + r.fr.f * k_spawn_fwd + r.fr.u * k_spawn_up + r.fr.r * ((g.lane == 0 ? -1.f : 1.f) * k_spawn_out); g.at0 = in.t + k_fly_gap_s * o; g.adur = k_fly_s; g.landed = false;
         }
         r.left0 = practice ? static_cast<float>(k_practice_s) : (in.left > 0.2f ? in.left : 4.f); r.left_now = r.left0;
         inj.reset(); ht[0].clear_round(); ht[1].clear_round();
@@ -451,34 +481,39 @@ struct Runner {
         if (!in.fresh) return;
         const int16_t p = in.prog;
         if (inj.have_prog && p < inj.last_prog) {   // a reset
-            const bool other = in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val;   // the word the game compared was not ours
+            const bool other = inj.other_seen || phys_seen != inj.phys_at || (in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val);   // a word not ours, or a press of the player's, since our press
             if (t - inj.ours_t < k_ours_s && !other) { if (!r.stopped) { r.stopped = true; inj.stop_why = 1; o.stopped = true; } inj.inflight = -1; }
             else rewind(t, o);
         }
         inj.last_prog = p; inj.have_prog = true;
+        if (in.game_press_ok && in.game_press != 0 && in.game_press != inj.ours_val && t >= inj.ours_t) inj.other_seen = true;
         for (int i = 0; i < r.n && i < p; ++i) if (!r.tg[i].done) { r.tg[i].done = true; if (!r.tg[i].struck) r.tg[i].gone_t = t; }
         if (p >= r.n && st.done < 0.0) st.done = t - r.t_open;
         r.prog_shown = p;
         if (inj.inflight >= 0 && p > inj.inflight) inj.inflight = -1;   // the game showed it
     }
     uint16_t inj_decide(const In& in, TickOut& o) {
+        if (in.inject != odg::OD_AURON) {   // the gate is off (the glue clears the slot): nothing now; a press in flight may be lost, so its resend is not a miss
+            if (inj.inflight >= 0) { inj.free_t = -1.0; inj.resent = false; }
+            return 0;
+        }
         if (!in.fresh || r.stopped || r.practice || !(in.auron == 4 && in.timer == 2)) return 0;
         const double t = in.t; const int p = in.prog;
         if (inj.inflight >= 0) {
             if (!in.slot_free) { inj.free_t = -1.0; return 0; }
-            if (inj.free_t < 0.0) inj.free_t = t;
-            if (t - inj.free_t < k_resend_s) return 0;
+            if (inj.free_t < 0.0) { inj.free_t = t; inj.free_frames = 0; } else if (in.read_now) inj.free_frames++;
+            if (t - inj.free_t < k_resend_s || inj.free_frames < k_settle_frames || !settled(in)) return 0;   // (review S2, N1)
             if (p != inj.inflight) { inj.inflight = -1; return 0; }
             if (inj.resent) { r.stopped = true; inj.stop_why = 2; o.stopped = true; inj.inflight = -1; return 0; }   // a second miss: buttons only
             const uint16_t b = r.map.button_of(inj.val); if (!b) { inj.inflight = -1; return 0; }
-            inj.resent = true; inj.resends++; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; o.resent = true;
+            inj.resent = true; inj.resends++; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.other_seen = false; inj.phys_at = phys_seen; o.resent = true;
             return b;
         }
-        if (!in.slot_free || in.phys_age < k_settle_s) return 0;
+        if (!in.slot_free || !settled(in)) return 0;
         if (p < 0 || p >= r.n || !r.tg[p].struck) return 0;
         const uint16_t b = r.map.button_of(r.seq[p]);   // ALWAYS seq[progress] by the map in use: a stroke cannot make a wrong press
         if (!b) return 0;
-        inj.inflight = p; inj.val = r.seq[p]; inj.resent = false; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.ours_val = inj.val; inj.presses++;
+        inj.inflight = p; inj.val = r.seq[p]; inj.resent = false; inj.free_t = -1.0; inj.prev_ours_t = inj.ours_t; inj.ours_t = t; inj.ours_val = inj.val; inj.other_seen = false; inj.phys_at = phys_seen; inj.presses++;
         return b;
     }
     // -- the hands ----------------------------------------------------------------------------------------------------------------
@@ -563,12 +598,19 @@ struct Runner {
     void tick(const In& in, TickOut& o) {
         o = TickOut{};
         const double t = in.t;
-        const bool win_live = in.targets_mode && in.win == odg::OD_AURON && in.inject == odg::OD_AURON && in.seq != nullptr && in.seq_n >= 1;
+        note_phys(in);
+        // the round lives with the driver's window (review S1): a gate drop (the VR pad's sync, the headset's focus) only stops
+        // the presses; past k_gate_grace_s it ends the round, and a new one opens when the gate is back in the same window
+        const bool win_live = in.targets_mode && in.win == odg::OD_AURON && in.seq != nullptr && in.seq_n >= 1;
+        const bool gate = in.inject == odg::OD_AURON;
+        if (gate) gate_off_t = -1.0; else if (gate_off_t < 0.0) gate_off_t = t;
         if (win_live) {
             const int n = in.seq_n > k_n_max ? k_n_max : in.seq_n;
             const bool same = r.on && !r.practice && r.n == n && std::memcmp(r.seq, in.seq, static_cast<size_t>(n) * 2u) == 0;
             if (r.on && r.practice) finish(E_ABORTED, t, o);
-            if (!same) { if (r.on) finish(E_CLOSED, t, o); open(in.seq, n, in.map, false, in); o.opened = true; }
+            if (r.on && !same) finish(E_CLOSED, t, o);
+            if (r.on && !gate && t - gate_off_t >= k_gate_grace_s) finish(E_CLOSED, t, o);
+            if (!r.on && gate) { open(in.seq, n, in.map, false, in); o.opened = true; }
         }
         else if (r.on && r.practice && in.win != odg::OD_NONE) finish(E_ABORTED, t, o);   // any overdrive window ends practice (its own gestures, or the buttons)
         else if (r.on && !r.practice) {
