@@ -17,7 +17,7 @@
 #   dist\ffxvr-target-art-<label>.zip (+ .sha256)   OPTIONAL, a separate download: the Bushido target art pack (the owner's
 #                              AI-generated medallion art, never in the repository or in the mod's zip), from
 #                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir; it mirrors the mod zip's layout,
-#                              ffx-vr-<label>\mod\ffxvr\art\targets\ (8 PNGs + ART-NOTICE.txt), so extracting both zips
+#                              ffx-vr-<label>\mod\ffxvr\art\targets\ (8 PNGs, arrow.png when there, ART-NOTICE.txt), so extracting both zips
 #                              into one folder and running install-mod installs the art too. No pack: skipped with a note,
 #                              never a failure. -NoArt skips it.
 #
@@ -279,6 +279,8 @@ if ($NoArt) {
             if (Test-Path -LiteralPath $artStage) { Remove-Item -LiteralPath $artStage -Recurse -Force }
             New-Item -ItemType Directory -Force -Path $artTo | Out-Null
             foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
+            $artArrow = Join-Path $artSrc 'arrow.png'   # optional: the pack's own arrow (without it the mod draws its procedural arrow)
+            if (Test-Path -LiteralPath $artArrow) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
             [IO.File]::WriteAllText((Join-Path $artTo 'ART-NOTICE.txt'), $artNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
             $artZip = Join-Path $OutDir "$artName.zip"
             if (Test-Path -LiteralPath $artZip) { Remove-Item -LiteralPath $artZip -Force }

@@ -7,6 +7,8 @@ optional download; docs/design-notes.md, "Bushido target art (local pack)", has 
 
 usage:
     python target_art.py SHEET.png OUT_DIR [--size 1024]
+    python target_art.py --arrow ARROW.png OUT_DIR       (the optional arrow.png: one image of a glowing arrow pointing UP
+                                                          on pure black; written 1024 x 1024 as OUT_DIR/arrow.png)
 
 then copy OUT_DIR's eight PNGs to <the mod folder>\\art\\targets\\ (the mod's own build never touches that folder).
 
@@ -24,6 +26,7 @@ assumes the frame's hole at 0.465 and its edge at 0.960 of the half-size, the sw
 Needs Python 3 with numpy and Pillow.
 """
 import argparse
+import os
 import numpy as np
 from PIL import Image
 
@@ -99,13 +102,32 @@ def save(path, rgba):
     Image.fromarray((np.clip(rgba, 0, 1) * 255 + 0.5).astype(np.uint8), "RGBA").save(path, optimize=True)
 
 
+def arrow(src, out, n):
+    """The optional arrow: one image of a glowing arrow pointing up on black (a metal outline, a white glowing fill) -> a square
+    on its content's box with a 4 % margin, Lanczos to n x n, alpha = the brightness (max channel) and RGB = the colour / alpha
+    (so the metal outline keeps its grey); the mod multiplies it by the symbol's colour and turns it to each cut direction."""
+    a = np.asarray(Image.open(src).convert("RGB")).astype(np.float32)
+    img = np.clip(resize(square_crop(a, bbox(a), 0.04), n), 0, 255)
+    al = np.clip(img.max(2) / 255.0, 0, 1)
+    rgb = np.where(al[..., None] > 1e-4, np.clip(img / 255.0 / np.maximum(al[..., None], 1e-4), 0, 1), 1.0)
+    save(f"{out}/arrow.png", np.dstack([rgb, al]))
+    ys, xs = np.where(img.max(2) > 128)
+    up = "up" if ys.size and ys.mean() < n / 2 else "NOT up? (its bright part is in the lower half: check the image points up)"
+    print(f"arrow {n} x {n}, its bright part {xs.min() if xs.size else 0}..{xs.max() if xs.size else 0} x {ys.min() if ys.size else 0}..{ys.max() if ys.size else 0}: {up}")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Cut a 3x3 medallion sheet into the Bushido target art pack.")
-    ap.add_argument("sheet", help="the 3x3 sheet (PNG)")
-    ap.add_argument("out", help="the folder for the eight PNGs")
+    ap = argparse.ArgumentParser(description="Cut a 3x3 medallion sheet into the Bushido target art pack (or, with --arrow, one arrow image).")
+    ap.add_argument("sheet", help="the 3x3 sheet (PNG), or with --arrow the arrow image")
+    ap.add_argument("out", help="the folder for the PNGs")
     ap.add_argument("--size", type=int, default=1024, help="the pieces' side (the mod expects 1024)")
+    ap.add_argument("--arrow", action="store_true", help="cut the optional arrow.png from one image of an arrow pointing up")
     o = ap.parse_args()
     n = o.size
+    os.makedirs(o.out, exist_ok=True)
+    if o.arrow:
+        arrow(o.sheet, o.out, n)
+        return
     a = np.asarray(Image.open(o.sheet).convert("RGB")).astype(np.float32)
     C = cells(a)
     rep = []

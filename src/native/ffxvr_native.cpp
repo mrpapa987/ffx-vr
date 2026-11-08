@@ -5316,7 +5316,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 55;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack)
+constexpr int FFXVR_ABI = 56;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6254,6 +6254,13 @@ static uint32_t g_xr_space_epoch = 0;
 static volatile LONG g_odt_art_on = 1;
 static char g_odt_art_why[320] = "art pack: not loaded yet (it loads at the first targets)";
 static void odt_art_frame(bool wanted_now);   // (defined with the marker pass)
+static bool odt_wanted();                     // (the same)
+// The game's own Bushido input row (0x892740: the remaining inputs' button icons and their label, drawn by the battle UI at
+// 0x89B411 while Auron's state is 3 or 4) is hidden while a strike-the-targets window's targets are drawn: the UI panel is its
+// own head-locked quad layer ABOVE the eye images our targets are drawn into, so the row covered them (the owner, 10 Nov 2026).
+// Decided here each Present (render thread), published interlocked; the managed detour on 0x892740 (main thread, ini
+// od_targets_hide2d, hooked at launch) asks ffxvr_odt_hide2d and skips the call. The shared timer (0x8955E0) stays.
+static volatile LONG g_odt_hide2d = 0;
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
 // from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
 static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.f;
@@ -6435,6 +6442,7 @@ static void od_gest_tick() {
     { const LONG ht = odt::hold_triggers(o.inject, g_odt.holding()) ? 1 : 0; if (g_odg_hold_trig != ht) InterlockedExchange(&g_odg_hold_trig, ht); }   // the triggers (above odg_input; a targets round too)
     { const LONG ar = o.inject == odg::OD_AURON && g_odt.r.on && !g_odt.r.practice ? 1 : 0; if (g_odt_arb != ar) InterlockedExchange(&g_odt_arb, ar); }   // the arbitration (odg_input)
     { const LONG gh = g_odt.holding() ? 1 : 0; if (g_odt_grip_hold != gh) InterlockedExchange(&g_odt_grip_hold, gh); }   // the grips (vrpad_apply)
+    { const LONG hd = g_odt.r.on && !g_odt.r.practice && odt_wanted() ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd); }   // the game's Bushido row (its detour)
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
     // the targets' lines (the odg: cap)
@@ -6521,7 +6529,8 @@ extern "C" __declspec(dllexport) void ffxvr_odg_set(int flags, float circle_cm, 
 /// (-0.5..0 m, -0.30), od_targets_size (0.6-1.6: a multiplier on the 24 cm plate), od_targets_time (1-3: the countdown's stretch in a
 /// targets window, practice's bar too; ABI 53), od_targets_spread (0.25-0.6 m between the two spots; ABI 54), od_targets_art (the local art pack; ABI 55), every frame from managed's push (render thread). The pitch applies at once (practice
 /// is where it is set); the rest from the next round.
-extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist, float height, float size, float time_mult, float spread, int art) {
+extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist, float height, float size, float time_mult, float spread, int art, int badge) {
+    g_odt.cfg.badge = badge != 0;   // ABI 56: F8 "show the button letter (small)" (od_targets_badge, off: arrows only)
     InterlockedExchange(&g_odt_art_on, art != 0 ? 1 : 0);   // ABI 55: F8 "target art (local pack)" (render thread acts on it)
     odt::Cfg& c = g_odt.cfg;
     c.pitch_deg = std::isfinite(pitch_deg) ? odg::clampf(pitch_deg, -45.f, 45.f) : 0.f; c.dist = std::isfinite(dist) ? odg::clampf(dist, 0.35f, 0.9f) : 0.5f;
@@ -6529,6 +6538,9 @@ extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist,
     c.time_mult = std::isfinite(time_mult) ? odg::clampf(time_mult, 1.f, 3.f) : 1.f;
     c.spread = std::isfinite(spread) ? odg::clampf(spread, 0.25f, 0.6f) : 0.36f;   // (geo() also keeps it at least the plate + 2 cm)
 }
+/// ABI 56 (the game's main thread, from the detour on 0x892740): 1 = skip the game's Bushido input row now (a strike-the-targets
+/// window's targets are being drawn in the headset). One aligned interlocked-published value, at most one Present old.
+extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return static_cast<int>(InterlockedCompareExchange(&g_odt_hide2d, 0, 0)); }
 /// Practice targets (ABI 52): which 1 a random 3-8 symbols, 2 the last Bushido sequence seen this session. Only a request: the render
 /// thread starts it at its next Present, and F8's text 4 says how it went. Returns 1 when requested.
 extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
@@ -10903,11 +10915,12 @@ static odv::Vtx g_odt_raw[odt::k_max_verts]; static MkVertex g_odt_mk[odt::k_max
 // plates until both are made. A result asked for by an older request (the box turned off, or off and on again, during the load)
 // is dropped unread (its generation). Anything missing, odd or failing: nothing is kept, the flat plates, and the reason in one
 // log line and F8 (ffxvr_odg_text 6). Turning it off releases the textures. The game's device lives as long as the process.
-struct OdtArt { bool tried = false, ok = false; ID3D11Texture2D* tex[2] = {}; ID3D11ShaderResourceView* srv[2] = {}; };
+struct OdtArt { bool tried = false, ok = false, arrow = false; ID3D11Texture2D* tex[2] = {}; ID3D11ShaderResourceView* srv[2] = {}; };
 static OdtArt g_odt_art;
 /// The worker's result (owned by the worker until it is put in the slot, by the render thread once taken out).
 struct OdtArtCpu {
     uint32_t gen = 0; bool ok = false; char why[240] = ""; int loaded = 0, edge_h = 0; double ms = 0.0;
+    bool arrow = false; char arrow_why[120] = "";   // the optional arrow.png: packed, or why not (the procedural arrow)
     std::vector<std::vector<uint32_t>> mip[2];   // atlas A, B: their chains (level 0 first)
 };
 struct OdtArtReq { uint32_t gen = 0; wchar_t dir[MAX_PATH] = {}; };
@@ -10932,7 +10945,7 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
         try {
             std::vector<uint32_t> atl[2];
             atl[0].assign(static_cast<size_t>(odt::art::k_a) * odt::art::k_a, 0u); atl[1].assign(static_cast<size_t>(odt::art::k_b) * odt::art::k_b, 0u);
-            for (int p = 0; p < odt::art::P_N && !r->why[0]; ++p) {
+            for (int p = 0; p < odt::art::P_REQUIRED && !r->why[0]; ++p) {
                 const char* nm = odt::art::file(p);
                 wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", q->dir, nm);
                 std::vector<uint8_t> bytes; char err[160] = "";
@@ -10944,6 +10957,14 @@ static DWORD WINAPI odt_art_worker(LPVOID arg) {
                 const odt::art::Cell c = odt::art::cell(p, im.h);
                 odt::art::put(atl[c.atlas].data(), c.atlas == 0 ? odt::art::k_a : odt::art::k_b, im.rgba.data(), im.w, im.h, c);
                 r->loaded++;
+            }
+            if (!r->why[0]) {   // the optional arrow.png (1024 x 1024, a white glowing arrow pointing up): absent or odd -> the procedural arrow
+                wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", q->dir, odt::art::file(odt::art::P_ARROW));
+                std::vector<uint8_t> bytes; char err[160] = ""; HvImage im;
+                if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) snprintf(r->arrow_why, sizeof(r->arrow_why), "no arrow.png");
+                else if (!hv_read_file(path, 64u << 20, &bytes, err, sizeof(err)) || !hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) snprintf(r->arrow_why, sizeof(r->arrow_why), "arrow.png: %s", err);
+                else if (const char* bad = odt::art::size_bad(odt::art::P_ARROW, im.w, im.h)) snprintf(r->arrow_why, sizeof(r->arrow_why), "arrow.png is %dx%d (%s)", im.w, im.h, bad);
+                else { odt::art::put(atl[1].data(), odt::art::k_b, im.rgba.data(), im.w, im.h, odt::art::cell(odt::art::P_ARROW)); r->arrow = true; }
             }
             for (int a = 0; a < 2 && !r->why[0]; ++a) {   // the chains
                 const int n = a == 0 ? odt::art::k_a : odt::art::k_b, lv = odt::art::levels(n);
@@ -10996,7 +11017,7 @@ static void odt_art_frame(bool wanted_now) {
             if (r->ok) { g_odt_art_pend = r; r = nullptr; }
             else {
                 char d8[MAX_PATH * 2] = ""; wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\targets", g_dir); WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
-                snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: %s at %s (loaded %d of %d), flat plates", r->why, d8, r->loaded, odt::art::P_N);
+                snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: %s at %s (loaded %d of %d), flat plates", r->why, d8, r->loaded, odt::art::P_REQUIRED);
                 diag("odt: %s (%.0f ms in the background)", g_odt_art_why, r->ms);
             }
         }
@@ -11010,14 +11031,15 @@ static void odt_art_frame(bool wanted_now) {
         if (!ok) {
             const int loaded = g_odt_art_pend->loaded;
             odt_art_release(); g_odt_art.tried = true;
-            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the %d atlas could not be made (loaded %d of %d), flat plates", a == 0 ? odt::art::k_a : odt::art::k_b, loaded, odt::art::P_N);
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: the %d atlas could not be made (loaded %d of %d), flat plates", a == 0 ? odt::art::k_a : odt::art::k_b, loaded, odt::art::P_REQUIRED);
             diag("odt: %s", g_odt_art_why);
         }
         else if (a == 1) {
-            g_odt_art.ok = true;
-            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms in the background, %.0f ms for the textures)",
-                     g_odt_art_pend->loaded, odt::art::P_N, odt::art::k_a, odt::art::k_b, static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0), g_odt_art_pend->edge_h,
-                     g_odt_art_pend->ms, g_odt_art_up_ms);
+            g_odt_art.ok = true; g_odt_art.arrow = g_odt_art_pend->arrow;
+            snprintf(g_odt_art_why, sizeof(g_odt_art_why), "art pack: loaded %d of %d%s (atlas %d + %d, %.0f MB; edge strip 1024 x %d; %.0f ms in the background, %.0f ms for the textures)",
+                     g_odt_art_pend->loaded, odt::art::P_REQUIRED, g_odt_art_pend->arrow ? " + arrow.png" : "", odt::art::k_a, odt::art::k_b, static_cast<double>(odt::art::vram_bytes()) / (1024.0 * 1024.0),
+                     g_odt_art_pend->edge_h, g_odt_art_pend->ms, g_odt_art_up_ms);
+            if (!g_odt_art_pend->arrow) diag("odt: art pack: %s: the procedural arrow", g_odt_art_pend->arrow_why);
             diag("odt: %s", g_odt_art_why);
             delete g_odt_art_pend; g_odt_art_pend = nullptr;
         }
@@ -11035,6 +11057,7 @@ static void odt_art_frame(bool wanted_now) {
         }
     }
     g_odt.art = on && g_odt_art.ok && g_mk_pst != nullptr;
+    g_odt.art_arrow = g_odt.art && g_odt_art.arrow;
 }
 /// The targets to draw now (a round, its end's fade, a cut still falling): the headset's 3D view only (as odv_wanted).
 static bool odt_wanted() {

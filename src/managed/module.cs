@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 55;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art)
+    private const int k_abi = 56;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art; 56: ffxvr_odt_set + badge, ffxvr_odt_hide2d)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -358,6 +358,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ld_init();      // load diagnostics (load_diag.cs): queued after build 7's hooks (the job join included), so a failure here cannot take them with it (LD-7)
         sr_init();      // stickrep (stickrep.cs): the flush gate's two hooks, queued last of all ours (Fahrenheit's commit stops at the first failing insertion)
         dmg3d_init();   // 3D damage numbers (dmg3d.cs): the hop table; the queue draw's hook only with dmg3d_hide2d=1, after all the others
+        odt_row_init(); // strike the targets (od_gest.cs): the game's Bushido row's hook only with od_targets_hide2d=1, last
         return true;
     }
 
@@ -3023,6 +3024,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         ld_resolve();      // load diagnostics: the same, for their detours
         sr_resolve();      // stickrep: the same, for the flush gate's two detours
         dmg3d_resolve();   // 3D damage numbers: the same, for the queue draw's detour (dmg3d_hide2d)
+        odt_row_resolve(); // strike the targets: the same, for the Bushido row's detour (od_targets_hide2d)
         try_install_hooks();
         if (_native_ready) draw_markers();
         if (_native_ready && _diag_actors) actors_auto_log();   // LD2-8: diag_actors (default 0)

@@ -44,13 +44,22 @@ public sealed unsafe partial class FFXVRModule {
     private float _od_tgt_time = 1f;                                                                      // ini od_targets_time (the countdown's stretch)
     private float _od_tgt_spread = 0.36f;                                                                 // ini od_targets_spread (between the two spots)
     private bool _od_tgt_art = true;                                                                      // ini od_targets_art (the local target art pack, <mod>\art\targets)
+    private bool _od_tgt_badge = false;                                                                   // ini od_targets_badge (a small button letter; off: arrows only)
+    private bool _od_tgt_hide2d = true, _od_tgt_hide_at_launch;                                           // ini od_targets_hide2d: hide the game's Bushido row (hooked at launch)
+    // the game's Bushido input row (0x892740, cdecl void(), called once from the battle UI at 0x89B411; prologue 55 8B EC 0F):
+    // skipped while native says a strike-the-targets window's targets are drawn (ffxvr_odt_hide2d, ABI 56)
+    private const int k_odt_row = 0x492740;                                                               // VA 0x892740
+    private delegate* unmanaged[Cdecl]<int> _fn_odt_hide2d;                                               // ABI 56
+    private d7_void? _h_odt_row, _o_odt_row; private nint _a_odt_row; private bool _odt_row_hook_ok;
+    private string _odt_row_status = "not hooked (od_targets_hide2d=0 at launch)";
+    private int _odt_row_calls, _odt_row_hidden; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
     private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
-    private delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, void> _fn_odt_set; // ABI 52: strike the targets; 53: + time; 54: + spread; 55: (pitch, distance, height, size, time, spread, art)
+    private delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void> _fn_odt_set; // ABI 52: strike the targets; 53: + time; 54: + spread; 55: + art; 56: (pitch, distance, height, size, time, spread, art, badge)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odt_practice;                   // ABI 52: Practice targets (1 random, 2 the last Bushido)
     private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
     private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
@@ -61,10 +70,48 @@ public sealed unsafe partial class FFXVRModule {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
         _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
-        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, void>)req("ffxvr_odt_set");   // ABI 55 (+ time, + spread, + art)
+        _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void>)req("ffxvr_odt_set");   // ABI 56 (+ time, + spread, + art, + badge)
+        _fn_odt_hide2d = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_odt_hide2d");   // ABI 56
         _fn_odt_practice = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_practice");
     }
-    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; }
+    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; _fn_odt_hide2d = null; }
+
+    /// <summary>At module init, after dmg3d_init (Fahrenheit's commit stops at the first failing insertion: a refusal here takes
+    /// nothing else with it): with od_targets_hide2d=1 the hook on the game's Bushido input row.</summary>
+    private void odt_row_init() {
+        _od_tgt_hide_at_launch = _od_tgt_hide2d;
+        if (!_od_tgt_hide2d) return;
+        if (!_native_ok || _fn_odt_hide2d == null) { _odt_row_status = "not hooked: the native helper did not load"; return; }
+        byte b0 = 0, b1 = 0, b2 = 0, b3 = 0;   // the bytes checked (push ebp; mov ebp, esp; movsx ...): anything else is left alone
+        try { b0 = FhUtil.get_at<byte>(k_odt_row); b1 = FhUtil.get_at<byte>(k_odt_row + 1); b2 = FhUtil.get_at<byte>(k_odt_row + 2); b3 = FhUtil.get_at<byte>(k_odt_row + 3); } catch { }
+        if (b0 != 0x55 || b1 != 0x8B || b2 != 0xEC || b3 != 0x0F) { _odt_row_status = I($"not hooked: 0x892740 starts {b0:X2} {b1:X2} {b2:X2} {b3:X2}, not 55 8B EC 0F (another mod, or another exe): the game's row stays"); _logger.Warning("odt: " + _odt_row_status); return; }
+        _h_odt_row = h_odt_row; new FhCallLocation("FFX.exe", k_odt_row).try_resolve(out _a_odt_row);
+        if (_a_odt_row == 0) { _odt_row_status = "not hooked: FFX.exe not found"; return; }
+        try {
+            _odt_row_hook_ok = new FhCallHandle<d7_void>(new FhCallLocation((void*)_a_odt_row)).hook(this, _h_odt_row!);
+            _odt_row_status = _odt_row_hook_ok ? "the Bushido row 0x892740 queued (its calls in a battle prove it)" : "the Bushido row hook was REFUSED (another mod hooks 0x892740?): the game's row stays";
+        }
+        catch (Exception e) { _odt_row_status = $"the Bushido row hook FAILED ({e.GetType().Name}): the game's row stays"; }
+        _logger.Info("odt: " + _odt_row_status);
+    }
+    /// <summary>Render thread, with dmg3d_resolve: the detour's original, once.</summary>
+    private void odt_row_resolve() {
+        if (_h_odt_row == null || _o_odt_row != null || !_odt_row_hook_ok) return;
+        try { System.Threading.Volatile.Write(ref _o_odt_row, d7_chain(_a_odt_row, _h_odt_row)); } catch (Exception e) { _logger.Error($"odt: resolving the original: {e}"); }
+    }
+    /// <summary>The game's Bushido input row (0x892740, main thread): skipped while native says our targets are drawn, latched per
+    /// game frame; otherwise the original runs.</summary>
+    private void h_odt_row() {
+        d7_void o = System.Threading.Volatile.Read(ref _o_odt_row) ?? d7_resolve_main(ref _o_odt_row, _a_odt_row, _h_odt_row!);
+        _odt_row_calls++;
+        var sk = _fn_odt_hide2d;
+        if (sk != null) {
+            uint f = FhUtil.get_at<uint>(0x1FCBBF0);
+            if (f != _odt_row_frame) { _odt_row_frame = f; _odt_row_val = sk() != 0; }
+            if (_odt_row_val) { _odt_row_hidden++; return; }
+        }
+        o();
+    }
     private bool odg_parse(string k, string v) {
         switch (k) {
             case "od_gestures":     pb(k, v, ref _od_gestures); return true;
@@ -90,6 +137,8 @@ public sealed unsafe partial class FFXVRModule {
             case "od_targets_time":   pf(k, v, ref _od_tgt_time, 1f, 3f); return true;
             case "od_targets_spread": pf(k, v, ref _od_tgt_spread, 0.25f, 0.6f); return true;
             case "od_targets_art":    pb(k, v, ref _od_tgt_art); return true;
+            case "od_targets_badge":  pb(k, v, ref _od_tgt_badge); return true;
+            case "od_targets_hide2d": pb(k, v, ref _od_tgt_hide2d); return true;
             case "od_gest_haptics": pb(k, v, ref _od_gest_haptics); return true;
             case "od_circle_cm":    pf(k, v, ref _od_circle_cm, 1f, 20f); return true;
             case "od_slash_speed":  pf(k, v, ref _od_slash_speed, 0.8f, 5f); return true;
@@ -113,6 +162,8 @@ public sealed unsafe partial class FFXVRModule {
             $"od_targets_time={_od_tgt_time.ToString("0.0#", ci)}\n" +
             $"od_targets_spread={_od_tgt_spread.ToString("0.0#", ci)}\n" +
             $"od_targets_art={(_od_tgt_art ? 1 : 0)}\n" +
+            $"od_targets_badge={(_od_tgt_badge ? 1 : 0)}\n" +
+            $"od_targets_hide2d={(_od_tgt_hide2d ? 1 : 0)}\n" +
             $"od_gest_haptics={(_od_gest_haptics ? 1 : 0)}\n" +
             $"od_circle_cm={_od_circle_cm.ToString("0.#", ci)}\n" +
             $"od_slash_speed={_od_slash_speed.ToString("0.##", ci)}\n" +
@@ -126,7 +177,7 @@ public sealed unsafe partial class FFXVRModule {
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
         if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size);
-        if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0);
+        if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0, _od_tgt_badge ? 1 : 0);
         odg_always_tick();
     }
     /// <summary>The test aid (design 4.3 step 6): Btl + 0x28 (debug flags) + 0x14 = VA 0x112A90C, the game's own "overdrive always
@@ -206,6 +257,10 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Checkbox("target art (local pack)##odt", ref _od_tgt_art);
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Textured medallions for the targets from the art pack in the mod folder's art\\targets (the optional download ffxvr-target-art, AI-generated, or your own made with tools\\target-art; not in the mod's zip). Without the pack, or off, the flat plates.");
         ImGui.SameLine(); ImGui.TextDisabled(esc(odg_text(6)));
+        ImGui.Checkbox("show the button letter (small)##odt", ref _od_tgt_badge);
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
+        ImGui.SameLine(); ImGui.Checkbox("hide the game's Bushido row (from the next launch)##odt", ref _od_tgt_hide2d);
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"While the targets are up, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Now: {_odt_row_status}; calls {_odt_row_calls}, hidden {_odt_row_hidden}."));
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
     /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>

@@ -5581,13 +5581,32 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 / 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`
 (its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
+- **The game's Bushido row and our targets** (the owner, 10 Nov 2026: "it kind of clashes with the 2d original bushido ui").
+  Why: the game's UI pass is captured into its own texture and submitted as a head-locked OpenXR quad layer (the UI panel)
+  above the projection layer, and our targets are drawn into the eye images (the projection layer). So wherever the panel's
+  Bushido row and a plate overlap, the row covers the plate, at the panel's own distance. What the game draws (our exe): the
+  battle UI 0x89B360 calls 0x892740 at 0x89B411 every UI frame; while Auron's state 0x133D6F4 is 3 or 4, 0x892740 draws one
+  button icon per remaining input (from the progress 0x133D6FC to the length 0x133D700, the sequence at [0x133D704]; 0x9029B0,
+  30 units apart) and a label (0x78F8F0(0x3011), 0x905290 / 0x9016B0). The shared countdown is drawn elsewhere (0x8955E0, while
+  the timer word is not 0). The fix: a detour on 0x892740 (managed, main thread; ini `od_targets_hide2d`, on, hooked at launch,
+  its first bytes checked) skips the call while native says a strike-the-targets window's targets are drawn in the headset
+  (`ffxvr_odt_hide2d`, decided each Present, published interlocked, latched per game frame). The countdown stays; no other
+  overdrive's UI is touched; slashes and punches (mode 1) keep the game's row.
+- **Arrows only** (the owner, 10 Nov 2026: the symbols were "less than ideal"; every plate has a cut direction now). Each plate
+  shows one big bold arrow pointing its cut direction (A down, B right, X left, Y up, L1 left, R1 right, the d-pad itself),
+  as large as fits in the face (the medallion's hole), with the colour's glow, a strong dark outline and a bright core; the
+  glow pulses with the chevrons, which stream along the arrow (at full strength) and on along the guide beyond the plate. The
+  spot and the colour still tell the kind. F8 "show the button letter (small)" (ini `od_targets_badge`, off) adds the button's
+  letter on a dark disc at the rim's bottom (A / B / X / Y, L1 / R1; none for the d-pad). The art pack may hold `arrow.png` (a
+  glowing arrow pointing up, 1024 x 1024; `target_art.py --arrow`): turned to each direction, multiplied by the colour, over a
+  black silhouette of itself (1.08 x, 0.7) and the colour's glow; without it, or odd-sized, the procedural arrow.
 - **Textured medallions** (the owner's concept, 10 Nov 2026: engraved silver medallions with a swirling glowing disc and a
   bright symbol, each symbol its own colour). From a local art pack when present (next section); without it the flat plates as
   before. Each plate, back to front: a soft halo ring (tinted, pulsing, additive), the swirl disc in the frame's hole (tinted,
   turning 0.15 turn/s, darkened to 40 % at the centre under the symbol), the engraved frame (its own metal colour), its glow
-  channel (tinted, pulsing a little, additive; red on a deflect), the symbol (the same procedural shapes, near-white over a thin
-  dark outline over the colour's glow, scaled to fit inside the hole). The chevrons and guide line stay (over a letter they give
-  way inside the hole). The frame's outer edge is the plate's edge (24 cm at size 1), its hole 0.48 of the radius. A cut: the
+  channel (tinted, pulsing a little, additive; red on a deflect), the arrow in the hole (arrows only, above: the pack's
+  `arrow.png` when present, else the procedural arrow, near-white over a dark outline over the colour's glow, scaled to fit
+  inside the hole). The chevrons and guide line stay (they stream over the arrow at full strength). The frame's outer edge is the plate's edge (24 cm at size 1), its hole 0.48 of the radius. A cut: the
   halves are the medallion's own layers clipped by the cut (the same UVs), the back face once a half has turned away (with the
   current tumble, at most about 63 degrees in its 0.45 s, it rarely does), the rim's edge strip on the side, the cut's face hot
   white; a burst (0.2 s) and sparks (0.3 s), tinted, expanding, additive. The preview: the textured look at 40 %, dimmed, no
@@ -5624,9 +5643,13 @@ folder in the mod's zip. To make your own pack:
 2. **Cut it:** `python tools/target-art/target_art.py sheet.png out` (Python 3 with numpy and Pillow). It writes eight PNGs:
    frame, glow, halo, swirl, back, burst, sparks (1024 x 1024 RGBA) and edge (1024 wide), and prints the frame's measured hole
    and edge (the mod assumes 0.465 and 0.960 of the half-size) and the swirl's disc (0.925).
-3. **Put them** in `<the mod folder>\art\targets\` (eight files: frame.png, glow.png, halo.png, swirl.png, back.png, edge.png,
-   burst.png, sparks.png). The mod's build and install never touch that folder.
-4. **F8 > Controllers:** "target art (local pack)" (ini `od_targets_art`, on by default) and its status line, e.g. `art pack:
+3. **Optional, the arrow:** generate one image of an ornate glowing arrow pointing UP on pure black (a metal outline, a white
+   glowing fill), upscale it, then `python tools/target-art/target_art.py --arrow arrow-image.png out`: a square on its content
+   with a 4 % margin, 1024 x 1024, alpha from the brightness, the colour kept (the metal stays grey). Without it the mod draws
+   its own bold arrow.
+4. **Put them** in `<the mod folder>\art\targets\` (eight files: frame.png, glow.png, halo.png, swirl.png, back.png, edge.png,
+   burst.png, sparks.png; and arrow.png if made). The mod's build and install never touch that folder.
+5. **F8 > Controllers:** "target art (local pack)" (ini `od_targets_art`, on by default) and its status line, e.g. `art pack:
    loaded 8 of 8 (atlas 2048 + 1024, 27 MB; ...)` or `art pack: frame.png not found at ..., flat plates`.
 
 How the mod loads it: at the first targets drawn, a worker thread (as the hand packs' loader) reads each file, decodes it

@@ -221,7 +221,9 @@ member's view (battle), left grip + left stick click = reset the view, both stic
 game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
 gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (the d-pad
 arrows appear on the left, A / B / X / Y and L1 / R1 on the right; cut the big plate with either hand along its sliding chevrons:
-A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
+A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right; each plate shows only its big arrow, and "show the button
+letter (small)" adds the letter at the rim; "hide the game's Bushido row (from the next launch)", on by default, hides the game's
+2D button row while the targets are up, keeping the timer). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
 and set the blade pitch, target distance, target height, target size and target spacing first; "Bushido time" (1-3x) slows the game's input timer
 while the targets window is open, if the time is too short. The targets can be textured medallions from the optional art download
 (`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the same folder as the mod's zip, then run

@@ -102,6 +102,7 @@ struct Cfg {
     bool preview = true, shoulder_hand = false, body = true, deflect_buzz = true, haptics = true;
     float time_mult = 1.f;     // od_targets_time, 1..3: the game's countdown runs this many times slower in a targets window (Stretch); practice's bar too
     float spread = 0.36f;      // od_targets_spread, 0.25..0.6 m: between the left and the right spot's centres (at least the plate + 2 cm)
+    bool badge = false;        // od_targets_badge: a small button letter at the rim's bottom (A / B / X / Y, L1 / R1); off: arrows only
 };
 struct Geo {
     bool fist = false;
@@ -177,6 +178,17 @@ inline V3 arrow_dir(int s, const Axes3& a) {
         default: return v3(0.f, 0.f, 0.f);
     }
 }
+/// The arrow every plate shows (the owner, 10 Nov 2026: arrows only): the d-pad as itself, A down, B right, X left, Y up, L1 left,
+/// R1 right; off the map none (G_NONE).
+inline int arrow_of(int s) {
+    switch (s) {
+        case odv::G_UP: case odv::G_Y: return odv::G_UP;
+        case odv::G_RIGHT: case odv::G_B: case odv::G_R1: return odv::G_RIGHT;
+        case odv::G_DOWN: case odv::G_A: return odv::G_DOWN;
+        case odv::G_LEFT: case odv::G_X: case odv::G_L1: return odv::G_LEFT;
+        default: return odv::G_NONE;
+    }
+}
 /// The spot: the d-pad arrows on the left, everything else (A / B / X / Y, L1 / R1, off the map) on the right.
 inline int side_of(int s) { return sym_arrow(s) ? -1 : 1; }
 /// The palette: brightness first. A saturated face (arrows cyan, face buttons amber, L1 / R1 violet; grey off the map) under a
@@ -214,9 +226,10 @@ constexpr float k_rim_in = 0.64f, k_glow_out = 1.22f, k_sym_fit = 0.97f, k_sym_w
 /// them; anything missing or odd keeps the flat plates. The marker pass samples atlas A in slot 1 and B in slot 2 (Vtx t.z 2 / 3;
 /// + 4: an additive layer, drawn premultiplied in the targets' own draw). Pure: sizes, layout, UVs, packing and mips.
 namespace art {
-enum Piece { P_FRAME = 0, P_GLOW, P_SWIRL, P_BACK, P_HALO, P_BURST, P_SPARKS, P_EDGE, P_N };
+enum Piece { P_FRAME = 0, P_GLOW, P_SWIRL, P_BACK, P_HALO, P_BURST, P_SPARKS, P_EDGE, P_ARROW, P_N };
+constexpr int P_REQUIRED = 8;                    // the eight pieces a pack needs; arrow.png (a white glowing arrow pointing up) is optional
 inline const char* file(int p) {
-    static const char* const k[P_N] = { "frame.png", "glow.png", "swirl.png", "back.png", "halo.png", "burst.png", "sparks.png", "edge.png" };
+    static const char* const k[P_N] = { "frame.png", "glow.png", "swirl.png", "back.png", "halo.png", "burst.png", "sparks.png", "edge.png", "arrow.png" };
     return p >= 0 && p < P_N ? k[p] : "";
 }
 constexpr int k_src = 1024;                      // every piece 1024 x 1024 but the edge strip: 1024 x 32..512
@@ -237,6 +250,7 @@ inline Cell cell(int p, int edge_h = 188) {
         case P_BURST:  c.atlas = 1; c.x = 512;  c.y = 0;    c.w = c.h = 512; break;
         case P_SPARKS: c.atlas = 1; c.x = 0;    c.y = 512;  c.w = c.h = 512; break;
         case P_EDGE:   c.atlas = 1; c.x = 512;  c.y = 512;  c.w = 512; c.h = (edge_h < k_edge_hmin ? k_edge_hmin : edge_h > k_edge_hmax ? k_edge_hmax : edge_h) / 2; break;
+        case P_ARROW:  c.atlas = 1; c.x = 512;  c.y = 768;  c.w = c.h = 256; break;   // (under the edge strip's cell: 1024 shrunk 4:1)
         default: break;
     }
     return c;
@@ -271,12 +285,12 @@ inline uint32_t avg(const uint32_t* const* t, int n) {
     return px(r / a, g / a, b / a, a / static_cast<float>(n));
 }
 /// Copies a decoded piece (iw x ih, RGBA8 with R in the low byte) into its cell of an atlas of side aw, shrunk by the whole
-/// factor iw / cell width (1 or 2) with the alpha-weighted box filter.
+/// factor iw / cell width (1, 2 or 4) with the alpha-weighted box filter.
 inline void put(uint32_t* atlas, int aw, const uint32_t* img, int iw, int ih, const Cell& c) {
-    const int f = c.w > 0 ? iw / c.w : 1; if (f < 1) return;
+    const int f = c.w > 0 ? iw / c.w : 1; if (f < 1 || f > 4) return;
     for (int y = 0; y < c.h; ++y) for (int x = 0; x < c.w; ++x) {
-        const uint32_t* t[4]; int n = 0;
-        for (int dy = 0; dy < f && n < 4; ++dy) for (int dx = 0; dx < f && n < 4; ++dx) {
+        const uint32_t* t[16]; int n = 0;
+        for (int dy = 0; dy < f && n < 16; ++dy) for (int dx = 0; dx < f && n < 16; ++dx) {
             const int sx = x * f + dx, sy = y * f + dy; if (sx < iw && sy < ih) t[n++] = &img[static_cast<size_t>(sy) * static_cast<size_t>(iw) + static_cast<size_t>(sx)];
         }
         atlas[static_cast<size_t>(c.y + y) * static_cast<size_t>(aw) + static_cast<size_t>(c.x + x)] = n ? avg(t, n) : 0u;
@@ -575,6 +589,7 @@ struct Runner {
     uint32_t rounds = 0; double hap_t[2] = { -1.0, -1.0 };
     Stretch tm;                                                  // the countdown's stretch (od_targets_time)
     bool art = false;                                            // the textured medallions (the glue: the local pack loaded, F8 "target art" on, the shader ready)
+    bool art_arrow = false;                                      // ... and the pack's own arrow.png (else the procedural bold arrow)
     uint32_t phys_seen = 0; int phys_frames = 1000; double phys_note_t = -1e300;   // the settle in frames (review S2); when the last new press was noticed
     double gate_off_t = -1.0;                                    // the injection gate off since (review S1); -1 on
     /// The player's new presses: a new count starts the frame count (the noticing Present itself does not count).
@@ -1063,8 +1078,6 @@ struct Runner {
     static float art_swirl_r(float rad) { return 1.04f * art_hole(rad); }                       // the swirl disc: just under the frame's inner edge
     static float art_swirl_q(float rad) { return art_swirl_r(rad) / art::k_swirl; }             // ... its texture's half-size (opaque inside k_swirl)
     static float art_halo_q(float rad) { return 1.10f * rad / art::k_halo_peak; }               // the halo ring: brightest at 1.1 x the radius
-    /// The symbol in the hole: as large as fits with its dark outline (k_art_outline x the weight) inside the hole.
-    static float art_sym_scale(int sym, float rad) { return k_sym_fit * art_hole(rad) / sym_extent(sym, true); }
     /// The plate (contrast pass): a short octagonal prism with a near-black face (k_face_a), a thick bright rim in the plate's
     /// colour (k_rim_in .. 1 of the radius; red on a deflect) and a soft glow ring outside it (to k_glow_out), front toward ax.N.
     /// (Alpha-blended layers: the marker pass blends straight alpha only, so the glows are dim layers drawn under what they light.)
@@ -1153,16 +1166,42 @@ struct Runner {
     /// the centre), the frame (its own metal), its glow channel (tinted, pulsing, additive), the symbol in the hole (near-white
     /// over a thin dark outline over the colour's glow). k: the plate's colour; glow_k: the glow channel's (red on a deflect);
     /// halo: the halo's alpha (0: none, the preview).
-    static void medallion(Out& o, int sym, V3 C, const Axes3& ax, float rad, float th, Col k, Col glow_k, float al, double t, float halo_a) {
+    static void medallion(Out& o, int sym, V3 C, const Axes3& ax, float rad, float th, Col k, Col glow_k, float al, double t, float halo_a, bool tex_arrow = false, float wave = 0.5f) {
         const float ang = static_cast<float>(std::fmod(t * k_swirl_turns * odg::k_two_pi, static_cast<double>(odg::k_two_pi)));
         const float pl = 0.5f + 0.5f * static_cast<float>(std::sin(t * odg::k_two_pi * 0.8));   // the slow pulse (0..1)
         if (halo_a > 0.f) sprite(o, art::P_HALO, C - ax.N * th, ax.R, ax.U, art_halo_q(rad), 0.f, col(k.r, k.g, k.b, halo_a * (0.80f + 0.20f * pl) * al), true);
         swirl_disc(o, C - ax.N * (0.2f * th), ax.R, ax.U, art_swirl_r(rad), art_swirl_q(rad), ang, col(k.r, k.g, k.b, al), 0.40f);
         sprite(o, art::P_FRAME, C, ax.R, ax.U, art_q(rad), 0.f, col(1.f, 1.f, 1.f, al), false);
         sprite(o, art::P_GLOW, C + ax.N * 0.0005f, ax.R, ax.U, art_q(rad), 0.f, col(glow_k.r, glow_k.g, glow_k.b, (0.85f + 0.15f * pl) * al), true);
-        const V3 F = C + ax.N * (0.5f * th + 0.0008f); const float s = art_sym_scale(sym, rad);
-        symbol(o, sym, F, ax.R, ax.U, s, ink(0.85f * al), k_art_outline * k_sym_w, col(k.r, k.g, k.b, 0.55f * al));   // the colour's glow, then the dark outline
-        symbol(o, sym, F, ax.R, ax.U, s, bright(k, al), k_sym_w);                                             // the near-white core
+        arrow_glyph(o, sym, C + ax.N * (0.5f * th + 0.0008f), ax, art_hole(rad), k, al, wave, tex_arrow);
+    }
+    /// The plate's one big arrow (arrows only: the cut direction, arrow_of), as large as fits in fit_r (the medallion's hole, the
+    /// flat plate's face): the colour's glow (pulsing with the chevrons' stream: wave 0..1), a strong dark outline, a bright
+    /// near-white core. tex: the pack's arrow.png (pointing up, its metal outline grey, its fill white), turned to the direction:
+    /// the colour's glow (additive, 1.18 x), a black silhouette (its alpha, 1.08 x, at 0.7) for contrast against the swirl, the
+    /// arrow multiplied by the symbol's colour; else the procedural bold arrow. Off the map: the ring.
+    static void arrow_glyph(Out& o, int sym, V3 F, const Axes3& ax, float fit_r, Col k, float al, float wave, bool tex) {
+        const int ag = arrow_of(sym);
+        const float ga = (0.40f + 0.35f * wave) * al;
+        if (ag == odv::G_NONE) { symbol(o, sym, F, ax.R, ax.U, k_sym_fit * fit_r / sym_extent(sym, true), bright(k, al), k_sym_w); return; }
+        if (tex) {
+            const float ang = ag == odv::G_UP ? 0.f : ag == odv::G_RIGHT ? -0.5f * 3.14159265f : ag == odv::G_DOWN ? 3.14159265f : 0.5f * 3.14159265f;
+            sprite(o, art::P_ARROW, F, ax.R, ax.U, 1.18f * fit_r, ang, col(k.r, k.g, k.b, ga), true);
+            sprite(o, art::P_ARROW, F, ax.R, ax.U, 1.08f * fit_r, ang, col(0.f, 0.f, 0.f, 0.7f * al), false);
+            sprite(o, art::P_ARROW, F, ax.R, ax.U, fit_r, ang, col(k.r, k.g, k.b, al), false);
+            return;
+        }
+        const float s = k_sym_fit * fit_r / sym_extent(ag, true);
+        symbol(o, ag, F, ax.R, ax.U, s, ink(0.85f * al), k_art_outline * k_sym_w, col(k.r, k.g, k.b, ga));   // the colour's glow, then the dark outline
+        symbol(o, ag, F, ax.R, ax.U, s, bright(k, al), k_sym_w);                                             // the near-white core
+    }
+    /// The small button letter (od_targets_badge, off by default) at the rim's bottom: a dark disc and the letter (A / B / X / Y,
+    /// the L / R tab); none for the d-pad.
+    static void badge(Out& o, int sym, V3 F, const Axes3& ax, float rad, Col k, float al) {
+        if (sym_arrow(sym) || !sym_directed(sym)) return;
+        const V3 c = F - ax.U * (0.80f * rad) + ax.N * 0.0006f;
+        odv::disc(o, c, ax.R, ax.U, 0.15f * rad, ink(0.9f * al), ink(0.9f * al), 12);
+        symbol(o, sym, c + ax.N * 0.0004f, ax.R, ax.U, 0.12f * rad / sym_extent(sym), bright(k, al), 0.8f * k_sym_w);
     }
     /// One chevron: a V pointing along d (in the plate's plane, across b), its tip at c; dark outline under a white core.
     static void chevron(Out& o, V3 c, V3 d, V3 b, float hw, float depth, float w, float a, Col core = col(1.f, 1.f, 1.f, 1.f)) {
@@ -1188,33 +1227,29 @@ struct Runner {
         const double da = t - g.defl_t; const bool defl = da >= 0.0 && da < k_defl_show_s;
         const Col face = grey ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);   // the plate's colour (the rim, the glows, the symbol's tint)
         const Col rim = defl ? col(1.f, 0.18f, 0.12f, 1.f) : face;
-        const Col ink_k = bright(face, al), glow_k = col(face.r, face.g, face.b, 0.45f * al);
+        const Col ink_k = bright(face, al);
         if (!art) halo(o, C - ax.N * th, ax, rad, 0.6f * al);
         const bool arrow = sym_directed(g.sym) && !grey;   // (every symbol on the map: the arrows, the face buttons, L1 / R1)
-        const bool letter = !sym_arrow(g.sym);                  // a letter or the L / R tab: the chevrons give way over it
         const V3 d = arrow_dir(g.sym, ax), b = cross(ax.N, d);
+        const float ph = static_cast<float>(std::fmod((t - r.t_open) / k_chev_period_s, 1.0));   // the chevrons' stream (and the arrow's glow with it)
+        const float wave = 0.5f + 0.5f * std::sin(odg::k_two_pi * ph);
         if (arrow) {   // the guide: the stroke's whole path, 12 cm beyond both edges (under the plate: the face hides it)
             const float L = rad + k_guide_m * r.g.size;
             odv::glow_line(o, C - d * L, C + d * L, 0.0025f * r.g.size, col(1.f, 1.f, 1.f, 0.35f * al), col(1.f, 1.f, 1.f, 0.35f * al), in.eye);
         }
         const V3 F = C + ax.N * (0.5f * th + 0.0008f);
-        if (art) medallion(o, g.sym, C, ax, rad, th, face, rim, al, t, 0.55f);   // the textured medallion (the local pack)
-        else { plate(o, C, ax, rad, th, rim, al); symbol(o, g.sym, F, ax.R, ax.U, sym_scale(g.sym, rad), ink_k, k_sym_w, glow_k); }
-        if (arrow) {   // three chevrons sliding along the cut, looping every 0.9 s, in the symbol's tint (thicker: 0.08 of the radius); they swell on a deflect
+        // arrows only: every plate one big bold arrow in its cut direction (the medallion's hole, the flat plate's face)
+        if (art) medallion(o, g.sym, C, ax, rad, th, face, rim, al, t, 0.55f, art_arrow, wave);   // the textured medallion (the local pack)
+        else { plate(o, C, ax, rad, th, rim, al); arrow_glyph(o, g.sym, F, ax, k_rim_in * rad, face, al, wave, false); }
+        if (cfg.badge) badge(o, g.sym, F, ax, rad, face, al);   // the small button letter (off by default)
+        if (arrow) {   // three chevrons streaming along the arrow and on along the guide, looping every 0.9 s, in its tint (0.08 of the
+                       // radius thick), over the arrow at full strength (they point its way); they swell on a deflect
             const float L = rad + k_guide_m * r.g.size, big = defl ? 1.5f : 1.f;
-            const float ph = static_cast<float>(std::fmod((t - r.t_open) / k_chev_period_s, 1.0));
             for (int j = 0; j < 3; ++j) {
                 float q = ph + static_cast<float>(j) / 3.f; if (q >= 1.f) q -= 1.f;
                 const float env = std::sin(3.14159265f * q), x = (-1.f + 2.f * q) * L;
-                // on a letter or the tab, the chevrons give way where they cross the symbol (the letter stays the main thing to
-                // read): while any part of one is over the face (its tip less than its depth past the rim's inner edge) it is at 20 %
-                // alpha and 65 % size, full again by the rim's middle and beyond the plate (a lane around the letter); on an arrow
-                // they run over it at full strength (they point the same way)
-                float fa = 1.f, fs = 1.f;
-                const float face_r = art ? art_hole(rad) : k_rim_in * rad;   // the face the letter sits on (the medallion's hole)
-                if (letter) { const float u2 = clampf((std::fabs(x) - 0.18f * rad * big - face_r) / (0.15f * rad), 0.f, 1.f), sm = u2 * u2 * (3.f - 2.f * u2); fa = 0.2f + 0.8f * sm; fs = 0.65f + 0.35f * sm; }
-                const float a = al * fa * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than the first build's plain sine
-                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big * fs, 0.18f * rad * big * fs, 0.08f * rad * big * fs, a, ink_k);
+                const float a = al * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than a plain sine
+                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big, 0.18f * rad * big, 0.08f * rad * big, a, ink_k);
             }
         }
     }
@@ -1225,10 +1260,10 @@ struct Runner {
         const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.5f * A;    // a little brighter than the first build's 0.45, clearly dimmer than the plate (R6-N2: 0.65 competed)
         const Col k = r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
         const Col kd = col(0.8f * k.r, 0.8f * k.g, 0.8f * k.b, 1.f);
-        if (art) { medallion(o, g.sym, P, ax, rad, th, kd, kd, al, t, 0.f); return; }   // the textured look at 40 %, dimmed (no halo)
+        if (art) { medallion(o, g.sym, P, ax, rad, th, kd, kd, al, t, 0.f, art_arrow, 0.5f); return; }   // the textured look at 40 %, dimmed (no halo)
         halo(o, P - ax.N * th, ax, rad, 0.4f * al);
         plate(o, P, ax, rad, th, kd, al);
-        symbol(o, g.sym, P + ax.N * (0.5f * th + 0.0005f), ax.R, ax.U, sym_scale(g.sym, rad), bright(k, 0.85f * al), k_sym_w);
+        arrow_glyph(o, g.sym, P + ax.N * (0.5f * th + 0.0005f), ax, k_rim_in * rad, k, 0.85f * al, 0.5f, false);
     }
     void draw_fx(const In& in, Out& o) const {
         const double t = in.t;
