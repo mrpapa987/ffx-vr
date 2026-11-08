@@ -2449,6 +2449,33 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _logger.Info(System.FormattableString.Invariant($"head: skipped index {old}, {d:F1} units out, for model {name} (index {now} instead; reach {reach:F1}, map {map_name()})"));
     }
 
+    // fix-eye (finding 7, the 7 Nov log): Wakka's head pick flips 1 / 25 / 24 at each tag-in (the "head: skipped index 11" lines),
+    // then the eye jumps exactly 11.2 units about 4 s later in both battles, with nothing logged (fp_head_smooth 1: the raw head).
+    // Read from HeadPick: the flips are the highest of three points at about one height trading places while he runs in (the
+    // height, a maximum, is continuous: no jump); an 11.2-unit jump of the height in one frame needs the candidate set to change.
+    // The likely cause is index 11 (the ball, 14.5 units out and 8-12 above his head in the 4-5 Nov captures) coming within the
+    // 8-unit reach of sub-position 0 in his battle stance: the pick goes to it with old == now, which the skip line cannot show.
+    // Not proven (no optpos dump of Wakka in battle exists), so no rule change: this line settles it. When the followed actor's
+    // head pick moves more than 6 units in height in one frame, the old and new index, each one's height over the root and
+    // horizontal distance from sub-position 0, whether the reach left anything out, and all 26 sub-positions. 12 a session, 4 a
+    // battle. If it shows index 11 within the reach, the fix is to drop from the reach rule the points more than about 4 units
+    // above sub-position 25 (the head helper of the party models) or to hold the index while it stays within the reach.
+    private int _fph_jump_lines, _fph_jump_btl, _fph_prev_actor = -1, _fph_prev_k = -1; private float _fph_prev_y;
+    private static string fph_pt(int i, Vector4 v, Vector4 b, float ry) => I($"{i} (up {ry - v.Y:F1}, out {MathF.Sqrt((v.X - b.X) * (v.X - b.X) + (v.Z - b.Z) * (v.Z - b.Z)):F1})");
+    private void fph_jump_log(ref Actor a, int pick, int k, int old, float reach, bool in_battle) {
+        if (k < 0) { _fph_prev_actor = -1; return; }
+        float y = a.chr_optpos[k].Y;
+        if (pick == _fph_prev_actor && _fph_prev_k >= 0 && MathF.Abs(y - _fph_prev_y) > 6f && _fph_jump_lines < 12 && _fph_jump_btl < 4) {
+            _fph_jump_lines++; _fph_jump_btl++;
+            Vector4 b = a.chr_optpos[0]; float ry = a.chr_pos_vec.Y;
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < 26; i++) { Vector4 v = a.chr_optpos[i]; if (v.X == 0f && v.Y == 0f && v.Z == 0f) continue; sb.Append(' ').Append(fph_pt(i, v, b, ry)); }
+            string left = old >= 0 && old != k ? I($", the reach {reach:F1} left out {fph_pt(old, a.chr_optpos[old], b, ry)}") : reach > 0f ? I($", nothing left out by the reach {reach:F1}") : "";
+            _logger.Info(I($"head: the head pick of actor {pick} '{actor_name(a.chr_name)}' moved {_fph_prev_y - y:F1} units up in one frame ({(in_battle ? "in battle" : "field")}, map {map_name()}): index {_fph_prev_k} -> {fph_pt(k, a.chr_optpos[k], b, ry)}{left} | sub-positions (index, up from the root, out from sub-position 0):{sb}") + (_fph_jump_lines == 12 ? " (no more of these lines this session)" : ""));
+        }
+        _fph_prev_actor = pick; _fph_prev_k = k; _fph_prev_y = y;
+    }
+
     /// <summary>"log this table" only (diagnostics: Wakka's first-person eye in battle sits ~7 units high): for the followed
     /// actor and every live party model (c0xx), the 26 chr_optpos sub-positions (+0x524; all-zero ones left out), with the
     /// index push_player's head rule picks marked '*' (the lowest actor-space Y with |X| + |Z| > 0.01: the highest point;
@@ -2545,7 +2572,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         Btl* btl = Globals.Battle.btl; bool in_battle = read(btl, out Btl btl_v) && btl_v.battle_state != 0;
         System.Threading.Volatile.Write(ref _fp_reach_live, in_battle ? _fp_head_reach : 0f);   // the head rule's reach: battle only (review of 9b406b9, SF); before _d7_follow_actor below
         if (in_battle != _btl_was) {
-            _fph_skip_n = 0; _fph_skip_key = -1;
+            _fph_skip_n = 0; _fph_skip_key = -1; _fph_jump_btl = 0;
             btg_end(in_battle ? "a new battle" : "the battle ended"); btg_log(in_battle ? "a new battle" : "the battle ended"); _btg_state = 0;   // battle tag
             _btl_was = in_battle; _btl_chr = -1; _btl_follow_id = -1; _btl_follow_slot = -1; _btl_pre_summon_id = -1; _btl_pending_id = -1; _btl_pending_frames = 0; _btl_who = ""; _btl_aeon_out = false;
             for (int i = 0; i < 3; i++) _btl_roster_prev[i] = 0xFF;
@@ -2736,7 +2763,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // space has Y pointing down (render space negates it), so the head is
             // the one with the LOWEST actor-space Y.
             float hy = float.MaxValue; Vector4 head = default; bool have = false;
-            { int hk = fp_head_pick(ref p, _fp_reach_live, out int hold); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } fph_skip_log(ref p, hk, hold, _fp_reach_live); }
+            { int hk = fp_head_pick(ref p, _fp_reach_live, out int hold); if (hk >= 0) { head = p.chr_optpos[hk]; hy = head.Y; have = true; } fph_skip_log(ref p, hk, hold, _fp_reach_live); fph_jump_log(ref p, pick, hk, hold, _fp_reach_live, in_battle); }
             // Riding (chocobo, ride.cs): an actor attached to another's bone (+0x19C) is drawn from the parent's bone and root, never
             // from its +0x0C (Tidus on the bird sits at a stale (0, 36.3, 0)): its position is the drawn root +0x200, and its
             // sub-positions, built from that root, are world positions already. Field only: battle follows the roster as before.
