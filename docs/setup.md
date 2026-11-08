@@ -219,9 +219,10 @@ Battle: Y = Defend, right trigger held = scroll the turn order forward, left tri
 (never reach the game): right grip + right stick click = the next view, left grip + right stick click = the next party
 member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
 game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
-gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (cut the
-big plate in front of you with either hand: an arrow along its sliding chevrons, a letter or L / R any way). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
-and set the blade pitch, target distance, target height and target size first; "Bushido time" (1-3x) slows the game's input timer
+gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (the d-pad
+arrows appear on the left, A / B / X / Y and L1 / R1 on the right; cut the big plate with either hand along its sliding chevrons:
+A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
+and set the blade pitch, target distance, target height, target size and target spacing first; "Bushido time" (1-3x) slows the game's input timer
 while the targets window is open, if the time is too short.
 
 Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old

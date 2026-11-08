@@ -5581,13 +5581,28 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 / 2 strike the targets, an F8 radio row ("Auron's Bushido:"). The logic is the pure header `src/native/ffxvr_odtarget.h`
 (its unit test and mutants are kept outside the repo, as the other overdrive suites).
 
+- **Two places** (the owner, 9 Nov 2026: "two places where the icons can appear"). The single spot became two, at the same
+  distance and height, 0.36 m apart (`od_targets_spread`, F8 "target spacing (m)", 0.25-0.6 between the centres, never less
+  than the plate's width + 2 cm, so the plates never overlap from either eye at any setting): the LEFT spot holds the four d-pad
+  arrows, the RIGHT spot A / B / X / Y and L1 / R1 (L1 and R1 were first planned for the left spot; the owner moved them to the
+  right with the face buttons). Every symbol is now cut in a direction with the same 65-degree path rule and deflect handling
+  as the arrows: the face buttons as they sit on the Xbox pad (A down, B right, X left, Y up; the glyph follows the map in use,
+  so the direction follows the button the game wants), L1 left, R1 right. A letter or the L / R tab stays the main symbol, with
+  the same sliding chevrons and guide line in the plate's colour; so the letter stays legible, a chevron is at 20 % alpha and
+  65 % size while any part of it is over the face, and full again by the rim's middle and beyond the plate (a lane around the
+  letter); on an arrow the chevrons run over it at full strength (they point the same way). Stabs no longer cut anything. Only
+  the current plate is hittable, as before; the preview (one, the next symbol) sits just above its own spot, so the player sees
+  which side is next. The pips and bar sit between the spots, pushed back to the spots' distance (never nearer than a plate).
+  A follow-through from one spot into the other must not cut a plate that has just appeared there: the hand that cut cannot
+  cut at the OTHER spot for 0.25 s (its same-spot re-arm is unchanged: out of the sphere it cut, or 0.2 s), the other hand can at
+  once. ABI 54 (`ffxvr_odt_set` gains the spread).
 - **What the player sees** (the "one big target" redesign, 8 Nov 2026; the first build's fly-in and two lanes failed the
   owner's play test: hard to see and unclear what to do). One plate at a time in one fixed spot, 0.50 m ahead and 0.30 m below
   the eyes, latched from the head's yaw at the open (blended toward the body). The plate is an octagon prism about 24 cm across
   (the size slider scales it), with a soft dark halo behind it (about 1.4x the plate, alpha 0.6), a bright saturated face
   (arrows cyan, A / B / X / Y amber, L1 / R1 violet), a thick white rim and a thick near-black symbol, and a gentle pulse
   (scale 1.00-1.04). The arrow points the way to cut: three chevrons slide along it, looping every 0.9 s, over a faint guide
-  line reaching 12 cm beyond both edges; letters and L / R have no chevrons (any direction). The next input shows small (40 %)
+  line reaching 12 cm beyond both edges; letters and L / R had no chevrons (any direction) until the two places (above). The next input shows small (40 %)
   and faint above and behind the plate, never hittable. When a plate is cut the next materialises in the same spot in 0.12 s
   (scale and alpha, no travel); the first materialises at the open. A wrong direction flashes the rim red and enlarges the
   chevrons. Thin progress pips (the game's own progress; a pip flashes when it moves) and a timer bar sit under the plate.
@@ -5636,8 +5651,8 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
   in the plate's plane over the pass (at least 7 cm of it, from the first contact sample or the last turn back), which must lie
   within 65 degrees of the arrow; a new pass starts afresh, and so does a turn back inside the sphere (a wind-up from a ready
   pose already in the 30 cm sphere would otherwise have to be cancelled by the chop first: review R5-S1). Across a 30 / 60 Hz test of noisy strokes, a stroke at
-  right angles is accepted 3 % of the time (bound 5 %), the opposite way never, the right way always. Buttons take any
-  direction (stabs too). One hit per plate; the striking hand re-arms when its blade leaves the sphere or after 0.2 s, the
+  right angles is accepted 3 % of the time (bound 5 %), the opposite way never, the right way always. Buttons took any
+  direction (stabs too) until the two places; now they follow the same rule in their own direction (right angles 3-4 %). One hit per plate; the striking hand re-arms when its blade leaves the sphere or after 0.2 s, the
   other hand can cut the next plate at once. A wrong direction deflects and sends nothing; a deflect shows 0.3 s after its
   pass ends and is dropped if the plate is cut (or done) meanwhile (a raise through the plate before the chop), and a pass that
   began less than 0.15 s after its plate became current never deflects (a two-handed grip: the second blade is already in the
@@ -5667,8 +5682,9 @@ A second scheme for Auron's Bushido beside the slashes and punches: `od_gest_aur
 - **Practice targets** (F8, under the overdrive gesture rows): any time with the headset's 3D view and no overdrive window open,
   outside battle too: a random 3-8 symbols (or "Replay last Bushido": the last sequence seen this session), a 4 s bar, the full
   test and visuals, nothing sent. It ends with `practice: 8 of 8 in 2.31 s (first 0.57 s, then 0.25 s an input; deflects 2)` in
-  F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate), Bushido
-  time (ini `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`, `od_targets_time`; the first build's `od_targets_dist` /
+  F8 and the log. Sliders: blade pitch, target distance, target height, target size (a multiplier on the 24 cm plate), target
+  spacing, Bushido time (ini `od_targets_blade_pitch`, `od_targets_dist2`, `od_targets_height2`, `od_targets_size`,
+  `od_targets_spread`, `od_targets_time`; the first build's `od_targets_dist` /
   `od_targets_height`, defaults 0.6 / -0.2, are read and ignored so the new 0.5 / -0.3 apply; one log line says so).
 - **Drawing:** the plate, preview, cuts, pips, bar and blades are built once a Present in the controllers' XR space and drawn last in the
   3D marker pass with the VR hands' map (as the overdrive visuals), in their own 4608 vertices; the blades and trails are drawn

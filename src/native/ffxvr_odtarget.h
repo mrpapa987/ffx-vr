@@ -6,16 +6,20 @@
 // arbitration (Arb) and trigger hold-back (trig_hold) run in odg_input / vrpad_triggers. A unit test drives it with
 // synthetic blade strokes and a transcription of the game's Bushido input state with the press slot's poll model.
 //
-//   geo / latch / spot  where the target is (the owner's redesign "one big target", 8 Nov 2026): ONE plate 24 cm across, straight
-//                       ahead at chest height (0.50 m forward of the eyes, 0.30 m below them), latched once a round from the
-//                       head's yaw (and the hands) and fixed in the room (a recentre re-latches); the next symbol small, faint,
-//                       above and behind it; thin progress pips and a timer bar under it
+//   geo / latch / spot  where the targets are (the owner's redesign "one big target", 8 Nov 2026, then "two places", 9 Nov):
+//                       ONE plate at a time, 24 cm across, at chest height (0.50 m forward of the eyes, 0.30 m below them) in
+//                       one of two spots 0.36 m apart (od_targets_spread): the LEFT spot holds the d-pad arrows, the RIGHT spot
+//                       A / B / X / Y and L1 / R1; latched once a round from the head's yaw (and the hands) and fixed in the room
+//                       (a recentre re-latches); the next symbol small and faint above its own spot; thin progress pips and a
+//                       timer bar under and between the spots
 //   sweep / judge       the swept blade (sub-stepped by rotation, 8 points along a slightly curved blade) against the target's
-//                       15 cm hit sphere; a hit needs 1.2 m/s at the contact and, for an arrow, the pass's in-plane path (from
-//                       its last turn back) within 65 degrees of the arrow; the face and shoulder buttons take any direction (a stab too)
+//                       15 cm hit sphere; a hit needs 1.2 m/s at the contact and the pass's in-plane path (from its last turn
+//                       back) within 65 degrees of the symbol's cut direction: the arrows theirs; the face buttons as on the
+//                       Xbox pad (A down, B right, X left, Y up); L1 left, R1 right
 //   Runner              a round (a Bushido window or a practice round): only the current target can be cut (no pre-hits); when
-//                       it is, the next materialises in the same spot (0.12 s); the re-arm per hand (the hand that cut must
-//                       leave the sphere, or 0.2 s; the other hand cuts at once), deflects (the rim flashes red, the cut
+//                       it is, the next materialises in its spot (0.12 s); the re-arm per hand (the hand that cut must leave
+//                       that sphere, or 0.2 s, and cannot cut at the other spot for 0.25 s: a follow-through; the other hand
+//                       cuts at once), deflects (the rim flashes red, the cut
 //                       direction's chevrons swell, a light buzz; held back 0.3 s and dropped if the plate is cut meanwhile,
 //                       and none for a plate that became current with the blade already in it), rewinds, the end; the closed-loop injection on the
 //                       game's own progress (a press of seq[progress] only when target `progress` was struck, the slot is free
@@ -72,6 +76,7 @@ constexpr double k_resend_s = 0.15, k_settle_s = 0.08, k_ours_s = 0.3;          
 constexpr int k_settle_frames = 2;
 constexpr double k_gate_grace_s = 0.25;                                                    // the injection gate may drop this long without ending the round (review S1)
 constexpr double k_rearm_s = 0.20; constexpr float k_rearm_m = 0.02f;                      // the re-arm per hand (out of the sphere by 2 cm, or 0.2 s)
+constexpr double k_cross_s = 0.25;                                                         // ... and no cut at the OTHER spot by that hand this soon (a follow-through)
 constexpr float k_snap_min = 0.04f, k_snap_rest = 0.08f, k_jump_speed = 8.f;               // a pose snap; a jump (m/s at the grip)
 constexpr double k_gap_s = 0.12;                                                           // a longer gap between samples ends the pair
 constexpr double k_practice_s = 4.0, k_end_s = 0.35;                                       // practice's bar; the end's fade
@@ -86,7 +91,7 @@ inline float ease_out(float u) { u = odv::clamp01(u); const float a = 1.f - u; r
 inline V3 rot_axis(V3 v, V3 axis, float ang) { const float c = std::cos(ang), s = std::sin(ang); return v * c + cross(axis, v) * s + axis * (dot(axis, v) * (1.f - c)); }
 
 // -- settings and the layout ----------------------------------------------------------------------------------------------
-/// ini od_targets_blade_pitch / od_targets_dist2 / od_targets_height2 / od_targets_size (F8 sliders); the rest are defaults.
+/// ini od_targets_blade_pitch / od_targets_dist2 / od_targets_height2 / od_targets_size / od_targets_spread (F8 sliders); the rest are defaults.
 struct Cfg {
     float reach = 0.45f;       // m: the blade's length; under 5 cm: a fist (the knuckles) and the fist layout
     float pitch_deg = 0.f;     // the blade's tilt from the grip's -Z (+: tip up), -45..45
@@ -95,6 +100,7 @@ struct Cfg {
     float hit_cm = 15.f, dir_deg = 65.f, speed = 1.2f;     // hit sphere at size 1, arrow tolerance, contact speed (m/s)
     bool preview = true, shoulder_hand = false, body = true, deflect_buzz = true, haptics = true;
     float time_mult = 1.f;     // od_targets_time, 1..3: the game's countdown runs this many times slower in a targets window (Stretch); practice's bar too
+    float spread = 0.36f;      // od_targets_spread, 0.25..0.6 m: between the left and the right spot's centres (at least the plate + 2 cm)
 };
 struct Geo {
     bool fist = false;
@@ -102,6 +108,7 @@ struct Geo {
     float R = 0.15f, rad = 0.12f, th = 0.025f;                   // hit sphere, plate circumradius, plate thickness
     float speed = 1.2f, cos_dir = 0.4226f, pitch = 0.f, s0 = 0.06f, s1 = 0.51f, curve = 0.025f; int npts = 8;
     float size = 1.f;
+    float spread = 0.36f;                                        // between the two spots' centres (m)
 };
 inline Geo geo(const Cfg& c) {
     Geo g;
@@ -111,6 +118,7 @@ inline Geo geo(const Cfg& c) {
     g.D = g.fist ? fmaxf(0.30f, dist - 0.10f) : dist;
     g.H = g.fist ? fmaxf(-0.55f, height - 0.05f) : height;
     g.rad = k_plate_r * size; g.th = 0.025f * size;
+    g.spread = (std::max)(clampf(fin(c.spread, 0.36f), 0.25f, 0.6f), 2.f * g.rad + 0.02f);   // never overlapping: the plate + 2 cm
     g.R = (clampf(fin(c.hit_cm, 15.f), 8.f, 22.f) + (g.fist ? 1.f : 0.f)) * 0.01f * size;
     g.speed = clampf(fin(c.speed, 1.2f), 0.6f, 3.f); if (g.fist && g.speed > 1.f) g.speed = 1.f;
     g.cos_dir = std::cos(clampf(fin(c.dir_deg, 65.f), 30.f, 80.f) * k_deg);
@@ -138,7 +146,8 @@ inline Frame latch(V3 eye, const float* head_q, const bool hand_ok[2], const V3 
     return fr;
 }
 /// The spot: straight ahead (the frame's forward) and below the eyes.
-inline V3 spot_of(const Frame& fr, const Geo& g) { return fr.e0 + fr.f * g.D + fr.u * g.H; }
+/// A spot: side -1 the left (the d-pad arrows), +1 the right (A / B / X / Y, L1 / R1), 0 between them (spot_of(fr, g) alone).
+inline V3 spot_of(const Frame& fr, const Geo& g, int side = 0) { return fr.e0 + fr.f * g.D + fr.u * g.H + fr.r * (0.5f * static_cast<float>(side) * g.spread); }
 /// A plate's axes: N toward e0 (fixed per spot, not billboarded each frame), R = the frame's right in its plane, U = N x R.
 struct Axes3 { V3 R = v3(1.f, 0.f, 0.f), U = v3(0.f, 1.f, 0.f), N = v3(0.f, 0.f, 1.f); };
 inline Axes3 plate_axes(const Frame& fr, V3 c) {
@@ -154,9 +163,21 @@ inline Axes3 plate_axes(const Frame& fr, V3 c) {
 static const char* const k_sym_name[odv::G_N] = { "? (off the map)", "Up", "Right", "Down", "Left", "L1", "R1", "Y", "B", "A", "X" };
 inline const char* sym_name(int s) { return s >= 0 && s < odv::G_N ? k_sym_name[s] : "?"; }
 inline bool sym_arrow(int s) { return s >= odv::G_UP && s <= odv::G_LEFT; }
+/// Every symbol on the map is cut in a direction (the owner, 9 Nov): the arrows theirs; the face buttons where they sit on the
+/// Xbox pad (A down, B right, X left, Y up; the glyph is the map in use's, so the direction follows the button the game wants);
+/// L1 left, R1 right. Off the map (G_NONE): none (not hittable).
+inline bool sym_directed(int s) { return s >= odv::G_UP && s <= odv::G_X; }
 inline V3 arrow_dir(int s, const Axes3& a) {
-    switch (s) { case odv::G_UP: return a.U; case odv::G_RIGHT: return a.R; case odv::G_DOWN: return a.U * -1.f; case odv::G_LEFT: return a.R * -1.f; default: return v3(0.f, 0.f, 0.f); }
+    switch (s) {
+        case odv::G_UP: case odv::G_Y: return a.U;
+        case odv::G_RIGHT: case odv::G_B: case odv::G_R1: return a.R;
+        case odv::G_DOWN: case odv::G_A: return a.U * -1.f;
+        case odv::G_LEFT: case odv::G_X: case odv::G_L1: return a.R * -1.f;
+        default: return v3(0.f, 0.f, 0.f);
+    }
 }
+/// The spot: the d-pad arrows on the left, everything else (A / B / X / Y, L1 / R1, off the map) on the right.
+inline int side_of(int s) { return sym_arrow(s) ? -1 : 1; }
 /// The palette: brightness first. A saturated face (arrows cyan, face buttons amber, L1 / R1 violet; grey off the map) under a
 /// near-black symbol (dark on bright reads at a glance), a white rim, all on a dark halo that keeps a bright battle effect behind
 /// from washing it out.
@@ -224,19 +245,18 @@ inline Contact sweep(const Blade& a, const Blade& b, float dt, V3 C, const Geo& 
     return best;
 }
 enum Judge { J_NONE = 0, J_HIT, J_WRONG, J_SLOW };   // J_WRONG: an arrow struck fast in the wrong direction (a deflect at the pass's end)
-/// A contact against a target (design 3.2): an arrow needs |v in its plane| >= speed and within the tolerance of the arrow;
-/// a button |v| >= speed in any direction (slash, chop, stab). deg: the arrow's direction error.
+/// A contact against a target (design 3.2): |v in its plane| >= speed and within the tolerance of the symbol's cut direction
+/// (every symbol on the map since the two places; off the map nothing). deg: the direction error.
 inline int judge(const Contact& c, int sym, const Axes3& a, const Geo& g, float* deg = nullptr) {
     if (deg) *deg = 0.f;
-    if (sym_arrow(sym)) {
+    if (sym_directed(sym)) {
         const V3 vp = c.v - a.N * dot(c.v, a.N); const float sp = len(vp);
         if (sp < g.speed) return J_SLOW;
         const float cs = dot(vp, arrow_dir(sym, a)) / sp;
         if (deg) *deg = std::acos(clampf(cs, -1.f, 1.f)) / k_deg;
         return cs >= g.cos_dir ? J_HIT : J_WRONG;
     }
-    if (sym == odv::G_NONE) return J_NONE;
-    return len(c.v) >= g.speed ? J_HIT : J_SLOW;
+    return J_NONE;   // off the map (since the two places every symbol on the map is cut in a direction)
 }
 /// The one-target rule for a pass (consecutive pairs in contact with the sphere): an arrow's DIRECTION is judged on the pass's
 /// in-plane path so far (the contact point's displacement summed over the pairs), once it is k_dir_min_m long, and its speed on
@@ -252,7 +272,7 @@ struct Pass {
     int step(const Contact& c, float dt, int sym, const Axes3& a, const Geo& g, float* deg = nullptr) {
         if (deg) *deg = 0.f;
         on = true;
-        if (!sym_arrow(sym)) return judge(c, sym, a, g, deg);
+        if (!sym_directed(sym)) return judge(c, sym, a, g, deg);
         const V3 vp = c.v - a.N * dot(c.v, a.N); const float sp = len(vp);
         if (dot(vp, d) < 0.f) d = v3(0.f, 0.f, 0.f);   // a turn back (a wind-up's apex): the stroke's path starts here
         d = d + vp * dt;
@@ -356,10 +376,11 @@ struct HandTrack {
     uint32_t in_contact = 0, fast_wrong = 0;                    // per target: in contact last pair; struck fast the wrong way in this pass
     Pass pass;                                                  // the pass through the one sphere (an arrow's direction)
     bool rearm = false; double rearm_t = 0.0; uint32_t rearm_k = 0;   // this hand cut: it cannot cut again until out of the sphere (or 0.2 s)
+    V3 rearm_c; int cut_side = 0; double cut_t = -1e300;        // ... that sphere's centre; the spot it cut at and when (the cross-spot follow-through)
     double pass_t0 = 0.0;                                       // when this hand's pass began
     int defl_i = -1; double defl_at = 0.0;                      // a deflect held back (k_defl_hold_s): its target and when its pass ended
     V3 tr_root[6], tr_tip[6]; double tr_t[6] = {}; bool tr_fast[6] = {}; int tr_n = 0, tr_head = 0;
-    void clear_round() { pend_n = 0; in_contact = fast_wrong = 0; rearm = false; pass.reset(); defl_i = -1; }
+    void clear_round() { pend_n = 0; in_contact = fast_wrong = 0; rearm = false; pass.reset(); defl_i = -1; cut_t = -1e300; }
     void trail(V3 root, V3 tip, double when, bool fast) { tr_root[tr_head] = root; tr_tip[tr_head] = tip; tr_t[tr_head] = when; tr_fast[tr_head] = fast; tr_head = (tr_head + 1) % 6; if (tr_n < 6) tr_n++; }
     int tr_at(int i) const { return (tr_head + 6 - 1 - i) % 6; }
 };
@@ -474,11 +495,22 @@ struct Runner {
         return false;
     }
     bool holding() const { return r.on; }
-    V3 spot() const { return spot_of(r.fr, r.g); }
-    /// The preview's place: above and a little behind the plate (never in front of it, never nearer the eyes).
-    V3 preview_spot() const {
-        const Axes3 ax = plate_axes(r.fr, spot());
-        return spot() + ax.U * (r.g.rad * (1.f + k_preview_scale) + 0.03f * r.g.size) + r.fr.f * (0.05f * r.g.size);
+    /// Target i's spot (its symbol's side); spot(): the current target's (the left spot when none).
+    V3 spot_i(int i) const { return spot_of(r.fr, r.g, i >= 0 && i < r.n ? side_of(r.tg[i].sym) : -1); }
+    V3 spot() const { return spot_i(r.cur >= 0 && r.cur < r.n ? r.cur : front() < r.n ? front() : r.n - 1); }
+    /// The pips' and bar's centre: between the spots, pushed back to the spots' distance from the eyes (never nearer than a plate).
+    V3 hud_centre() const { const float hs = 0.5f * r.g.spread; return r.fr.e0 + r.fr.f * std::sqrt(r.g.D * r.g.D + hs * hs) + r.fr.u * r.g.H; }
+    /// The preview's place: above and a little behind its own spot's plate (never in front of it, never nearer the eyes).
+    V3 preview_spot(int i) const {
+        const V3 c = spot_i(i); const Axes3 ax = plate_axes(r.fr, c);
+        return c + ax.U * (r.g.rad * (1.f + k_preview_scale) + 0.03f * r.g.size) + r.fr.f * (0.05f * r.g.size);
+    }
+    /// Hand h may cut target i at t: armed (the re-arm), and not a follow-through into the other spot (k_cross_s after its cut).
+    bool armed(int i, int h, double t) const {
+        if (h < 0 || h > 1) return true;
+        const HandTrack& k = ht[h];
+        if (k.rearm) return false;
+        return !(i >= 0 && i < r.n && side_of(r.tg[i].sym) != k.cut_side && t - k.cut_t < k_cross_s);
     }
     /// The materialise: 0 -> 1 over k_appear_s from when target i became current (1 for any other).
     float appear(int i, double t) const { if (i != r.cur) return 1.f; return odv::clamp01(static_cast<float>((t - r.cur_t) / k_appear_s)); }
@@ -574,22 +606,22 @@ struct Runner {
     // -- the hands ----------------------------------------------------------------------------------------------------------------
     void apply_hit(int i, int h, const Contact& c, double t_hit, double t_now, float deg, TickOut& o) {
         Tgt& g = r.tg[i]; HandTrack& k = ht[h];
-        const V3 C = spot(); const Axes3 ax = plate_axes(r.fr, C);
+        const V3 C = spot_i(i); const Axes3 ax = plate_axes(r.fr, C);
         g.struck = true; g.t_hit = t_hit; g.hand = h;
         st.struck++; st.hits[h]++;
         const double rel = t_hit - r.t_open; if (st.first < 0.0) st.first = rel; if (rel > st.last) st.last = rel;
-        k.rearm = true; k.rearm_t = t_now; k.rearm_k = k.ns;
+        k.rearm = true; k.rearm_t = t_now; k.rearm_k = k.ns; k.rearm_c = C; k.cut_side = side_of(g.sym); k.cut_t = t_now;
         const uint32_t bit = 1u << i; k.in_contact &= ~bit; k.fast_wrong &= ~bit; k.pass.reset();
         V3 vp = c.v - ax.N * dot(c.v, ax.N); const float sp = len(vp);
         const V3 cd = sp > 0.3f ? vp * (1.f / sp) : norm(ax.R - ax.U);   // a stab: a diagonal cut
         add_cut(C, ax, cd, c.at, c.v, sym_col(g.sym), t_now);
         if (i == r.cur && t_now - r.cur_t < k_appear_s) cut[(cut_next + k_cut_n - 1) % k_cut_n].twin = true;   // never fully seen: flash (R5-N1)
-        if (o.nhit < 8) { Hit& x = o.hit[o.nhit++]; x.i = i; x.hand = h; x.speed = sym_arrow(g.sym) ? sp : len(c.v); x.deg = deg; x.t = t_hit; x.pre = false; }
+        if (o.nhit < 8) { Hit& x = o.hit[o.nhit++]; x.i = i; x.hand = h; x.speed = sym_directed(g.sym) ? sp : len(c.v); x.deg = deg; x.t = t_hit; x.pre = false; }
     }
     /// For the tests and the injection model: hand h strikes target i now if it is hittable and the hand is armed (a plain downward cut).
     bool strike(int i, int h, double t, TickOut& o) {
-        if (!hittable(i, h) || (h >= 0 && h < 2 && ht[h].rearm)) return false;
-        Contact c; c.v = r.fr.u * -2.f; c.at = spot(); apply_hit(i, h, c, t, t, 0.f, o); return true;
+        if (!hittable(i, h) || (h >= 0 && h < 2 && ht[h].rearm)) return false;   // (a deliberate cut: the cross-spot follow-through rule is the swept blade's)
+        Contact c; c.v = r.fr.u * -2.f; c.at = spot_i(i); apply_hit(i, h, c, t, t, 0.f, o); return true;
     }
     /// A wrong-direction pass on an arrow: the rim flashes red and the chevrons swell (k_defl_show_s), a light buzz on that hand
     /// (on by default in this presentation: the direction rule is learnt from the feedback).
@@ -621,7 +653,7 @@ struct Runner {
             if (snap) st.snaps++;
             else for (int j = 0; j < k.pend_n; ++j) {
                 const int i = k.pend_i[j];
-                if (hittable(i, h) && !k.rearm) { Contact c; c.v = k.pend_v[j]; c.at = spot(); apply_hit(i, h, c, k.pend_t[j], t, k.pend_deg[j], o); nh[h]++; }
+                if (hittable(i, h) && armed(i, h, t)) { Contact c; c.v = k.pend_v[j]; c.at = spot_i(i); apply_hit(i, h, c, k.pend_t[j], t, k.pend_deg[j], o); nh[h]++; }
             }
             k.pend_n = 0;
         }
@@ -633,10 +665,10 @@ struct Runner {
         else if (snap) { k.in_contact = k.fast_wrong = 0; }
         else if (r.on) {
             const int i = front();
-            const bool can = i < r.n && hittable(i, h) && !k.rearm;   // the one target, for an armed hand
+            const bool can = i < r.n && hittable(i, h) && armed(i, h, t);   // the one target, for an armed hand (not a follow-through from the other spot)
             const uint32_t bit = can ? 1u << i : 0u;
             if (can) {
-                const V3 C = spot(); const Axes3 ax = plate_axes(r.fr, C);
+                const V3 C = spot_i(i); const Axes3 ax = plate_axes(r.fr, C);
                 const Contact c = sweep(k.b, b, static_cast<float>(dt), C, g);
                 if (c.dist <= g.R) {
                     if (!(k.in_contact & bit)) { k.pass.reset(); k.pass_t0 = t; }   // a new pass
@@ -657,7 +689,7 @@ struct Runner {
         }
         nh[h] += hits_now;
         k.ns++;   // the re-arm's out test starts at the sample after the hit's (the blade out of the sphere for one sample)
-        if (k.rearm && (t - k.rearm_t >= k_rearm_s || (k.ns > k.rearm_k + 1 && blade_dist(b, g, spot()) > g.R + k_rearm_m))) k.rearm = false;
+        if (k.rearm && (t - k.rearm_t >= k_rearm_s || (k.ns > k.rearm_k + 1 && blade_dist(b, g, k.rearm_c) > g.R + k_rearm_m))) k.rearm = false;   // out of the sphere it cut
         k.step = step; k.have_step = true; k.b = b; k.t = t;
         k.trail(blade_pt(b, g, g.s0), blade_pt(b, g, g.s1), t, k.tip_speed > g.speed);
     }
@@ -923,7 +955,7 @@ struct Runner {
         const float pulse = 1.02f + 0.02f * static_cast<float>(std::sin((t - r.t_open) * odg::k_two_pi * 1.5));   // 1.00-1.04
         const float sc = (0.6f + 0.4f * e) * pulse, al = A * u;
         if (al <= 0.f) return;
-        const V3 C = spot(); const Axes3 ax = plate_axes(r.fr, C);
+        const V3 C = spot_i(i); const Axes3 ax = plate_axes(r.fr, C);
         const float rad = r.g.rad * sc, th = r.g.th * sc;
         const bool grey = r.stopped || (!r.on && r.end == E_TIMEOUT);
         const double da = t - g.defl_t; const bool defl = da >= 0.0 && da < k_defl_show_s;
@@ -931,9 +963,10 @@ struct Runner {
         const Col rim = defl ? col(1.f, 0.18f, 0.12f, 1.f) : face;
         const Col ink_k = bright(face, al), glow_k = col(face.r, face.g, face.b, 0.45f * al);
         halo(o, C - ax.N * th, ax, rad, 0.6f * al);
-        const bool arrow = sym_arrow(g.sym) && !grey;
+        const bool arrow = sym_directed(g.sym) && !grey;   // (every symbol on the map: the arrows, the face buttons, L1 / R1)
+        const bool letter = !sym_arrow(g.sym);                  // a letter or the L / R tab: the chevrons give way over it
         const V3 d = arrow_dir(g.sym, ax), b = cross(ax.N, d);
-        if (arrow) {   // the guide: the stroke's whole path, 12 cm beyond both edges (under the plate)
+        if (arrow) {   // the guide: the stroke's whole path, 12 cm beyond both edges (under the plate: the face hides it)
             const float L = rad + k_guide_m * r.g.size;
             odv::glow_line(o, C - d * L, C + d * L, 0.0025f * r.g.size, col(1.f, 1.f, 1.f, 0.35f * al), col(1.f, 1.f, 1.f, 0.35f * al), in.eye);
         }
@@ -945,15 +978,22 @@ struct Runner {
             const float ph = static_cast<float>(std::fmod((t - r.t_open) / k_chev_period_s, 1.0));
             for (int j = 0; j < 3; ++j) {
                 float q = ph + static_cast<float>(j) / 3.f; if (q >= 1.f) q -= 1.f;
-                const float env = std::sin(3.14159265f * q), x = (-1.f + 2.f * q) * L, a = al * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than the first build's plain sine
-                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big, 0.18f * rad * big, 0.08f * rad * big, a, ink_k);
+                const float env = std::sin(3.14159265f * q), x = (-1.f + 2.f * q) * L;
+                // on a letter or the tab, the chevrons give way where they cross the symbol (the letter stays the main thing to
+                // read): while any part of one is over the face (its tip less than its depth past the rim's inner edge) it is at 20 %
+                // alpha and 65 % size, full again by the rim's middle and beyond the plate (a lane around the letter); on an arrow
+                // they run over it at full strength (they point the same way)
+                float fa = 1.f, fs = 1.f;
+                if (letter) { const float u2 = clampf((std::fabs(x) - 0.18f * rad * big - k_rim_in * rad) / (0.15f * rad), 0.f, 1.f), sm = u2 * u2 * (3.f - 2.f * u2); fa = 0.2f + 0.8f * sm; fs = 0.65f + 0.35f * sm; }
+                const float a = al * fa * std::sqrt(env > 0.f ? env : 0.f);   // brighter for longer than the first build's plain sine
+                chevron(o, F + ax.N * 0.0008f + d * x, d, b, 0.30f * rad * big * fs, 0.18f * rad * big * fs, 0.08f * rad * big * fs, a, ink_k);
             }
         }
     }
     /// The next symbol: small (40 %), faint, above and behind; never hittable.
     void draw_preview(int i, float A, Out& o) const {
         const Tgt& g = r.tg[i];
-        const V3 P = preview_spot(); const Axes3 ax = plate_axes(r.fr, P);
+        const V3 P = preview_spot(i); const Axes3 ax = plate_axes(r.fr, P);
         const float rad = r.g.rad * k_preview_scale, th = r.g.th * k_preview_scale, al = 0.5f * A;    // a little brighter than the first build's 0.45, clearly dimmer than the plate (R6-N2: 0.65 competed)
         const Col k = r.stopped ? col(0.55f, 0.55f, 0.57f, 1.f) : sym_col(g.sym);
         halo(o, P - ax.N * th, ax, rad, 0.4f * al);
@@ -1000,7 +1040,7 @@ struct Runner {
     /// Thin progress pips and a timer bar under the plate (and its halo); the pip whose progress just registered flashes.
     void draw_hud(const In& in, float A, Out& o) const {
         const double t = in.t; const float S = r.g.size;
-        const V3 C = spot(); const Axes3 ax = plate_axes(r.fr, C);
+        const V3 C = hud_centre(); const Axes3 ax = plate_axes(r.fr, C);   // between the two spots
         const float below = 1.4f * r.g.rad;
         const int n = r.n; const float sp = fminf(0.016f, 0.24f / static_cast<float>(n > 0 ? n : 1)) * S, w = 0.55f * sp;
         const double sa = r.end == E_SUCCESS ? t - r.t_end : 1e9; const bool success = sa >= 0.0 && sa < 0.25;
@@ -1018,9 +1058,9 @@ struct Runner {
         odv::rect(o, bc, ax.R, ax.U, -0.5f * W, -0.5f * H, 0.5f * W, 0.5f * H, col(0.f, 0.f, 0.f, 0.30f * A));
         const Col bk = left < 0.75f ? col(1.f, 0.32f, 0.25f, 0.85f * A) : left < 1.5f ? col(1.f, 0.72f, 0.22f, 0.85f * A) : col(0.95f, 0.95f, 0.95f, 0.7f * A);
         if (frac > 0.f) odv::rect(o, bc, ax.R, ax.U, -0.5f * W * frac, -0.5f * H, 0.5f * W * frac, 0.5f * H, bk);
-        if (success) {   // success: a ring expands from the plate
-            const float u = static_cast<float>(sa / 0.25);
-            odv::arc(o, C, ax.R, ax.U, r.g.rad * (1.f + 1.5f * u), 0.012f * S, 0.f, odg::k_two_pi, col(1.f, 0.95f, 0.8f, (1.f - u) * 0.9f), 24);
+        if (success) {   // success: a ring expands from the last plate's spot
+            const float u = static_cast<float>(sa / 0.25); const V3 Cl = spot_i(r.n - 1); const Axes3 al = plate_axes(r.fr, Cl);
+            odv::arc(o, Cl, al.R, al.U, r.g.rad * (1.f + 1.5f * u), 0.012f * S, 0.f, odg::k_two_pi, col(1.f, 0.95f, 0.8f, (1.f - u) * 0.9f), 24);
         }
     }
     /// A blade: a single-edged, slightly curved, tapered blade from 6 cm beyond the grip, a small round guard, gold (left) or
