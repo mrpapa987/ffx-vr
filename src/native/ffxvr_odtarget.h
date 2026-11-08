@@ -133,6 +133,8 @@ inline Axes3 plate_axes(const Frame& fr, V3 c) {
 // -- symbols ----------------------------------------------------------------------------------------------------------------
 // odv::Glyph values: G_UP..G_LEFT arrows, G_L1 / G_R1 shoulders, G_Y / G_B / G_A / G_X faces, G_NONE a value off the map ("?",
 // not hittable: the player uses the button). The symbol follows the map in use (odv::glyph_of).
+static const char* const k_sym_name[odv::G_N] = { "? (off the map)", "Up", "Right", "Down", "Left", "L1", "R1", "Y", "B", "A", "X" };
+inline const char* sym_name(int s) { return s >= 0 && s < odv::G_N ? k_sym_name[s] : "?"; }
 inline bool sym_arrow(int s) { return s >= odv::G_UP && s <= odv::G_LEFT; }
 inline V3 arrow_dir(int s, const Axes3& a) {
     switch (s) { case odv::G_UP: return a.U; case odv::G_RIGHT: return a.R; case odv::G_DOWN: return a.U * -1.f; case odv::G_LEFT: return a.R * -1.f; default: return v3(0.f, 0.f, 0.f); }
