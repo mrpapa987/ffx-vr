@@ -2,8 +2,9 @@
 
 namespace FFXVR;
 
-// 3D damage numbers (roadmap 4.2, 6 Nov 2026; native ffxvr_dmg3d.h, ABI 47). On by default since the owner's play2 test (ini dmg3d_on=1;
-// the first build's dmg3d=0 lines are ignored;
+// 3D damage numbers (roadmap 4.2, 6 Nov 2026; native ffxvr_dmg3d.h, ABI 47). Off by default again since 8 Nov (ini dmg3d_show=0): with the
+// panel's own numbers still shown and the words (Immune, Miss, ...) left on the panel, they added little (the owner). The older keys
+// dmg3d and dmg3d_on are ignored, so the new default reaches an existing ini;
 // F8 main page, under "battle start (glass break)": "3D damage numbers", live). The battle's damage / heal / MP digits are drawn at each target in the world, in both
 // eyes, with the game's own hop, fade and colour; the four word sprites ("Miss" and the others, texture 600) and the Doom
 // countdown stay on the panel (v1).
@@ -32,8 +33,8 @@ namespace FFXVR;
 // Logging: native writes one dmg3d: line per new number (the first 40); here a dmg3d: line every 10 s in battle while on. Both only
 // with a diagnostic profile (diag_any(): dmg3d is on by default, so they would reach every Release log); the hello line always.
 public sealed unsafe partial class FFXVRModule {
-    private bool  _dmg3d = true;         // ini dmg3d_on (live; default 1 since the owner's play2 test). The first build's key dmg3d (saved as 0
-                                         // by it) is ignored, as fmv_depth_edges was, so the new default reaches an existing ini
+    private bool  _dmg3d = false;        // ini dmg3d_show (live; default 0 since 8 Nov). The older keys dmg3d and dmg3d_on (saved as 1 by the
+                                         // play2-to-fix-all builds) are ignored, as fmv_depth_edges was, so the new default reaches an existing ini
     private float _dmg_size = 1f;        // ini dmg3d_scale (0.3-3)
     private float _dmg_lift = 0f;        // ini dmg3d_lift (units above the game's anchor, -10..20)
     private bool  _dmg_hide2d = false;   // ini dmg3d_hide2d: hook the queue draw at launch; live once hooked
@@ -85,15 +86,15 @@ public sealed unsafe partial class FFXVRModule {
 
     private bool dmg_parse(string k, string v) {
         switch (k) {
-            case "dmg3d":        return true;   // the first build's key (saved as 0 there): ignored, the numbers start on (dmg3d_on)
-            case "dmg3d_on":     pb(k, v, ref _dmg3d); return true;
+            case "dmg3d": case "dmg3d_on": return true;   // older keys: ignored, the numbers start off (dmg3d_show)
+            case "dmg3d_show":   pb(k, v, ref _dmg3d); return true;
             case "dmg3d_scale":  pf(k, v, ref _dmg_size, 0.3f, 3f); return true;
             case "dmg3d_lift":   pf(k, v, ref _dmg_lift, -10f, 20f); return true;
             case "dmg3d_hide2d": pb(k, v, ref _dmg_hide2d); return true;
             default: return false;
         }
     }
-    private string dmg_ini_text() => $"dmg3d_on={(_dmg3d ? 1 : 0)}\ndmg3d_scale={_dmg_size.ToString("0.00", CI)}\ndmg3d_lift={_dmg_lift.ToString("0.0", CI)}\ndmg3d_hide2d={(_dmg_hide2d ? 1 : 0)}\n";
+    private string dmg_ini_text() => $"dmg3d_show={(_dmg3d ? 1 : 0)}\ndmg3d_scale={_dmg_size.ToString("0.00", CI)}\ndmg3d_lift={_dmg_lift.ToString("0.0", CI)}\ndmg3d_hide2d={(_dmg_hide2d ? 1 : 0)}\n";
 
     /// <summary>At module init, after every other hook of ours (Fahrenheit's commit stops at the first failing insertion, so a
     /// refusal here takes nothing else with it): the hop table, and with dmg3d_hide2d=1 the queue draw's hook.</summary>
