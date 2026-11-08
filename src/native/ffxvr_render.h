@@ -13,11 +13,15 @@ namespace rnd {
 // A frame goes flat when it has no real 3D camera, fewer than 3 scene draws, or (backdrop_mode 1) it is a painted-backdrop
 // room: the game's layered-2D background system (a dummy camera, design-notes "Painted-backdrop rooms"). Until 7 Nov a single
 // layer upload made the room: a 3D cutscene in kino0400 went flat for 9.3 s on 2 layer uploads beside 349 real camera
-// uploads. Now the layers must dominate (or the real 3D uploads be absent): a room is entered when layers x k_bd_enter >=
-// real 3D uploads, and kept while layers x k_bd_stay >= real (the hysteresis band), leaving after k_bd_exit_frames frames in
-// a row outside it, or at once when no layer is drawn. The 2D verdict still needs k_flat_frames frames in a row before the
-// screen; back to 3D at once, as before.
-constexpr uint32_t k_bd_enter = 4, k_bd_stay = 8, k_bd_exit_frames = 10, k_flat_frames = 2, k_few_draws = 3;
+// uploads. Now a room needs at least k_bd_min layer uploads, or the layers must dominate (or the real 3D uploads be absent): a
+// room is entered when layers >= k_bd_min or layers x k_bd_enter >= real 3D uploads, and kept while layers >= k_bd_min or
+// layers x k_bd_stay >= real (the hysteresis band), leaving after k_bd_exit_frames frames in a row outside it, or at once when
+// no layer is drawn. The 2D verdict still needs k_flat_frames frames in a row before the screen; back to 3D at once, as before.
+// (Review B1: a painted room with many 3D characters has real > 4 x layers; the floor keeps every room of 4+ layers flat, as
+// before, so only a stray layer or two beside a real 3D scene, E1's 2 vs 349, changes.)
+// Separately, first person, the hands, the stick remap and the stereo screen stay off whenever any layer is drawn, this frame
+// or the one before (any_layers): only the screen decision uses the ratio.
+constexpr uint32_t k_bd_min = 4, k_bd_enter = 4, k_bd_stay = 8, k_bd_exit_frames = 10, k_flat_frames = 2, k_few_draws = 3;
 
 /// Why the frame is shown as it is. The first group is the frame's own verdict (ModeRule); the rest are the native side's
 /// overrides (forced by a setting or a state), in the order it applies them.
@@ -45,14 +49,17 @@ struct ModeRule {
     uint32_t room_out = 0;   // frames in a row a room failed the stay test
     uint32_t without = 0;    // frames in a row with a 2D verdict
     bool flat = false;       // this frame's decision after the hysteresis: the virtual screen
+    bool any_layers = false; // a layer drawn this frame or the one before (first person, the hands, the remap, the stereo screen off)
+    uint32_t prev_layers = 0;
     int why = W_3D;          // this frame's own verdict (before the hysteresis)
     FrameIn last;            // this frame's counts (for the reason text)
     void reset() { *this = ModeRule{}; }
     static bool dominate(uint32_t layers, uint32_t real3d, uint32_t ratio) {
-        return real3d == 0 || static_cast<uint64_t>(layers) * ratio >= static_cast<uint64_t>(real3d);
+        return layers >= k_bd_min || real3d == 0 || static_cast<uint64_t>(layers) * ratio >= static_cast<uint64_t>(real3d);
     }
     void step(const FrameIn& f) {
         last = f;
+        any_layers = f.layers > 0 || prev_layers > 0; prev_layers = f.layers;
         if (f.layers == 0) { room = false; room_out = 0; }
         else if (!room) { room = dominate(f.layers, f.real3d, k_bd_enter); room_out = 0; }
         else if (dominate(f.layers, f.real3d, k_bd_stay)) room_out = 0;
@@ -71,12 +78,12 @@ inline void why_text(char* out, size_t n, int why, const FrameIn& f) {
     if (out == nullptr || n == 0) return;
     switch (why) {
     case W_3D: snprintf(out, n, "a real 3D camera (%u real 3D uploads, %u scene draws)", f.real3d, f.draws); break;
-    case W_3D_MINOR: snprintf(out, n, "3D: %u painted-layer uploads do not dominate %u real 3D uploads (a room needs layers x %u >= real, x %u to stay)",
-                              f.layers, f.real3d, k_bd_enter, k_bd_stay); break;
+    case W_3D_MINOR: snprintf(out, n, "3D: %u painted-layer uploads do not dominate %u real 3D uploads (a room needs %u+ layers or layers x %u >= real, x %u to stay; first person stays off while layers are drawn)",
+                              f.layers, f.real3d, k_bd_min, k_bd_enter, k_bd_stay); break;
     case W_NO_CAM: snprintf(out, n, "no real 3D camera (%u painted-layer uploads, %u scene draws)", f.layers, f.draws); break;
     case W_FEW_DRAWS: snprintf(out, n, "a 3D camera but %u scene draws (< %u; %u real 3D uploads)", f.draws, k_few_draws, f.real3d); break;
-    case W_ROOM: snprintf(out, n, "a painted-backdrop room: %u layer uploads vs %u real 3D uploads (layers x %u >= real to enter, x %u to stay; backdrop_mode 1)",
-                          f.layers, f.real3d, k_bd_enter, k_bd_stay); break;
+    case W_ROOM: snprintf(out, n, "a painted-backdrop room: %u layer uploads vs %u real 3D uploads (%u+ layers, or layers x %u >= real to enter, x %u to stay; backdrop_mode 1)",
+                          f.layers, f.real3d, k_bd_min, k_bd_enter, k_bd_stay); break;
     case W_FORCED: snprintf(out, n, "screen_mode 1 (always the virtual screen)"); break;
     case W_NEVER: snprintf(out, n, "screen_mode 2 (never the virtual screen)"); break;
     case W_BT: snprintf(out, n, "a battle transition keeps the view it started in"); break;

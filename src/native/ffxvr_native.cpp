@@ -14363,13 +14363,13 @@ static void xr_tick() {
         }
     }
     else if (g_mode_why.step(mode_why)) {               // fix-render (E2): the same mode for a new reason (held 30 frames): a room entered through a load
-        static int relogged = 0;
-        if (relogged++ < 200) {
+        static int relogged[rnd::W_COUNT] = {};   // review N2: 40 per reason, so 3D <-> 3D-with-layers flapping cannot spend a room's lines
+        if (mode_why >= 0 && mode_why < rnd::W_COUNT && relogged[mode_why]++ < 40) {
             char why[256]; rnd::why_text(why, sizeof(why), mode_why, g_mode_rule.last);
             diag("mode: still %s at frame %u, now because: %s", screen_next ? "SCREEN" : "3D", g_frames, why);
         }
     }
-    g_backdrop_room = g_mode_rule.room;                 // fix-render: the layer rule's room (with its hysteresis), not any layer upload
+    g_backdrop_room = g_mode_rule.any_layers;           // fix-render (review B1): first person, the hands, the remap and the stereo screen stay off while any layer is drawn (this frame or the last); only the screen uses the room rule
     g_cam_uploads_frame = 0; g_cam3d_uploads_frame = 0; g_bg_uploads_frame = 0;
     g_xr_screen_now = screen_next;
     g_ovr_suspend = screen_next;              // a frame shown flat is rendered as the game renders it: no head pose, no eye offset, no FOV

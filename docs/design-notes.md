@@ -5460,16 +5460,21 @@ reads); scratch tests in render_chk/tests.
 
 - **The flat-screen rule needs the painted layers to dominate (behaviour E1/E2).** A 3D cutscene in kino0400 (s2 07:25:17) went to
   the virtual screen for 9.3 s on 2 painted-layer (dummy camera) uploads beside 349 real 3D camera uploads: any layer upload made
-  the frame a "painted-backdrop room". Now (`rnd::ModeRule`) a room is entered when the layer uploads x 4 >= the real 3D uploads
-  (or there is no real 3D upload), and kept while layers x 8 >= real (the hysteresis band); 10 frames in a row outside the band,
-  or a frame with no layer at all, end it. The 2D verdict still needs 2 frames before the screen and 3D comes back at once.
-  `g_backdrop_room` (first person, hands, stereo screen, the stick remap) follows the rule's room, not any layer upload; with
-  `backdrop_mode` 0 the room is still tracked but stays 3D. Expected: E1 stays 3D (2 x 4 < 349); the s2 title-like frame (28
-  layers, 0 real) and a hut (about 10 layers, a few characters) stay flat.
+  the frame a "painted-backdrop room". Now (`rnd::ModeRule`) a room is entered when there are at least 4 layer uploads, or the
+  layer uploads x 4 >= the real 3D uploads (or there is no real 3D upload), and kept while 4+ layers or layers x 8 >= real (the
+  hysteresis band); 10 frames in a row outside the band, or a frame with no layer at all, end it. The 2D verdict still needs 2
+  frames before the screen and 3D comes back at once. Expected: E1 stays 3D (2 layers, 2 x 4 < 349); every room of 4+ layers
+  (the title-like frame's 28, a hut, the Djose side rooms if they are painted) stays flat whatever its character count.
+  - Review B1: without the 4-layer floor, a painted room with many 3D characters (real > 4 x layers, plausible in the Djose side
+    rooms) would have come up in 3D with the painting glued to the face. Replaying all 141 logged mode lines of both sessions
+    through the new rule (render_test): only E1 changes.
+  - First person, the hands, the stick remap and the stereo screen stay off whenever any layer is drawn, this frame or the one
+    before (`ModeRule::any_layers` -> `g_backdrop_room`), as before the change: only the screen decision uses the ratio. So
+    E1's scene is 3D now, but in the seat view while its 2 layers are drawn.
   - **The mode lines say why.** `mode -> SCREEN|3D at frame F: ... | why: <reason with the counts and the rule>`; reasons: a real
     3D camera, 3D with layers that do not dominate, no real 3D camera, too few scene draws, a painted room, screen_mode 1 / 2,
     a battle transition's pin, Fahrenheit's save screen, the slow-GPU guard. While the mode stays, a new reason held for 30
-    frames gets `mode: still SCREEN at frame F, now because: ...` (200 a session): a room entered through a load is first
+    frames gets `mode: still SCREEN at frame F, now because: ...` (40 a session per reason): a room entered through a load is first
     logged as "no real 3D camera" (the load frame), then as the room with its counts, which is what confirms or rules out the
     Djose side rooms' 126 s (E2).
   - If a painted room with many characters now shows in 3D with the painting stuck to the face, the line gives its counts
