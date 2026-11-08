@@ -5531,3 +5531,13 @@ reads); scratch tests in render_chk/tests.
     encode / network / decode figures are only in Virtual Desktop's own overlay; VDXR's ETW provider (its
     `scripts/Capture-ETL.bat`) splits the wait into `OVR_WaitToBeginFrame` and `OVR_EndFrame` on its submission thread.
   - Owner steps: fixes/fix-render-impl.md (scratchpad), section 6.
+- **Spell hitches are FFX-60fps' (perf finding 1): nothing changed here.** Every spell end with a hooked magic overlay freezes the
+  picture 0.1-0.6 s (on the game's main thread, so no Present and no extra frames: the flush gate is held), and big spells' starts
+  0.3-0.5 s. fps60.log's own lines show it: `magic_0605.dll unload: 9 callbacks 563.40 ms (slowest MAG-022 412.36 ms)`; hookless
+  unloads take 0.00 ms. Cause: the MAG-016 / 017 / 022 rows hook and unhook the overlay through MinHook, and each `MH_EnableHook`
+  / `MH_RemoveHook` runs `Freeze()` (a system-wide Toolhelp thread snapshot, then suspend + context of every thread of the
+  process): ~100-150 ms a call on this PC, 1-4 calls per DLL event. Suggested upstream: no freeze for magic DLLs (no thread can be
+  in an overlay at its load or unload notification; at unload nothing even needs restoring), or one `MH_ApplyQueued` per event
+  (queue the enables / disables), or a per-process thread walk in MinHook. FFX-60fps is Apache-2.0 (MinHook BSD-2-Clause): a
+  local patch is allowed (modified files marked; licence kept when distributed). The issue draft with the evidence:
+  scratchpad research/fps60-spell-hitch.md.
