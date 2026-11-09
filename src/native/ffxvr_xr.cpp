@@ -1104,6 +1104,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
         if (have_panel) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&pnq);
         for (int b = 0; b < nbm && nl < 8; ++b) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&bmq[b]);   // at most 7 layers
+        if (g_max_layers > 0 && nl > g_max_layers) nl = g_max_layers;   // S3 review N3: never past the runtime's limit (the beams, then the panel, go first)
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount = base ? nl : 0u; end.layers = base ? layers : nullptr;
@@ -1241,6 +1242,7 @@ bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* ne
         if (g_last_sent.have_panel && g_eye[k_beam_sc].ever_released)
             for (int b = 0; b < g_last_sent.nbeam && b < 2 && nl < 8; ++b) { bmq[b] = g_last_sent.bq[b]; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&bmq[b]); }
     }
+    if (g_max_layers > 0 && nl > g_max_layers) nl = g_max_layers;   // S3 review N3
     XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
     end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     end.layerCount = nl; end.layers = nl ? layers : nullptr;

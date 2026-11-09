@@ -49,20 +49,20 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int, float*, int, void> _fn_panel_set;     // ABI 58
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_panel_state;         // ABI 58
     private delegate* unmanaged[Cdecl]<int, void> _fn_panel_place;               // ABI 58
-    private delegate* unmanaged[Cdecl]<int, float*, int, int> _fn_panel_pointer;  // ABI 59: vr-menu S3, the laser pointer
+    private delegate* unmanaged[Cdecl]<int, float*, int, float*, int, int> _fn_panel_pointer;  // ABI 59: vr-menu S3, the laser pointer; 60: + in (the hand-back)
     private int   _vr_menu_hand = 0;            // ini vr_menu_hand: 0 either, 1 right, 2 left
     private bool  _vr_menu_haptics = true;      // ini vr_menu_haptics
-    private readonly float[] _vrp_ptr = new float[9];
+    private readonly float[] _vrp_ptr = new float[11];
     private bool  _vrp_ptr_active, _vrp_ptr_btn, _vrp_ptr_logged, _vrp_focused;   // feeding ImGui; the button sent; the method logged; F8 focused
     private int   _vrp_ptr_owner = -1;          // the hand that owns the pointer (for the haptics)
-    private uint  _vrp_hover_id;                // the item under the pointer last frame (a new one ticks)
+    private uint  _vrp_hover_id;                // the last item that ticked (a new one ticks; review N1)
     private int   _vrp_off_press = -1;          // native's count of trigger presses off the panel, last seen
 
     private void vrp_bind(Func<string, nint> req) {
         _fn_panel_set = (delegate* unmanaged[Cdecl]<int, float*, int, void>)req("ffxvr_panel_set");
         _fn_panel_state = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_panel_state");
         _fn_panel_place = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_panel_place");
-        _fn_panel_pointer = (delegate* unmanaged[Cdecl]<int, float*, int, int>)req("ffxvr_panel_pointer");
+        _fn_panel_pointer = (delegate* unmanaged[Cdecl]<int, float*, int, float*, int, int>)req("ffxvr_panel_pointer");
     }
     private void vrp_clear() { _fn_panel_set = null; _fn_panel_state = null; _fn_panel_place = null; _fn_panel_pointer = null; _vrp_ptr_active = false; _vrp_ptr_btn = false; }
 
@@ -204,56 +204,65 @@ public sealed unsafe partial class FFXVRModule {
         _vrp_set[5] = ds.X; _vrp_set[6] = ds.Y; _vrp_set[7] = _vr_menu_distance; _vrp_set[8] = _vr_menu_height; _vrp_set[9] = _vr_menu_scale;
         _vrp_set[10] = _vrp_wx0; _vrp_set[11] = _vrp_wy0; _vrp_set[12] = _vrp_wx1; _vrp_set[13] = _vrp_wy1;
         fixed (float* v = _vrp_set) _fn_panel_set(flags, v, _vrp_set.Length);
+        _vrp_drawn_last = _vrp_drawn;   // (vrp_pointer, next: the window's rectangle keeps the park point off it)
         _vrp_drawn = false;
     }
 
     /// <summary>vr-menu S3: every frame after vrp_push (render_imgui, render thread): native's pointer into ImGui's mouse, the haptic
-    /// ticks, and a trigger pulled off the panel giving the game its input back. Queued events apply at the next NewFrame.</summary>
+    /// ticks, and a trigger pulled off the panel giving the game its input back. Native decides the mouse (vptr::Feed): while pointing,
+    /// and for 3 frames after (at the park point, review B1), io.MousePos is written with io.WantSetMousePos set, then one "no mouse" is
+    /// queued. No position event is queued while feeding (ImGui drops them under the flag anyway; review S1: fewer writes to the input
+    /// queue, which Fahrenheit's WndProc also writes from the message-pump thread): only the button, the wheel and that one "no mouse".</summary>
     private void vrp_pointer() {
         if (_fn_panel_pointer == null) return;
-        int n; fixed (float* o = _vrp_ptr) n = _fn_panel_pointer(_vr_menu_hand, o, _vrp_ptr.Length);
-        if (n < 9) return;
         ImGuiIOPtr io = ImGui.GetIO();
+        Vector2 mp = io.MousePos, ds = io.DisplaySize;
+        _vrp_ptr_in[0] = mp.X; _vrp_ptr_in[1] = mp.Y; _vrp_ptr_in[2] = ds.X; _vrp_ptr_in[3] = ds.Y;
+        bool win = _vrp_drawn_last;
+        _vrp_ptr_in[4] = win ? _vrp_wx0 : 0f; _vrp_ptr_in[5] = win ? _vrp_wy0 : 0f; _vrp_ptr_in[6] = win ? _vrp_wx1 : 0f; _vrp_ptr_in[7] = win ? _vrp_wy1 : 0f;
+        int n; fixed (float* i = _vrp_ptr_in) fixed (float* o = _vrp_ptr) n = _fn_panel_pointer(_vr_menu_hand, i, _vrp_ptr_in.Length, o, _vrp_ptr.Length);
+        if (n < 11) return;
         int owner = (int)_vrp_ptr[0];
-        bool active = _vrp_ptr[1] != 0f && _vrp_shown && float.IsFinite(_vrp_ptr[2]) && float.IsFinite(_vrp_ptr[3]);
-        bool btn = active && _vrp_ptr[4] != 0f;
-        if (active) {
-            var pos = new Vector2(_vrp_ptr[2], _vrp_ptr[3]);
-            io.AddMousePosEvent(pos.X, pos.Y);   // (dropped by ImGui while WantSetMousePos is set; kept for a backend that ignores the flag)
-            io.MousePos = pos; io.WantSetMousePos = true;   // the position stands, the backend moves the OS cursor and does not poll it
-            if (btn != _vrp_ptr_btn) { io.AddMouseButtonEvent(0, btn); _vrp_ptr_btn = btn; }
-            float wheel = _vrp_ptr[5];
-            if (wheel != 0f && float.IsFinite(wheel)) io.AddMouseWheelEvent(0f, wheel);
-            if (!_vrp_ptr_logged) {
+        bool active = _vrp_ptr[1] != 0f;
+        bool btn = active && _vrp_ptr[5] != 0f;
+        if (_vrp_ptr[2] != 0f && float.IsFinite(_vrp_ptr[3]) && float.IsFinite(_vrp_ptr[4])) {
+            io.MousePos = new Vector2(_vrp_ptr[3], _vrp_ptr[4]); io.WantSetMousePos = true;   // stands this frame; the backend moves the OS cursor and skips its poll
+            if (!_vrp_ptr_logged && active) {
                 _vrp_ptr_logged = true;
                 bool can_set = (io.BackendFlags & ImGuiBackendFlags.HasSetMousePos) != 0;
-                d7_log($"menu pointer: ImGui's mouse from the {(owner == 1 ? "right" : "left")} controller via io.MousePos + io.WantSetMousePos "
+                d7_log($"menu pointer: ImGui's mouse from the {(owner == 1 ? "right" : "left")} controller via io.MousePos + io.WantSetMousePos, no queued positions "
                      + (can_set ? "(the backend moves the OS cursor and skips its GetCursorPos poll; queued positions are dropped meanwhile)"
-                                : "(the backend does not move the OS cursor: queued positions are still dropped while the flag is set)"));
+                                : "(the backend does not move the OS cursor: queued positions are still dropped while the flag is set)")
+                     + "; on leaving: 3 frames at the park point, then one no-mouse event");
             }
-            if (!_vrp_ptr_active && _vr_menu_haptics && _fn_haptic != null && owner >= 0) _fn_haptic(owner, 0.08f, 0.006f);   // arriving on the panel
         }
-        else if (_vrp_ptr_active) {   // left the panel: the button up (a drag ends cleanly), and no mouse
-            if (_vrp_ptr_btn) { io.AddMouseButtonEvent(0, false); _vrp_ptr_btn = false; }
-            io.AddMousePosEvent(-float.MaxValue, -float.MaxValue);
-            _vrp_hover_id = 0;
-        }
+        if (btn != _vrp_ptr_btn) { io.AddMouseButtonEvent(0, btn); _vrp_ptr_btn = btn; }   // (up when the pointer leaves: a drag ends cleanly)
+        float wheel = _vrp_ptr[6];
+        if (active && wheel != 0f && float.IsFinite(wheel)) io.AddMouseWheelEvent(0f, wheel);
+        if (_vrp_ptr[7] != 0f) io.AddMousePosEvent(-float.MaxValue, -float.MaxValue);   // the hand-back's end: no mouse (once)
+        if (active && !_vrp_ptr_active && _vr_menu_haptics && _fn_haptic != null && owner >= 0) _fn_haptic(owner, 0.08f, 0.006f);   // arriving on the panel
+        if (!active) { _vrp_hover_prev = 0; }
         _vrp_ptr_active = active; _vrp_ptr_owner = owner;
-        // haptics: a new item under the pointer ticks, a press on an item buzzes (ImGui's hovered item of this frame)
+        // haptics (review N1): a tick when the item under the pointer changes to a new one and stays for a frame (the gap between two
+        // list items, A -> 0 -> A, does not tick again); a buzz on a press over an item
         if (active && _vr_menu_haptics && _fn_haptic != null && owner >= 0) {
             uint id = ImGuiP.GetHoveredID();
-            if (id != 0 && id != _vrp_hover_id) _fn_haptic(owner, 0.12f, 0.008f);
-            if (_vrp_ptr[4] != 0f && !_vrp_click_prev && id != 0) _fn_haptic(owner, 0.25f, 0.012f);
-            _vrp_hover_id = id;
+            if (id != 0 && id == _vrp_hover_prev && id != _vrp_hover_id) { _fn_haptic(owner, 0.12f, 0.008f); _vrp_hover_id = id; }
+            _vrp_hover_prev = id;
+            if (_vrp_ptr[5] != 0f && !_vrp_click_prev && id != 0) _fn_haptic(owner, 0.25f, 0.012f);
         }
-        _vrp_click_prev = active && _vrp_ptr[4] != 0f;
+        _vrp_click_prev = active && _vrp_ptr[5] != 0f;
         // a trigger pulled off the panel while F8 has the focus: the focus goes, so Fahrenheit hands the game its input again
-        // (design 4.5: a focused ImGui window holds WantCaptureKeyboard, and Fahrenheit skips the game's input update meanwhile)
-        int off = (int)_vrp_ptr[6];
-        if (_vrp_off_press >= 0 && off != _vrp_off_press && !active && _vrp_focused && _vrp_shown) ImGui.SetWindowFocus((byte*)null);
+        // (design 4.5: a focused ImGui window holds WantCaptureKeyboard). Not while the controllers drive ImGui's navigation in every
+        // mod menu (imgui_vrpad=2, review N4): there the focus is the navigation's.
+        int off = (int)_vrp_ptr[8];
+        if (_vrp_off_press >= 0 && off != _vrp_off_press && !active && _vrp_focused && _vrp_shown && _imgui_vrpad != 2) ImGui.SetWindowFocus((byte*)null);
         _vrp_off_press = off;
     }
     private bool _vrp_click_prev;
+    private uint _vrp_hover_prev;               // the hovered item last frame (a tick needs it held for a frame)
+    private readonly float[] _vrp_ptr_in = new float[8];
+    private bool _vrp_drawn_last;               // the headset's window was drawn this frame (its rectangle for the park point)
 
     /// <summary>F8 > Controls > Menu panel (in the headset).</summary>
     private void vrp_ui() {
