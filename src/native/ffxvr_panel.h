@@ -12,12 +12,13 @@
 // for the round, then back (review S2: far enough to clear the targets, slide_plan; hidden when that is too far); it stays
 // visible during movies.
 //
-// S2's grab has no laser (that is S3): a grip latches to the panel at its press edge when the controller points roughly at it (the
-// aim ray hits the rectangle widened by k_ray_margin) or reaches it (the grip within k_reach of the rectangle). A latched grip
+// The grab (S3: with the laser pointer's beam showing where the ray goes): a grip latches to the panel at its press edge when the
+// controller's aim ray hits the window's rectangle itself (k_ray_margin 0; S2 widened it by 3 cm without a beam) or the controller
+// touches it (the grip within k_reach of the rectangle). A latched grip
 // belongs to the panel until it is let go (the native side hides it from the world grab, quick squeezes, LB / RB, the hands tap
 // and the chords). One hand moves the panel rigidly with the grip; two hands also scale it by the change of their distance.
 #pragma once
-#define FFXVR_PANEL_REV 3
+#define FFXVR_PANEL_REV 4
 #include <cmath>
 #include <cstdint>
 
@@ -34,7 +35,7 @@ constexpr float k_dist_min = 0.4f, k_dist_max = 2.5f;    // vr_menu_distance; al
 constexpr float k_height_min = -0.6f, k_height_max = 0.3f;   // vr_menu_height: the centre against eye height
 constexpr int   k_side = 1536;                            // the panel swapchain's side (pixels)
 constexpr float k_keep_deg = 50.f, k_keep_m = 3.f;        // reopen at the last pose when it is this near the gaze
-constexpr float k_ray_margin = 0.03f;                     // the aim ray: the rectangle widened by 3 cm (design 3.4)
+constexpr float k_ray_margin = 0.f;                       // the grab's aim ray: the rectangle itself (S3; S2's proxy had 3 cm)
 constexpr float k_reach = 0.15f;                          // the grip within 15 cm of the rectangle also grabs
 constexpr float k_resize_min_d = 0.05f;                   // two hands closer than this do not scale
 constexpr float k_slide_rate = 120.f;                     // a targets round: the slide's degrees a second
@@ -180,7 +181,7 @@ inline float rect_dist(const Pose& pn, float w, float h, V3 p) {
 }
 
 struct HandIn { bool down = false; bool grip_ok = false; Pose grip{}; bool aim_ok = false; Pose aim{}; };
-/// S2's "grab anywhere" proxy without a laser: pointing roughly at the panel, or reaching it.
+/// The grab's "anywhere on the panel": its ray on the window (S3, the beam shows it), or the controller touching it.
 inline bool reaches(const Pose& pn, float w, float h, const HandIn& in) {
     if (in.aim_ok && ray_hit(pn, w, h, in.aim.p, qrot(in.aim.q, V3{ 0.f, 0.f, -1.f }), k_ray_margin)) return true;
     return in.grip_ok && rect_dist(pn, w, h, in.grip.p) <= k_reach;
