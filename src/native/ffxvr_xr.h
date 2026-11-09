@@ -18,6 +18,10 @@ struct XrHost {
     int  (*extra_wait_begin)();                             // stickrep: the same pair for an extra frame's xrWaitFrame (xr_extra_frame): gives up the game's
     void (*extra_wait_end)(int token);                      //   render lock the extra took for its xrEndFrame and takes it back for xrBeginFrame / sync / locate
     bool (*extra_abort)();                                  // SR-1: true = the game is exiting: an extra frame stops before its next OpenXR call (null = never)
+    // vr-menu S2 (null = no menu panel): the panel's crop copy, 1:1 from (x0, y0) of src into dst (w x h), premultiplied, linear-light
+    // for an sRGB swapchain; and a rectangle of dst set to transparent (the full ImGui layer's hole where the panel shows the window)
+    bool (*copy_crop)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int x0, int y0);
+    bool (*clear_rect)(ID3D11RenderTargetView* dst, UINT w, UINT h, int x, int y, int rw, int rh);
 };
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space
@@ -65,6 +69,14 @@ struct XrUiPanel {
     float im_dist, im_width;                                // the ImGui layer's own distance / width (the ui_distance / ui_width settings; never adaptive)
     bool  im_world;                                         // saveui: the ImGui layer lies on the virtual screen (world-locked, the reference space) instead of head-locked
     float im_q[4], im_p[3], im_w;                           // ... with this pose (the screen's centre) and width (the screen's; height 16:9). Only with a screen base layer
+    // vr-menu S2: the F8 window's own panel, a world-locked quad (the reference space). ptex: the ImGui capture (null: no panel this
+    // frame); its rectangle (pcrop_x, pcrop_y, pcrop_w, pcrop_h, at most 1536 x 1536) goes 1:1 into the panel's swapchain; pose and
+    // size in metres. hole: the same rectangle as a fraction of the capture (u0, v0, u1, v1), made transparent in the full ImGui
+    // layer (tex2) so the window never shows twice; u1 <= u0 = no hole.
+    ID3D11Texture2D* ptex;
+    int   pcrop_x, pcrop_y, pcrop_w, pcrop_h;
+    float pq[4], pp[3], pw, ph;
+    float hole[4];
 };
 
 /// Controller input through the OpenXR action system (Touch controllers;
@@ -99,6 +111,8 @@ void        xr_counters(unsigned* held_frames, unsigned* wait_timeouts);   // fr
 bool        xr_take_stuck();   // R8-3: true once after a B5-2 stop (a stuck swapchain): xr_tick counts it as a failed start, so the restart backs off
 void        xr_eye_size(unsigned* w, unsigned* h);          // the eye swapchains' size: the headset's recommended width at 16:9 (0 x 0 while no session)
 void        xr_imgui_size(unsigned* w, unsigned* h);        // the ImGui layer's swapchain size (saveui: 1920x1080; 0 x 0 while no session)
+bool        xr_panel_ready();                               // vr-menu S2: the menu panel's swapchain exists (a running session with its 1536 x 1536 swapchain)
+uint32_t    xr_max_layers();                                // the runtime's maxLayerCount (0 before the first session)
 bool        xr_srgb();                                      // the swapchains are R8G8B8A8_UNORM_SRGB: the compositor decodes our UNORM bytes before it blends (uidepth's plate)
 void xr_timing(double* wait_ms, double* end_ms);
 const char* xr_stage();                                    // the render thread's current stage name (a string literal; the load profiler reads it)

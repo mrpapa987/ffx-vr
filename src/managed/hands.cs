@@ -552,6 +552,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Text("hand model:"); ImGui.SameLine(); ImGui.SetNextItemWidth(340);
         string preview = sel != null ? sel.label : _vr_hands_pack + " (not found)";
         if (ImGui.BeginCombo("##h2pk", preview)) {
+            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too
             for (int i = 0; i < _h2_packs.Count; i++) {
                 HandPack k = _h2_packs[i];
                 bool ok = k.usable;

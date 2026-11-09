@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 57;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art; 56: ffxvr_odt_set + badge, ffxvr_odt_hide2d; 57: ffxvr_odt_row_patch, ffxvr_odt_row_stat, the Bushido row's call-site patch and its diagnostics)
+    private const int k_abi = 58;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art; 56: ffxvr_odt_set + badge, ffxvr_odt_hide2d; 57: ffxvr_odt_row_patch, ffxvr_odt_row_stat, the Bushido row's call-site patch and its diagnostics; 58: ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place, vr-menu S2, the F8 window's own panel in the headset)
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -554,6 +554,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _fn_hands2_pack_error = (delegate* unmanaged[Cdecl]<byte*>)req("ffxvr_hands2_pack_error");   // ABI 29: VR hands v2 S3, user packs
             qc_bind(req);   // ABI 44: Quest-only controls (quest_ctl.cs, imgui_pad.cs)
             odg_bind(req);  // ABI 47: overdrive gestures (od_gest.cs); ABI 52: + ffxvr_odt_set, ffxvr_odt_practice (strike the targets, Practice targets)
+            vrp_bind(req);  // ABI 58: vr-menu S2, the menu panel (vrpanel.cs)
             _fn_hands2_tap_set = (delegate* unmanaged[Cdecl]<VrTapCfg*, int, void>)req("ffxvr_hands2_tap_set"); _fn_hands2_tap_status = (delegate* unmanaged[Cdecl]<float*, int, byte*>)req("ffxvr_hands2_tap_status");   // ABI 30: the tap gesture (hands.cs)
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
@@ -619,6 +620,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_fmv3d_set = null; _fn_fmv3d_text = null;   // ABI 41 (FMVs in 3D)
         qc_clear();   // ABI 44 (Quest-only controls)
         odg_clear();  // ABI 47 (overdrive gestures); ABI 52 (_fn_odt_set, _fn_odt_practice)
+        vrp_clear();  // ABI 58 (the menu panel)
         _fn_load_info = null;   // ABI 23 (loads)
         _fn_sr_set = null; _fn_sr_gate = null; _fn_sr_status = null; _fn_turn_keys = null;   // ABI 25 (stickrep)
         _fn_pre_resolve = null; _fn_hands2_set = null; _fn_hands2_status = null; _fn_hands2_cal = null; _fn_hands2_pack = null; _fn_hands2_pack_error = null;   // ABI 27, 28, 29 (VR hands v2)
@@ -1157,7 +1159,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
                 } break;
-                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v) && !odg_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs); od_gest* (od_gest.cs)
+                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v) && !odg_parse(k, v) && !vrp_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs); od_gest* (od_gest.cs)
             }
         }
         if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
@@ -1505,6 +1507,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             ride_ini_text() +     // riding (ride.cs)
             qc_ini_text() +       // Quest-only controls (quest_ctl.cs)
             odg_ini_text() +      // overdrive gestures (od_gest.cs)
+            vrp_ini_text() +      // vr-menu S2: the menu panel (vrpanel.cs)
             $"diag_verbose={(_diag_verbose ? 1 : 0)}\n" +
             $"diag_build7={(_diag7 ? 1 : 0)}\n" +
             $"cursor_source={(_cursor_game_cfg ? "game" : "legacy")}\n" +
@@ -1999,7 +2002,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             // menu: 0 not latched; latched: 1 | (the raw state << 8), so native can tell the frames Fahrenheit draws the menu in
             // (state 2) from the latched ones without it (3 / 4 at a close, 1 in a reopen: SU-1's black-out, SU-2's watchdog)
             int menu = (_fh_menu_on_screen && _imgui_layer && _fh_menu_open) ? 1 | (int)((st & 0xFF) << 8) : 0;
-            if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, (_window_open || st != 0) ? 1 : 0, _imgui_min_draws, menu);
+            // vr-menu S2: while the menu panel shows the F8 window, the open window no longer forces the full layer (only the save screen does)
+            if (_fn_imgui_layer_set != null) _fn_imgui_layer_set(_imgui_layer ? 1 : 0, ((_window_open && !_vrp_shown) || st != 0) ? 1 : 0, _imgui_min_draws, menu);
         }
         if (_fn_gesture_set != null) _fn_gesture_set(_gestures ? 1 : 0, _gest_tilt);
         if (_fp_head_parts != _head_mask_src) { _head_mask_src = _fp_head_parts; _head_mask = parse_mask(_fp_head_parts); }   // R22: parsed only when the text changes
@@ -2798,7 +2802,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private float our_font_px() {
         float s = ImGui.GetMainViewport().DpiScale; if (!(s >= 0.5f && s <= 4f)) s = 1f;
         float f = ImGui.GetStyle().FontScaleDpi;   if (!(f >= 0.5f && f <= 4f)) f = 1f;   // someone else's odd value: no 512 px bake
-        return k_fh_font_px * s * text_scale_step(_overlay_text_scale) / f;   // PushFont's size is applied before FontScaleDpi (imgui.cpp:9836)
+        return vrp_font(k_fh_font_px * s * text_scale_step(_overlay_text_scale)) / f;   // PushFont's size is applied before FontScaleDpi (imgui.cpp:9836); vr-menu S2: 28..45 px in the headset's window
     }
     /// <summary>overlay_text_scale as used: 0.5..2 in steps of 0.05 (a hand-typed 1.234 reads as 1.25; NaN as 1).</summary>
     private static float text_scale_step(float k) => float.IsFinite(k) ? Math.Clamp(MathF.Round(k * 20f) / 20f, 0.5f, 2f) : 1f;
@@ -2843,6 +2847,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             catch (Exception e) { if (e.Message != _ui_fault_last) { _ui_fault_last = e.Message; _logger.Error($"overlay fault: {e}"); } }
             _cpu_t_win1 = cpu_now();
         }
+        if (_native_ready) { try { vrp_push(); } catch (Exception e) { if (e.Message != _ui_fault_last) { _ui_fault_last = e.Message; _logger.Error($"menu panel fault: {e}"); } } }   // vr-menu S2: every frame, open or closed
         if (_native_ready) { _cpu_t_push0 = cpu_now(); push_all(); _cpu_t_push1 = cpu_now(); }      // every setting, once per frame, open or closed
         settings_reload_check();   // R31/R33: a hand edit, every second of _now
         settings_save_tick();      // R21: debounced save
@@ -2853,21 +2858,25 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// (no imgui.ini entry yet) is 30 x 34 em, the size the tabs were laid out for (vr-menu-design 3.2); after that Fahrenheit's
     /// imgui.ini keeps the player's own.</summary>
     private void draw_window() {
+        bool vr = vrp_use();   // vr-menu S2: in the headset, the panel's own window (vrpanel.cs)
+        if (vr != _vrp_last_use) { _vrp_last_use = vr; _menu_tab_restore = true; }   // the other window's tab bar starts on the remembered tab
+        if (vr) { draw_window_vr(); return; }
         float em = ImGui.GetFontSize();
         ImGui.SetNextWindowSize(new Vector2(30f * em, 34f * em), ImGuiCond.FirstUseEver);
-        try {
-            if (ImGui.Begin("FFX VR", ref _window_open)) {
-                if (!_native_ready) {
-                    ImGui.TextWrapped($"Native helper: {esc(_native_status)}");
-                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(_ini_note)); ImGui.PopStyleColor(1); }   // R30 / B8-12
-                    if (_native_mismatch) ImGui.TextWrapped("The VR mod is not running. Reinstall the mod, so that ffxvr.dll and ffxvr_native.dll come from the same build; core.log has the details.");
-                    else if (_native_failed) ImGui.TextWrapped("The VR mod is not running: it could not hook the game's renderer. core.log and ffxvr_native.log have the details.");
-                    else ImGui.TextDisabled("starting: waiting for the game's renderer");
-                    ImGui.TextDisabled("F8: hide");
-                }
-                else draw_menu();   // the header (the detour and ini warnings in it), the tabs (menu.cs)
-            }
-        }
+        try { if (ImGui.Begin("FFX VR", ref _window_open)) draw_window_body(); }
         finally { ImGui.End(); }
+    }
+    private bool _vrp_last_use;
+    /// <summary>The F8 window's content, flat or in the headset's window.</summary>
+    private void draw_window_body() {
+        if (!_native_ready) {
+            ImGui.TextWrapped($"Native helper: {esc(_native_status)}");
+            if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(_ini_note)); ImGui.PopStyleColor(1); }   // R30 / B8-12
+            if (_native_mismatch) ImGui.TextWrapped("The VR mod is not running. Reinstall the mod, so that ffxvr.dll and ffxvr_native.dll come from the same build; core.log has the details.");
+            else if (_native_failed) ImGui.TextWrapped("The VR mod is not running: it could not hook the game's renderer. core.log and ffxvr_native.log have the details.");
+            else ImGui.TextDisabled("starting: waiting for the game's renderer");
+            ImGui.TextDisabled("F8: hide");
+        }
+        else draw_menu();   // the header (the detour and ini warnings in it), the tabs (menu.cs)
     }
 }

@@ -226,6 +226,10 @@ public sealed unsafe partial class FFXVRModule {
         ui_tip("The headset view, this session (View > Starting: start in the headset)\nnot saved (this session only)");
         ImGui.SameLine(); if (ImGui.Button("Recentre") && _fn_xr_recenter != null) _fn_xr_recenter();
         ui_tip("Home: the view and the big screen in front of you again");
+        if (_vrp_shown && _fn_panel_place != null) {   // vr-menu S2: the menu panel in front again
+            ImGui.SameLine(); if (ImGui.Button("Bring here")) _fn_panel_place(1);
+            ui_tip("This menu's panel in front of you again (Home does it too). Grip the panel to move it; both grips to resize it.");
+        }
         string st = xr_status_text();
         int cut = st.IndexOf("  yaw ", StringComparison.Ordinal);
         string brief = cut > 0 ? st[..cut] : st;
@@ -449,6 +453,8 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.SmallButton("reset grab")) { if (_fn_gesture_reset != null) _fn_gesture_reset(); }
         ui_tip("The grab's move, turn, tilt and zoom back to none (Numpad 5 too)");
 
+        vrp_ui();   // vr-menu S2: the menu panel in the headset (vrpanel.cs)
+
         ImGui.SeparatorText("Help");
         ImGui.TextDisabled("Home: recentre.  End: next view.  F8: this menu.  (?)");
         ui_tip(k_help_text);
@@ -588,6 +594,8 @@ public sealed unsafe partial class FFXVRModule {
             if (_xr_want && _fn_uidepth_status != null) ImGui.TextDisabled("UI panel: " + esc(uidepth_live_text()));
             if (_fn_dream_status != null) ImGui.TextDisabled("flashback filter: " + esc(dream_status_text()));
             if (_fn_backdrop_draws != null) ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}");
+            if (_fn_panel_state != null)   // vr-menu S2
+                ImGui.TextDisabled(I($"menu panel: {(_vrp_available ? "available" : "not available")}, {(_vrp_shown ? "shown" : "not shown")}, {_vrp_state[8]:F2} x {_vrp_state[9]:F2} m at {_vrp_state[10]:F2} m, scale {_vrp_state[5]:F2}, grips latched {_vrp_latched}, grabs {_vrp_state[6]:F0}, pairing misses {_vrp_state[7]:F0}, slide {_vrp_state[11]:F0} deg"));
             if (_xr_want && _fn_haze_status != null) ImGui.TextDisabled("heat haze: " + esc(haze_live_text()));
             if ((_s3_blitz || _s3_all) && _s3_auto && _fn_screen3d_status != null) {
                 int vis; float nd, sd, pl, sp; _fn_screen3d_status(&vis, &nd, &sd, &pl, &sp);

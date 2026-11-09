@@ -266,6 +266,7 @@ public sealed unsafe partial class FFXVRModule {
         ui_slider("od_circle_cm", "smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f", UiTag.None, null, 140f); ImGui.SameLine();
         ImGui.SetNextItemWidth(120f);
         if (ImGui.BeginCombo("stick for Fury##odg", k_odg_stick[_od_lulu_stick])) {
+            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too
             for (int i = 0; i < 3; i++) if (ImGui.Selectable(k_odg_stick[i], i == _od_lulu_stick)) _od_lulu_stick = i;
             ImGui.EndCombo();
         }
@@ -294,7 +295,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>F8 > Overdrives > Bushido targets: Practice targets (works with the gestures off too) and the targets' layout.</summary>
     private void odt_ui() {
         if (ImGui.Button("Practice targets##odt") && _fn_odt_practice != null) _fn_odt_practice(1);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("A random 3-8 Bushido symbols and a 4 s bar, any time with the headset on (no overdrive window open): the blades, the hits and the buzz as in battle, nothing is sent to the game. Close F8 (or move it aside) after pressing: its panel is drawn over the 3D view, plates included.");
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("A random 3-8 Bushido symbols and a 4 s bar, any time with the headset on (no overdrive window open): the blades, the hits and the buzz as in battle, nothing is sent to the game. With the menu panel in the headset it slides about 30 degrees aside for the round, then back; otherwise close F8 after pressing (its layer is drawn over the 3D view, plates included).");
         string replay = odg_text(5);
         ImGui.SameLine();
         if (replay.Length == 0) ImGui.BeginDisabled(true);

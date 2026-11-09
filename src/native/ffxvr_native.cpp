@@ -44,6 +44,7 @@
 #include "ffxvr_odvis.h"   // overdrive visuals: trails, bursts, Lulu's ring, Tidus's blade and bar, Auron's glyph row (pure geometry)
 #include "ffxvr_odtarget.h" // Bushido "strike the targets" and Practice targets: layout, swept blade, injection, arbitration, the plates and blades (pure)
 #include "ffxvr_render.h"  // fix-render: the flat-screen rule and its reason, the second 3D camera, the GPU budget, the xrEndFrame trend (pure logic)
+#include "ffxvr_panel.h"   // vr-menu S2: the F8 window's own panel: placement, the crop, the grab and resize, the slide aside (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -5316,7 +5317,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 57;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics)
+constexpr int FFXVR_ABI = 58;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -10487,6 +10488,274 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
 }
 
 // ---------------------------------------------------------------------------
+// vr-menu S2 (research vr-menu-design.md section 3; the pure parts in ffxvr_panel.h, unit-tested): the F8 window's own panel,
+// fixed in the room. Managed draws the window at the right edge of the screen while the headset is on and sends its rectangle
+// every frame (ffxvr_panel_set, render thread: render_imgui after its ffxvr_begin_frame, which bumped g_frames and ran xr_tick).
+// The capture xr_tick submits holds the draws of the previous render_imgui, so the rectangle used is the one stamped with
+// g_frames - 1 (a mismatch shows no panel that frame and is counted). The crop goes 1:1 into the panel's 1536 x 1536 swapchain (ffxvr_xr.cpp swapchain 6) and is shown as a
+// world-locked quad in the reference space, facing the eye; its place in the full ImGui layer is made transparent. A grip
+// latches to the panel at its press edge when the controller points roughly at it or reaches it, moves it, and with the other
+// grip resizes it; a latched grip is hidden from every other grip use (vpanel_input). Practice targets slides it 30 degrees aside.
+static const char k_panel_hlsl[] =
+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+    "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+    "float3 srgb_dec(float3 c) { return lerp(c / 12.92, pow((c + 0.055) / 1.055, 2.4), step(0.04045, c)); }\n"
+    "float3 srgb_enc(float3 l) { return lerp(l * 12.92, 1.055 * pow(max(l, 1e-8), 1.0 / 2.4) - 0.055, step(0.0031308, l)); }\n"
+    // 1:1 (the viewport puts every target pixel on a source texel centre): one tap, premultiplied as the capture is
+    "float4 ps_crop(V i) : SV_Target { return t.Sample(s, i.uv); }\n"
+    // sRGB swapchain: the same linear-light premultiplication as the ImGui layer's ps_premul_srgb
+    "float4 ps_crop_srgb(V i) : SV_Target {\n"
+    "    float4 p = t.Sample(s, i.uv);\n"
+    "    float3 c = saturate(p.rgb / max(p.a, 1e-6));\n"
+    "    return float4(p.a > 0.0 ? srgb_enc(srgb_dec(c) * p.a) : float3(0, 0, 0), p.a);\n"
+    "}\n"
+    "float4 ps_zero(V i) : SV_Target { return float4(0, 0, 0, 0); }\n";
+ID3D11PixelShader* g_vp_ps[3] = { nullptr, nullptr, nullptr };   // ps_crop, ps_crop_srgb, ps_zero
+ID3D11RasterizerState* g_vp_rs_scissor = nullptr;
+bool g_vp_pass_tried = false, g_vp_pass_ok = false;
+
+struct VpIn {   // managed's last ffxvr_panel_set
+    int flags = 0;                                  // 1 the F8 window is drawn as the headset's window this frame; 2 vr_menu_panel on
+    float r[4] = { 0, 0, 0, 0 };                    // the window and its popups, ImGui coordinates (x0, y0, x1, y1)
+    float wr[4] = { 0, 0, 0, 0 };                   // the window alone (the panel's pose is its centre)
+    float em = 0.f, ds_w = 0.f, ds_h = 0.f;         // ImGui.GetFontSize() inside the window; DisplaySize
+    float dist = 1.f, height = -0.15f, scale = 1.f; // vr_menu_distance / _height / _scale
+    uint32_t frame = 0;                             // g_frames at the call
+};
+VpIn g_vp_in;
+vpanel::Pose g_vp_pose = { { 0, 0, 0, 1 }, { 0, 0, 0 } };   // the panel this session (the reference space); g_vp_have: placed
+bool g_vp_have = false, g_vp_open_prev = false, g_vp_replace = false, g_vp_shown = false;
+float g_vp_scale = 1.f, g_vp_w = 0.f, g_vp_h = 0.f, g_vp_rem_dist = 1.f, g_vp_rem_height = -0.15f, g_vp_eye_d = 0.f;
+vpanel::Grab g_vp_grab; vpanel::Slide g_vp_slide;
+uint32_t g_vp_misses = 0, g_vp_ends = 0, g_vp_shown_10s = 0, g_vp_miss_10s = 0, g_vp_grab_10s = 0;
+ULONGLONG g_vp_t_prev = 0;
+vpanel::Rect g_vp_crop;
+
+static bool vpanel_pass_init() {
+    if (g_vp_pass_tried) return g_vp_pass_ok;
+    if (!copy_pass_init()) return false;            // the vertex shader and the sampler (tried once)
+    g_vp_pass_tried = true;
+    HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
+    PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
+    if (!compile) { diag("menu panel: D3DCompile not found: the F8 window stays on the head-locked layer"); return false; }
+    const char* entry[3] = { "ps_crop", "ps_crop_srgb", "ps_zero" };
+    bool ok = true;
+    for (int k = 0; k < 3; ++k) {
+        ID3DBlob *pb = nullptr, *e = nullptr;
+        const HRESULT h = compile(k_panel_hlsl, sizeof(k_panel_hlsl) - 1, "panel", nullptr, nullptr, entry[k], "ps_4_0", 0, 0, &pb, &e);
+        if (SUCCEEDED(h)) { if (FAILED(g_device->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &g_vp_ps[k]))) g_vp_ps[k] = nullptr; pb->Release(); }
+        if (g_vp_ps[k] == nullptr) { ok = false; diag("menu panel: %s compile / create failed 0x%08X: %s", entry[k], static_cast<unsigned>(h), e ? static_cast<const char*>(e->GetBufferPointer()) : ""); }
+        if (e) e->Release();
+    }
+    D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.ScissorEnable = TRUE; rd.DepthClipEnable = TRUE;
+    if (FAILED(g_device->CreateRasterizerState(&rd, &g_vp_rs_scissor))) { g_vp_rs_scissor = nullptr; ok = false; diag("menu panel: the scissor state failed"); }
+    g_vp_pass_ok = ok && g_copy_vs != nullptr && g_copy_smp != nullptr;
+    diag("menu panel: %s", g_vp_pass_ok ? "ready (1:1 crop, premultiplied; the hole in the ImGui layer)" : "NOT available: the F8 window stays on the head-locked layer");
+    return g_vp_pass_ok;
+}
+/// The shader view of a source texture (the copy pass's cache); null when it cannot be sampled.
+static ID3D11ShaderResourceView* vpanel_srv(ID3D11Texture2D* src) {
+    auto it = g_plain_srvs.find(src);
+    if (it != g_plain_srvs.end()) return it->second;
+    D3D11_TEXTURE2D_DESC sd; src->GetDesc(&sd);
+    ID3D11ShaderResourceView* in = nullptr;
+    if (!(sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) || sd.SampleDesc.Count != 1 || FAILED(g_device->CreateShaderResourceView(src, nullptr, &in))) in = nullptr;
+    g_plain_srvs[src] = in;
+    return in;
+}
+/// The pipeline state the panel's two passes touch, saved and restored (as ffxvr_copy_pass does, plus the scissor rectangles).
+struct VpPassState {
+    ID3D11RenderTargetView* rtv[8] = {}; ID3D11DepthStencilView* dsv = nullptr;
+    UINT nvp = 1; D3D11_VIEWPORT vp = {}; UINT nsc = 1; D3D11_RECT sc = {};
+    ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11GeometryShader* gs = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr; ID3D11SamplerState* smp = nullptr;
+    ID3D11BlendState* bs = nullptr; float bf[4] = {}; UINT mask = 0; ID3D11DepthStencilState* ds = nullptr; UINT ref = 0;
+    ID3D11RasterizerState* rs = nullptr; ID3D11InputLayout* il = nullptr; D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    void save() {
+        g_ctx->OMGetRenderTargets(8, rtv, &dsv); g_ctx->RSGetViewports(&nvp, &vp); g_ctx->RSGetScissorRects(&nsc, &sc);
+        g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr); g_ctx->GSGetShader(&gs, nullptr, nullptr);
+        g_ctx->PSGetShaderResources(0, 1, &srv); g_ctx->PSGetSamplers(0, 1, &smp);
+        g_ctx->OMGetBlendState(&bs, bf, &mask); g_ctx->OMGetDepthStencilState(&ds, &ref); g_ctx->RSGetState(&rs);
+        g_ctx->IAGetInputLayout(&il); g_ctx->IAGetPrimitiveTopology(&topo);
+    }
+    void restore() {
+        om_restore_keep(rtv, dsv);
+        if (nvp) g_ctx->RSSetViewports(1, &vp);
+        if (nsc) g_ctx->RSSetScissorRects(1, &sc);
+        g_ctx->VSSetShader(vs, nullptr, 0); g_ctx->PSSetShader(ps, nullptr, 0); g_ctx->GSSetShader(gs, nullptr, 0);
+        g_ctx->PSSetShaderResources(0, 1, &srv); g_ctx->PSSetSamplers(0, 1, &smp);
+        g_ctx->OMSetBlendState(bs, bf, mask); g_ctx->OMSetDepthStencilState(ds, ref); g_ctx->RSSetState(rs);
+        g_ctx->IASetInputLayout(il); g_ctx->IASetPrimitiveTopology(topo);
+        for (auto* v : rtv) if (v) v->Release();
+        if (dsv) dsv->Release(); if (vs) vs->Release(); if (ps) ps->Release(); if (gs) gs->Release();
+        if (srv) srv->Release(); if (smp) smp->Release(); if (bs) bs->Release(); if (ds) ds->Release();
+        if (rs) rs->Release(); if (il) il->Release();
+    }
+};
+/// XrHost copy_crop (ffxvr_xr.cpp, the panel's swapchain): src's pixels from (x0, y0) into dst 1:1. The viewport is the whole source,
+/// shifted by (-x0, -y0): every target pixel samples a source texel centre; what falls outside dst is clipped.
+static bool vpanel_copy_crop(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int x0, int y0) {
+    if (!g_vp_pass_ok || src == nullptr || dst == nullptr || g_ctx == nullptr || w == 0 || h == 0) return false;
+    ID3D11ShaderResourceView* in = vpanel_srv(src);
+    if (in == nullptr) return false;
+    D3D11_TEXTURE2D_DESC sd; src->GetDesc(&sd);
+    if (x0 < 0 || y0 < 0 || x0 >= static_cast<int>(sd.Width) || y0 >= static_cast<int>(sd.Height)) return false;
+    VpPassState st; st.save();
+    InEye2 guard;                                      // our hooks ignore this pass, restore included
+    ID3D11RenderTargetView* rt[1] = { dst };
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+    D3D11_VIEWPORT vp = {}; vp.TopLeftX = -static_cast<float>(x0); vp.TopLeftY = -static_cast<float>(y0);
+    vp.Width = static_cast<float>(sd.Width); vp.Height = static_cast<float>(sd.Height); vp.MaxDepth = 1.f;
+    g_ctx->RSSetViewports(1, &vp);
+    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(xr_srgb() ? g_vp_ps[1] : g_vp_ps[0], nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_ctx->PSSetShaderResources(0, 1, &in); g_ctx->PSSetSamplers(0, 1, &g_copy_smp);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->Draw(3, 0);
+    st.restore();
+    return true;
+}
+/// XrHost clear_rect (ffxvr_xr.cpp, the full ImGui layer): the rectangle of dst made transparent (a scissored draw of zero).
+static bool vpanel_clear_rect(ID3D11RenderTargetView* dst, UINT w, UINT h, int x, int y, int rw, int rh) {
+    if (!g_vp_pass_ok || dst == nullptr || g_ctx == nullptr || rw <= 0 || rh <= 0 || w == 0 || h == 0) return false;
+    VpPassState st; st.save();
+    InEye2 guard;
+    ID3D11RenderTargetView* rt[1] = { dst };
+    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
+    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
+    g_ctx->RSSetViewports(1, &vp);
+    const D3D11_RECT sc = { x, y, x + rw, y + rh };
+    g_ctx->RSSetScissorRects(1, &sc);
+    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(g_vp_ps[2], nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(g_vp_rs_scissor);
+    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_ctx->Draw(3, 0);
+    st.restore();
+    return true;
+}
+
+/// The eye centre and the head's orientation (the views located at the last xr_frame); false before a pose is known.
+static bool vpanel_head(vpanel::V3* eye, vpanel::Q* hq) {
+    *eye = vpanel::V3{ 0.5f * (g_xr_raw_p[0] + g_xr_raw_p1[0]), 0.5f * (g_xr_raw_p[1] + g_xr_raw_p1[1]), 0.5f * (g_xr_raw_p[2] + g_xr_raw_p1[2]) };
+    *hq = vpanel::Q{ g_xr_raw_q[0], g_xr_raw_q[1], g_xr_raw_q[2], g_xr_raw_q[3] };
+    return g_xr_active && vpanel::finite3(*eye) && vpanel::finiteq(*hq) && (hq->x != 0.f || hq->y != 0.f || hq->z != 0.f || hq->w != 0.f);
+}
+static void vpanel_off() {   // the headset off: nothing is kept (a new session starts in front)
+    vpanel::reset(g_vp_grab); g_vp_slide = vpanel::Slide{}; g_vp_have = false; g_vp_open_prev = false; g_vp_shown = false;
+}
+/// xr_tick, before xr_frame: this frame's panel into ui (ptex, the crop, the pose and size, the hole). cap_ok: the capture holds the
+/// previous Present's ImGui draws (what the ImGui layer's tex2 needs too).
+static void vpanel_frame(XrUiPanel& ui, bool cap_ok) {
+    g_vp_shown = false;
+    const bool want = (g_vp_in.flags & 3) == 3;
+    if (!want) g_vp_open_prev = false;
+    vpanel::V3 eye; vpanel::Q hq;
+    const bool head = vpanel_head(&eye, &hq);
+    const ULONGLONG now = GetTickCount64();
+    const float dt = g_vp_t_prev ? static_cast<float>(now - g_vp_t_prev) / 1000.f : 0.f;
+    g_vp_t_prev = now;
+    const bool practice = g_odt.r.on && g_odt.r.practice;
+    if (want && head && g_vp_pass_ok && g_imgui_layer && cap_ok && g_imgui_tex != nullptr && xr_panel_ready()) {
+        // opened (or Home, the headset's recentre, "bring it here"); a re-place waits while a grip moves it (a latch is never dropped
+        // here: a grip let go of the panel must stay hidden from the game until it is released)
+        if ((!g_vp_open_prev || g_vp_replace || !g_vp_have) && g_vp_grab.anchor == 0) {
+            const bool keep = g_vp_have && !g_vp_replace && vpanel::keep_pose(g_vp_pose, eye, hq);
+            if (!keep) g_vp_pose = vpanel::place_front(eye, hq, g_vp_in.dist, g_vp_in.height);
+            g_vp_have = true; g_vp_replace = false;
+            diag("menu panel: frame %u: %s at %.2f m, %.2f m against the eye", g_frames, keep ? "opened where it was" : "placed in front",
+                 vpanel::len(vpanel::sub(g_vp_pose.p, eye)), g_vp_pose.p.y - eye.y);
+        }
+        g_vp_open_prev = true;
+        if (g_vp_in.frame + 1 != g_frames) { g_vp_misses++; g_vp_miss_10s++; }   // the rectangle is not this capture's: no panel this frame
+        else {
+            D3D11_TEXTURE2D_DESC td; g_imgui_tex->GetDesc(&td);
+            const vpanel::Rect r = vpanel::crop(g_vp_in.r[0], g_vp_in.r[1], g_vp_in.r[2], g_vp_in.r[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(td.Width), static_cast<int>(td.Height));
+            vpanel::Rect wr = vpanel::crop(g_vp_in.wr[0], g_vp_in.wr[1], g_vp_in.wr[2], g_vp_in.wr[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(td.Width), static_cast<int>(td.Height));
+            if (vpanel::empty(wr)) wr = r;
+            if (!vpanel::empty(r)) {
+                if (g_vp_grab.anchor == 0) g_vp_scale = vpanel::clampf(std::isfinite(g_vp_in.scale) ? g_vp_in.scale : 1.f, vpanel::k_scale_min, vpanel::k_scale_max);   // the setting, except during a grab
+                const float em_cap = g_vp_in.em * static_cast<float>(td.Width) / g_vp_in.ds_w;
+                const float mpp = vpanel::m_per_px(em_cap, g_vp_scale);
+                vpanel::slide_step(g_vp_slide, practice, g_vp_pose, eye, hq, dt);
+                const vpanel::Pose sp = vpanel::slid(g_vp_pose, g_vp_slide, eye);
+                ui.ptex = g_imgui_tex; ui.pcrop_x = r.x; ui.pcrop_y = r.y; ui.pcrop_w = r.w; ui.pcrop_h = r.h;
+                // the quad covers the window and its popups; the pose is the window's centre, which stays put while a list opens
+                float ox = 0.f, oy = 0.f; vpanel::crop_offset(wr, r, mpp, &ox, &oy);
+                const vpanel::V3 qc = vpanel::offset_centre(sp, ox, oy);
+                ui.pq[0] = sp.q.x; ui.pq[1] = sp.q.y; ui.pq[2] = sp.q.z; ui.pq[3] = sp.q.w;
+                ui.pp[0] = qc.x; ui.pp[1] = qc.y; ui.pp[2] = qc.z;
+                ui.pw = r.w * mpp; ui.ph = r.h * mpp;
+                vpanel::hole_uv(r, static_cast<int>(td.Width), static_cast<int>(td.Height), ui.hole);
+                // the grab's rectangle is the window's (a grip on an open list latches only where the window is)
+                g_vp_shown = true; g_vp_w = wr.w * mpp; g_vp_h = wr.h * mpp; g_vp_crop = r; g_vp_shown_10s++;
+                g_vp_eye_d = vpanel::len(vpanel::sub(g_vp_pose.p, eye));
+            }
+        }
+    }
+    else if (!practice) vpanel::slide_step(g_vp_slide, false, g_vp_pose, eye, hq, dt);   // a round over while hidden: back
+    static ULONGLONG next = 0;
+    if (now >= next) {
+        next = now + 10000;
+        if (g_vp_shown_10s + g_vp_miss_10s > 0)
+            diagv("panel: 10 s: shown %u frames, %.2f x %.2f m (crop %dx%d, scale %.2f), %.2f m from the eye, slide %.0f deg | pairing misses %u (session %u) | grabs ended %u (session %u), latched now %d",
+                  g_vp_shown_10s, g_vp_w, g_vp_h, g_vp_crop.w, g_vp_crop.h, g_vp_scale, g_vp_eye_d, g_vp_slide.cur, g_vp_miss_10s, g_vp_misses, g_vp_grab_10s, g_vp_ends, vpanel::mask(g_vp_grab));
+        g_vp_shown_10s = g_vp_miss_10s = g_vp_grab_10s = 0;
+    }
+}
+/// xr_tick, right after xr_input_get (render thread): the grab, from the raw grips; then every latched grip is hidden from the
+/// rest of the mod and the game (its squeeze reads 0: no world grab, no quick squeeze or LB / RB, no chord, no hands tap). The
+/// copy is masked before it becomes g_vrpad, which the input thread reads.
+static void vpanel_input(XrInput& in) {
+    vpanel::V3 eye; vpanel::Q hq;
+    const bool head = vpanel_head(&eye, &hq);
+    vpanel::HandIn h[2];
+    for (int k = 0; k < 2; ++k) {
+        const XrHand& s = in.hand[k];
+        h[k].down = in.ready && s.active && s.squeeze > 0.5f;
+        h[k].grip_ok = s.grip_valid; h[k].grip = vpanel::Pose{ { s.grip_q[0], s.grip_q[1], s.grip_q[2], s.grip_q[3] }, { s.grip_p[0], s.grip_p[1], s.grip_p[2] } };
+        h[k].aim_ok = s.aim_valid;   h[k].aim = vpanel::Pose{ { s.aim_q[0], s.aim_q[1], s.aim_q[2], s.aim_q[3] }, { s.aim_p[0], s.aim_p[1], s.aim_p[2] } };
+    }
+    // no new latch inside an injecting Bushido window or a practice round (the grips are the overdrive's), nor while sliding aside
+    const bool allow = head && !odg_grips_are_gestures() && !(g_odt.r.on && g_odt.r.practice) && g_vp_slide.cur == 0.f;
+    const int ev = vpanel::grab_step(g_vp_grab, h, g_vp_shown && head, allow, g_vp_pose, g_vp_scale, g_vp_w, g_vp_h, eye);
+    for (int k = 0; k < 2; ++k) if (ev & (k ? vpanel::G_LATCH_R : vpanel::G_LATCH_L)) xr_haptic(k, 0.3f, 0.04f);   // as the world grab's latch
+    if (ev & vpanel::G_END) {
+        vpanel::remember(g_vp_pose, eye, &g_vp_rem_dist, &g_vp_rem_height);
+        g_vp_ends++; g_vp_grab_10s++;
+        diag("menu panel: frame %u: let go at %.2f m (level), %.2f m against the eye, scale %.2f", g_frames, g_vp_rem_dist, g_vp_rem_height, g_vp_scale);
+    }
+    const int m = vpanel::mask(g_vp_grab);
+    for (int k = 0; k < 2; ++k) if (m & (1 << k)) in.hand[k].squeeze = 0.f;
+}
+/// vr-menu S2, from managed every frame (render thread, render_imgui, after ffxvr_begin_frame: stamped with this g_frames). flags: 1 the F8 window is
+/// drawn as the headset's window this frame, 2 vr_menu_panel. v: x0, y0, x1, y1 (the window and its popups, ImGui coordinates), the
+/// em (px), DisplaySize w / h, vr_menu_distance, vr_menu_height, vr_menu_scale (n >= 10; fewer: no panel), then optionally x0, y0,
+/// x1, y1 of the window alone (n >= 14; else the window is the whole rectangle).
+extern "C" __declspec(dllexport) void ffxvr_panel_set(int flags, const float* v, int n) {
+    if (v == nullptr || n < 10) { g_vp_in.flags = 0; g_vp_in.frame = g_frames; return; }
+    g_vp_in.flags = flags;
+    for (int k = 0; k < 4; ++k) g_vp_in.r[k] = v[k];
+    g_vp_in.em = v[4]; g_vp_in.ds_w = v[5]; g_vp_in.ds_h = v[6]; g_vp_in.dist = v[7]; g_vp_in.height = v[8]; g_vp_in.scale = v[9];
+    for (int k = 0; k < 4; ++k) g_vp_in.wr[k] = n >= 14 ? v[10 + k] : v[k];
+    g_vp_in.frame = g_frames;
+}
+/// out: [0] available (the shaders and the session's panel swapchain), [1] shown in this frame's submit, [2] latched grips (1 left,
+/// 2 right), [3] / [4] the distance (level) and height to open at, from the last grab, [5] the scale now, [6] grabs ended (session),
+/// [7] pairing misses (session), [8] / [9] the F8 window's size on the panel (m), [10] its distance from the eye, [11] the slide angle (deg).
+/// Returns the count written.
+extern "C" __declspec(dllexport) int ffxvr_panel_state(float* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    const float v[12] = { (g_vp_pass_ok && xr_panel_ready()) ? 1.f : 0.f, g_vp_shown ? 1.f : 0.f, static_cast<float>(vpanel::mask(g_vp_grab)),
+                          g_vp_rem_dist, g_vp_rem_height, g_vp_scale, static_cast<float>(g_vp_ends), static_cast<float>(g_vp_misses),
+                          g_vp_w, g_vp_h, g_vp_eye_d, g_vp_slide.cur };
+    const int k = n < 12 ? n : 12;
+    for (int i = 0; i < k; ++i) out[i] = v[i];
+    return k;
+}
+/// how: 1 the panel back in front of you at the next frame (the F8 window's "Bring here"; Home and the headset's recentre do the same).
+extern "C" __declspec(dllexport) void ffxvr_panel_place(int how) { if (how == 1) g_vp_replace = true; }
+
+// ---------------------------------------------------------------------------
 // 3D markers: small camera-facing triangles at world positions, drawn into
 // each eye's image with that eye's view and projection, so they sit on the
 // combatant at the right depth (the game's cursors are placed through its
@@ -12845,11 +13114,12 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_want) return 1;
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
-    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort };
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop, vpanel_clear_rect };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
     if (g_xr_want) {
         if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
         copy_pass_init();   // SU-8: the copy shaders compile at headset start, not inside the first frame's submit (tried once; a later call is a no-op)
+        vpanel_pass_init(); // vr-menu S2: the panel's crop and hole shaders, the same rule
         return 1;
     }   // g_xr_fails clears in xr_tick after 5 s alive
     g_xr_fails++; g_xr_retry_at = now + (g_xr_fails < 3 ? 2000 : 5000);
@@ -12888,7 +13158,7 @@ extern "C" __declspec(dllexport) const char* ffxvr_slow_status(int* out, int n) 
     for (int i = 0; out != nullptr && i < n && i < 6; ++i) out[i] = v[i];
     return slow_status_text();
 }
-extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("Home (recentre)"); }   // in a battle transition window a recentre ends the window (bt_tick)
+extern "C" __declspec(dllexport) void ffxvr_xr_recenter() { g_xr_recenter_pending = true; g_vp_replace = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("Home (recentre)"); }   // in a battle transition window a recentre ends the window (bt_tick)
 extern "C" __declspec(dllexport) void ffxvr_cuts_set(int recentre, int blink, int follow_pans, float follow_rate, float dt) {
     g_cut_recentre = recentre != 0; g_cut_blink = blink != 0; g_follow_pans = follow_pans != 0; g_follow_rate = follow_rate;
     if (!g_dt_measured && dt > 0.f && dt < 1.f) g_dt = dt < k_dt_min ? k_dt_min : dt > k_dt_max ? k_dt_max : dt;   // fallback until begin_frame has measured one frame
@@ -14881,11 +15151,12 @@ extern "C" __declspec(dllexport) int ffxvr_fmv3d_text(int which, char* buf, int 
 }
 
 static void xr_tick() {
-    if (!g_xr_want) { relief_headset_off(); dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
+    if (!g_xr_want) { vpanel_off(); relief_headset_off(); dream_headset_off(); uid_headset_off(); g_imgui_menu_prev = g_imgui_menu_place = g_imgui_menu_pose = false; g_imgui_where = 0; g_imgui_menu_gap = 0; return; }
     if (!g_uid_tried && (g_uid_on || g_uid_backing > 0.001f)) uid_init();   // UD-6: the shaders compile here at Present, at headset start, not inside the game's frame
     if (g_h2cfg.on && !g_h2_tried) hands_pass_init();   // VR hands v2: the same rule (lazily, the first time vr_hands=1 with the headset on)
     hands_pack_tick();                                    // VR hands v2 (S2): start a pack load, or upload a finished one (at Present, vr_hands=1 only)
     if (!g_copy_tried) copy_pass_init();         // SU-8 backstop: never inside xr_frame's submit
+    if (!g_vp_pass_tried) vpanel_pass_init();     // vr-menu S2: the same
     lowres_check();
     detect_cut();
     bt_tick();                                   // battle transition phases (before anything this tick decides from them)
@@ -14907,13 +15178,15 @@ static void xr_tick() {
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
     // The ImGui layer: what Fahrenheit drew after our hook last Present.
     g_imgui_draws_last = g_imgui_draws_frame; g_imgui_draws_frame = 0;
+    bool im_cap_ok = false;   // vr-menu S2: the capture holds the last Present's draws (the menu panel's crop source)
     if (g_imgui_layer && g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         ID3D11Texture2D* const was = g_imgui_tex;
         ensure_copy(g_imgui_tex, g_imgui_rtv, bd);
         ensure_ui_blend();   // saveui A: before the first ImGui draw can be re-issued into the capture (eye2_begin refuses without it)
         if (g_imgui_tex != was && g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); }   // a new capture starts transparent
-        if (g_imgui_tex && g_imgui_tex == was && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;   // (a new texture holds none of last frame's draws)
+        im_cap_ok = g_imgui_tex && g_imgui_tex == was && g_imgui_draws_last > 0;
+        if (im_cap_ok && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;   // (a new texture holds none of last frame's draws)
     }
     // saveui C: Fahrenheit's save screen (fh_menu_on_screen and 0x8CB994, from managed) is a full-screen 2D program: while it is
     // open the frame goes to the virtual screen and the ImGui layer lies on it (below). Not inside a battle transition window (the
@@ -15096,6 +15369,7 @@ static void xr_tick() {
         ui.im_world = true; memcpy(ui.im_q, screen.q, sizeof(ui.im_q)); memcpy(ui.im_p, screen.p, sizeof(ui.im_p)); ui.im_w = screen.width;
     }
     g_imgui_where = ui.tex2 == nullptr ? 0 : ui.im_world ? 2 : 1;
+    vpanel_frame(ui, im_cap_ok);   // vr-menu S2: the F8 window's own panel (any base mode: 3D, screens, movies, the save screen)
     {   // saveui A.3: the ImGui layer, every 10 s while it drew (screen frames included: the boot menu used to leave no trace)
         static ULONGLONG next = 0; static uint32_t f_screen = 0, f_screen_shown = 0, f_3d_shown = 0, f_world = 0, draws_max = 0, f_draws = 0;
         if (g_imgui_draws_last > 0) f_draws++;
@@ -15150,10 +15424,11 @@ static void xr_tick() {
     if (!g_bt_frozen) xr_apply_poses(out);         // frozen: the override keeps the head pose the pin was taken with (eye poses, IPD offset, FOV)
     motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
-    xr_input_get(&g_vrpad); if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
+    { XrInput in; xr_input_get(&in); vpanel_input(in); g_vrpad = in; }   // vr-menu S2: the menu panel's grab first; a grip latched to it is masked in the copy
+    if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
     if (sr_clock && out.began) turn_advance(out.display_time, false);   // stickrep: the yaw at the display time of the frame about to render (the stick as synced at this wait)
     haptics_tick();   // rumble to haptics (render thread: every xrApplyHapticFeedback stays here, next to xrSyncActions)
-    if (xr_take_space_change()) { g_xr_space_epoch++; g_xr_recenter_pending = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("the headset's recentre"); diag("xr: recentre (headset gesture)"); }   // same as Home
+    if (xr_take_space_change()) { g_xr_space_epoch++; g_xr_recenter_pending = true; g_vp_replace = true; g_seat_latched = false; g_fp_yaw_latched = false; g_sr_epoch++; bt_user("the headset's recentre"); diag("xr: recentre (headset gesture)"); }   // same as Home
     {   // frozen world: no world grab or chords; a new grip or stick click ends the window, and the next frame's gesture_tick acts on it
         static bool s_any_prev = false;
         const XrHand& L = g_vrpad.hand[0]; const XrHand& R = g_vrpad.hand[1];

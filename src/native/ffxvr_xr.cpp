@@ -28,6 +28,7 @@ typedef XrResult (XRAPI_PTR *PFN_xrGetDisplayRefreshRateFB)(XrSession session, f
 #include <cstring>
 #include <vector>
 #include "ffxvr_xr.h"
+#include "ffxvr_panel.h"   // vr-menu S2: the hole rectangle (pure)
 
 namespace {
 
@@ -104,7 +105,12 @@ struct Eye {
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
-Eye g_eye[6];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye
+Eye g_eye[7];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye; 6: the menu panel (vr-menu S2)
+constexpr int k_panel_sc = 6;
+// vr-menu S2: this frame's crop origin for the panel's copy, and the full ImGui layer's hole (fractions of the capture), set by xr_frame
+// before the submits that use them
+int g_panel_crop_x = 0, g_panel_crop_y = 0; float g_imgui_hole[4] = { 0, 0, 0, 0 };
+uint32_t g_max_layers = 0;                       // XrSystemProperties::graphicsProperties.maxLayerCount (logged once)
 // R8b (with R15): the last layers submitted with fresh images. A frame whose base layer cannot go out fresh (no eye
 // image, or a swapchain wait that timed out) re-sends the held base layer for up to 30 frames instead of a black
 // zero-layer frame: the swapchains still hold those images (the compositor uses each one's last released image, legal
@@ -114,6 +120,7 @@ struct HeldBase {
     bool have = false, use_screen = false, stereo = false; uint32_t age = 0;
     XrCompositionLayerProjectionView pv[2] = {}; XrCompositionLayerQuad quad = {}, quad_r = {};
     bool have_ui = false, have_imgui = false; uint32_t ui_age = 0, imgui_age = 0; XrCompositionLayerQuad uiq = {}, imq = {};
+    bool have_panel = false; uint32_t panel_age = 0; XrCompositionLayerQuad pq = {};   // vr-menu S2: the menu panel, held like the ImGui quad
     bool base_ui = false;                         // R8-1: the held base frame went out with a UI panel (only then may a held base bring one)
 };
 HeldBase g_held;
@@ -136,7 +143,7 @@ DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
 // stickrep: what the last xr_frame's xrEndFrame sent besides the base layer (the extra frames re-send exactly that), the
 // display period, and a frame whose xrWaitFrame succeeded but whose xrBeginFrame failed (VDXR then blocks the next
 // xrWaitFrame until a Begin: the next call retries the Begin instead of waiting again).
-struct LastSent { bool base = false, have_ui = false, have_imgui = false; XrCompositionLayerQuad uiq = {}, imq = {}; };
+struct LastSent { bool base = false, have_ui = false, have_imgui = false, have_panel = false; XrCompositionLayerQuad uiq = {}, imq = {}, pq = {}; };
 LastSent g_last_sent;
 bool g_waited_unbegun = false; XrFrameState g_unbegun_fs = { XR_TYPE_FRAME_STATE };
 XrTime g_last_begun_T = 0;                         // the display time of the last begun frame (skipped-slot count)
@@ -386,6 +393,8 @@ bool xr_take_stuck() { const bool v = g_stuck_stop; g_stuck_stop = false; return
 void xr_counters(unsigned* held_frames, unsigned* wait_timeouts) { if (held_frames) *held_frames = g_held_frames; if (wait_timeouts) *wait_timeouts = g_wait_timeouts; }   // held: base-layer frames (quads held alone are in the diag log)
 void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
 void xr_imgui_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[4].w; if (h) *h = g_eye[4].h; }   // 0 x 0 while no session
+bool xr_panel_ready() { return g_session != XR_NULL_HANDLE && g_running && g_eye[k_panel_sc].sc != XR_NULL_HANDLE; }
+uint32_t xr_max_layers() { return g_max_layers; }
 bool xr_srgb() { return g_sc_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; }
 
 void xr_stop() {
@@ -510,7 +519,10 @@ bool xr_start(const XrHost& host) {
     r = p_xrGetSystem(g_instance, &sgi, &g_system);
     if (XR_FAILED(r)) { fail("xrGetSystem (headset not available?)", r); xr_stop(); return false; }
     XrSystemProperties sp = { XR_TYPE_SYSTEM_PROPERTIES };
-    if (XR_SUCCEEDED(p_xrGetSystemProperties(g_instance, g_system, &sp))) g_h.diag("xr: system %s", sp.systemName);
+    if (XR_SUCCEEDED(p_xrGetSystemProperties(g_instance, g_system, &sp))) {
+        g_max_layers = sp.graphicsProperties.maxLayerCount;
+        g_h.diag("xr: system %s, maxLayerCount %u (this mod sends at most 5: base, stereo right, UI panel, ImGui layer, menu panel)", sp.systemName, g_max_layers);
+    }
 
     XrGraphicsRequirementsD3D11KHR req = { XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR };
     r = p_xrGetD3D11GraphicsRequirementsKHR(g_instance, g_system, &req);
@@ -548,7 +560,7 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         Eye& e = g_eye[i];
         if (i < 2) {
             // The headset's recommended width at the game's 16:9 aspect (the
@@ -558,6 +570,7 @@ bool xr_start(const XrHost& host) {
             if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
         }
         else if (i == 4) { e.w = 1920; e.h = 1080; }       // the ImGui layer (saveui D): exactly half a 4K capture, so the copy's taps are a 2x2 box; ~34 px/deg on a 56 deg quad, above the display's ~25
+        else if (i == k_panel_sc) { e.w = vpanel::k_side; e.h = vpanel::k_side; }   // vr-menu S2: the menu panel, 1:1 crops of the F8 window up to 1536 x 1536 (~9.4 MB an image)
         else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2, 5), the UI panel (3)
         XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -576,7 +589,7 @@ bool xr_start(const XrHost& host) {
         if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
             set_status("intermediate texture failed"); xr_stop(); return false;
         }
-        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : "screen right", i, e.w, e.h, n);
+        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : i == 5 ? "screen right" : "menu panel", i, e.w, e.h, n);
     }
     if (p_xrGetDisplayRefreshRateFB) {   // stickrep: the refresh rate (the session's; VDXR answers with VD's setting)
         float hz = 0.f;
@@ -688,7 +701,16 @@ bool prepare(int i, bool short_wait) {
 void copy_release(int i, ID3D11Texture2D* src) {
     Eye& e = g_eye[i];
     stage(i == 0 ? "copy eye 0" : i == 1 ? "copy eye 1" : "copy");
-    if (src != nullptr && g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : i == 4 ? 2 : 0)) g_h.ctx->CopyResource(e.images[e.idx], e.mid);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui)
+    bool copied = false;
+    if (src != nullptr) {
+        if (i == k_panel_sc) copied = g_h.copy_crop != nullptr && g_h.copy_crop(src, e.mid_rtv, e.w, e.h, g_panel_crop_x, g_panel_crop_y);   // vr-menu S2: 1:1 crop
+        else copied = g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : i == 4 ? 2 : 0);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui)
+        if (copied && i == 4 && g_h.clear_rect != nullptr) {   // vr-menu S2: the menu panel shows the F8 window: its place in the full layer is transparent
+            const vpanel::Rect hr = vpanel::hole_px(g_imgui_hole, static_cast<int>(e.w), static_cast<int>(e.h), 2);
+            if (!vpanel::empty(hr)) g_h.clear_rect(e.mid_rtv, e.w, e.h, hr.x, hr.y, hr.w, hr.h);
+        }
+    }
+    if (copied) g_h.ctx->CopyResource(e.images[e.idx], e.mid);
     stage("release image");
     XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     if (XR_SUCCEEDED(p_xrReleaseSwapchainImage(e.sc, &ri))) e.ever_released = true;
@@ -971,6 +993,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         // and width, 16:9 onto 16:9, after the screen quad in the layer order), as the menu sits over the game's frame on the
         // monitor. Only over a screen base (a held base keeps its mode, so use_screen is this frame's truth); otherwise head-locked.
         const bool im_world = im_src && ui->im_world && use_screen;
+        for (int k = 0; k < 4; ++k) g_imgui_hole[k] = (ui != nullptr && ui->ptex != nullptr) ? ui->hole[k] : 0.f;   // vr-menu S2: holed only while the panel shows the window
         if (im_src && submit_eye(4, ui->tex2)) {
             have_imgui = true;
             imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // saveui B: premultiplied (the capture is; the copy keeps it so)
@@ -996,13 +1019,36 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
                  && g_held.imq.space == (im_world ? g_space : g_view_space)) {   // R8b: its own wait timed out; saveui: never across a head-locked / on-screen change
             have_imgui = true; imq = g_held.imq; g_held.imgui_age++; g_held_quads++;
         }
-        const XrCompositionLayerBaseHeader* layers[4] = {
+        // vr-menu S2: the menu panel, world-locked in the reference space (any base mode: 3D, screens, movies, the save screen), last
+        // in the order so it lies over the ImGui layer (whose copy of the window is holed out). Premultiplied, as the ImGui layer.
+        XrCompositionLayerQuad pnq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        bool have_panel = false;
+        const bool p_src = base && ui != nullptr && ui->ptex != nullptr && ui->pcrop_w > 0 && ui->pcrop_h > 0
+                           && ui->pcrop_w <= static_cast<int>(g_eye[k_panel_sc].w) && ui->pcrop_h <= static_cast<int>(g_eye[k_panel_sc].h) && g_eye[k_panel_sc].sc != XR_NULL_HANDLE;
+        if (p_src) { g_panel_crop_x = ui->pcrop_x; g_panel_crop_y = ui->pcrop_y; }
+        if (p_src && submit_eye(k_panel_sc, ui->ptex)) {
+            have_panel = true;
+            pnq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            pnq.space = g_space; pnq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            pnq.subImage.swapchain = g_eye[k_panel_sc].sc;
+            pnq.subImage.imageRect.offset = { 0, 0 };
+            pnq.subImage.imageRect.extent = { ui->pcrop_w, ui->pcrop_h };
+            pnq.pose.orientation = { ui->pq[0], ui->pq[1], ui->pq[2], ui->pq[3] };
+            pnq.pose.position = { ui->pp[0], ui->pp[1], ui->pp[2] };
+            pnq.size = { ui->pw, ui->ph };
+            g_held.have_panel = true; g_held.panel_age = 0; g_held.pq = pnq;
+        }
+        else if (p_src && g_held.have_panel && g_held.panel_age < k_hold_max && g_eye[k_panel_sc].ever_released) {   // R8b: its own wait timed out
+            have_panel = true; pnq = g_held.pq; g_held.panel_age++; g_held_quads++;
+        }
+        const XrCompositionLayerBaseHeader* layers[8] = {
             use_screen ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad) : reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
-            nullptr, nullptr, nullptr };
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
         uint32_t nl = 1;
         if (stereo_screen) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_r);
         if (have_ui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq);
         if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
+        if (have_panel) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&pnq);
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount = base ? nl : 0u; end.layers = base ? layers : nullptr;
@@ -1013,9 +1059,10 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         g_frame_open = false;
         if (XR_FAILED(r)) fail("xrEndFrame", r);
         // stickrep: what went out, for the extra frames until the next call (they re-send exactly this)
-        g_last_sent.base = base; g_last_sent.have_ui = base && have_ui; g_last_sent.have_imgui = base && have_imgui;
+        g_last_sent.base = base; g_last_sent.have_ui = base && have_ui; g_last_sent.have_imgui = base && have_imgui; g_last_sent.have_panel = base && have_panel;
         if (have_ui) g_last_sent.uiq = uiq;
         if (have_imgui) g_last_sent.imq = imq;
+        if (have_panel) g_last_sent.pq = pnq;
         next->ended = true; next->base_fresh = ok; next->base_sent = base; next->end_ms = g_t_end_ms;
         if (g_sc_stuck >= 0) {   // B5-2: a swapchain that keeps failing hard (not timing out) never recovers by itself: restart the session
             const int stuck = g_sc_stuck;
@@ -1112,9 +1159,9 @@ bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* ne
     // fresh or held; the quads from g_last_sent), the images being the swapchains' last released ones (no acquire, no copy).
     XrCompositionLayerProjectionView pv[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD }, quad_r = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, imq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, pnq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
-    const XrCompositionLayerBaseHeader* layers[4] = { nullptr, nullptr, nullptr, nullptr };
+    const XrCompositionLayerBaseHeader* layers[8] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
     uint32_t nl = 0;
     if (base) {
         if (g_held.use_screen) {                                    // the virtual / stereo screen: re-sent unrotated (world-locked in the room)
@@ -1131,6 +1178,8 @@ bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* ne
         // the ImGui quad: head-locked only within `quads`; on the screen (Fahrenheit's save screen, world-locked) always, so a save that
         // stalls the main thread does not make the menu vanish from the screen (SR-8)
         if (g_last_sent.have_imgui && g_eye[4].ever_released && (quads || g_last_sent.imq.space == g_space)) { imq = g_last_sent.imq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&imq); }
+        // vr-menu S2: the menu panel is world-locked: always re-sent as it was (design 3.7)
+        if (g_last_sent.have_panel && g_eye[k_panel_sc].ever_released) { pnq = g_last_sent.pq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pnq); }
     }
     XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
     end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
