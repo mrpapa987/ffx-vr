@@ -14,8 +14,12 @@
 //   the wheel     the owner's stick y over the panel: k_wheel_rate notches a second at full deflection, past k_stick_dz
 //   steadiness    a 1-euro filter on the hit (panel metres) and a press lock (k_lock_s, or until the ray turned k_lock_deg)
 //   the beam      a thin quad from the aim pose to the plane, facing the eye (beam_pose), while the ray is near the panel
+//   the edge      a ray comes on at the quad's edge and goes off k_edge_m beyond it (on_step: no flicker on the border)
+//   a gap         a drag survives a frame or two without the panel (drag_grace: a pairing miss, a lost head pose)
+//   handing back  ImGui's mouse goes back where the OS cursor was before pointing (or to a point off the F8 window), with
+//                 WantSetMousePos kept k_leave_frames more frames, then "no mouse" (Feed: review S3 B1)
 #pragma once
-#define FFXVR_POINTER_REV 1
+#define FFXVR_POINTER_REV 2
 #include "ffxvr_panel.h"
 
 namespace vptr {
@@ -29,6 +33,10 @@ constexpr float k_near = 0.25f;                          // the beam shows while
 constexpr float k_lock_s = 0.10f, k_lock_deg = 1.5f;     // the press lock (design 4.1)
 constexpr float k_beam_w = 0.004f;                       // the beam's width (m)
 constexpr float k_oe_min = 1.0f, k_oe_beta = 20.f, k_oe_d = 1.0f;   // 1-euro: Hz at rest, Hz per m/s, the speed's own cutoff
+constexpr float k_edge_m = 0.015f;                       // a ray on the quad goes off this far beyond its edge (review N1)
+constexpr float k_gap_s = 0.10f;                         // a drag survives this long without the panel (review N2)
+constexpr int   k_leave_frames = 3;                      // frames ImGui's mouse is held at the park point after the pointer left
+constexpr float k_park_pad = 8.f;                        // the park point stays this far (ImGui px) off the F8 window
 
 // -- the 1-euro filter (Casiez et al. 2012) -------------------------------------------------------------------------------
 struct OneEuro { bool init = false; float x = 0.f, dx = 0.f; };
@@ -82,6 +90,64 @@ inline bool uv_to_imgui(float u, float v, const Rect& cap, float ds_w, float ds_
     *x = (static_cast<float>(cap.x) + u * static_cast<float>(cap.w)) * ds_w / bb_w;
     *y = (static_cast<float>(cap.y) + v * static_cast<float>(cap.h)) * ds_h / bb_h;
     return true;
+}
+
+/// A hand's ray on the quad with hysteresis (review N1): it comes on inside the quad, and goes off only beyond k_edge_m past an edge
+/// (or off the plane).
+inline bool on_step(bool was, const QuadHit& h, float w, float hh) {
+    if (!h.plane) return false;
+    if (!was) return h.on;
+    return fabsf(h.lx) <= 0.5f * w + k_edge_m && fabsf(h.ly) <= 0.5f * hh + k_edge_m;
+}
+/// A drag through a gap (review N2): with the panel gone for a moment (can false) while the owner's button, pressed on the panel, is
+/// still down, the pointer keeps feeding its last position for k_gap_s. gap: seconds without it (reset whenever it is there).
+inline bool drag_grace(float& gap, bool can, bool btn, bool down, float dt) {
+    if (can) { gap = 0.f; return false; }
+    if (!btn || !down) { gap = 0.f; return false; }
+    gap += (dt > 0.f && std::isfinite(dt)) ? dt : 0.f;
+    return gap <= k_gap_s;
+}
+
+// -- handing ImGui's mouse back (review S3 B1) ------------------------------------------------------------------------------------
+/// While the pointer feeds ImGui, managed writes io.MousePos and sets io.WantSetMousePos, so the Win32 backend moves the OS cursor
+/// there (onto the F8 window). When the pointer leaves, a single "no mouse" is not enough: a WM_MOUSEMOVE from the last cursor move
+/// (the message-pump thread) and the backend's GetCursorPos poll both put ImGui's mouse back over F8, WantCaptureMouse stays on and
+/// Fahrenheit withholds the game's input. So for k_leave_frames frames the mouse is written at a park point with the flag still set
+/// (ImGui drops every queued position meanwhile, and the backend moves the OS cursor there), then the flag goes and one "no mouse"
+/// is queued. The park point is where ImGui's mouse was before pointing, unless that is unknown or on the F8 window; then the
+/// display's left edge, half way down (the F8 window is at the right).
+struct Feed { int phase = 0; int left = 0; float park_x = 0.f, park_y = 0.f; };   // phase 0 idle, 1 feeding, 2 handing back
+struct FeedIn {
+    bool active = false; float px = 0.f, py = 0.f;          // the pointer feeds ImGui, at (px, py)
+    float mx = 0.f, my = 0.f;                               // io.MousePos now (before this frame's write)
+    float ds_w = 0.f, ds_h = 0.f;                           // DisplaySize
+    float wx0 = 0.f, wy0 = 0.f, wx1 = 0.f, wy1 = 0.f;       // the F8 window (ImGui coordinates; empty: none)
+};
+struct FeedOut { bool write = false; float x = 0.f, y = 0.f; bool none = false; };   // write io.MousePos = (x, y) + WantSetMousePos; queue "no mouse"
+inline bool park_ok(float x, float y, const FeedIn& in) {
+    if (!std::isfinite(x) || !std::isfinite(y) || x < 0.f || y < 0.f || x >= in.ds_w || y >= in.ds_h) return false;
+    const bool win = in.wx1 > in.wx0 && in.wy1 > in.wy0;
+    return !(win && x >= in.wx0 - k_park_pad && x <= in.wx1 + k_park_pad && y >= in.wy0 - k_park_pad && y <= in.wy1 + k_park_pad);
+}
+inline void park_choose(Feed& f, const FeedIn& in) {
+    if (park_ok(in.mx, in.my, in)) { f.park_x = in.mx; f.park_y = in.my; return; }
+    f.park_x = k_park_pad; f.park_y = 0.5f * in.ds_h;
+    if (!park_ok(f.park_x, f.park_y, in)) { f.park_x = k_park_pad; f.park_y = k_park_pad; }   // (a window reaching the left edge)
+}
+/// Once a frame (managed render_imgui, after the window).
+inline FeedOut feed_step(Feed& f, const FeedIn& in) {
+    FeedOut o;
+    if (in.active && std::isfinite(in.px) && std::isfinite(in.py)) {
+        if (f.phase == 0) park_choose(f, in);               // (handing back and pointing again: the first park stays)
+        f.phase = 1; o.write = true; o.x = in.px; o.y = in.py;
+        return o;
+    }
+    if (f.phase == 1) { f.phase = 2; f.left = k_leave_frames; }
+    if (f.phase == 2) {
+        if (f.left > 0) { f.left--; o.write = true; o.x = f.park_x; o.y = f.park_y; return o; }
+        f.phase = 0; o.none = true;
+    }
+    return o;
 }
 
 // -- the trigger, the hand, the mask, the wheel ---------------------------------------------------------------------------
