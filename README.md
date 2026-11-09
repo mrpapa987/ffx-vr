@@ -24,7 +24,7 @@ Each part of the game gets the viewpoint that suits it, instead of one VR camera
 
 The Quest controllers act as the gamepad (with rumble), the stick turns smoothly at the headset's
 refresh rate, and the game's own battle cursors are drawn in 3D over their targets.
-Overdrives can be played with gestures (F8 > Controllers), Auron's Bushido by cutting targets with a blade in each hand; an
+Overdrives can be played with gestures (F8 > Overdrives), Auron's Bushido by cutting targets with a blade in each hand; an
 optional download, `ffxvr-target-art-<version>.zip` (AI-generated art), turns those targets into textured medallions.
 
 ## Requirements
@@ -69,19 +69,19 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
 
 - **Connect Virtual Desktop to the PC before starting the game.** Without a headset (or with Virtual
   Desktop not running) the game plays normally on the monitor.
-- Press **F8** in the game for the FFX VR overlay. Tick **Headset**, and **start automatically** to go
-  straight into the headset from the next launch.
+- Press **F8** in the game for the FFX VR overlay. Tick **Headset** (top left), and View > Starting >
+  **Start in the headset** to go straight into the headset from the next launch.
 - **Recentre**: hold the Meta button, or press **Home**.
 - **Change view** (first person, third person, diorama): **right grip + right stick click**, or **End**.
 - **Reset the view** (third person, diorama): **left grip + left stick click**.
 - **In battle, look through the next party member**: **left grip + right stick click**, or **Insert**.
-- **Turn**: right stick, smooth (the speed is in the overlay); there is no snap turn.
+- **Turn**: right stick, smooth (the speed is in F8 > Controls > Turning); there is no snap turn.
 - Play seated, and quit through the game's menu rather than by closing the window.
 
 ## Known issues
 
 - **Stick turning can still ghost** (a faint double image while turning with the right stick). Turning
-  your head is clean. "Smooth stick turns at the headset rate" in the overlay (on by default) helps a
+  your head is clean. "Extra-smooth stick turning (headset rate)" in F8 > Controls (on by default) helps a
   lot; a full fix is planned.
 - **The heat haze over fires and torches is off in the headset**: it showed a wrong patch of the scene
   in one eye. The fire itself is drawn.
@@ -96,11 +96,11 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
 
 ## VR hands (experimental) and your own hands
 
-F8 > **VR hands (experimental)** > tick **VR hands** draws a pair of hands at your controllers in first person (and,
+The F8 **Hands** tab > tick **VR hands** draws a pair of hands at your controllers in first person (and,
 if you tick them, in the diorama, third person and the seat view). The fingers follow the trigger, the grip and the
 touch sensors. It is off by default while it is being tested.
 
-**Tap to press action** (F8 > VR hands > gestures, on with VR hands): **squeeze the grip and push your hand forward about a
+**Tap to press action** (F8 > Hands > gestures, on with VR hands): **squeeze the grip and push your hand forward about a
 hand's width (10 cm) toward what you're facing**: it presses confirm (A: talk, examine, open) with a short tick on that
 controller. The grip is what arms it: a reach with the grip squeezed presses too, so let go of the grip when you don't mean
 it (tick **require a pointing finger** to also need the index off the trigger). Only in first person in the field: never in
@@ -124,7 +124,7 @@ to install numpy if it is missing).
 powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "D:\models\My Character.obj" -Name mine
 ```
 
-It writes `<game>\fahrenheit\mods\ffxvr\hands\mine\`. In game: F8 > VR hands > hand model > **rescan**, pick it.
+It writes `<game>\fahrenheit\mods\ffxvr\hands\mine\`. In game: F8 > Hands > hand model > **rescan**, pick it.
 If a hand looks wrong: `-CutRight 0.095` / `-CutLeft` move the wrist cut, `-FlipRight` / `-FlipLeft` swap a palm and
 back, `-Only right` mirrors one hand, `-Tip "x,y,z"` picks a hand by hand, `-DebugImages` shows what it found,
 `-Preview preview.png` renders the poses into the pack folder (the script's header lists everything). A pack made
@@ -146,7 +146,7 @@ never to the Fahrenheit or FFX-60fps projects: they are not responsible for this
 1. Start the game with `tools\run-ffx.ps1`; when it closes, it collects the logs into the `logs\`
    folder next to `tools\`.
 2. Attach the newest `logs\run-*.txt` and the `logs\run-*-gamelogs` folder (zipped), and say what you
-   did and what you saw. The FFX VR version is shown at the bottom of the F8 overlay.
+   did and what you saw. The FFX VR version is shown at the top of the F8 overlay.
 
 By default the mod keeps only a small log: `ffxvr_diag.log` in the mod folder (startup, versions,
 headset and view events, errors; started fresh each session, at most 4 MB; the session before is
@@ -157,7 +157,8 @@ problem shows, and turn it off again afterwards (its log grows up to 64 MB a ses
     powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Verbose
     powershell -ExecutionPolicy Bypass -File .\tools\set-logging.ps1 -Profile Release
 
-(The same switch is "verbose log" at the top of the F8 overlay's Debug section.)
+(The same switch is the **Developer** checkbox at the top right of the F8 overlay. It also shows the developer tools,
+and turns on a few automatic captures for the developer; leave it off unless we ask.)
 
 ## Standing on
 

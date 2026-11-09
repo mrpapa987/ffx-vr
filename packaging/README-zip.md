@@ -112,29 +112,29 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
    powershell -ExecutionPolicy Bypass -File .\tools\run-ffx.ps1
    ```
    Steam must be running. When the game closes, the script collects the logs into `logs\`.
-3. In the game, press **F8** for the FFX VR overlay. Tick **Headset**, and **start
-   automatically** if you want it on from the next launch.
+3. In the game, press **F8** for the FFX VR overlay. Tick **Headset** (top left), and View >
+   Starting > **Start in the headset** if you want it on from the next launch.
 
 ### Virtual Desktop settings
 
 - **Refresh rate: 120 Hz** (72 Hz also works). Avoid 90 Hz: 60 fps doesn't divide into it.
 - **SSW (Synchronous Spacewarp): Disabled**, not "Always" (Auto is not tested with this build).
   The mod fills the refreshes between game frames itself, turned with the stick, so stick turns
-  should be as smooth as head turns ("smooth stick turns at the headset rate" in the overlay, on by
-  default; the `sr:` lines in `ffxvr_diag.log` show what it does).
+  should be as smooth as head turns ("Extra-smooth stick turning (headset rate)" in F8 > Controls, on
+  by default; the `sr:` lines in `ffxvr_diag.log` show what it does).
 - Set the game's **V-Sync off** (the headset paces the frames).
 - **Quit through the game's menu**, not by closing the window.
 - Play **seated**.
 
 ### Controls
 
-The Quest controllers act as the gamepad (on by default; "Quest controllers as the gamepad" in
-the overlay). A normal gamepad works too.
+The Quest controllers act as the gamepad (on by default; "Use the Quest controllers as the
+gamepad" in F8 > Controls). A normal gamepad works too.
 
 | Action | Controllers | Keyboard |
 |---|---|---|
 | Recentre the view | Hold the **Meta** button | **Home** |
-| Turn | Right stick: smooth turning, at the turn speed set in the overlay (there is no snap turning) | Numpad 1 / 3 |
+| Turn | Right stick: smooth turning, at the turn speed set in F8 > Controls (there is no snap turning) | Numpad 1 / 3 |
 | Change view: first person, third person, diorama | **Right grip + right stick click** | **End** |
 | Reset the view (third person / diorama) | **Left grip + left stick click** | |
 | Battle: look through the next party member | **Left grip + right stick click** | **Insert** |
@@ -148,7 +148,7 @@ the overlay). A normal gamepad works too.
 - **Menus, dialogue, the battle command window**: on a panel in front of you.
 - **2D screens and movies**: a large flat virtual screen.
 - **Blitzball**: a large **stereo 3D screen** showing the game's own camera, with automatic
-  depth. "Everywhere" in the overlay's View section uses this screen for the whole game.
+  depth. "everywhere" in F8 > Movies > 3D cinema screen uses this screen for the whole game.
 
 ---
 
@@ -163,7 +163,7 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 
 ### VR hands (experimental), and your own hands
 
-F8 > **VR hands (experimental)** > tick **VR hands**: a pair of hands at your controllers in first person, fingers
+The F8 **Hands** tab > tick **VR hands**: a pair of hands at your controllers in first person, fingers
 following the trigger, grip and touch sensors. **hand model** picks the look: our generic glove or bare hand, or a pack
 you made yourself (**rescan** after adding one).
 
@@ -174,7 +174,7 @@ T or A pose, Y up), install [Python 3](https://www.python.org/downloads/) and nu
 powershell -ExecutionPolicy Bypass -File .\tools\import-hands.ps1 "<path to the .obj>" -Name mine
 ```
 
-It writes the pack into the mod's `hands\mine\` folder; in game: F8 > VR hands > hand model > rescan, pick it. Options
+It writes the pack into the mod's `hands\mine\` folder; in game: F8 > Hands > hand model > rescan, pick it. Options
 for a hand that comes out wrong are listed at the top of `tools\import-hands.ps1` (`-CutRight 0.095`, `-FlipLeft`,
 `-Only right`, ...).
 
@@ -207,14 +207,14 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | Fahrenheit doesn't start at all | Not as administrator. Is Fahrenheit release {FAHRENHEIT_RELEASE} installed (section 2; `install-mod.ps1` shows the version it found)? Check `logs\run-*.txt`. |
 | No F8 overlay | The mod didn't load: re-run `install-mod.ps1` and check the .NET x86 runtime. |
 | Black for a few seconds at some scene changes | The headset should now keep showing the last picture (head-tracked) while the game loads. If it still goes black, send the logs: the `sr:` lines in `ffxvr_diag.log` say why. |
-| Ghosting when turning with the stick | Is "smooth stick turns at the headset rate" ticked in the F8 overlay (under the turn speed)? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, try `game-settings.ps1 -Profile vr`. |
+| Ghosting when turning with the stick | Is "Extra-smooth stick turning (headset rate)" ticked in F8 > Controls > Turning? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, try `game-settings.ps1 -Profile vr`. |
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit (and maybe FFX VR) update. |
 
 **Bug reports:** open an issue at the [FFX VR repository](https://github.com/mrpapa987/ffx-vr/issues)
 (never on Fahrenheit's or FFX-60fps's pages), with the newest `logs\run-*.txt` and the `logs\run-*-gamelogs`
 folder next to it (zipped), a description of what you saw and the FFX VR version ({VERSION}; also at the
-bottom of the F8 overlay).
+top of the F8 overlay).
 
 The mod logs little by default: `ffxvr_diag.log` in `<game folder>\fahrenheit\mods\ffxvr\` (events and
 errors, started fresh each session, at most 4 MB; the session before is `ffxvr_diag.prev.log`). If you are

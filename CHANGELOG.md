@@ -37,19 +37,22 @@ recommended.
 - **4x MSAA** handled by the mod; the F8 overlay warns when the game renders below the headset's
   resolution.
 - **The F8 overlay** for every setting, saved to `ffxvr.ini` (hand edits are read back while the game
-  runs).
+  runs): a header with the headset switch, Recentre, the status and the version, then tabs (View, Controls, Battle,
+  Overdrives, Movies, Hands). Every tooltip names its ini key; experimental settings are marked, and a setting that needs
+  the next launch says so. The **Developer** checkbox (`diag_verbose`, off by default) adds the Developer tab and the
+  verbose log; the engine-lock option for loads (`load_lock_release`) is there now, not on a player tab.
 - **Installer** (`tools\install-mod.ps1`) that checks every requirement, and `tools\run-ffx.ps1` that
   starts the game and collects the logs for a bug report.
 - **VR hands (experimental, off by default)**: your hands drawn at the controllers in first person (optionally in
   the diorama, third person and the seat view), depth-tested in both eyes, fingers following the trigger, grip and
-  touch sensors. F8 > VR hands > **hand model** picks the look: our generic dark glove or bare hand (MIT), or a pack
+  touch sensors. F8 > Hands > **hand model** picks the look: our generic dark glove or bare hand (MIT), or a pack
   you make from a model you own with `tools\import-hands.ps1` (Python 3 + numpy). Such a pack is marked private and
   stays on your PC; the mod's tools never package, copy or delete it. With VR hands on, **tap to press action**: squeeze
   the grip and push your hand forward about a hand's width toward what you face to press confirm (talk, examine, open) in
   the field in first person; never in battle, menus, the sphere grid or the save screen, nor (unless you tick it) while a
   text box is up.
 - **Chocobo rides in first person**: your eyes on Tidus's head on the bird, the bird's running bob smoothed
-  (F8 > Debug > First person / follow > chocobo), the bird drawn under you (or hidden, if its neck is in the way);
+  (F8 > View > First person > Riding), the bird drawn under you (or hidden, if its neck is in the way);
   third person and the diorama follow the bird too.
 - **Small logs by default**: one `ffxvr_diag.log` per session, at most 4 MB; the diagnostics for bug
   hunting are off; `tools\set-logging.ps1 -Profile Verbose` turns on a fuller log for a bug report, and

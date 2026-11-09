@@ -210,7 +210,8 @@ stay in view: **Headset** (the VR view, this session), **Recentre** (Home), the
 headset's status in one line (hover it for the whole text), the frame / GPU /
 VRAM line (hover it for the full performance text), the version, and warnings
 only while there is one. **Developer** sits on the right of the first line.
-Below, one tab bar; the selected tab is remembered (`menu_tab`):
+Below, one tab bar; the selected tab is remembered (`menu_tab`; the Developer
+tab is not: a launch with it saved opens View):
 
 | Tab | Sections |
 | --- | --- |
@@ -231,10 +232,17 @@ and the header counts them.
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in
 `ffxvr_diag.log` (up to 64 MB a session instead of 4), the camera trace and
-Ctrl+F9 dumps; unticking hides the tab and stops them. It applies at once and
-is saved; only the camera trace's fresh file starts at the next launch. While
-the Developer tab is the selected one, the native diagnostics stay armed (as
-the old Debug header did). A release install (`tools\set-logging.ps1 -Profile
+Ctrl+F9 dumps, and the developer's automatic captures (one frame census at the
+first battle frame in the headset, up to 3 slow-GPU dumps instead of 1, the
+overdrive log, the per-movie FMV lines); unticking hides the tab and stops
+them. It applies at once and is saved; only the camera trace's fresh file
+starts at the next launch. Once raised, the log cap stays at 64 MB until the
+next start, so unticking never closes a log that has grown past 4 MB. While
+the Developer tab is the selected one (after a click on it this session), the
+native diagnostics stay armed, as the old Debug header did. With Developer off,
+the header names any session-only developer tool that is still running (F10
+slow motion, the F11 UI highlight, a hidden draw range, a frozen game camera,
+eye 2 rendered without the headset, a lifted bone) and offers **clear**. A release install (`tools\set-logging.ps1 -Profile
 Release`) has it off. With it off, the header says when a developer-only key
 was left away from its default in the ini.
 

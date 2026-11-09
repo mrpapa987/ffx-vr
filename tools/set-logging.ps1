@@ -13,8 +13,8 @@
 #
 # The file is edited in place: every other line, comment, the order, the line endings and the encoding stay as they
 # are; a key that is missing is added at the end. A timestamped copy (ffxvr.ini.<yyyyMMdd-HHmmss-fff>.bak) is made first.
-# The game must be closed: the mod reads the file back and rewrites it while it runs. The keys marked "next launch"
-# in the mod's Debug section (diag_cluster_bytes, diag_va_log, diag_load_prof's probes) take effect at the next start
+# The game must be closed: the mod reads the file back and rewrites it while it runs. The keys the F8 overlay's
+# Developer tab tags "next launch" (diag_cluster_bytes, diag_va_log, diag_load_prof's probes) take effect at the next start
 # anyway; the rest would apply at once, but the game is closed here, so: the next start.
 # Without an ffxvr.ini: Release has nothing to do (no file = the defaults = all off); Verbose and Dev write a short one
 # (every diagnostic key, so the mod does not take it for a truncated file; it fills in the rest at its next save).

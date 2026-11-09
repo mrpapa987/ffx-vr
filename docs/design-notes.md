@@ -5864,3 +5864,12 @@ mode = `diag_verbose`; tabs and labels as proposed, judged in the headset). Mana
   `NextLaunch.Pending`. The C# is not compiled here.
 - **Not verified (nobody here can run the game):** the layout at the owner's 35 px text, the tab restore on the first
   frame, the header's right-aligned checkbox in a narrow window, and the tags' small font.
+- **Review fixes** (vrmenu-s1-review.md, S1-S5 and five nits): `dmg3d_hide2d` is `next launch` only when turned on
+  without its hook (hooked at launch it is live both ways); the log cap is never lowered during a session (native closes a
+  log already past a lowered cap until the next start), and the Developer tooltip names the automatic captures it turns
+  on; with Developer off the header names the session-only developer states still running (F10 slow motion, F11
+  highlight, a draw range, the frozen camera, eye 2 without the headset, the bone lift) with a **clear** button, never
+  clearing them by itself; `menu_tab=developer` is never restored (View opens), so the diagnostics are armed only after
+  a click on the tab; the player docs (README, INSTALL-ALPHA, the zip's README, CHANGELOG, release.md) follow the new
+  menu. Nits: tooltips are built only while hovered, the tab bar uses the Mixed fitting policy, a radio row shows
+  `next launch` once, the guided FMV grid's radio shows whenever it is the value, stale "Debug" comments renamed.

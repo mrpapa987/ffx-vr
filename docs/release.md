@@ -126,7 +126,8 @@ game version (Steam build id).
 - [x] `tools/package-release.ps1`: builds, assembles the zip from a clean folder (never from the live mod folder - it has the ini, logs and captures), writes a SHA-256 next to it
 - [x] version: one place (`ffxvr.csproj` `<Version>`, now `0.1.0-alpha.1`) flowing into the assembly's informational version,
   the manifest, and (through `src/native/ffxvr_version.h`, written by build-mod) the native DLL's `ffxvr_build_info`; both
-  shown at the bottom of the F8 overlay, in Debug, and at the top of `ffxvr_diag.log`; package-release names the zip from it.
+  shown in the F8 overlay's header (the version, the native one in its tooltip), in the Developer tab, and at the top of
+  `ffxvr_diag.log`; package-release names the zip from it.
   The tag is `v` + it (release procedure below)
 - [x] CHANGELOG.md
 - [x] README: player-facing (requirements, install in brief, first-run notes, known issues, bug reports, credits,
@@ -192,7 +193,7 @@ public tag, have a second person run them on a separate install.
    (it warns if `-Version` is not the csproj's, or if the tree is dirty). Out: `dist\ffx-vr-0.1.0-alpha.1.zip` and its
    `.sha256`.
 5. **Smoke test the zip** on the game PC (the fail-safe tests in the release-prep notes): a fresh install into a game folder
-   with no `ffxvr.ini` (F8 shows the version and "diagnostics: all off"; `ffxvr_diag.log` stays small), a start without the
+   with no `ffxvr.ini` (F8's header shows the version and no amber "log: N on", and there is no Developer tab; `ffxvr_diag.log` stays small), a start without the
    headset, `install-mod.ps1 -Uninstall -Purge`.
 6. **GitHub release** from the tag: title `FFX VR 0.1.0-alpha.1`, tick "pre-release", body from
    `.github/release-template.md` + the CHANGELOG entry + the SHA-256; attach the zip and the `.sha256`.
