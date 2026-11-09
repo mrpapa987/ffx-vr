@@ -172,7 +172,7 @@ public sealed unsafe partial class FFXVRModule {
         draw_header();
         int sel = -1;
         // Mixed (review N4): shrink to the style's minimum tab width, then scroll, so a narrow window keeps the labels readable
-        if (ImGui.BeginTabBar("##ffxvr_tabs", ImGuiTabBarFlags.FittingPolicyMixed)) {
+        if (ImGui.BeginTabBar("##ffxvr_tabs", ImGuiTabBarFlags.FittingPolicyMixed | ImGuiTabBarFlags.NoTooltip)) {
             try {
                 for (int i = 0; i < k_tab_key.Length; i++) {
                     if (i == k_tab_dev && !_diag_verbose) continue;   // developer mode = diag_verbose: the tab comes and goes the same frame

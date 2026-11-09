@@ -20,6 +20,17 @@ namespace FFXVR;
 // Opening: F8 (keyboard only, the owner's decision). Where it was if that is within 50 degrees of the gaze and 3 m, else in front.
 // Home, the headset's recentre and "Bring here" put it in front again. A Bushido targets round (Practice targets or a real one)
 // slides it aside until it clears the targets (about 53 degrees at the defaults), or hides it for the round when that is too far.
+//
+// vr-menu S3 (design section 4): the laser pointer. Native follows each controller's aim ray onto the panel (ffxvr_pointer.h) and
+// gives us ImGui's mouse every frame (ffxvr_panel_pointer); vrp_pointer feeds it, after the window, in render_imgui (after
+// Fahrenheit's NewFrame: the events apply at the next one). The owner's trigger is the left button, its stick the wheel.
+//   vr_menu_hand     0 (default) either hand, 1 the right only, 2 the left only
+//   vr_menu_haptics  1 (default) / 0: a tick on each new item under the pointer, a buzz on a click, a faint tick on arriving
+// The real cursor: the Win32 backend polls GetCursorPos every NewFrame while the physical mouse has not moved over the window
+// (ImGui 1.92.9b, imgui_impl_win32.cpp ImGui_ImplWin32_UpdateMouseData), which would override us. While the pointer feeds ImGui we
+// write io.MousePos and set io.WantSetMousePos: the backend then moves the OS cursor to our point (only with the game in front) and
+// skips its poll, and ImGui itself drops every queued mouse-position event while that flag is set (imgui.cpp UpdateInputEvents),
+// so our direct position stands whatever the backend or WM_MOUSEMOVE queue. The OS cursor follows the beam on the TV.
 public sealed unsafe partial class FFXVRModule {
 
     private bool  _vr_menu_panel = true;        // ini vr_menu_panel
@@ -38,13 +49,22 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<int, float*, int, void> _fn_panel_set;     // ABI 58
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_panel_state;         // ABI 58
     private delegate* unmanaged[Cdecl]<int, void> _fn_panel_place;               // ABI 58
+    private delegate* unmanaged[Cdecl]<int, float*, int, int> _fn_panel_pointer;  // ABI 59: vr-menu S3, the laser pointer
+    private int   _vr_menu_hand = 0;            // ini vr_menu_hand: 0 either, 1 right, 2 left
+    private bool  _vr_menu_haptics = true;      // ini vr_menu_haptics
+    private readonly float[] _vrp_ptr = new float[9];
+    private bool  _vrp_ptr_active, _vrp_ptr_btn, _vrp_ptr_logged, _vrp_focused;   // feeding ImGui; the button sent; the method logged; F8 focused
+    private int   _vrp_ptr_owner = -1;          // the hand that owns the pointer (for the haptics)
+    private uint  _vrp_hover_id;                // the item under the pointer last frame (a new one ticks)
+    private int   _vrp_off_press = -1;          // native's count of trigger presses off the panel, last seen
 
     private void vrp_bind(Func<string, nint> req) {
         _fn_panel_set = (delegate* unmanaged[Cdecl]<int, float*, int, void>)req("ffxvr_panel_set");
         _fn_panel_state = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_panel_state");
         _fn_panel_place = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_panel_place");
+        _fn_panel_pointer = (delegate* unmanaged[Cdecl]<int, float*, int, int>)req("ffxvr_panel_pointer");
     }
-    private void vrp_clear() { _fn_panel_set = null; _fn_panel_state = null; _fn_panel_place = null; }
+    private void vrp_clear() { _fn_panel_set = null; _fn_panel_state = null; _fn_panel_place = null; _fn_panel_pointer = null; _vrp_ptr_active = false; _vrp_ptr_btn = false; }
 
     private bool vrp_parse(string k, string v) {
         switch (k) {
@@ -52,6 +72,8 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_menu_distance": pf(k, v, ref _vr_menu_distance, 0.4f, 2.5f); return true;
             case "vr_menu_height":   pf(k, v, ref _vr_menu_height, -0.6f, 0.3f); return true;
             case "vr_menu_scale":    pf(k, v, ref _vr_menu_scale, 0.6f, 2f); return true;
+            case "vr_menu_hand":     pi(k, v, ref _vr_menu_hand, 0, 2); return true;
+            case "vr_menu_haptics":  pb(k, v, ref _vr_menu_haptics); return true;
             default: return false;
         }
     }
@@ -59,7 +81,9 @@ public sealed unsafe partial class FFXVRModule {
         $"vr_menu_panel={(_vr_menu_panel ? 1 : 0)}\n" +
         $"vr_menu_distance={_vr_menu_distance.ToString("F2", CI)}\n" +
         $"vr_menu_height={_vr_menu_height.ToString("F2", CI)}\n" +
-        $"vr_menu_scale={_vr_menu_scale.ToString("F2", CI)}\n";
+        $"vr_menu_scale={_vr_menu_scale.ToString("F2", CI)}\n" +
+        $"vr_menu_hand={_vr_menu_hand}\n" +
+        $"vr_menu_haptics={(_vr_menu_haptics ? 1 : 0)}\n";
 
     /// <summary>The F8 window is the headset's panel window this frame (decided from last frame's native state).</summary>
     private bool vrp_use() => _vr_menu_panel && _xr_on && _imgui_layer && _vrp_available && _fn_panel_set != null;
@@ -91,6 +115,7 @@ public sealed unsafe partial class FFXVRModule {
                 _vrp_x0 = p.X; _vrp_y0 = p.Y; _vrp_x1 = p.X + s.X; _vrp_y1 = p.Y + s.Y; _vrp_em = ImGui.GetFontSize(); _vrp_drawn = true;
                 _vrp_wx0 = _vrp_x0; _vrp_wy0 = _vrp_y0; _vrp_wx1 = _vrp_x1; _vrp_wy1 = _vrp_y1;
                 draw_window_body();
+                _vrp_focused = ImGui.IsWindowFocused(ImGuiFocusedFlags.RootAndChildWindows);   // (popups it opened count: the popup hierarchy)
             }
         }
         finally { ImGui.End(); _vrp_drawing = false; ImGui.PopStyleVar(3); }
@@ -182,18 +207,72 @@ public sealed unsafe partial class FFXVRModule {
         _vrp_drawn = false;
     }
 
+    /// <summary>vr-menu S3: every frame after vrp_push (render_imgui, render thread): native's pointer into ImGui's mouse, the haptic
+    /// ticks, and a trigger pulled off the panel giving the game its input back. Queued events apply at the next NewFrame.</summary>
+    private void vrp_pointer() {
+        if (_fn_panel_pointer == null) return;
+        int n; fixed (float* o = _vrp_ptr) n = _fn_panel_pointer(_vr_menu_hand, o, _vrp_ptr.Length);
+        if (n < 9) return;
+        ImGuiIOPtr io = ImGui.GetIO();
+        int owner = (int)_vrp_ptr[0];
+        bool active = _vrp_ptr[1] != 0f && _vrp_shown && float.IsFinite(_vrp_ptr[2]) && float.IsFinite(_vrp_ptr[3]);
+        bool btn = active && _vrp_ptr[4] != 0f;
+        if (active) {
+            var pos = new Vector2(_vrp_ptr[2], _vrp_ptr[3]);
+            io.AddMousePosEvent(pos.X, pos.Y);   // (dropped by ImGui while WantSetMousePos is set; kept for a backend that ignores the flag)
+            io.MousePos = pos; io.WantSetMousePos = true;   // the position stands, the backend moves the OS cursor and does not poll it
+            if (btn != _vrp_ptr_btn) { io.AddMouseButtonEvent(0, btn); _vrp_ptr_btn = btn; }
+            float wheel = _vrp_ptr[5];
+            if (wheel != 0f && float.IsFinite(wheel)) io.AddMouseWheelEvent(0f, wheel);
+            if (!_vrp_ptr_logged) {
+                _vrp_ptr_logged = true;
+                bool can_set = (io.BackendFlags & ImGuiBackendFlags.HasSetMousePos) != 0;
+                d7_log($"menu pointer: ImGui's mouse from the {(owner == 1 ? "right" : "left")} controller via io.MousePos + io.WantSetMousePos "
+                     + (can_set ? "(the backend moves the OS cursor and skips its GetCursorPos poll; queued positions are dropped meanwhile)"
+                                : "(the backend does not move the OS cursor: queued positions are still dropped while the flag is set)"));
+            }
+            if (!_vrp_ptr_active && _vr_menu_haptics && _fn_haptic != null && owner >= 0) _fn_haptic(owner, 0.08f, 0.006f);   // arriving on the panel
+        }
+        else if (_vrp_ptr_active) {   // left the panel: the button up (a drag ends cleanly), and no mouse
+            if (_vrp_ptr_btn) { io.AddMouseButtonEvent(0, false); _vrp_ptr_btn = false; }
+            io.AddMousePosEvent(-float.MaxValue, -float.MaxValue);
+            _vrp_hover_id = 0;
+        }
+        _vrp_ptr_active = active; _vrp_ptr_owner = owner;
+        // haptics: a new item under the pointer ticks, a press on an item buzzes (ImGui's hovered item of this frame)
+        if (active && _vr_menu_haptics && _fn_haptic != null && owner >= 0) {
+            uint id = ImGuiP.GetHoveredID();
+            if (id != 0 && id != _vrp_hover_id) _fn_haptic(owner, 0.12f, 0.008f);
+            if (_vrp_ptr[4] != 0f && !_vrp_click_prev && id != 0) _fn_haptic(owner, 0.25f, 0.012f);
+            _vrp_hover_id = id;
+        }
+        _vrp_click_prev = active && _vrp_ptr[4] != 0f;
+        // a trigger pulled off the panel while F8 has the focus: the focus goes, so Fahrenheit hands the game its input again
+        // (design 4.5: a focused ImGui window holds WantCaptureKeyboard, and Fahrenheit skips the game's input update meanwhile)
+        int off = (int)_vrp_ptr[6];
+        if (_vrp_off_press >= 0 && off != _vrp_off_press && !active && _vrp_focused && _vrp_shown) ImGui.SetWindowFocus((byte*)null);
+        _vrp_off_press = off;
+    }
+    private bool _vrp_click_prev;
+
     /// <summary>F8 > Controls > Menu panel (in the headset).</summary>
     private void vrp_ui() {
         ImGui.SeparatorText("Menu panel (in the headset)");
         ui_check("vr_menu_panel", "This menu on its own panel in the room##vrp", ref _vr_menu_panel, UiTag.None,
-                 "In the headset this menu is a panel fixed in the room, about 1 m ahead and a little below your eyes. Grip it with either hand (pointing at it or reaching it) "
-               + "to move it, with both grips to resize it. Off: the menu is on the head-locked layer with Fahrenheit's menus, as before.");
+                 "In the headset this menu is a panel fixed in the room, about 1 m ahead and a little below your eyes. Point at it: the trigger clicks, the stick scrolls. "
+               + "Grip it (pointing at it or touching it) to move it, with both grips to resize it. Off: the menu is on the head-locked layer with Fahrenheit's menus, as before.");
         if (!_vr_menu_panel) return;
         ui_slider("vr_menu_distance", "distance (m)##vrp", ref _vr_menu_distance, 0.4f, 2.5f, "%.2f", UiTag.None, "Where it opens: this far ahead of your eyes. Letting go of the panel sets it.", 140f); ImGui.SameLine();
         ui_slider("vr_menu_height", "height (m)##vrp", ref _vr_menu_height, -0.6f, 0.3f, "%.2f", UiTag.None, "Where it opens: its centre against your eye height. Letting go of the panel sets it.", 140f); ImGui.SameLine();
         ui_slider("vr_menu_scale", "size##vrp", ref _vr_menu_scale, 0.6f, 2f, "%.2fx", UiTag.None, "1 = one line of text about 0.9 degrees tall at 1 m. Resizing it with both grips sets it.", 140f);
         if (_fn_panel_place != null && ImGui.SmallButton("Bring it here##vrp")) _fn_panel_place(1);
         ui_tip("The panel in front of you again (Home and the headset's recentre do the same).");
+        ImGui.TextUnformatted("pointer:"); ImGui.SameLine();
+        const string hand_tip = "Which controller points at this panel. Either: the one pointing at it (the last to arrive, or the one that pulls its trigger on it).";
+        ui_radio("vr_menu_hand", "either hand##vrph", ref _vr_menu_hand, 0, UiTag.None, hand_tip); ImGui.SameLine();
+        ui_radio("vr_menu_hand", "right##vrph", ref _vr_menu_hand, 1, UiTag.None, hand_tip); ImGui.SameLine();
+        ui_radio("vr_menu_hand", "left##vrph", ref _vr_menu_hand, 2, UiTag.None, hand_tip); ImGui.SameLine();
+        ui_check("vr_menu_haptics", "ticks##vrp", ref _vr_menu_haptics, UiTag.None, "A light tick on each new item under the pointer, a buzz on a click.");
         if (_vr_menu_panel && _xr_on && _imgui_layer && !_vrp_available) { ImGui.SameLine(); ImGui.TextDisabled("(not available: the panel shaders or swapchain failed, see ffxvr_diag.log)"); }
         if (!_imgui_layer) { ImGui.SameLine(); ImGui.TextDisabled("(needs \"Show mod menus in the headset\", View > Panels)"); }
     }

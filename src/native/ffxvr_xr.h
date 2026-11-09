@@ -74,6 +74,12 @@ struct XrUiPanel {
     ID3D11Texture2D* ptex;
     int   pcrop_x, pcrop_y, pcrop_w, pcrop_h;
     float pq[4], pp[3], pw, ph;
+    // vr-menu S3: the pointer's beams (0..2), world-locked quads (the reference space) from btex (16 x 128, premultiplied: columns
+    // 0-7 the owner's, 8-15 faint), written into their swapchain once. bq / bp: pose (its +Y along the beam), blen: length (m).
+    ID3D11Texture2D* btex;
+    int   nb;
+    float bq[2][4], bp[2][3], blen[2];
+    int   bfaint[2];
 };
 
 /// Controller input through the OpenXR action system (Touch controllers;
@@ -111,6 +117,7 @@ void        xr_imgui_size(unsigned* w, unsigned* h);        // the ImGui layer's
 bool        xr_panel_ready();                               // vr-menu S2: the menu panel's swapchain exists (a running session with its 1536 x 1536 swapchain)
 bool        xr_panel_possible();                            // ... or can be made: a running session where making it has not failed
 bool        xr_panel_ensure();                              // render thread: makes it at the first use (review N6: nothing while the panel is unused); true = it exists
+                                                            // (vr-menu S3: the beam's 16 x 128 swapchain with it; a failure there only drops the beams)
 uint32_t    xr_max_layers();                                // the runtime's maxLayerCount (0 before the first session)
 bool        xr_srgb();                                      // the swapchains are R8G8B8A8_UNORM_SRGB: the compositor decodes our UNORM bytes before it blends (uidepth's plate)
 void xr_timing(double* wait_ms, double* end_ms);
