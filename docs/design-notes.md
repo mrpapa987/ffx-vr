@@ -5959,7 +5959,7 @@ scratchpad); the fixes are folded in below and listed at the end.
   composited for F8 alone; N6 the swapchain at the first open; N7 every targets round, and no moves while aside; N8 a close
   pair; N9 the "Overdrives always ready" label, the scissor restore (none bound stays none), the docs.
 
-## The laser pointer on the menu panel (vr-menu S3, branch `vr-menu`, 9 Nov 2026; ABI 59)
+## The laser pointer on the menu panel (vr-menu S3, branch `vr-menu`, 9 Nov 2026; ABI 59, 60 after the review)
 
 Design: research/vr-menu-design.md (session scratchpad), sections 3.5, 4 and 6 S3. Pure logic in `ffxvr_pointer.h`
 (namespace `vptr`), unit-tested in vrmenu_chk/s3 (session scratchpad).
@@ -5978,13 +5978,27 @@ Design: research/vr-menu-design.md (session scratchpad), sections 3.5, 4 and 6 S
   when pressed on the panel, kept until released (a drag past the edge keeps feeding). Its stick y over the panel is the wheel
   (dead zone 0.2, 4 notches a second at full deflection), summed across calls until managed reads it.
 - **Feeding ImGui** (`vrp_pointer`, managed `render_imgui` after the window, so the events apply at the next NewFrame):
-  `AddMousePosEvent`, `AddMouseButtonEvent(0)` on changes, `AddMouseWheelEvent`, and on leaving one `(-FLT_MAX, -FLT_MAX)`.
+  `io.MousePos` written directly with `io.WantSetMousePos` (below; no queued position while feeding, review S1),
+  `AddMouseButtonEvent(0)` on changes, `AddMouseWheelEvent`, and one `(-FLT_MAX, -FLT_MAX)` at the end of the hand-back.
   **The real cursor:** in ImGui 1.92.9b (Fahrenheit's cimgui and ImGuiImpl, both checked) the Win32 backend polls
   `GetCursorPos` at every NewFrame while the physical mouse has not moved over the window, and queues it after ours. We also
   write `io.MousePos` and set `io.WantSetMousePos`: the backend then moves the OS cursor to our point (only with the game in front)
   and skips the poll, and `UpdateInputEvents` drops every queued position event while the flag is set, so the direct position
   stands whatever is queued (WM_MOUSEMOVE from the cursor move included). ImGui's NavUpdate clears the flag each NewFrame; we set
   it again each frame we feed. Logged once (`menu pointer: ... via io.MousePos + io.WantSetMousePos`).
+- **Handing the mouse back** (review B1; `vptr::Feed`, run by native in `ffxvr_panel_pointer`, which managed calls with
+  `io.MousePos`, DisplaySize and the F8 window's rectangle). Feeding moves the OS cursor onto the F8 window (the backend's
+  SetCursorPos), so a single "no mouse" on leaving loses: the WM_MOUSEMOVE that cursor move posts is handled on the message-pump
+  thread after our event, and the backend's GetCursorPos poll (with the mouse untracked) adds the parked position every frame;
+  either puts ImGui's mouse back over F8, `WantCaptureMouse` stays on and Fahrenheit withholds the game's input. Now, on leaving,
+  `io.MousePos` is written at a park point with the flag kept for 3 more frames (ImGui drops every queued position meanwhile and
+  the backend moves the OS cursor there), then the flag goes and one "no mouse" is queued. The park point is where ImGui's mouse
+  was when pointing began, unless unknown or within 8 px of the F8 window; then (8, DisplaySize.y / 2). A model of these sources
+  in pointer_test.cpp (`t_imgui_model`) shows the old way never gives the input back and the new one within 5 frames, either with
+  the mouse tracked or with the backend polling.
+- **The edge and gaps** (review N1, N2): a ray comes on inside the quad and goes off 1.5 cm past an edge (`on_step`); a drag
+  begun on the panel keeps its button and last position through up to 100 ms without the panel (`drag_grace`: a pairing miss, a
+  head-pose drop). The hover tick needs the new item held for a frame and differs from the last one that ticked.
 - **What the game and the mod do not get** (`mask_step`): a hand whose ray is on the panel has its trigger, stick and stick
   click zeroed in the copy that becomes `g_vrpad`, so XInput, the stick turning, stickrep's turn, the chords, the hands tap and
   the ImGui pad feed all see nothing. A trigger pressed there stays the panel's until released, a stick until back in its dead
@@ -5993,7 +6007,7 @@ Design: research/vr-menu-design.md (session scratchpad), sections 3.5, 4 and 6 S
   does for the real mouse; and a click focuses the window, which holds `WantCaptureKeyboard` (keyboard nav) and so the game's
   input until the focus goes. A trigger pulled while no ray is on the shown panel (`ffxvr_panel_pointer[6]`) therefore calls
   `ImGui.SetWindowFocus(null)` when F8 has the focus (design 4.5's proposal): the panel stays, the game moves again, and that
-  pull reaches the game.
+  pull reaches the game. Not with `imgui_vrpad=2` (review N4: the controllers navigate the menus and the focus is theirs).
 - **The grab** now needs the ray on the window itself (S2's 3 cm proxy is gone; the beam shows where it points) or the
   controller touching it (15 cm). Two-hand resize is unchanged.
 - **The dot** is drawn into the panel image by the crop copy: a constant buffer (dot x, y in capture pixels, radius 0.3 em or
@@ -6001,15 +6015,37 @@ Design: research/vr-menu-design.md (session scratchpad), sections 3.5, 4 and 6 S
 - **The beams** are their own quads, last in the layer list: a 16 x 128 premultiplied gradient (`g_vp_beam_tex`; left half the
   owner's, right half at 35 %) written once into swapchain 7 (made with the panel's at the first open), then only referenced.
   A beam shows while its ray meets the quad widened by 25 %, or while its grip holds the panel; `beam_pose` puts its length along
-  the ray and its face toward the eye; 4 mm wide. Extra frames re-send them as last sent. At most 7 layers.
+  the ray and its face toward the eye; 4 mm wide. Extra frames re-send them as last sent. At most 7 layers, and never more than
+  the runtime's `maxLayerCount` (review N3: the last layers, beams then the panel, go first).
 - **Haptics** (`vr_menu_haptics`, managed): 0.08 / 6 ms on arriving, 0.12 / 8 ms on each new hovered item
   (`ImGuiP.GetHoveredID`), 0.25 / 12 ms on a press over an item.
 - **S2 round 2 nits folded in:** a draw is routed only when its rasterizer state has scissoring on (N1); a DisplaySize that is
   not the backbuffer's is logged once (N2); the tab bar has `NoTooltip` (N3); routed draws are counted in `eye2_begin` (N4).
-- **Exports (ABI 59):** `ffxvr_panel_pointer(mode, out, n)` (9 values: owner, feed, x, y, button, wheel, presses off the panel,
-  masked hands, beams).
-- **Tests:** vrmenu_chk/s3/pointer_test.cpp, 130 checks (g++ ASan / UBSan, clang++ -Werror), 47 mutants of `ffxvr_pointer.h`
-  and the grab's ray, all killed; the S2 suite, probe_vrpad.py and check.py stay green.
+- **Exports:** ABI 59 `ffxvr_panel_pointer(mode, out, n)`; ABI 60 (the review's hand-back) `ffxvr_panel_pointer(mode, in, nin,
+  out, n)`: in 8 values (io.MousePos, DisplaySize, the F8 window), out 11 (owner, on the panel, write + x + y, button, wheel,
+  no-mouse, presses off the panel, masked hands, beams).
+- **Tests:** vrmenu_chk/s3/pointer_test.cpp, 168 checks (g++ ASan / UBSan, clang++ -Werror), 65 mutants of `ffxvr_pointer.h`
+  and the grab's ray, all killed; the S2 suite, probe_vrpad.py and check.py stay green. Reviewed in vrmenu-s3-review.md
+  (session scratchpad): B1 the hand-back, S1 no queued positions, N1 the edge and the hover tick, N2 the gap, N3 the layer
+  limit, N4 the focus with stick navigation, N5 an owner-test note; N6 (beams a call behind) left as it is.
 - **Not verified (nobody here can run the game):** the feel of the filter, the press lock and the wheel rate; the OS cursor
   following on the TV; whether `PInput::Update` really holds the game's XInput poll (design 4.5's guess; the native mask covers
   the mod's own readers either way); the beams' look; the unfocus on an off-panel pull (an owner decision in the design).
+
+### To raise upstream: ImGui's input queue across two threads (Fahrenheit)
+
+Facts only, from Fahrenheit at the version the mod targets (`src/runtime/imgui.cs`) and ImGui 1.92.9b:
+
+- The game renders on its own thread. `h_present` runs `ImGuiImplWin32.NewFrame`, `ImGui.NewFrame`, every module's
+  `render_imgui`, `ImGui.Render` and `RenderDrawData` there; the window's message pump runs on another thread (Fahrenheit's
+  own comment above `h_implw32_setwindowfocus` says so).
+- `h_wndproc`, on the message-pump thread, calls `ImGuiImplWin32.WndProcHandler`, which queues ImGui input events (mouse
+  position, buttons, wheel, keys, focus) into the context's `InputEventsQueue`.
+- `ImGui.NewFrame`, on the render thread, reads and clears that same queue (`UpdateInputEvents`); modules that call
+  `io.Add*Event` from `render_imgui` push to it on the render thread too. `InputEventsQueue` is an `ImVector` with no lock,
+  so a push on one thread during a push or the clear on the other can lose an event, and a push that reallocates during the
+  other thread's access touches freed memory.
+- This exists without the mod whenever the physical mouse or keyboard is used while frames are drawn. The mod's pointer adds,
+  from the render thread, a button event per press and release, a wheel event per frame while the stick scrolls, and one
+  position event per hand-back; and while it points, the backend's SetCursorPos makes Windows post one WM_MOUSEMOVE per frame,
+  which the pump turns into a queued event.

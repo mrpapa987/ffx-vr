@@ -252,7 +252,12 @@ default layout and size), then comes back; if that would be more than 60 degrees
   arrives last, or pulls its trigger on it, takes over; the other's beam is faint);
   `vr_menu_hand=1` / `2` keeps it to the right / left. Ticks on each new item under
   the pointer and a buzz on a click (`vr_menu_haptics=1`). The OS cursor follows the
-  pointer on the TV; the real mouse works whenever no controller points at the panel.
+  pointer on the TV; when the pointer leaves, the cursor goes back where it was
+  before (or to the screen's left edge, if that was on this menu) and the game has
+  its input again a few frames later. The real mouse works whenever no controller
+  points at the panel. A ray comes onto the panel at its edge and leaves it 1.5 cm
+  past it, so a ray resting on the border does not flicker; a slider drag survives
+  a frame or two in which the panel is not shown.
 - While a controller points at the panel, its trigger and stick reach nothing else
   (not the game, not the stick turning, chords, the hands tap or the ImGui pad feed);
   a trigger pressed on the panel stays the panel's until it is released, even if the
@@ -261,7 +266,11 @@ default layout and size), then comes back; if that would be more than 60 degrees
   mouse), as it does for the real mouse. Clicking the window gives it the focus,
   which holds the game's input too (Fahrenheit's rule, as with the mouse): pull a
   trigger while pointing away from the panel and the focus goes, so the game moves
-  again (that pull is the game's).
+  again (that pull is the game's; not with `imgui_vrpad=2`, where the controllers
+  navigate the menus and the focus is theirs). In battle with the panel open, a
+  controller resting in your lap and tilted a little up can already point at it,
+  which holds the game: close F8 for battle, or keep the pointer to one hand
+  (`vr_menu_hand`).
 - **Move it:** squeeze a grip while that controller's ray is on the panel (the beam
   ends on it) or the controller touches it (within 15 cm), anywhere on the panel.
   It follows the hand; let go and it stays. It always turns to face you and stays
