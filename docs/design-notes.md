@@ -5958,3 +5958,58 @@ scratchpad); the fixes are folded in below and listed at the end.
   slide clears the targets or hides; N1 the curl; N2 a popup's first frame; N3 tooltips on the panel; N5 the layer not
   composited for F8 alone; N6 the swapchain at the first open; N7 every targets round, and no moves while aside; N8 a close
   pair; N9 the "Overdrives always ready" label, the scissor restore (none bound stays none), the docs.
+
+## The laser pointer on the menu panel (vr-menu S3, branch `vr-menu`, 9 Nov 2026; ABI 59)
+
+Design: research/vr-menu-design.md (session scratchpad), sections 3.5, 4 and 6 S3. Pure logic in `ffxvr_pointer.h`
+(namespace `vptr`), unit-tested in vrmenu_chk/s3 (session scratchpad).
+
+- **The ray.** `vpanel_pointer` runs inside `vrpad_take` (every game frame and every stickrep extra frame, render thread) on
+  the raw input, before any mask. Each controller's aim pose (its -Z) meets the quad last shown (`g_vq`: the union's pose with
+  the crop offset, its size, the crop in backbuffer pixels); `hit_quad` gives u, v across the image and the point in metres.
+  The pointer never catches the panel while it is aside or hidden for a targets round, nor without head tracking.
+- **Which hand** (`vr_menu_hand`: 0 either, 1 right, 2 left; `owner_step`). Either: the owner keeps it while its ray is on, for
+  150 ms after it leaves, and however long its trigger is held (a drag); a hand that comes onto the panel (after 150 ms off,
+  so an edge flicker does not count) or pulls its trigger on it takes it over; both at once, the right. A hand the setting leaves
+  out has no ray, no beam and no mask.
+- **The mouse.** The owner's hit, 1-euro filtered in the panel's plane (1 Hz at rest, + 20 Hz per m/s) and press-locked (100 ms
+  or 1.5 degrees, so a click does not slip but a slider drag starts), goes back across the image and through the crop to ImGui
+  coordinates (`uv_to_imgui`). Its trigger (30 / 255 to press, 20 to release, as `pad::k_trig_on / off`) is the left button
+  when pressed on the panel, kept until released (a drag past the edge keeps feeding). Its stick y over the panel is the wheel
+  (dead zone 0.2, 4 notches a second at full deflection), summed across calls until managed reads it.
+- **Feeding ImGui** (`vrp_pointer`, managed `render_imgui` after the window, so the events apply at the next NewFrame):
+  `AddMousePosEvent`, `AddMouseButtonEvent(0)` on changes, `AddMouseWheelEvent`, and on leaving one `(-FLT_MAX, -FLT_MAX)`.
+  **The real cursor:** in ImGui 1.92.9b (Fahrenheit's cimgui and ImGuiImpl, both checked) the Win32 backend polls
+  `GetCursorPos` at every NewFrame while the physical mouse has not moved over the window, and queues it after ours. We also
+  write `io.MousePos` and set `io.WantSetMousePos`: the backend then moves the OS cursor to our point (only with the game in front)
+  and skips the poll, and `UpdateInputEvents` drops every queued position event while the flag is set, so the direct position
+  stands whatever is queued (WM_MOUSEMOVE from the cursor move included). ImGui's NavUpdate clears the flag each NewFrame; we set
+  it again each frame we feed. Logged once (`menu pointer: ... via io.MousePos + io.WantSetMousePos`).
+- **What the game and the mod do not get** (`mask_step`): a hand whose ray is on the panel has its trigger, stick and stick
+  click zeroed in the copy that becomes `g_vrpad`, so XInput, the stick turning, stickrep's turn, the chords, the hands tap and
+  the ImGui pad feed all see nothing. A trigger pressed there stays the panel's until released, a stick until back in its dead
+  zone. The finger curl takes the masked trigger's own value (`vpanel_curl_trigger`). On top of that, while the pointer is on the
+  panel Fahrenheit skips the game's `PInput::Update` entirely (`h_pinput`: `WantCaptureMouse || WantCaptureKeyboard`), as it
+  does for the real mouse; and a click focuses the window, which holds `WantCaptureKeyboard` (keyboard nav) and so the game's
+  input until the focus goes. A trigger pulled while no ray is on the shown panel (`ffxvr_panel_pointer[6]`) therefore calls
+  `ImGui.SetWindowFocus(null)` when F8 has the focus (design 4.5's proposal): the panel stays, the game moves again, and that
+  pull reaches the game.
+- **The grab** now needs the ray on the window itself (S2's 3 cm proxy is gone; the beam shows where it points) or the
+  controller touching it (15 cm). Two-hand resize is unchanged.
+- **The dot** is drawn into the panel image by the crop copy: a constant buffer (dot x, y in capture pixels, radius 0.3 em or
+  0.22 em pressed, colour light blue or amber when pressed), a dark ring for contrast, antialiased; only for the panel's capture.
+- **The beams** are their own quads, last in the layer list: a 16 x 128 premultiplied gradient (`g_vp_beam_tex`; left half the
+  owner's, right half at 35 %) written once into swapchain 7 (made with the panel's at the first open), then only referenced.
+  A beam shows while its ray meets the quad widened by 25 %, or while its grip holds the panel; `beam_pose` puts its length along
+  the ray and its face toward the eye; 4 mm wide. Extra frames re-send them as last sent. At most 7 layers.
+- **Haptics** (`vr_menu_haptics`, managed): 0.08 / 6 ms on arriving, 0.12 / 8 ms on each new hovered item
+  (`ImGuiP.GetHoveredID`), 0.25 / 12 ms on a press over an item.
+- **S2 round 2 nits folded in:** a draw is routed only when its rasterizer state has scissoring on (N1); a DisplaySize that is
+  not the backbuffer's is logged once (N2); the tab bar has `NoTooltip` (N3); routed draws are counted in `eye2_begin` (N4).
+- **Exports (ABI 59):** `ffxvr_panel_pointer(mode, out, n)` (9 values: owner, feed, x, y, button, wheel, presses off the panel,
+  masked hands, beams).
+- **Tests:** vrmenu_chk/s3/pointer_test.cpp, 130 checks (g++ ASan / UBSan, clang++ -Werror), 47 mutants of `ffxvr_pointer.h`
+  and the grab's ray, all killed; the S2 suite, probe_vrpad.py and check.py stay green.
+- **Not verified (nobody here can run the game):** the feel of the filter, the press lock and the wheel rate; the OS cursor
+  following on the TV; whether `PInput::Update` really holds the game's XInput poll (design 4.5's guess; the native mask covers
+  the mod's own readers either way); the beams' look; the unfocus on an off-panel pull (an owner decision in the design).

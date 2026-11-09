@@ -200,7 +200,8 @@ second if it is edited on disk (so hand edits while the game runs are kept,
 not overwritten). Launch-only keys: `headset_autostart` (start XR at the
 first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
 diorama), `overlay_at_start` (0 = no mod window until F8). `menu_tab` is the
-F8 tab last selected; `vr_menu_*` place the menu panel in the headset (below). `hands_dev=1` adds the old bone-hands tools to the
+F8 tab last selected; `vr_menu_*` place the menu panel in the headset and set its
+pointer (below). `hands_dev=1` adds the old bone-hands tools to the
 Developer tab's First person & body group.
 
 ## The F8 menu
@@ -216,7 +217,7 @@ tab is not: a launch with it saved opens View):
 | Tab | Sections |
 | --- | --- |
 | View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
-| Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Menu panel (in the headset: on / off, distance, height, size, **Bring it here**); Help (hover it: every key and chord) |
+| Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Menu panel (in the headset: on / off, distance, height, size, **Bring it here**, the pointer's hand and ticks); Help (hover it: every key and chord) |
 | Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
@@ -244,17 +245,35 @@ targets) it slides aside until it is clear of the targets (about 53 degrees at t
 default layout and size), then comes back; if that would be more than 60 degrees
 (a large panel) it hides for the round instead.
 
-- **Move it:** squeeze a grip while that controller points roughly at the panel
-  (within 3 cm of its edge) or touches it (the controller within 15 cm), anywhere
-  on the panel. It follows the hand; let go and it stays. It always turns to face
-  you and stays 0.4 to 2.5 m from your eyes.
+- **Point at it:** each controller's ray shows as a thin beam while it is near
+  the panel, with a dot where it meets it (amber while pressed). The trigger is the
+  mouse's left button (pressed from 30/255 of its travel, let go below 20/255), the
+  stick scrolls (up and down). Either hand points (`vr_menu_hand=0`: the one that
+  arrives last, or pulls its trigger on it, takes over; the other's beam is faint);
+  `vr_menu_hand=1` / `2` keeps it to the right / left. Ticks on each new item under
+  the pointer and a buzz on a click (`vr_menu_haptics=1`). The OS cursor follows the
+  pointer on the TV; the real mouse works whenever no controller points at the panel.
+- While a controller points at the panel, its trigger and stick reach nothing else
+  (not the game, not the stick turning, chords, the hands tap or the ImGui pad feed);
+  a trigger pressed on the panel stays the panel's until it is released, even if the
+  ray leaves it, and a stick until it is back in the middle. While the pointer is on
+  the panel, Fahrenheit also holds back the game's whole input (ImGui wants the
+  mouse), as it does for the real mouse. Clicking the window gives it the focus,
+  which holds the game's input too (Fahrenheit's rule, as with the mouse): pull a
+  trigger while pointing away from the panel and the focus goes, so the game moves
+  again (that pull is the game's).
+- **Move it:** squeeze a grip while that controller's ray is on the panel (the beam
+  ends on it) or the controller touches it (within 15 cm), anywhere on the panel.
+  It follows the hand; let go and it stays. It always turns to face you and stays
+  0.4 to 2.5 m from your eyes.
 - **Resize it:** hold it with both grips and move the hands apart or together
   (0.6x to 2x). Nothing re-flows; the text just grows or shrinks.
 - While a grip holds the panel it does nothing else: no world grab, no quick
   squeeze (LB / RB), no grip chord, no hands tap (at every frame the headset shows,
   stickrep's extra frames included). The holding hand's fingers stay curled. A
   grip pressed away from the panel works as before. No new grab starts, and a held
-  one stops moving the panel, while a Bushido targets round is up.
+  one stops moving the panel, while a Bushido targets round is up; the pointer does
+  not catch the panel while it is aside or hidden either.
 - Letting go writes `vr_menu_distance` (0.4..2.5 m, 1.0), `vr_menu_height`
   (-0.6..0.3 m against eye height, -0.15) and `vr_menu_scale` (0.6..2, 1.0), so
   the next open uses them. `vr_menu_panel=0` puts the menu back on the
@@ -263,11 +282,12 @@ default layout and size), then comes back; if that would be more than 60 degrees
   everything else whole (F7, the save screen, the title's mod list, other mods'
   windows) and is not shown at all while F8 is the only thing open. Without head
   tracking the window falls back to the head-locked layer at the TV's place.
-  Clicking still uses the gamepad (`imgui_vrpad=2`) or the mouse; the controller
-  pointer comes later.
+  Stick navigation (`imgui_vrpad=2`) and the mouse still work too.
 - `ffxvr_diag.log`: `menu panel:` lines when its capture is made, when it is placed
   or let go; with developer mode, a `panel:` line every 10 s (size, scale,
-  distance, the draws routed to it, misses, which should stay 0). The panel's 1536 x 1536 swapchain is made the first time it
+  distance, the draws routed to it, misses, which should stay 0) and, while the
+  pointer is used, a `panel: pointer` line (frames fed, clicks, the owner). The
+  first use logs `menu pointer:` lines (the hand, and how the mouse is fed). The panel's 1536 x 1536 swapchain is made the first time it
   opens in a session (`xr: menu panel 6 swapchain`), and the session start logs
   the runtime's layer limit.
 
