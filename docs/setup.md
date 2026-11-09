@@ -218,7 +218,7 @@ tab is not: a launch with it saved opens View):
 | View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
 | Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Help (hover it: every key and chord) |
 | Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
-| Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides); Bushido targets (Practice targets, the layout, more time, art) |
+| Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
 | Hands | VR hands (experimental), with a **Fix it** button when the hands cannot show because your body is shown |
 | Developer | only in developer mode: everything the old Debug section held, in eight groups (Logging & status, Camera & stereo, Rendering, First person & body, Battle internals, Loading, Inspect, Captures) |
@@ -272,7 +272,10 @@ A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right; each plate s
 letter" adds the letter at the rim; "Hide the game's Bushido row", on by default and applied from the next launch, hides the game's
 2D button row while the targets are up, keeping the timer). "Practice targets" (F8 > Overdrives > Bushido targets, headset on, no battle
 needed) lets you try the targets and set the blade angle, distance, height, size and spacing first; "More time for Bushido" (1-3x) slows the
-game's input timer while the targets window is open, if the time is too short. The targets can be textured medallions from the optional art download
+game's input timer while the targets window is open, if the time is too short. "Overdrives always ready" (F8 >
+Overdrives > Gestures, every player, not saved) sets the game's own debug flag in each battle while ticked, so any
+overdrive can be practised at once; the flag is cleared at each battle's end and when unticked, and while it is on
+the gauge is not spent (a save made then keeps a full gauge). The targets can be textured medallions from the optional art download
 (`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the same folder as the mod's zip, then run
 `tools\install-mod.ps1`) or a pack you make yourself
 (docs/design-notes.md, "Bushido target art (local pack)").

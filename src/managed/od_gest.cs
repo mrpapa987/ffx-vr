@@ -60,7 +60,7 @@ public sealed unsafe partial class FFXVRModule {
     private int _odt_row_calls, _odt_row_hidden, _odt_row_faults; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
-    private bool  _od_always_ready;     // Developer tab, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
+    private bool  _od_always_ready;     // F8 > Overdrives, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
@@ -217,7 +217,7 @@ public sealed unsafe partial class FFXVRModule {
             $"od_visuals={(_od_visuals ? 1 : 0)}\n" +
             $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n";
     }
-    /// <summary>Every frame from push_all: the settings; the Developer tab test aid.</summary>
+    /// <summary>Every frame from push_all: the settings; "overdrives always ready".</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
@@ -229,16 +229,16 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>The test aid (design 4.3 step 6): Btl + 0x28 (debug flags) + 0x14 = VA 0x112A90C, the game's own "overdrive always
     /// available" (debug-revival, zanarkand, fh-structs agree; Fahrenheit's BtlDebugFlags.always_available_overdrive). Set in every
-    /// battle while ticked, cleared at the battle's end and when unticked; the box is not saved. Never in the Release logging
-    /// profile (no diagnostic key on: diag_any): the box is off there. While it is on the gauge is not spent (debug-revival
-    /// battle.md: MsCheckUseCommand / MsCalcMagic), so a save made later keeps a full gauge.</summary>
+    /// battle while ticked, cleared at the battle's end and when unticked; the box is not saved. Since the owner's request of
+    /// 9 Nov it is in F8 > Overdrives for every player (it was in the Developer tab, a diagnostic logging profile only). While it
+    /// is on the gauge is not spent (debug-revival battle.md: MsCheckUseCommand / MsCalcMagic), so a save made later keeps a
+    /// full gauge: its tooltip says so.</summary>
     private void odg_always_tick() {
-        if (!diag_any()) _od_always_ready = false;
         byte* btl = (byte*)Globals.Battle.btl;
         if (btl == null) return;
         bool live = read(btl + 0x10, out byte bs) && bs != 0;
         if (_od_always_ready && live) {
-            if (read(btl + 0x3C, out byte f) && f == 0) { btl[0x3C] = 1; if (!_od_always_wrote) d7_log("odg: test aid: overdrives always ready in this battle (the game's debug flag, F8 Developer tab)"); _od_always_wrote = true; }
+            if (read(btl + 0x3C, out byte f) && f == 0) { btl[0x3C] = 1; if (!_od_always_wrote) d7_log("odg: overdrives always ready in this battle (the game's debug flag, F8 > Overdrives)"); _od_always_wrote = true; }
         }
         else if (_od_always_wrote) {
             if (read(btl + 0x3C, out byte f) && f != 0) btl[0x3C] = 0;
@@ -283,6 +283,11 @@ public sealed unsafe partial class FFXVRModule {
         if (!_od_gestures) ImGui.EndDisabled();
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }
+        // the owner's request (9 Nov): the game's own debug flag, for practice, without developer mode (it was the Developer tab's test aid)
+        ui_check("", "Overdrives always ready (the game's debug flag; for practice, clears at battle end)##odar", ref _od_always_ready, UiTag.None,
+                 "Sets the game's own \"overdrive always available\" flag in every battle this session while ticked; the flag is cleared at each battle's end "
+               + "and when you untick it. Not saved. While it is on the overdrive gauge is not spent, so a save made later keeps a full gauge.");
+        if (_od_always_wrote) { ImGui.SameLine(); ImGui.TextDisabled("set in this battle"); }
         ImGui.SeparatorText("Bushido targets");
         odt_ui();
     }
@@ -319,11 +324,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Developer > Battle internals: the test aid and Auron's raw sequence.</summary>
     private void odg_debug_ui() {
         if (!ImGui.TreeNode("Overdrive gestures (test aid)")) return;
-        if (diag_any()) {
-            ImGui.Checkbox("overdrives always ready (the game's debug flag, in every battle this session; not saved; the gauge is not spent while on, so a later save keeps a full gauge)", ref _od_always_ready);
-            ImGui.SameLine(); ImGui.TextDisabled(_od_always_wrote ? "set in this battle" : "");
-        }
-        else ImGui.TextDisabled("overdrives always ready: only with a diagnostic logging profile (e.g. diag_verbose=1), never in Release");
+        ImGui.TextDisabled("overdrives always ready: F8 > Overdrives > Gestures (since 9 Nov)");
         ImGui.TextDisabled("Auron's expected sequence (raw, the last read): " + esc(odg_text(2)));
         ImGui.TreePop();
     }
