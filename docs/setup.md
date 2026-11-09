@@ -200,7 +200,7 @@ second if it is edited on disk (so hand edits while the game runs are kept,
 not overwritten). Launch-only keys: `headset_autostart` (start XR at the
 first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
 diorama), `overlay_at_start` (0 = no mod window until F8). `menu_tab` is the
-F8 tab last selected. `hands_dev=1` adds the old bone-hands tools to the
+F8 tab last selected; `vr_menu_*` place the menu panel in the headset (below). `hands_dev=1` adds the old bone-hands tools to the
 Developer tab's First person & body group.
 
 ## The F8 menu
@@ -216,7 +216,7 @@ tab is not: a launch with it saved opens View):
 | Tab | Sections |
 | --- | --- |
 | View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
-| Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Help (hover it: every key and chord) |
+| Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Menu panel (in the headset: on / off, distance, height, size, **Bring it here**); Help (hover it: every key and chord) |
 | Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
@@ -228,6 +228,39 @@ lasts the session). A small amber `experimental` marks the experimental
 items, which come last in their tab; `next launch` appears beside a setting
 that is saved now but needs the next launch (its hook is installed at launch),
 and the header counts them.
+
+**In the headset the menu is a panel fixed in the room** (`vr_menu_panel=1`, the
+default, with "Show mod menus in the headset" on). F8 opens it about 1 m ahead of
+your eyes and 0.15 m below them, upright and facing you, about 0.47 x 0.53 m
+(one line of text about 0.9 degrees tall). It opens where you left it if that is
+within 50 degrees of where you look and 3 m; otherwise in front of you. Home, the
+headset's recentre and **Bring here** (in the header, and **Bring it here** in
+Controls > Menu panel) put it in front again. On the TV the same window sits at
+the right edge of the screen at a fixed size; the flat window keeps its own place
+and size for when the headset is off. The panel stays up during movies, and while
+"Practice targets" runs it slides about 30 degrees aside, then comes back.
+
+- **Move it:** squeeze a grip while that controller points roughly at the panel
+  (within 3 cm of its edge) or touches it (the controller within 15 cm), anywhere
+  on the panel. It follows the hand; let go and it stays. It always turns to face
+  you and stays 0.4 to 2.5 m from your eyes.
+- **Resize it:** hold it with both grips and move the hands apart or together
+  (0.6x to 2x). Nothing re-flows; the text just grows or shrinks.
+- While a grip holds the panel it does nothing else: no world grab, no quick
+  squeeze (LB / RB), no grip chord, no hands tap. A grip pressed away from the
+  panel works as before. No new grab starts while a Bushido targets window or
+  Practice targets is up.
+- Letting go writes `vr_menu_distance` (0.4..2.5 m, 1.0), `vr_menu_height`
+  (-0.6..0.3 m against eye height, -0.15) and `vr_menu_scale` (0.6..2, 1.0), so
+  the next open uses them. `vr_menu_panel=0` puts the menu back on the
+  head-locked layer with Fahrenheit's menus, as before.
+- The panel is cut out of the head-locked layer, so F8 never shows twice; F7
+  and the save screen stay where they were. Clicking still uses the gamepad
+  (`imgui_vrpad=2`) or the mouse; the controller pointer comes later.
+- `ffxvr_diag.log`: `menu panel:` lines when it is placed or let go; with
+  developer mode, a `panel:` line every 10 s (size, scale, distance, pairing
+  misses, which should stay 0). The session start logs the panel's 1536 x 1536
+  swapchain and the runtime's layer limit.
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in

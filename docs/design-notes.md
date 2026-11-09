@@ -5873,3 +5873,54 @@ mode = `diag_verbose`; tabs and labels as proposed, judged in the headset). Mana
   a click on the tab; the player docs (README, INSTALL-ALPHA, the zip's README, CHANGELOG, release.md) follow the new
   menu. Nits: tooltips are built only while hovered, the tab bar uses the Mixed fitting policy, a radio row shows
   `next launch` once, the guided FMV grid's radio shows whenever it is the value, stale "Debug" comments renamed.
+
+## The F8 menu as a panel in the room (vr-menu S2, branch `vr-menu`, 9 Nov 2026; ABI 58)
+
+Design: research/vr-menu-design.md (session scratchpad), sections 3 and 6 S2, with the owner's decisions of 8 Nov (grab
+anywhere on the panel; F8 stays the only way to open it, no chord; Practice targets slides it about 30 degrees aside for
+the round; it stays visible during movies). No laser yet (S3), so no beam and no dot.
+
+- **Managed** (`vrpanel.cs`): while the headset is on, `imgui_layer=1`, `vr_menu_panel=1` and native reports the panel
+  available, the F8 window is drawn as its own window `FFX VR###ffxvr_vr` at the right edge, 30 x 34 em, set every frame
+  (`NoMove | NoResize | NoSavedSettings | NoDocking`), opaque, FramePadding x1.5 and ItemSpacing x1.25; the flat window
+  keeps its imgui.ini place and size. Our font is clamped to 28..45 px there (`vrp_font`). Every frame after the window
+  `vrp_push` reads `ffxvr_panel_state` (a grab that ended writes `vr_menu_distance` / `_height` / `_scale`, saved by the
+  debounced ini save) and then sends `ffxvr_panel_set`: the window plus the combo lists it opened (`vrp_union_popup` in
+  the two combos), the window alone, the em, DisplaySize and the three settings. `push_all`'s `force_show` is no longer
+  set by the open F8 window while the panel showed (the save screen still forces the ImGui layer).
+- **Native, pure** (`ffxvr_panel.h`, namespace `vpanel`): placement (`place_front`, `keep_pose`: 50 degrees / 3 m, `remember`),
+  face-the-eye (yaw then pitch, no roll), the size model (`m_per_px`: one em is 2 tan(0.45 deg) m at scale 1, so the size is
+  physical, not angular, when the panel is moved), the crop (outward rounding, clamped, cut to 1536 from the top-left),
+  `crop_offset` (the quad's centre against the window's, so the window part stays put when a list widens the crop), the
+  hole on the 1920 x 1080 ImGui layer, the ray / reach proxy, the grab state machine and the slide.
+- **Native, glue** (`ffxvr_native.cpp` `vpanel_*`): the panel shaders (`ps_crop`, `ps_crop_srgb`, `ps_zero`) and a
+  scissor rasterizer state; `vpanel_copy_crop` copies the crop 1:1 into swapchain 6 (the viewport's top-left at minus the
+  crop's origin, so each target pixel samples one texel centre); `vpanel_clear_rect` zeroes the hole in the ImGui layer
+  with a scissored draw. `vpanel_frame` runs in `xr_tick` before `xr_frame`: placement on open or re-place (Home, the
+  headset's recentre, a space change, Bring here; deferred while a grip moves it), the pairing check, the crop, the
+  scale, the slide and the quad. `vpanel_input` runs on the raw `xr_input_get` copy before it becomes `g_vrpad`.
+- **Frame pairing.** Managed calls `ffxvr_begin_frame` (g_frames++, then `xr_tick`, which submits the capture of the
+  previous render_imgui's draws) and then draws; `ffxvr_panel_set` is stamped with that g_frames. So the capture
+  submitted at begin_frame N+1 holds the draws whose rectangle was stamped N: the rectangle is used when `stamp + 1 ==
+  g_frames`, else the panel is skipped that frame and the miss counted (`panel:` line, `ffxvr_panel_state[7]`).
+- **The grab without a laser.** At a grip's press edge (squeeze > 0.5), the grip latches to the shown panel when its aim
+  ray hits the window's rectangle widened by 3 cm, or the grip pose is within 15 cm of it. Not inside an injecting Bushido
+  window (`odg_grips_are_gestures()`), not during Practice targets, not while slid aside. One hand: the panel's centre
+  rides rigidly in the grip's frame. Two hands: scale = scale0 x d1 / d0 (0.6..2; hands closer than 5 cm do not scale),
+  the centre at the midpoint plus the offset when the pair formed; a change of hands re-anchors without a jump. Then the
+  distance from the eye is clamped to 0.4..2.5 m and the panel turned to face the eye. Haptic 0.3 / 40 ms at a latch.
+- **A latched grip is hidden by zeroing its `squeeze`** in the input copy before `g_vrpad = in`. Every other grip use reads
+  that copy, so the world grab, GripTap (quick squeeze, LB / RB), the LB / RB pass, the grip chords and the hands tap all
+  see a released grip, without a gate in each of them. The mask holds until the grip is let go, even if the panel closes.
+- **Layers.** Base, [stereo right], UI panel, ImGui layer (with the hole), menu panel: at most 5 (`layers[8]`); the
+  runtime's `maxLayerCount` is logged once. The panel quad is in `g_space`, premultiplied, with `imageRect` the crop's
+  extent; held frames and stickrep's extra frames re-send it as last sent.
+- **Exports (ABI 58):** `ffxvr_panel_set(flags, v, n)` (flags 1 drawn and open, 2 `vr_menu_panel`; v: the rectangle with
+  its popups, em, DisplaySize, distance, height, scale, then optionally the window alone, n >= 14),
+  `ffxvr_panel_state(out, n)` (12 values), `ffxvr_panel_place(1)` (in front at the next frame).
+- **Tests:** vrmenu_chk/s2/panel_test.cpp (session scratchpad), 171 checks under g++ ASan / UBSan and clang++; 43
+  mutants of the header, all killed. vrmenu_chk/check.py passes with the four new keys.
+- **Not verified (nobody here can run the game):** the negative viewport offset on the owner's driver, the hole's
+  scissored draw, the layout at 35 px, how the reach proxy feels, the hands' curl while a grip is masked, and VD's
+  handling of five layers. Tooltips are not in the crop (they follow the mouse; S3). At a 1080p backbuffer and 35 px the
+  34-em window is taller than the screen and is cut at the bottom; the owner's 3840 x 2160 capture holds it.

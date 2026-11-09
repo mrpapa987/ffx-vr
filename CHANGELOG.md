@@ -41,6 +41,9 @@ recommended.
   Overdrives, Movies, Hands). Every tooltip names its ini key; experimental settings are marked, and a setting that needs
   the next launch says so. The **Developer** checkbox (`diag_verbose`, off by default) adds the Developer tab and the
   verbose log; the engine-lock option for loads (`load_lock_release`) is there now, not on a player tab.
+  In the headset the F8 menu is **a panel fixed in the room**, about 1 m ahead and a little below your eyes, sharp
+  enough to read: squeeze a grip on it (pointing at it or touching it) to move it, both grips to resize it; it opens where
+  you left it, and Home or **Bring here** puts it in front of you again.
 - **Installer** (`tools\install-mod.ps1`) that checks every requirement, and `tools\run-ffx.ps1` that
   starts the game and collects the logs for a bug report.
 - **VR hands (experimental, off by default)**: your hands drawn at the controllers in first person (optionally in
