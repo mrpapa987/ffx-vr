@@ -236,9 +236,13 @@ your eyes and 0.15 m below them, upright and facing you, about 0.47 x 0.53 m
 within 50 degrees of where you look and 3 m; otherwise in front of you. Home, the
 headset's recentre and **Bring here** (in the header, and **Bring it here** in
 Controls > Menu panel) put it in front again. On the TV the same window sits at
-the right edge of the screen at a fixed size; the flat window keeps its own place
-and size for when the headset is off. The panel stays up during movies, and while
-"Practice targets" runs it slides about 30 degrees aside, then comes back.
+the right edge of the screen at a fixed size, without a title bar (F8 closes it);
+the flat window keeps its own place and size for when the headset is off. Its
+tooltips appear under the item, on the panel. The panel stays up during movies.
+During a Bushido targets round (Practice targets, or Auron's overdrive with the
+targets) it slides aside until it is clear of the targets (about 53 degrees at the
+default layout and size), then comes back; if that would be more than 60 degrees
+(a large panel) it hides for the round instead.
 
 - **Move it:** squeeze a grip while that controller points roughly at the panel
   (within 3 cm of its edge) or touches it (the controller within 15 cm), anywhere
@@ -247,20 +251,25 @@ and size for when the headset is off. The panel stays up during movies, and whil
 - **Resize it:** hold it with both grips and move the hands apart or together
   (0.6x to 2x). Nothing re-flows; the text just grows or shrinks.
 - While a grip holds the panel it does nothing else: no world grab, no quick
-  squeeze (LB / RB), no grip chord, no hands tap. A grip pressed away from the
-  panel works as before. No new grab starts while a Bushido targets window or
-  Practice targets is up.
+  squeeze (LB / RB), no grip chord, no hands tap (at every frame the headset shows,
+  stickrep's extra frames included). The holding hand's fingers stay curled. A
+  grip pressed away from the panel works as before. No new grab starts, and a held
+  one stops moving the panel, while a Bushido targets round is up.
 - Letting go writes `vr_menu_distance` (0.4..2.5 m, 1.0), `vr_menu_height`
   (-0.6..0.3 m against eye height, -0.15) and `vr_menu_scale` (0.6..2, 1.0), so
   the next open uses them. `vr_menu_panel=0` puts the menu back on the
   head-locked layer with Fahrenheit's menus, as before.
-- The panel is cut out of the head-locked layer, so F8 never shows twice; F7
-  and the save screen stay where they were. Clicking still uses the gamepad
-  (`imgui_vrpad=2`) or the mouse; the controller pointer comes later.
-- `ffxvr_diag.log`: `menu panel:` lines when it is placed or let go; with
-  developer mode, a `panel:` line every 10 s (size, scale, distance, pairing
-  misses, which should stay 0). The session start logs the panel's 1536 x 1536
-  swapchain and the runtime's layer limit.
+- The window's own drawing goes to the panel only: the head-locked layer keeps
+  everything else whole (F7, the save screen, the title's mod list, other mods'
+  windows) and is not shown at all while F8 is the only thing open. Without head
+  tracking the window falls back to the head-locked layer at the TV's place.
+  Clicking still uses the gamepad (`imgui_vrpad=2`) or the mouse; the controller
+  pointer comes later.
+- `ffxvr_diag.log`: `menu panel:` lines when its capture is made, when it is placed
+  or let go; with developer mode, a `panel:` line every 10 s (size, scale,
+  distance, the draws routed to it, misses, which should stay 0). The panel's 1536 x 1536 swapchain is made the first time it
+  opens in a session (`xr: menu panel 6 swapchain`), and the session start logs
+  the runtime's layer limit.
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in
