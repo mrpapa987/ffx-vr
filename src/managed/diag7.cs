@@ -450,7 +450,7 @@ public sealed unsafe partial class FFXVRModule {
         }
     }
 
-    /// <summary>Debug > Build 7 diagnostics: the status and the anchor-dot toggle.</summary>
+    /// <summary>Developer > Logging & status > Build 7 diagnostics: the status and the anchor-dot toggle.</summary>
     private void diag7_ui() {
         if (!ImGui.TreeNode("Build 7 diagnostics (log only)")) return;
         ImGui.TextWrapped($"{(_diag7 ? "on" : "off")}: {esc(_d7_status)}");

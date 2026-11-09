@@ -326,16 +326,13 @@ public sealed unsafe partial class FFXVRModule {
         d7_log(I($"dmg3d: 10 s: snapshots at the join {_dmg_snaps_join} (join frames without the game's UI draw {_dmg_ui_skipped}), at the queue draw {_dmg_snaps_draw} (hook calls {_dmg_draw_calls}), nodes seen {_dmg_nodes_seen}, pool reads failed {_dmg_reads_failed}, main-thread faults {_dmg_faults} | targets: the game's anchor {_dmg_chr_exact} (of them through the 0x794AB0 port {_dmg_chr_ab0}), stand-in (0xFF port failed / above 25 / fallback) {_dmg_chr_ff}, no anchor {_dmg_chr_none}, first person's own (self spot) {_dmg_chr_self} | walks cut: loop {_dmg_cut_loop} outside {_dmg_cut_outside} misaligned {_dmg_cut_misaligned} free {_dmg_cut_free} cap {_dmg_cut_cap} full {_dmg_cut_full} | queue check (our placement vs the game's entries): matched {_dmg_q_ok}, mismatch {_dmg_q_mismatch}, missing {_dmg_q_missing} (the UI was not drawn that frame, or the queue full), other {_dmg_q_other} | hide: {(_dmg_hide2d ? (_dmg_hook_ok ? "on" : "on, NOT HOOKED") : "off")}, frames {_dmg_hidden_frames}, digits taken off {_dmg_hidden_digits}, left for a doubt {_dmg_hide_doubt} | native: snapshots {_dmg_st[4]}, digits drawn {_dmg_st[6]} ({_dmg_st[5]} now), numbers {_dmg_st[11]} (lines {_dmg_st[12]}, dropped {_dmg_st[13]}), without battle.dds {_dmg_st[7]} Presents, no anchor {_dmg_st[8]}, over the cap {_dmg_st[9]}, skip frames {_dmg_st[10]}; battle.dds {(_dmg_atlas ? "held" : "not held")}, hop table {(_dmg_st[14] != 0 ? "as checked" : "DIFFERENT")}"));
     }
 
-    /// <summary>F8 main page, under "battle start (glass break)" (bt_ui).</summary>
+    /// <summary>F8 > Battle, last (experimental). The readout is in Developer > Logging & status.</summary>
     private void dmg3d_ui() {
-        ImGui.Checkbox("3D damage numbers", ref _dmg3d); ImGui.SameLine();
-        ImGui.TextDisabled("battle: the damage / heal numbers at each target in the world (experimental; \"Miss\" and the other words stay on the panel)");
+        ui_check("dmg3d_show", "3D damage numbers", ref _dmg3d, UiTag.Experimental, "Battle: the damage / heal numbers at each target in the world (\"Miss\" and the other words stay on the panel).");
         if (!_dmg3d) return;
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("number size##dmg3d", ref _dmg_size, 0.3f, 3f, "%.2f"); ImGui.SameLine();
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("number lift##dmg3d", ref _dmg_lift, -10f, 20f, "%.1f units"); ImGui.SameLine();
-        ImGui.Checkbox("hide the flat numbers on the panel##dmg3d", ref _dmg_hide2d);
-        if (_dmg_hide2d && !_dmg_hide_at_launch) { ImGui.SameLine(); ImGui.TextDisabled("(takes effect at the next launch: the setting is saved now, the hook it needs is installed at launch)"); }
-        if (_fn_dmg_status != null) fixed (uint* u = _dmg_st) _fn_dmg_status(u, 18);
-        ImGui.TextDisabled(I($"  battle.dds {(_dmg_atlas ? "held" : "not found yet (found at the first target menu or number of a battle)")}; digits now {_dmg_st[5]}, numbers seen {_dmg_st[11]}; targets without the game's anchor {_dmg_chr_ff + _dmg_chr_none}; queue check matched {_dmg_q_ok} / mismatch {_dmg_q_mismatch}{(_dmg_hide_at_launch ? I($"; hide: {esc(_dmg_hook_status)}, calls {_dmg_draw_calls}, digits taken off {_dmg_hidden_digits}") : "")}"));
+        ui_slider("dmg3d_scale", "size##dmg3d", ref _dmg_size, 0.3f, 3f, "%.2f", UiTag.None, null, 160f); ImGui.SameLine();
+        ui_slider("dmg3d_lift", "lift##dmg3d", ref _dmg_lift, -10f, 20f, "%.1f units", UiTag.None, null, 160f); ImGui.SameLine();
+        ui_check("dmg3d_hide2d", "hide the flat numbers##dmg3d", ref _dmg_hide2d, UiTag.NextLaunch, "The game's flat numbers are left off the panel. Takes effect at the next launch: the setting is saved now, the hook it needs is installed at launch.");
+        if (!_dmg_atlas) ImGui.TextDisabled("battle.dds not found yet (found at the first target menu or number of a battle)");
     }
 }

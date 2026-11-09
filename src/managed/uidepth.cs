@@ -64,19 +64,17 @@ public sealed unsafe partial class FFXVRModule {
              + $" (the scene's VP block is built from: {(v[14] < 0f ? "not decided yet" : v[14] != 0f ? "main" : "near variant")})";
     }
 
-    /// <summary>The main window's row (View block, under "UI on its own panel").</summary>
+    /// <summary>F8 > View > Panels, under the floating panel (the status: Developer > Logging & status).</summary>
     private void uidepth_ui() {
-        ImGui.Checkbox("UI panel comes in front of near objects (adaptive depth)", ref _ui_adaptive); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("dark backing behind the UI (0 = off)##uidb", ref _ui_backing, 0f, 1f, "%.2f");
-        if (_xr_want && _fn_uidepth_status != null) { ImGui.SameLine(); ImGui.TextDisabled(esc(uidepth_live_text())); }
+        ui_check("ui_adaptive", "Bring the panel in front of nearby objects", ref _ui_adaptive, UiTag.None, "Adaptive depth: the UI panel comes in front of near objects."); ImGui.SameLine();
+        ui_slider("ui_backing", "Darken behind the panel##uidb", ref _ui_backing, 0f, 1f, "%.2f", UiTag.None, "A dark backing behind the UI (0 = off).", 140f);
     }
 
-    /// <summary>Debug > UI panel, next to the distance and width sliders: every setting and the status.</summary>
+    /// <summary>Developer > Rendering > UI panel internals (the adaptive depth and the backing: View > Panels).</summary>
     private void uidepth_debug_ui() {
-        ImGui.Checkbox("adaptive depth##uid", ref _ui_adaptive); ImGui.SameLine();
+        ImGui.TextDisabled(I($"ui_adaptive={(_ui_adaptive ? 1 : 0)}, ui_backing={_ui_backing:F2} (View > Panels)"));
         ImGui.SetNextItemWidth(140); ImGui.SliderFloat("nearest (m)##uidmin", ref _ui_adaptive_min, 0.3f, 2f, "%.2f"); ImGui.SameLine();
         ImGui.SetNextItemWidth(140); ImGui.SliderFloat("margin (x the nearest depth)##uidmargin", ref _ui_adaptive_margin, 0.5f, 1f, "%.2f");
-        ImGui.SliderFloat("backing plate opacity (0 = off)##uidback", ref _ui_backing, 0f, 1f, "%.2f");
         ImGui.Text("depth linearised with:"); ImGui.SameLine();
         ImGui.RadioButton("auto (default)##uidproj", ref _ui_adaptive_proj, 0); ImGui.SameLine();
         ImGui.RadioButton("near-variant projection##uidproj", ref _ui_adaptive_proj, 1); ImGui.SameLine();

@@ -238,7 +238,7 @@ public sealed unsafe partial class FFXVRModule {
         if (btl == null) return;
         bool live = read(btl + 0x10, out byte bs) && bs != 0;
         if (_od_always_ready && live) {
-            if (read(btl + 0x3C, out byte f) && f == 0) { btl[0x3C] = 1; if (!_od_always_wrote) d7_log("odg: test aid: overdrives always ready in this battle (the game's debug flag, F8 Debug)"); _od_always_wrote = true; }
+            if (read(btl + 0x3C, out byte f) && f == 0) { btl[0x3C] = 1; if (!_od_always_wrote) d7_log("odg: test aid: overdrives always ready in this battle (the game's debug flag, F8 Developer tab)"); _od_always_wrote = true; }
         }
         else if (_od_always_wrote) {
             if (read(btl + 0x3C, out byte f) && f != 0) btl[0x3C] = 0;
@@ -251,39 +251,42 @@ public sealed unsafe partial class FFXVRModule {
         int n = _fn_odg_text(which, b, 768);
         return n > 0 ? Marshal.PtrToStringAnsi((nint)b) ?? "" : "";
     }
-    /// <summary>F8, the Controllers section.</summary>
+    private const string k_auron_tip = "Strike the targets: one big plate at chest height shows the input to give now: the d-pad arrows in the left spot, A / B / X / Y and "
+        + "L1 / R1 in the right spot (the next one small above its own spot). Cut it with the blade in either hand along its sliding chevrons: an arrow its way; the face "
+        + "buttons where they sit on an Xbox pad (A down, B right, X left, Y up); L1 left, R1 right. The mod sends the game's own expected button, one at a time, so a "
+        + "stroke never sends a wrong press; your buttons still work. While the targets are up a quick squeeze is not L1 / R1, the grips do not grab and the triggers "
+        + "are held back.\nSlashes and punches (experimental): an opposite pair in a row (Left, Right) goes at once when the game asks for it; any other bring-back "
+        + "of the same hand within 0.3 s is ignored; L1 / R1 is a punch (a quick squeeze is not L1 / R1 there, and the triggers are held back).";
+    /// <summary>F8 > Overdrives > Gestures (the live state: Developer > Logging & status), then the Bushido targets.</summary>
     private void odg_ui() {
-        ImGui.Checkbox("overdrive gestures (the controllers keep working too):", ref _od_gestures);
+        ImGui.SeparatorText("Gestures");
+        ui_check("od_gestures", "Overdrive gestures (the buttons keep working)", ref _od_gestures, UiTag.Common, "Overdrive inputs by moving the controllers; a pad and the controllers' buttons always work too.");
         if (!_od_gestures) ImGui.BeginDisabled(true);
-        ImGui.SameLine(); ImGui.Checkbox("Lulu's Fury: circles##odg", ref _od_gest_lulu);
-        ImGui.SameLine(); ImGui.Checkbox("Tidus's Swordplay: swing (off until you tick it: a miss restarts the bar)##odg", ref _od_gest_tidus);
-        if (!_od_gest_tidus && ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Tick it to swing for Slice & Dice / Spiral Cut: a swing of the right controller presses A once; the light blade and a small copy of the bar show where it lands. Off by default: an early swing restarts the bar.");
-        ImGui.SameLine(); ImGui.Checkbox("buzz (also on a wrong Bushido input or a Swordplay miss from a button)##odg", ref _od_gest_haptics);
-        ImGui.Text("Auron's Bushido:"); ImGui.SameLine();
-        ImGui.RadioButton("off##odga", ref _od_gest_auron, 0); ImGui.SameLine();
-        ImGui.RadioButton("slashes and punches (experimental)##odga", ref _od_gest_auron, 1); ImGui.SameLine();
-        ImGui.RadioButton("strike the targets##odga", ref _od_gest_auron, 2);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("One big plate at chest height shows the input to give now: the d-pad arrows in the left spot, A / B / X / Y and L1 / R1 in the right spot (the next one small above its own spot). Cut it with the blade in either hand along its sliding chevrons: an arrow its way; the face buttons where they sit on an Xbox pad (A down, B right, X left, Y up); L1 left, R1 right. The mod sends the game's own expected button, one at a time, so a stroke never sends a wrong press; your buttons still work.");
-        ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("slash / swing speed (m/s)##odg", ref _od_slash_speed, 0.8f, 5f, "%.1f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(120f);
-        if (ImGui.BeginCombo("Fury's stick##odg", k_odg_stick[_od_lulu_stick])) {
+        ui_check("od_gest_lulu", "Lulu: circles for Fury##odg", ref _od_gest_lulu, UiTag.None, "Draw circles with either controller to spin Fury."); ImGui.SameLine();
+        ui_slider("od_circle_cm", "smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f", UiTag.None, null, 140f); ImGui.SameLine();
+        ImGui.SetNextItemWidth(120f);
+        if (ImGui.BeginCombo("stick for Fury##odg", k_odg_stick[_od_lulu_stick])) {
             for (int i = 0; i < 3; i++) if (ImGui.Selectable(k_odg_stick[i], i == _od_lulu_stick)) _od_lulu_stick = i;
             ImGui.EndCombo();
         }
-        ImGui.Checkbox("overdrive visuals##odv", ref _od_visuals);
-        if (_od_visuals) { ImGui.SameLine(); ImGui.SetNextItemWidth(140f); ImGui.SliderFloat("visual size##odv", ref _od_visual_size, 0.5f, 2f, "%.1f"); }
-        ImGui.SameLine(); ImGui.TextDisabled("near the hands, in the headset: Fury a ring and the spins; Swordplay a light blade and the bar; Bushido the inputs ahead");
+        ImGui.SetItemTooltip("ini: od_lulu_stick");
+        ui_check("od_gest_tidus_swing", "Tidus: swing for Swordplay##odg", ref _od_gest_tidus, UiTag.None,
+                 "Swing the right controller for Slice & Dice / Spiral Cut: a swing presses A once; the light blade and a small copy of the bar show where it lands. Off by default: an early swing restarts the bar."); ImGui.SameLine();
+        ui_slider("od_slash_speed", "swing speed (m/s)##odg", ref _od_slash_speed, 0.8f, 5f, "%.1f", UiTag.None, "The speed a swing (or Auron's slash) must reach.", 140f);
+        ImGui.Text("Auron's Bushido:"); ImGui.SameLine();
+        ui_radio("od_gest_auron", "off##odga", ref _od_gest_auron, 0, UiTag.Common, k_auron_tip); ImGui.SameLine();
+        ui_radio("od_gest_auron", "strike the targets##odga", ref _od_gest_auron, 2, UiTag.Common, k_auron_tip); ImGui.SameLine();
+        ui_radio("od_gest_auron", "slashes and punches##odga", ref _od_gest_auron, 1, UiTag.Common | UiTag.Experimental, k_auron_tip);
+        ui_check("od_gest_haptics", "Buzz on hits and misses##odg", ref _od_gest_haptics, UiTag.None, "Also on a wrong Bushido input or a Swordplay miss from a button.");
+        ui_check("od_visuals", "Guides near your hands##odv", ref _od_visuals, UiTag.None, "In the headset: Fury a ring and the spins; Swordplay a light blade and the bar; Bushido the inputs ahead.");
+        if (_od_visuals) { ImGui.SameLine(); ui_slider("od_visual_size", "size##odv", ref _od_visual_size, 0.5f, 2f, "%.1f", UiTag.None, null, 140f); }
         if (!_od_gestures) ImGui.EndDisabled();
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }
-        ImGui.TextDisabled(esc(odg_text(0)));
-        if (_od_gest_auron == 1) ImGui.TextDisabled("Bushido: an opposite pair in a row (Left, Right) goes at once when the game asks for it; any other bring-back of the same hand within 0.3 s is ignored; L1 / R1 is a punch (a quick squeeze is not L1 / R1 there, and the triggers are held back)");
-        if (_od_gest_auron == 2) ImGui.TextDisabled("Bushido targets: arrows on the left, A / B / X / Y and L1 / R1 on the right; cut the big plate along its chevrons, either hand (alternating is fastest; A down, B right, X left, Y up, L1 left, R1 right; a wrong way flashes the rim red and buzzes); a wrong button of yours starts them over; while they are up a quick squeeze is not L1 / R1, the grips do not grab and the triggers are held back");
-        ImGui.TextDisabled("last: " + esc(odg_text(1)));
+        ImGui.SeparatorText("Bushido targets");
         odt_ui();
     }
-    /// <summary>F8, under the overdrive gesture rows: Practice targets (works with the gestures off too) and the targets' layout.</summary>
+    /// <summary>F8 > Overdrives > Bushido targets: Practice targets (works with the gestures off too) and the targets' layout.</summary>
     private void odt_ui() {
         if (ImGui.Button("Practice targets##odt") && _fn_odt_practice != null) _fn_odt_practice(1);
         if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("A random 3-8 Bushido symbols and a 4 s bar, any time with the headset on (no overdrive window open): the blades, the hits and the buzz as in battle, nothing is sent to the game. Close F8 (or move it aside) after pressing: its panel is drawn over the 3D view, plates included.");
@@ -293,25 +296,25 @@ public sealed unsafe partial class FFXVRModule {
         if (ImGui.Button("Replay last Bushido##odt") && _fn_odt_practice != null) _fn_odt_practice(2);
         if (replay.Length == 0) ImGui.EndDisabled();
         ImGui.SameLine(); ImGui.TextDisabled(esc(odg_text(4)));
-        ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("blade pitch (deg)##odt", ref _od_tgt_pitch, -45f, 45f, "%.0f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target distance (m)##odt", ref _od_tgt_dist, 0.35f, 0.9f, "%.2f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target height (m)##odt", ref _od_tgt_height, -0.5f, 0f, "%.2f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target size##odt", ref _od_tgt_size, 0.6f, 1.6f, "%.1f");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("target spacing (m)##odt", ref _od_tgt_spread, 0.25f, 0.6f, "%.2f");
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Between the left spot (the d-pad arrows) and the right spot (A / B / X / Y, L1 / R1). Never less than the plate's width + 2 cm (bigger targets push them apart).");
-        ImGui.SetNextItemWidth(130f); ImGui.SliderFloat("Bushido time (x, strike the targets)##odt", ref _od_tgt_time, 1f, 3f, "%.1f");
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("More time for Bushido in strike the targets: the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. The game also counts the extra seconds left at the end toward Bushido's damage bonus (up to x1.5 with the whole time left), so a fast finish with more time hits harder. Nothing changes for the slashes and punches or any other overdrive.");
-        ImGui.Checkbox("target art (local pack)##odt", ref _od_tgt_art);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Textured medallions for the targets from the art pack in the mod folder's art\\targets (the optional download ffxvr-target-art, AI-generated, or your own made with tools\\target-art; not in the mod's zip). Without the pack, or off, the flat plates.");
+        ui_slider("od_targets_blade_pitch", "Blade angle (deg)##odt", ref _od_tgt_pitch, -45f, 45f, "%.0f", UiTag.None, "The blade's pitch in your hand.", 130f);
+        ImGui.SameLine(); ui_slider("od_targets_dist2", "distance (m)##odt", ref _od_tgt_dist, 0.35f, 0.9f, "%.2f", UiTag.None, "The targets' distance in front of you.", 130f);
+        ImGui.SameLine(); ui_slider("od_targets_height2", "height (m)##odt", ref _od_tgt_height, -0.5f, 0f, "%.2f", UiTag.None, "The targets' height (0 = eye height).", 130f);
+        ImGui.SameLine(); ui_slider("od_targets_size", "size##odt", ref _od_tgt_size, 0.6f, 1.6f, "%.1f", UiTag.None, "A multiplier on the 24 cm plate.", 130f);
+        ImGui.SameLine(); ui_slider("od_targets_spread", "spacing (m)##odt", ref _od_tgt_spread, 0.25f, 0.6f, "%.2f", UiTag.None,
+                                    "Between the left spot (the d-pad arrows) and the right spot (A / B / X / Y, L1 / R1). Never less than the plate's width + 2 cm (bigger targets push them apart).", 130f);
+        ui_slider("od_targets_time", "More time for Bushido (x)##odt", ref _od_tgt_time, 1f, 3f, "%.1f", UiTag.None,
+                  "In strike the targets, the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. The game also counts the extra seconds left at the end toward Bushido's damage bonus (up to x1.5 with the whole time left), so a fast finish with more time hits harder. Nothing changes for the slashes and punches or any other overdrive.", 130f);
+        ui_check("od_targets_art", "Target art (local pack)##odt", ref _od_tgt_art, UiTag.None,
+                 "Textured medallions for the targets from the art pack in the mod folder's art\\targets (the optional download ffxvr-target-art, AI-generated, or your own made with tools\\target-art; not in the mod's zip). Without the pack, or off, the flat plates.");
         ImGui.SameLine(); ImGui.TextDisabled(esc(odg_text(6)));
-        ImGui.Checkbox("show the button letter (small)##odt", ref _od_tgt_badge);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
-        ImGui.SameLine(); ImGui.Checkbox("hide the game's Bushido row (from the next launch)##odt", ref _od_tgt_hide2d);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip(I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Two ways, either is enough: the detour on 0x892740 ({_odt_row_status}; {_odt_row_check}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}) and the call-site patch at 0x89B411 ({odt_patch_name(_odt_patch_state)}). Each Bushido's odt line in ffxvr_diag.log says which ran."));
+        ui_check("od_targets_badge", "Show the button letter##odt", ref _od_tgt_badge, UiTag.None,
+                 "Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
+        ImGui.SameLine(); ui_check("od_targets_hide2d", "Hide the game's Bushido row##odt", ref _od_tgt_hide2d, UiTag.NextLaunch,
+                 I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Two ways, either is enough: the detour on 0x892740 ({_odt_row_status}; {_odt_row_check}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}) and the call-site patch at 0x89B411 ({odt_patch_name(_odt_patch_state)}). Each Bushido's odt line in ffxvr_diag.log says which ran."));
 
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
-    /// <summary>F8 Debug: the test aid and Auron's raw sequence.</summary>
+    /// <summary>Developer > Battle internals: the test aid and Auron's raw sequence.</summary>
     private void odg_debug_ui() {
         if (!ImGui.TreeNode("Overdrive gestures (test aid)")) return;
         if (diag_any()) {

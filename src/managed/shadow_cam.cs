@@ -101,24 +101,23 @@ public sealed unsafe partial class FFXVRModule {
         return s + $" | map lines logged {v[5]}";
     }
 
-    /// <summary>The main window's row (in the View block, after the headset field of view).</summary>
+    /// <summary>F8 > View > Graphics & performance.</summary>
     private void shadow_ui() {
         bool on = _shadow_cam != 0;
-        if (ImGui.Checkbox("character shadows from the game's light (both eyes)", ref on)) _shadow_cam = on ? 1 : 0;
-        ImGui.SameLine();
+        if (ui_check("shadow_cam", "Character shadows##shc", ref on, UiTag.None,
+                     "Shadows from the game's light camera, the same in both eyes. Off: the old behaviour (the camera moved with the head, a shadow in one eye only), for comparison.")) _shadow_cam = on ? 1 : 0;
+    }
+    /// <summary>F8 > View > First person.</summary>
+    private void shadow_self_ui() {
         bool self = _fp_self_shadow != 0;
-        if (ImGui.Checkbox("my own shadow in first person", ref self)) _fp_self_shadow = self ? 1 : 0;
-        if (_shadow_cam == 0) { ImGui.SameLine(); ImGui.TextDisabled("(off: the old one-eye shadows, for comparison)"); }
+        if (ui_check("fp_self_shadow", "Your own shadow##fss", ref self, UiTag.None, "Off: hidden with the body (the whole-body hide only).")) _fp_self_shadow = self ? 1 : 0;
     }
 
-    /// <summary>Debug > Character shadows: the same two settings and the status line.</summary>
+    /// <summary>Developer > Rendering > Character shadows: the explanation, the status, the pool and the budget (the two settings: View).</summary>
     private void shadow_debug_ui() {
         ImGui.TextWrapped("The game draws each character from straight above into a tile of its shadow atlas (the ShadowManager's light camera). "
                         + "Left alone, both eyes get the game's tiles. The old behaviour moved that camera with the head, so a shadow showed in one eye only.");
-        ImGui.RadioButton("leave the light camera alone (default)##shadowcam", ref _shadow_cam, 1); ImGui.SameLine();
-        ImGui.RadioButton("override it as the scene camera (old, A/B)##shadowcam", ref _shadow_cam, 0);
-        ImGui.RadioButton("first person: draw my own shadow (default)##selfshadow", ref _fp_self_shadow, 1); ImGui.SameLine();
-        ImGui.RadioButton("hide it with the body (whole-body mode only)##selfshadow", ref _fp_self_shadow, 0);
+        ImGui.TextDisabled(I($"shadow_cam={_shadow_cam}, fp_self_shadow={_fp_self_shadow} (View > Graphics & performance, View > First person)"));
         if (_fn_shadow_status != null) ImGui.TextDisabled(esc(shadow_status_text()));
         ImGui.TextDisabled("ShadowManager pool: " + esc(_sp_status));
         ImGui.SetNextItemWidth(160); ImGui.SliderFloat("near: always a shadow within (units, 0 = no budget)##sgnear", ref _shadow_near, 0f, 2000f, "%.0f"); ImGui.SameLine();

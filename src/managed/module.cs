@@ -350,7 +350,9 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     public override bool init(FhModContext mod_context, FileStream global_state_file) {
         _logger.Info($"FFX VR {s_mod_version} module initialized (Fahrenheit {s_fh_version}).");
+        menu_defaults_capture();   // vr-menu S1: every key's code default, before the file is read (menu.cs)
         settings_load();
+        menu_launch_snapshot();    // vr-menu S1: the launch-only keys as the hooks below will see them ("next launch" tags; menu.cs)
         load_native(mod_context);
         if (_native_ok) cpu_settings_push();   // vq-lean (review SF1): fast_reads before any frame reads (cpu_report.cs)
         if (_fn_haptics_set != null) _fn_haptics_set(_haptics ? 1 : 0, _haptics_gain);   // before ffxvr_init, which installs the XInputSetState hook only if haptics or build 7 are on
@@ -1150,6 +1152,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "marker_lift":       pf(k, v, ref _marker_lift, -5f, 20f); break;              // C2-10
                 case "cursor_look":       pw(k, v, ref _cursor_look_game, "game", "mod"); break;    // cursor stage C3
                 case "cursor_hand_size":  pf(k, v, ref _cursor_hand_size, 0.3f, 3f); break;
+                case "menu_tab":          menu_tab_parse(k, v); break;   // vr-menu S1: the F8 tab last selected (default view; menu.cs)
                 case "fp_self_marker": {  // low (default) / hide / normal
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
@@ -1519,7 +1522,8 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"marker_lift={_marker_lift.ToString("F1", ci)}\n" +
             $"cursor_look={(_cursor_look_game ? "game" : "mod")}\n" +
             $"cursor_hand_size={_cursor_hand_size.ToString("0.##", ci)}\n" +
-            $"fp_self_marker={(_fp_self_marker == 1 ? "hide" : _fp_self_marker == 2 ? "normal" : "low")}\n";
+            $"fp_self_marker={(_fp_self_marker == 1 ? "hide" : _fp_self_marker == 2 ? "normal" : "low")}\n" +
+            $"menu_tab={_menu_tab}\n";   // vr-menu S1 (menu.cs)
     }
 
     // -- main window --------------------------------------------------------------
@@ -1531,346 +1535,161 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         return System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)buf) ?? "";
     }
 
-    /// <summary>What a player touches: headset, comfort, view. Everything else is under Debug.</summary>
-    private void draw_main() {
-        if (_fn_xr_set == null) { ImGui.Text($"Native helper: {esc(_native_status)}"); return; }
+    /// <summary>The Developer tab (developer mode = diag_verbose; menu.cs draws it only then, and keeps the native diagnostics
+    /// armed while it is the selected tab): today's Debug, in the design's eight groups (research vr-menu-design.md 2.3). Settings
+    /// reach the native side through push_all, whatever is drawn.</summary>
+    private void draw_dev_tab() {
+        if (ImGui.CollapsingHeader("Logging & status", ImGuiTreeNodeFlags.DefaultOpen)) {
+            log_debug_ui();   // release prep: the version, "diagnostics: N on", diag_verbose, the log's size (logging.cs)
+            ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {esc(_native_status)}   detours: {esc(_detour_status)}");
+            ImGui.Checkbox("Fahrenheit's text ignores the Windows display scale (fh_dpi_fix, as Fahrenheit #376)", ref _fh_dpi_fix);
+            ImGui.SameLine(); ImGui.TextDisabled(I($"Windows scale {ImGui.GetMainViewport().DpiScale:F2}x; Fahrenheit's own: {(_dpi_fh_fonts == 1 ? "scaled" : _dpi_fh_fonts == 0 ? "not scaled" : "?")}; turned off {_dpi_offs}x; our text {ImGui.GetFontSize():F1} px (pushed {_our_px:F1}, overlay_text_scale {_overlay_text_scale:F2})"));
+            if (_fn_counter != null)
+                ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
+            timer_debug_ui();  // grid-timer: timer_fix, limiter_probe, fast_reads (cpu_report.cs)
+            slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
+            diag7_ui();        // build 7: status line, "show cursor anchors"
+            dev_status_ui();   // the live readouts that sat beside the player settings (menu.cs)
+        }
 
-        // Headset
-        ImGui.Checkbox("Headset", ref _xr_want);   // pushed every frame by push_all, until the native side accepts (it waits for the first 3D frame)
-        ImGui.SameLine(); if (ImGui.Button("Recentre (Home)") && _fn_xr_recenter != null) _fn_xr_recenter();
-        ImGui.SameLine(); ImGui.Checkbox("start automatically", ref _headset_autostart);
-        if (_headset_autostart) {
-            ImGui.SameLine(); ImGui.Checkbox("overlay open at start", ref _overlay_at_start); ImGui.SameLine(); ImGui.Text("start in:"); ImGui.SameLine();
-            ImGui.RadioButton("seat##sv", ref _start_view, 0); ImGui.SameLine(); ImGui.RadioButton("first person##sv", ref _start_view, 1); ImGui.SameLine();
-            ImGui.RadioButton("third person##sv", ref _start_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##sv", ref _start_view, 2);
-        }
-        ImGui.TextWrapped(esc(xr_status_text()));   // the OpenXR runtime's name is in it
-        if (_xr_drop_image) {   // a test toggle that blacks out the headset after 30 frames: always visible while it is on
-            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
-            ImGui.TextWrapped("TEST ON: the eye image is being dropped (Debug > Headset tests). The headset holds the last frame, then goes black. Untick it to resume.");
-            ImGui.PopStyleColor(1);
-        }
-        if (_fn_lowres_status != null) {   // the game renders below the headset's per-eye size (monitor off at launch, a lower desktop mode)
-            byte* lr = stackalloc byte[320];
-            if (_fn_lowres_status(lr, 320) != 0) {
-                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
-                ImGui.TextWrapped(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)lr)));
-                ImGui.PopStyleColor(1);
-            }
-        }
-        if (_fn_xr_screen_now != null && _xr_on) { int sn = _fn_xr_screen_now(); ImGui.Text(sn == 1 ? "showing: virtual screen" : sn == 2 ? "showing: stereo screen" : "showing: 3D scene"); }
-
-        // Controllers
-        ImGui.Separator();
-        ImGui.Checkbox("Quest controllers as the gamepad", ref _vrpad); ImGui.SameLine();
-        ImGui.TextDisabled("A/B/X/Y, sticks, triggers = LT/RT, grips = LB/RB (a quick squeeze in battle and the seat / diorama), left menu = Start, left stick click = Select");
-        if (_fn_vrpad_status != null) {
-            float* st = stackalloc float[24]; byte* pl = stackalloc byte[64]; byte* pr = stackalloc byte[64]; uint frames;
-            int ready = _fn_vrpad_status(st, pl, pr, 64, &frames);
-            if (ready == 0) ImGui.TextDisabled(_xr_on ? "controllers: no input this frame (headset not focused, or no bindings)" : "controllers: headset off");
-            else {
-                ImGui.Text($"controllers: syncing ({frames} frames)   left: {esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pl))}   right: {esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pr))}");
-                for (int h = 0; h < 2; h++) {
-                    float* o = st + h * 12;
-                    ImGui.Text($"  {(h == 0 ? "L" : "R")}: {(o[0] > 0 ? "on " : "off")} stick ({o[1],5:F2},{o[2],5:F2}){(o[3] > 0 ? "*" : " ")}  {(h == 0 ? "X" : "A")}{(o[4] > 0 ? "#" : "-")} {(h == 0 ? "Y" : "B")}{(o[5] > 0 ? "#" : "-")}  trig {o[6]:F2} grip {o[7]:F2}  {(h == 0 ? (o[8] > 0 ? "menu#" : "menu-") : "     ")}  pose {(o[9] > 0 ? "grip" : "----")}/{(o[10] > 0 ? "aim" : "---")}");
+        if (ImGui.CollapsingHeader("Camera & stereo")) {
+            if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
+                float* c = stackalloc float[48];
+                if (_fn_get_camera == null || _fn_get_camera(c) == 0) ImGui.Text("not read yet");
+                else {
+                    float t0 = c[3], t1 = c[7], t2 = c[11];
+                    float px = -(c[0] * t0 + c[4] * t1 + c[8]  * t2);
+                    float py = -(c[1] * t0 + c[5] * t1 + c[9]  * t2);
+                    float pz = -(c[2] * t0 + c[6] * t1 + c[10] * t2);
+                    float yaw   = MathF.Atan2(c[8], c[10]) * 180f / MathF.PI;
+                    float pitch = MathF.Asin(Math.Clamp(-c[9], -1f, 1f)) * 180f / MathF.PI;
+                    ImGui.Text($"yaw {yaw,7:F1}  pitch {pitch,6:F1}   position {px,9:F2} {py,9:F2} {pz,9:F2}");
+                    float m0 = c[16 + 0], m5 = c[16 + 5];
+                    if (MathF.Abs(m0) > 1e-6f && MathF.Abs(m5) > 1e-6f)
+                        ImGui.Text($"game FOV: {2f * MathF.Atan(1f / m5) * 180f / MathF.PI:F1} vertical, {2f * MathF.Atan(1f / m0) * 180f / MathF.PI:F1} horizontal");
+                    if (ImGui.TreeNode("matrices")) {
+                        for (int r = 0; r < 4; r++) ImGui.Text($"{c[r*4+0],10:F4} {c[r*4+1],10:F4} {c[r*4+2],10:F4} {c[r*4+3],10:F4}");
+                        ImGui.Spacing();
+                        for (int r = 0; r < 4; r++) ImGui.Text($"{c[16+r*4+0],10:F4} {c[16+r*4+1],10:F4} {c[16+r*4+2],10:F4} {c[16+r*4+3],10:F4}");
+                        ImGui.TreePop();
+                    }
                 }
-                if (_fn_haptic != null) { if (ImGui.SmallButton("buzz left")) _fn_haptic(0, 0.5f, 0.1f); ImGui.SameLine(); if (ImGui.SmallButton("buzz right")) _fn_haptic(1, 0.5f, 0.1f); }
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Camera override")) {
+                ImGui.Checkbox("enabled", ref _ovr_enabled); ImGui.SameLine();
+                ImGui.Checkbox("freeze game camera", ref _ovr_freeze); ImGui.SameLine();
+                if (ImGui.Button("reset")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
+                ImGui.SliderFloat("yaw",     ref _ovr_yaw,     -180f, 180f);
+                ImGui.SliderFloat("pitch",   ref _ovr_pitch,    -89f,  89f);
+                ImGui.SliderFloat("right",   ref _ovr_right,  -2000f, 2000f);
+                // up / forward are seat_height / seat_forward: drawn once, in View > Seat height / forward (+-2000 in developer mode)
+                ImGui.TextDisabled(I($"up {_ovr_up:F0}, forward {_ovr_forward:F0}: View > Seat height / Seat forward (seat_height, seat_forward)"));
+                int mask = _fn_override_mask != null ? _fn_override_mask() : 0;
+                ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
+                         + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
+                         + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
+                         + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
+                ImGui.TextDisabled("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 5 reset (numpad 0 is the fps mod's turbo)");
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Second eye")) {
+                ImGui.Checkbox("render eye 2", ref _stereo_on);
+                ImGui.SliderFloat("eye separation without headset", ref _ipd, 0f, 30f);
+                ImGui.Checkbox("preview window", ref _eye2_preview); ImGui.SameLine();
+                ImGui.RadioButton("final", ref _eye2_source, 0); ImGui.SameLine();
+                ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
+                ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
+                if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}" + (_fn_eye2_same_inputs != null ? $"   (with the same inputs as eye 1, at most: {_fn_eye2_same_inputs()})" : ""));
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Headset tests (frame hold, swapchain timeouts)")) {
+                ImGui.Checkbox("drop the eye image every frame (the headset holds the last frame for 30 frames, then goes black; untick to resume)", ref _xr_drop_image);
+                if (ImGui.SmallButton("simulate 20 swapchain wait timeouts")) _xr_sim_timeouts_req = 20; ImGui.SameLine();
+                if (ImGui.SmallButton("simulate 60")) _xr_sim_timeouts_req = 60; ImGui.SameLine();
+                ImGui.TextDisabled("ffxvr_diag.log: 'swapchain N wait ... (try N)' then 'recovered after N tries'");
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Effects without a camera (fog, water: ghosting experiment)")) {
+                ImGui.TextWrapped("Scene draws whose constant buffers carry no camera we recognise are drawn identically in both eyes, which shows as ghosting. Try each setting in a foggy or watery spot, then press Frame census so the log lists those draws.");
+                ImGui.RadioButton("draw in both eyes (default)", ref _noimg_mode, 0); ImGui.SameLine();
+                ImGui.RadioButton("eye 1 only", ref _noimg_mode, 1); ImGui.SameLine();
+                ImGui.RadioButton("hide", ref _noimg_mode, 2);
+                if (_fn_noimg_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"such draws so far: {_fn_noimg_draws()}"); }
+                ImGui.TreePop();
             }
         }
-        ImGui.Checkbox("rumble on the controllers (the game's vibration; the in-game Vibration option still decides)", ref _haptics); ImGui.SameLine();
-        ImGui.SetNextItemWidth(160f); ImGui.SliderFloat("strength##hap", ref _haptics_gain, 0f, 1f);
-        {
-            int hs = _haptics_status, src = (hs >> 16) & 0xF;
-            ImGui.TextDisabled($"  rumble: {(((hs >> 20) & 1) != 0 ? "hooked" : "XInputSetState not hooked")}, source {(src == 1 ? "the game's XInputSetState" : src == 2 ? "the game's pad block" : src == 3 ? "in-game Vibration off" : "none (headset off or not focused, haptics off, or a pad in use with the VR pad off)")}, motors left {hs & 0xFF} right {(hs >> 8) & 0xFF} (of 254)");
-        }
-        ImGui.Checkbox("grips grab the world in the seat view (one hand pans; two hands pan, turn, tilt and zoom)", ref _gestures);
-        ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("tilt (wrist roll) gain", ref _gest_tilt, -2f, 2f, "%.1f");
-        ImGui.TextDisabled($"right grip + right stick click: first person on/off.   {(_gest_active != 0 ? "GRABBING   " : "")}world scale now {_xr_scale * _gest_scale_mul:F0} units/m (base {_xr_scale:F0} x {_gest_scale_mul:F2}), grab offset ({_gest_move_x:F0}, {_gest_move_y:F0}, {_gest_move_z:F0})");
-        ImGui.SameLine(); if (ImGui.SmallButton("reset grab")) { if (_fn_gesture_reset != null) _fn_gesture_reset(); }
-        qc_ui();   // Quest-only controls: quick-squeeze grips, the VD overlay mask, the save screen (quest_ctl.cs)
-        odg_ui();  // overdrive gestures: Lulu's circles, Tidus's swing, Auron's slashes or targets, Practice targets (od_gest.cs)
 
-        // Comfort
-        ImGui.Separator();
-        ImGui.SliderFloat("world scale", ref _xr_scale, 10f, 300f, "%.0f units/m");
-        ImGui.SameLine(); ImGui.TextDisabled(_xr_scale < 20f ? "life-size" : _xr_scale < 60f ? "large model" : "tabletop diorama");
-        ImGui.Checkbox("head position (lean)", ref _xr_translate); ImGui.SameLine();
-        ImGui.Checkbox("seat (head owns orientation)", ref _xr_seat);
-        ImGui.SliderFloat("pitch follow", ref _xr_pitch_follow, 0f, 1f, "%.2f");
-        ImGui.SameLine(); ImGui.TextDisabled("0 level horizon .. 1 the original view");
-        ImGui.Text("camera cuts:"); ImGui.SameLine();
-        ImGui.Checkbox("recentre on cut", ref _cut_recentre); ImGui.SameLine();
-        ImGui.Checkbox("blink", ref _cut_blink); ImGui.SameLine();
-        ImGui.Checkbox("follow pans", ref _follow_pans);
-        if (_follow_pans) ImGui.SliderFloat("pan follow rate (deg/s)", ref _follow_rate, 5f, 360f);
-        if (_fn_cut_count != null) { ImGui.SameLine(); ImGui.TextDisabled($"cuts seen: {_fn_cut_count()}"); }
-        ej_ui();   // eye jumps: eye_jump_blink, eye_jump_units, battle_face (eye_jump.cs)
-        fpev_ui();   // fix-eye: fp_event_hold, fp_event_leash (fp_follow.cs)
-        ImGui.SliderFloat("seat height", ref _ovr_up, -300f, 300f, "%.0f units");
-        ImGui.SliderFloat("seat forward", ref _ovr_forward, -600f, 600f, "%.0f units");
-        ImGui.SameLine(); if (ImGui.Button("reset offsets")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
-
-        // View mode
-        ImGui.Separator();
-        ImGui.Text("camera:"); ImGui.SameLine();
-        int fp_before = _fp_mode;
-        ImGui.RadioButton("authored (seat)", ref _fp_mode, 0); ImGui.SameLine();
-        ImGui.RadioButton("first person", ref _fp_mode, 1); ImGui.SameLine();
-        ImGui.RadioButton("third person", ref _fp_mode, 3); ImGui.SameLine();
-        ImGui.RadioButton("diorama (follows the player)", ref _fp_mode, 2);
-        ImGui.SameLine(); ImGui.TextDisabled("End / right grip + right stick click: first person -> third person -> diorama.   left grip + left stick click: reset the view");
-
-        // Turning (first person and seat alike)
-        ImGui.Text("turning:"); ImGui.SameLine();
-        ImGui.Checkbox("right stick", ref _turn_stick); ImGui.SameLine();
-        ImGui.SliderFloat("turn speed", ref _turn_rate, 30f, 240f, "%.0f deg/s");
-        ImGui.SameLine(); ImGui.TextDisabled("Numpad 1/3: turn left/right");
-        sr_ui();       // stickrep: stick_reproject (the turn drawn at the headset's rate)
-        ImGui.Checkbox("left stick follows where I look (first person)", ref _move_remap); ImGui.SameLine();
-        ImGui.Checkbox("invert", ref _move_invert);
-        if (_fn_move_status != null) {
-            float yv, yc, dd; uint calls; int hooked;
-            _fn_move_status(&yv, &yc, &dd, &calls, &hooked);
-            ImGui.SameLine(); ImGui.TextDisabled(hooked != 0 ? $"pad reads: {calls}  view {yv:F0}\u00b0 camera {yc:F0}\u00b0 stick turned {dd:F0}\u00b0" : "pad hook not installed");
-        }
-        qc_walk_ui();   // the walk gate: move_remap_walk_only (quest_ctl.cs)
-        if (_fp_mode != fp_before) apply_mode_scale(fp_before, _fp_mode);
-        hands2_ui();   // VR hands v2: the "VR hands (experimental)" header (hands.cs)
-
-        // View
-        ImGui.Separator();
-        ImGui.Checkbox("headset field of view", ref _xr_fov); ImGui.SameLine();
-        shadow_ui();   // shadow camera: shadow_cam, fp_self_shadow
-        haze_ui();     // heat haze: heat_haze
-        ImGui.Text("2D screens:"); ImGui.SameLine();
-        ImGui.RadioButton("auto", ref _xr_screen_mode, 0); ImGui.SameLine();
-        ImGui.RadioButton("always", ref _xr_screen_mode, 1); ImGui.SameLine();
-        ImGui.RadioButton("never", ref _xr_screen_mode, 2);
-        fmv3d_ui();    // fmv-relief (S3): fmv_depth, fmv_depth_amount / _range / _pop / _smooth, fmv_depth_flat_subs (fmv_relief.cs)
-        ImGui.Text("stereo screen (3D scenes on the big screen, through the game's own camera, in 3D):"); ImGui.SameLine();
-        ImGui.Checkbox("in blitzball##s3", ref _s3_blitz); ImGui.SameLine(); ImGui.Checkbox("everywhere##s3", ref _s3_all);
-        if (_s3_blitz || _s3_all) {
-            ImGui.SliderFloat("3D depth (1 = standard; 0 = flat)##s3", ref _s3_depth, 0f, 3f, "%.2f");
-            ImGui.Checkbox("auto depth: the screen plane follows the subject, and nothing pops out further than##s3", ref _s3_auto); ImGui.SameLine();
-            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("% of the screen (0 = nothing in front of it)##s3pop", ref _s3_max_pop, 0f, 6f, "%.1f");
-            if (_s3_auto && _fn_screen3d_status != null) {
-                int vis; float nd, sd, pl, sp; _fn_screen3d_status(&vis, &nd, &sd, &pl, &sp);
-                ImGui.TextDisabled($"  now: {vis} characters in view, nearest {nd:F0}, subject {sd:F0}; screen plane {pl:F0}, eye separation {sp:F1} (background limited by the {_xr_screen_width:F1} m screen)");
-            }
-            if (!_s3_auto) ImGui.SliderFloat("screen plane (game units: nearer pops out, farther goes in)##s3", ref _s3_plane, 50f, 2000f, "%.0f");
-            ImGui.SliderFloat("screen width (m)##s3", ref _xr_screen_width, 1f, 8f, "%.1f");
-            ImGui.SliderFloat("screen distance (m)##s3", ref _xr_screen_dist, 1f, 6f, "%.1f"); ImGui.SameLine(); ImGui.TextDisabled("Home re-places the screen in front of you");
-        }
-        ImGui.Text("painted-backdrop rooms (hut interiors):"); ImGui.SameLine();
-        ImGui.RadioButton("whole room on the screen", ref _backdrop_mode, 1); ImGui.SameLine();
-        ImGui.RadioButton("3D props over the flat backdrop", ref _backdrop_mode, 0);
-        if (_fn_backdrop_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}"); }
-        ImGui.Checkbox("UI on its own panel (menus, subtitles, HUD)", ref _ui_on); ImGui.SameLine();
-        ImGui.Checkbox("Fahrenheit menus (save screen) and this overlay in the headset", ref _imgui_layer);
-        if (_fn_imgui_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"layer draws {_fn_imgui_draws()} (shown when this overlay or the save screen is open, or at {_imgui_min_draws}+ draws)"); }
-        if (_imgui_layer) fh_menu_ui();   // saveui: fh_menu_on_screen
-        if (_ui_on) uidepth_ui();   // adaptive UI panel: ui_adaptive, ui_backing (the rest in Debug > UI panel)
-        dream_ui();   // dream overlay: dream_overlay
-        bt_ui();
-        dmg3d_ui();    // 3D damage numbers: dmg3d, dmg3d_scale, dmg3d_lift, dmg3d_hide2d (dmg3d.cs)
-        lp_ui();   // load lock build: load_lock_release
-        ImGui.Checkbox("keep characters drawn (no distance or frustum cull of characters)", ref _cull_dist);
-        if (_fn_cull_dist_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_dist_get() != 0 ? "patched" : (_cull_dist_rc != 0 ? $"not applied (rc {_cull_dist_rc}, see diag log)" : "off")); }
-        ImGui.Checkbox("keep all geometry drawn (no frustum cull of the scene; costs GPU time)", ref _cull_scene);
-        if (_fn_cull_scene_get != null) { ImGui.SameLine(); ImGui.TextDisabled(_fn_cull_scene_get() != 0 ? "patched" : (_cull_scene_rc != 0 ? $"not applied (rc {_cull_scene_rc}, see diag log)" : "off")); }
-        ImGui.Text("MSAA for the scene targets:"); ImGui.SameLine();
-        ImGui.RadioButton("game default (8x)", ref _msaa, 0); ImGui.SameLine();
-        ImGui.RadioButton("4x", ref _msaa, 4); ImGui.SameLine();
-        ImGui.RadioButton("2x", ref _msaa, 2);
-        if (_fn_msaa_status != null) {
-            uint seen, changed, lw, lh, ln; _fn_msaa_status(&seen, &changed, &lw, &lh, &ln);
-            ImGui.SameLine();
-            ImGui.TextDisabled(seen == 0 ? "takes effect when the game next creates its scene targets" : $"targets created: {seen} (overridden {changed}), last {lw}x{lh} @ {ln} samples");
-        }
-        ImGui.Text("frame blending (water areas):"); ImGui.SameLine();
-        ImGui.RadioButton("off (no trails)", ref _hist_mode, 1); ImGui.SameLine();
-        ImGui.RadioButton("game default", ref _hist_mode, 0); ImGui.SameLine();
-        ImGui.RadioButton("skip pass", ref _hist_mode, 2);
-        if (_fn_hist_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"blend draws seen: {_fn_hist_draws()}"); }
-
-        ImGui.Separator();
-        // FH-2: overlay_text_scale, driven in whole 0.05 steps (10..40): one keyboard / gamepad press moves one step (a float
-        // slider's 1 % nav step, 0.015, would round back to the same value), and a drag bakes a few font sizes, not hundreds.
-        // The format has no '%': ImGui shows it as it is (a Ctrl+click entry takes the step count, clamped below).
-        int ots = (int)MathF.Round(text_scale_step(_overlay_text_scale) * 20f);
-        ImGui.SetNextItemWidth(160f);
-        if (ImGui.SliderInt("text size of this overlay, Eye 2 and the labels##ots", ref ots, 10, 40, I($"{ots / 20f:F2}"))) _overlay_text_scale = text_scale_step(ots / 20f);
-        ImGui.SameLine(); if (ImGui.SmallButton("default##ots")) _overlay_text_scale = 1f;
-        ImGui.SameLine(); ImGui.TextDisabled(I($"now {ImGui.GetFontSize():F0} px"));
-        if (_fn_perf_status != null) {
-            byte* pb = stackalloc byte[768]; _fn_perf_status(pb, 768);   // fix-render: + the GPU budget line(s) (perf finding 2)
-            ImGui.TextDisabled(esc(System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)pb)));
-        }
-        ImGui.TextDisabled("Home: recentre   F8: hide/show this overlay (F7 is Fahrenheit's own mod-settings menu)");
-        log_main_ui();   // release prep: the version, and a reminder while diagnostics are on (logging.cs)
-    }
-
-    /// <summary>Camera numbers, override controls, second eye, captures. Collapsed by default.</summary>
-    private void draw_debug() {
-        if (!ImGui.CollapsingHeader("Debug")) return;   // settings reach the native side through push_all, whatever is drawn
-        // Expanded: keep the native diagnostics armed (1 s heartbeat, slot-0 readback). Closing the header disarms them.
-        if (_fn_diag_keepalive != null) _fn_diag_keepalive(2);
-        log_debug_ui();   // release prep: the version, "diagnostics: N on", diag_verbose, the log's size (logging.cs)
-
-        ImGui.Text($"{ImGui.GetIO().Framerate:F1} fps   native: {esc(_native_status)}   detours: {esc(_detour_status)}");
-        ImGui.Checkbox("Fahrenheit's text ignores the Windows display scale (fh_dpi_fix, as Fahrenheit #376)", ref _fh_dpi_fix);
-        ImGui.SameLine(); ImGui.TextDisabled(I($"Windows scale {ImGui.GetMainViewport().DpiScale:F2}x; Fahrenheit's own: {(_dpi_fh_fonts == 1 ? "scaled" : _dpi_fh_fonts == 0 ? "not scaled" : "?")}; turned off {_dpi_offs}x; our text {ImGui.GetFontSize():F1} px (pushed {_our_px:F1}, overlay_text_scale {_overlay_text_scale:F2})"));
-        diag7_ui();   // build 7: status line, "show cursor anchors"
-        if (_fn_counter != null)
-            ImGui.Text($"draws: indexed {_fn_counter(1)}, plain {_fn_counter(2)}   UpdateSubresource {_fn_counter(7)}   buffers {(_fn_buffer_count != null ? _fn_buffer_count() : -1)}");
-        slow_debug_ui();   // the slow-GPU guard: its two settings and its state line (slow_guard.cs)
-        odg_debug_ui();    // overdrive gestures: the test aid (overdrives always ready), Auron's raw sequence (od_gest.cs)
-        timer_debug_ui();  // grid-timer: timer_fix, limiter_probe (cpu_report.cs)
-        fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
-        fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; fmv_depth_tight_fov, the session-only depth offset (fmv_relief.cs)
-
-        if (ImGui.TreeNode("Camera (from the game's constant buffers)")) {
-            float* c = stackalloc float[48];
-            if (_fn_get_camera == null || _fn_get_camera(c) == 0) ImGui.Text("not read yet");
-            else {
-                float t0 = c[3], t1 = c[7], t2 = c[11];
-                float px = -(c[0] * t0 + c[4] * t1 + c[8]  * t2);
-                float py = -(c[1] * t0 + c[5] * t1 + c[9]  * t2);
-                float pz = -(c[2] * t0 + c[6] * t1 + c[10] * t2);
-                float yaw   = MathF.Atan2(c[8], c[10]) * 180f / MathF.PI;
-                float pitch = MathF.Asin(Math.Clamp(-c[9], -1f, 1f)) * 180f / MathF.PI;
-                ImGui.Text($"yaw {yaw,7:F1}  pitch {pitch,6:F1}   position {px,9:F2} {py,9:F2} {pz,9:F2}");
-                float m0 = c[16 + 0], m5 = c[16 + 5];
-                if (MathF.Abs(m0) > 1e-6f && MathF.Abs(m5) > 1e-6f)
-                    ImGui.Text($"game FOV: {2f * MathF.Atan(1f / m5) * 180f / MathF.PI:F1} vertical, {2f * MathF.Atan(1f / m0) * 180f / MathF.PI:F1} horizontal");
-                if (ImGui.TreeNode("matrices")) {
-                    for (int r = 0; r < 4; r++) ImGui.Text($"{c[r*4+0],10:F4} {c[r*4+1],10:F4} {c[r*4+2],10:F4} {c[r*4+3],10:F4}");
-                    ImGui.Spacing();
-                    for (int r = 0; r < 4; r++) ImGui.Text($"{c[16+r*4+0],10:F4} {c[16+r*4+1],10:F4} {c[16+r*4+2],10:F4} {c[16+r*4+3],10:F4}");
-                    ImGui.TreePop();
+        if (ImGui.CollapsingHeader("Rendering")) {
+            if (ImGui.TreeNode("Culling (code patches)")) {
+                ImGui.TextWrapped("Patches to the game's visibility tests, verified against the expected bytes before writing; untick restores. View > Graphics & performance (characters, the whole scene) is the normal way to drive these.");
+                if (_fn_patch_set != null && _fn_patch_count != null) {
+                    int np = Math.Min(_fn_patch_count(), _patch_on.Length);
+                    for (int i = 0; i < np; i++) {
+                        string name = (_fn_patch_name != null ? System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) : null) ?? $"patch {i}";
+                        bool on = _patch_on[i];
+                        if (ImGui.Checkbox(name, ref on)) { if (_fn_patch_set(i, on ? 1 : 0) == 0) _patch_on[i] = on; }
+                    }
                 }
+                ImGui.TreePop();
             }
-            ImGui.TreePop();
-        }
 
-        if (ImGui.TreeNode("Camera override")) {
-            ImGui.Checkbox("enabled", ref _ovr_enabled); ImGui.SameLine();
-            ImGui.Checkbox("freeze game camera", ref _ovr_freeze); ImGui.SameLine();
-            if (ImGui.Button("reset")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
-            ImGui.SliderFloat("yaw",     ref _ovr_yaw,     -180f, 180f);
-            ImGui.SliderFloat("pitch",   ref _ovr_pitch,    -89f,  89f);
-            ImGui.SliderFloat("right",   ref _ovr_right,  -2000f, 2000f);
-            ImGui.SliderFloat("up",      ref _ovr_up,     -2000f, 2000f);
-            ImGui.SliderFloat("forward", ref _ovr_forward, -2000f, 2000f);
-            int mask = _fn_override_mask != null ? _fn_override_mask() : 0;
-            ImGui.Text($"buffers patched: {(_fn_override_applied != null ? _fn_override_applied() : -1)}   blocks:"
-                     + ((mask & 1)  != 0 ? " view" : "") + ((mask & 2)  != 0 ? " inv" : "") + ((mask & 4) != 0 ? " pos" : "")
-                     + ((mask & 8)  != 0 ? " VP" : "")   + ((mask & 16) != 0 ? " VW" : "")  + ((mask & 32) != 0 ? " PVW" : "")
-                     + ((mask & 64) != 0 ? " IVW" : "") + ((mask & 128) != 0 ? " shifted" : "") + ((mask & 256) != 0 ? " product-only" : ""));
-            ImGui.TextDisabled("Numpad: 4/6 yaw, 8/2 pitch, +/- forward/back, 7/9 up/down, 5 reset (numpad 0 is the fps mod's turbo)");
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Second eye")) {
-            ImGui.Checkbox("render eye 2", ref _stereo_on);
-            ImGui.SliderFloat("eye separation without headset", ref _ipd, 0f, 30f);
-            ImGui.Checkbox("preview window", ref _eye2_preview); ImGui.SameLine();
-            ImGui.RadioButton("final", ref _eye2_source, 0); ImGui.SameLine();
-            ImGui.RadioButton("scene", ref _eye2_source, 1); ImGui.SameLine();
-            ImGui.RadioButton("scene eye 1", ref _eye2_source, 2);
-            if (_fn_eye2_draws != null) ImGui.Text($"eye-2 draws last frame: {_fn_eye2_draws()}" + (_fn_eye2_same_inputs != null ? $"   (with the same inputs as eye 1, at most: {_fn_eye2_same_inputs()})" : ""));
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Headset tests (frame hold, swapchain timeouts)")) {
-            ImGui.Checkbox("drop the eye image every frame (the headset holds the last frame for 30 frames, then goes black; untick to resume)", ref _xr_drop_image);
-            if (ImGui.SmallButton("simulate 20 swapchain wait timeouts")) _xr_sim_timeouts_req = 20; ImGui.SameLine();
-            if (ImGui.SmallButton("simulate 60")) _xr_sim_timeouts_req = 60; ImGui.SameLine();
-            ImGui.TextDisabled("ffxvr_diag.log: 'swapchain N wait ... (try N)' then 'recovered after N tries'");
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("UI panel")) {
-            ImGui.SliderFloat("distance (m)", ref _ui_dist, 0.5f, 4f);
-            ImGui.SliderFloat("width (m)", ref _ui_width, 0.5f, 4f);
-            uidepth_debug_ui();   // adaptive UI panel: ui_adaptive, ui_adaptive_min, ui_adaptive_margin, ui_backing, the projection slot, the status
-            if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
-            if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + esc(dream_status_text()));
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Virtual screen panel")) {
-            ImGui.SliderFloat("width (m)", ref _xr_screen_width, 1f, 6f);
-            ImGui.SliderFloat("distance (m)", ref _xr_screen_dist, 1f, 6f);
-            ImGui.TextDisabled("both apply at once; Home re-places the screen in front of you");
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Character shadows (the ShadowManager's light camera)")) {
-            shadow_debug_ui();
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Heat haze (the shimmer over fire)")) {
-            haze_debug_ui();
-            ImGui.TreePop();
-        }
-        if (ImGui.TreeNode("Stick reprojection and the loading keepalive")) {
-            sr_debug_ui();
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Effects without a camera (fog, water: ghosting experiment)")) {
-            ImGui.TextWrapped("Scene draws whose constant buffers carry no camera we recognise are drawn identically in both eyes, which shows as ghosting. Try each setting in a foggy or watery spot, then press Frame census so the log lists those draws.");
-            ImGui.RadioButton("draw in both eyes (default)", ref _noimg_mode, 0); ImGui.SameLine();
-            ImGui.RadioButton("eye 1 only", ref _noimg_mode, 1); ImGui.SameLine();
-            ImGui.RadioButton("hide", ref _noimg_mode, 2);
-            if (_fn_noimg_draws != null) { ImGui.SameLine(); ImGui.TextDisabled($"such draws so far: {_fn_noimg_draws()}"); }
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Culling (code patches)")) {
-            ImGui.TextWrapped("Patches to the game's visibility tests, verified against the expected bytes before writing; untick restores. The two checkboxes above (characters, scene) are the normal way to drive these.");
-            if (_fn_patch_set != null && _fn_patch_count != null) {
-                int np = Math.Min(_fn_patch_count(), _patch_on.Length);
-                for (int i = 0; i < np; i++) {
-                    string name = (_fn_patch_name != null ? System.Runtime.InteropServices.Marshal.PtrToStringAnsi((nint)_fn_patch_name(i)) : null) ?? $"patch {i}";
-                    bool on = _patch_on[i];
-                    if (ImGui.Checkbox(name, ref on)) { if (_fn_patch_set(i, on ? 1 : 0) == 0) _patch_on[i] = on; }
-                }
+            if (ImGui.TreeNode("Find a draw (bisect scene draws)")) {
+                int total = _fn_scene_draws != null ? (int)_fn_scene_draws() : 0;
+                ImGui.TextWrapped($"Scene draws last frame: {total}. Hide a range of them (or show only that range) and narrow it down until the thing you want to identify disappears; then Frame census lists the draw's shaders. Draw order is stable while you stand still.");
+                ImGui.RadioButton("off", ref _bisect_mode, 0); ImGui.SameLine();
+                ImGui.RadioButton("hide range", ref _bisect_mode, 1); ImGui.SameLine();
+                ImGui.RadioButton("show only range", ref _bisect_mode, 2);
+                int hi = Math.Max(total, 1);
+                ImGui.SliderInt("from", ref _bisect_a, 0, hi); ImGui.SliderInt("to", ref _bisect_b, 0, hi);
+                if (ImGui.Button("first half")) { _bisect_a = 0; _bisect_b = hi / 2; } ImGui.SameLine();
+                if (ImGui.Button("second half")) { _bisect_a = hi / 2 + 1; _bisect_b = hi; } ImGui.SameLine();
+                if (ImGui.Button("split: lower")) { _bisect_b = (_bisect_a + _bisect_b) / 2; } ImGui.SameLine();
+                if (ImGui.Button("split: upper")) { _bisect_a = (_bisect_a + _bisect_b) / 2 + 1; }
+                ImGui.TreePop();
             }
-            ImGui.TreePop();
+
+            if (ImGui.TreeNode("Character shadows (the ShadowManager's light camera)")) {
+                shadow_debug_ui();   // the budget and the pool (the two settings: View > Graphics & performance, View > First person)
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Heat haze (the shimmer over fire)")) {
+                haze_debug_ui();     // the explanation and the status (the setting: View > Graphics & performance)
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("UI panel internals")) {
+                uidepth_debug_ui();   // adaptive UI panel: ui_adaptive_min, ui_adaptive_margin, the projection slot, the status (the rest: View > Panels)
+                if (_fn_ui_draws != null) ImGui.Text($"UI draws last frame: {_fn_ui_draws()}");
+                if (_fn_dream_status != null) ImGui.TextDisabled("dream filter: " + esc(dream_status_text()));
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Stick reprojection and the loading keepalive")) {
+                sr_debug_ui();
+                ImGui.TreePop();
+            }
+
+            fmv_debug_ui();    // fmv-sync (S2): the movie playing, its frame, the view, the depth file (fmv_sync.cs)
+            fmv3d_debug_ui();  // fmv-relief (S3): FMV 3D: the relief's state, decode times, ring fill; the A/B and test knobs (fmv_relief.cs)
         }
 
-        if (ImGui.TreeNode("Find a draw (bisect scene draws)")) {
-            int total = _fn_scene_draws != null ? (int)_fn_scene_draws() : 0;
-            ImGui.TextWrapped($"Scene draws last frame: {total}. Hide a range of them (or show only that range) and narrow it down until the thing you want to identify disappears; then Frame census lists the draw's shaders. Draw order is stable while you stand still.");
-            ImGui.RadioButton("off", ref _bisect_mode, 0); ImGui.SameLine();
-            ImGui.RadioButton("hide range", ref _bisect_mode, 1); ImGui.SameLine();
-            ImGui.RadioButton("show only range", ref _bisect_mode, 2);
-            int hi = Math.Max(total, 1);
-            ImGui.SliderInt("from", ref _bisect_a, 0, hi); ImGui.SliderInt("to", ref _bisect_b, 0, hi);
-            if (ImGui.Button("first half")) { _bisect_a = 0; _bisect_b = hi / 2; } ImGui.SameLine();
-            if (ImGui.Button("second half")) { _bisect_a = hi / 2 + 1; _bisect_b = hi; } ImGui.SameLine();
-            if (ImGui.Button("split: lower")) { _bisect_b = (_bisect_a + _bisect_b) / 2; } ImGui.SameLine();
-            if (ImGui.Button("split: upper")) { _bisect_a = (_bisect_a + _bisect_b) / 2 + 1; }
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("First person / follow")) {
-            ImGui.Checkbox("in battle the diorama centres on the fight, not the player", ref _battle_anchor); ImGui.SameLine(); ImGui.TextDisabled(_battle_anchor_n > 0 ? $"combatants {_battle_anchor_n}" : "not in battle");
-            ImGui.Checkbox("in battle, first person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna", ref _battle_follow); ImGui.SameLine(); ImGui.TextDisabled(_btl_who.Length > 0 ? $"now: {esc(_btl_who)}" : "");   // an actor name read from the game
-            ImGui.TextDisabled("Tidus joining the field takes the eyes; left grip + right stick click (or Insert) moves them to the next party member");
-            btg_ui();   // battle tag: when a swap hands the eyes on (bt_tag.cs)
+        if (ImGui.CollapsingHeader("First person & body")) {
+            ImGui.PushID("dev_fp");   // the old tree node's ID scope (a collapsing header pushes none)
             ImGui.Checkbox("smooth follow anchor: the eyes follow the drawn (60 fps) body, not the 30 Hz logic position", ref _smooth_anchor); ImGui.SameLine();
             ImGui.TextDisabled($"{esc(_sa_status)} (snapshot {(_sa_age >= 999 ? "none" : $"{_sa_age} frames old")}{(_sa_rejects > 0 ? $", {_sa_rejects} refused as implausible" : "")}){(_sa_flat > 60 ? " - the drawn root equals the logic position: is FFX-60fps smoothing on (F7)?" : "")}");
-            ride_ui();   // chocobo: the riding status and its options (ride.cs)
-            if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle markers brings the old behaviour back (unticking the sprite-signature checkbox does not).");
+            ride_debug_ui();   // chocobo: the riding status (ride.cs; the options: View > First person)
+            if (_c2_active) ImGui.TextWrapped("Game cursor source: in the headset the game's target hand and turn triangle are skipped where the game draws them, and our markers replace them. The pointer rule and the two default cursor rows below are off; the hide list still hides what picks added. The \"legacy cursor source\" checkbox under Battle internals brings the old behaviour back (unticking the sprite-signature checkbox does not).");
             if (_c2_active) ImGui.BeginDisabled(true);
             ImGui.Checkbox("hide the game's battle pointers by position, headset only: any small plain or 1024-atlas quad in the column above where a character projects through the game's camera", ref _hide_pointers); ImGui.SameLine();
             if (_c2_active) { ImGui.EndDisabled(); ImGui.TextDisabled("(off: game cursor source)"); }
             else ImGui.TextDisabled($"hidden last frame: {_pointer_stats & 0xFFFF}, characters projected: {_pointer_stats >> 16}");
-            ImGui.Checkbox("hide the game's battle cursors by sprite signature, headset only (the list is filled by picking, below)", ref _hide_cursor); ImGui.SameLine();
+            ImGui.Checkbox("hide the game's battle cursors by sprite signature, headset only (the list is filled by picking, under Inspect)", ref _hide_cursor); ImGui.SameLine();
             ImGui.TextDisabled($"candidates {_rect_stats >> 16}, rect unknown {_rect_stats & 0xFFFF}");
             for (int i = 0; i < _hide_list.Count; i++) {
                 float[] e = _hide_list[i];
@@ -1881,44 +1700,19 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 if (ImGui.SmallButton($"remove##hl{i}")) { _hide_list.RemoveAt(i); _hide_list_dirty = true; break; }
             }
             if (ImGui.SmallButton("reset the list to the two known cursors")) { _hide_list.Clear(); _hide_list.AddRange(hide_list_defaults()); _hide_list_dirty = true; }
-            ImGui.Checkbox("blitzball: put the scoreboard and radar on the UI panel (they are drawn into the scene with no camera: double vision)", ref _blitz_overlay); ImGui.SameLine();
-            ImGui.TextDisabled(_in_blitz ? $"routed last frame: {_blitz_overlay_n}" : "not in blitzball");
             ImGui.Text("cursor experiment - hide 2D draws:"); ImGui.SameLine();
             ImGui.RadioButton("off##uh", ref _ui_hide, 0); ImGui.SameLine(); ImGui.RadioButton("1024x1024 atlas, in battle##uh", ref _ui_hide, 3); ImGui.SameLine();
             ImGui.RadioButton("1024x1024 atlas, always##uh", ref _ui_hide, 1); ImGui.SameLine(); ImGui.RadioButton("+ textureless draws##uh", ref _ui_hide, 2); ImGui.SameLine();
             ImGui.RadioButton("textureless only, in battle##uh", ref _ui_hide, 4); ImGui.SameLine();
             ImGui.RadioButton("textureless except window backgrounds, in battle##uh", ref _ui_hide, 5); ImGui.SameLine(); ImGui.TextDisabled($"hidden last frame: {_ui_hidden_n}");
-            ImGui.Text("battles start in:"); ImGui.SameLine();
-            ImGui.RadioButton("the current view##bv", ref _battle_view, -1); ImGui.SameLine(); ImGui.RadioButton("first person##bv", ref _battle_view, 1); ImGui.SameLine();
-            ImGui.RadioButton("third person##bv", ref _battle_view, 3); ImGui.SameLine(); ImGui.RadioButton("diorama##bv", ref _battle_view, 2); ImGui.SameLine(); ImGui.TextDisabled("(the view from before returns when the battle ends)");
-            ImGui.SliderFloat("diorama floor: never below this many units above the player's feet (0 = off; suspended while a grip is held)", ref _diorama_floor, 0f, 40f, "%.0f");
-            ImGui.Text("eye height:"); ImGui.SameLine();
-            ImGui.RadioButton("fixed", ref _fp_head_anchor, 0); ImGui.SameLine();
-            ImGui.RadioButton("head bone height (swimming, crouching)", ref _fp_head_anchor, 1); ImGui.SameLine();
-            ImGui.RadioButton("full head bone (leans too)", ref _fp_head_anchor, 2);
             ImGui.SliderFloat("head, in battle: ignore points further out than (units; 0 = off)", ref _fp_head_reach, 0f, 40f, "%.1f");   // every anchor mode: the pick also feeds the displaced-body eye in mode 0
             if (_fp_head_anchor != 0) {
                 ImGui.SliderFloat("eye offset above the head bone", ref _fp_head_up, -5f, 10f);
                 ImGui.SliderFloat("head smoothing (1 = none, 0.1 = heavy)", ref _fp_head_smooth, 0.05f, 1f);
                 if (_fp_head_anchor == 2) ImGui.SliderFloat("eye offset forward of the head bone (the bone is the neck joint)", ref _fp_head_fwd, 0f, 6f);
             }
-            else ImGui.SliderFloat("eye height (units)", ref _fp_eye_h, 0f, 40f);
-            ImGui.SliderFloat("follow distance", ref _fp_follow_dist, 10f, 300f);
-            ImGui.SliderFloat("follow height", ref _fp_follow_h, 0f, 150f);
-            ImGui.Text("third person:"); ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("distance", ref _tp_dist, 4f, 120f, "%.0f"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("height", ref _tp_h, 0f, 60f, "%.0f"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(120); ImGui.SliderFloat("pitch", ref _tp_pitch, -60f, 30f, "%.0f deg"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(140); ImGui.SliderFloat("heading follows the run", ref _tp_follow_rate, 0f, 180f, "%.0f deg/s");
-            ImGui.SameLine(); ImGui.TextDisabled("0 = fixed heading like first person (recommended); grips zoom the distance, not the world");
-            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("anchor smoothing (ms, 0 = snap)", ref _anchor_smooth_ms, 0f, 150f, "%.0f"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(160); ImGui.SliderFloat("battle anchor smoothing (ms, 0 = snap)", ref _battle_anchor_smooth_ms, 0f, 1000f, "%.0f"); ImGui.SameLine();
-            ImGui.TextDisabled("third person / diorama follow the player, and the battle diorama its centre, with this lag (24 / 325 to try)");
             ImGui.Checkbox("hide the player's body", ref _fp_hide_body); ImGui.SameLine();
             ImGui.SliderFloat("hide radius", ref _fp_hide_radius, 0.1f, 12f); ImGui.SameLine(); ImGui.TextDisabled("the player's parts sit exactly on the actor position; an NPC you talk to is 1+ units away, so keep this small");
-            ImGui.Text("in first person:"); ImGui.SameLine();
-            ImGui.RadioButton("hide my whole body", ref _fp_body_mode, 0); ImGui.SameLine();
-            ImGui.RadioButton("show my body, hide the head parts", ref _fp_body_mode, 1); ImGui.SameLine();
-            ImGui.RadioButton("show everything", ref _fp_body_mode, 2);
             ImGui.SetNextItemWidth(160); ImGui.InputText("head parts (indices, e.g. 2,3)", ref _fp_head_parts, 64); ImGui.SameLine();
             ImGui.TextDisabled($"player parts drawn into the scene last frame: {(_fn_fp_parts != null ? _fn_fp_parts() : 0)}");
             hands2_debug_ui();   // VR hands v2: the debug bits, the pose dump (hands.cs)
@@ -2010,82 +1804,83 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             body_hide_ui();   // the on-foot ownership: radius, NPC parts kept visible (body_hide.cs)
             ImGui.InputText("player model names (comma list, best first)", ref _fp_actor, 64); ImGui.SameLine();
             ImGui.TextDisabled((_fp_actor_idx < 0 ? "no live actor" : _fp_how.Length > 0 ? esc(_fp_how) : $"actor {_fp_actor_idx}") + (_ride_att ? " | " + esc(_ride_status) : ""));
-            ImGui.TreePop();
+            ImGui.PopID();
         }
 
-        if (ImGui.TreeNode("Actors (field actor table; the one that moves when you walk is the player)")) {
-            draw_actors();
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Pick a UI element (flat mode: hover it with the mouse, press F9)")) {
-            ImGui.TextWrapped("F9 logs every 2D UI draw under the mouse to ffxvr_diag.log (texture, index count, rectangle, constant buffer) and lists them here. F10 toggles slow motion so things that flash by (damage numbers) can be hovered.");
-            ImGui.SliderInt("slow motion: ms of sleep per frame", ref _slowmo_ms, 20, 1000); ImGui.SameLine(); ImGui.Checkbox("on (F10)", ref _slowmo_on);
-            ImGui.Text("highlight (F11 cycles):"); ImGui.SameLine();
-            ImGui.RadioButton("off##hv", ref _hover_mode, 0); ImGui.SameLine(); ImGui.RadioButton("the quads under the mouse##hv", ref _hover_mode, 1); ImGui.SameLine(); ImGui.RadioButton("every UI quad the mod sees##hv", ref _hover_mode, 2);
-            ImGui.TextDisabled("yellow = under the mouse (what F9 would pick), red = the pointer rule would hide it, green cross = a character's position through the game camera, white = other sprites");
-            ImGui.Text($"picks so far: {_pick_n}");
-            if (_pick_text.Length == 0) ImGui.TextDisabled("(nothing picked yet)");
-            else {
-                string[] hits = _pick_text.Split('\n'); int hi = 0;
-                foreach (string h in hits) {
-                    int bar = h.IndexOf("|sig="); string text = bar >= 0 ? h[..bar] : h;
-                    ImGui.TextWrapped(esc(text));
-                    if (bar >= 0) {
-                        string[] f = h[(bar + 5)..].Split(','); ImGui.SameLine();
-                        if (f.Length == 4 && ImGui.SmallButton($"hide this##pk{hi}")) {
-                            var ci = System.Globalization.CultureInfo.InvariantCulture;
-                            float tw = float.Parse(f[0], ci), th = float.Parse(f[1], ci), w = float.Parse(f[2], ci), hh = float.Parse(f[3], ci);
-                            // width gets room for pulsing (about half to 1.3x), height a few units; no duplicates
-                            float[] e = { tw, th, MathF.Floor(w * 0.5f), MathF.Ceiling(w * 1.3f), MathF.Floor(hh - 3), MathF.Ceiling(hh + 3) };
-                            bool dup = _hide_list.Exists(x => x[0] == e[0] && x[1] == e[1] && x[2] == e[2] && x[3] == e[3] && x[4] == e[4] && x[5] == e[5]);
-                            if (!dup && _hide_list.Count < 16) { _hide_list.Add(e); _hide_list_dirty = true; _logger.Info($"hide list: added {tw}x{th} quad {w}x{hh} from a pick"); }
-                        }
-                    }
-                    hi++;
-                }
-            }
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Battle loading (diagnostics, HD cluster cache)")) {
-            ImGui.TextWrapped($"load diagnostics: {esc(_ld_status)}");
-            ImGui.Checkbox("load lines (diag_load_lines): one \"load:\" line per battle entry, way back, area / event map change, save load and the title's load in ffxvr_diag.log", ref _diag_load_lines);
-            ImGui.Checkbox("load diagnostics (diag_load): add the expensive parts to those lines (address-space walks, the chr cache table, the wait callers' stack walks, the HDC: line per map free)", ref _diag_load);
-            ImGui.Checkbox("actors line (diag_actors): every 10 s, the live actors that are not drawn, in Fahrenheit's log", ref _diag_actors);
-            ImGui.Checkbox("cluster bytes (diag_cluster_bytes; hooks at the next launch): the game pool's allocations inside each HD cluster load, for its resident size. Off: the Phyre header size stands in. Measurement only (hot path)", ref _diag_cluster_bytes);
-            ImGui.Checkbox("ntdll reservation log (diag_va_log; hooks at the next launch): name the caller of every low-2 GB reservation. Off: a patch-free region diff at each map free", ref _diag_va_log);
-            bt_debug_ui();
-            lp_debug_ui();
-            hc_ui();
-            ImGui.TextDisabled($"hooks seen working 0x{seen_mask:X} (0x1FF the core nine; 0x200 open, 0x400 read, 0x800 post fixups, 0x1000 / 0x2000 pool alloc / free, 0x4000 / 0x8000 texture section / create)");
-            ImGui.TreePop();
-        }
-
-        if (ImGui.TreeNode("Battle markers")) {
+        if (ImGui.CollapsingHeader("Battle internals")) {
+            ImGui.PushID("dev_battle");
             ImGui.Checkbox("draw target / turn markers", ref _markers_on); ImGui.SameLine();
             ImGui.Checkbox("as 3D geometry in the headset", ref _markers_3d);
             ImGui.TextWrapped($"cursor source: {esc(_c2_status)}");
-            bool legacy_src = !_cursor_game_cfg; if (ImGui.Checkbox("legacy cursor source (the markers from battle-window memory, cursor hiding by shape)", ref legacy_src)) _cursor_game_cfg = !legacy_src;
-            if (_c2_active) ImGui.SliderFloat("pointer lift above the game's anchor", ref _marker_lift, -5f, 20f);
-            else ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f);
-            ImGui.SliderFloat("pointer size", ref _marker_scale, 0.3f, 3f);
-            ImGui.Checkbox("the game's look (the hand from battle.dds, the game's spinning triangle; needs the game cursor source)", ref _cursor_look_game);
+            bool legacy_src = !_cursor_game_cfg;
+            if (ui_check("cursor_source", "legacy cursor source (the markers from battle-window memory, cursor hiding by shape)", ref legacy_src, UiTag.NextLaunch,
+                         "Off = the game cursor source (its hooks are installed at launch with cursor_source=game or diag_build7=1).")) _cursor_game_cfg = !legacy_src;
+            if (!_c2_active) ImGui.SliderFloat("pointer clearance above the head", ref _marker_height, -20f, 60f);   // the legacy source's (the game source's lift: Battle > Target cursor)
             if (_cursor_look_game) {
-                ImGui.SameLine(); ImGui.TextDisabled(_c3_atlas_ok ? "battle.dds: found" : "battle.dds: not found yet (it is found at the first target menu of a battle; red triangles until then)");
-                ImGui.SliderFloat("hand size", ref _cursor_hand_size, 0.3f, 3f);
                 ImGui.Checkbox("sample the atlas the other way up (only if the hand shows the wrong art)", ref _c3_vflip_inv); ImGui.SameLine();
                 if (_fn_cursor_atlas_dump != null && ImGui.SmallButton("dump the battle atlas")) _fn_cursor_atlas_dump();
                 ImGui.SameLine(); ImGui.TextDisabled("-> battle_atlas.dds next to the mod, details in ffxvr_diag.log");
             }
-            ImGui.Text("first person, on the actor we look out of:"); ImGui.SameLine();
-            ImGui.RadioButton("low (no turn marker; a self-target small at chest height)##fps", ref _fp_self_marker, 0); ImGui.SameLine();
-            ImGui.RadioButton("hide##fps", ref _fp_self_marker, 1); ImGui.SameLine(); ImGui.RadioButton("normal##fps", ref _fp_self_marker, 2);
             ImGui.Text($"drawn this frame: {_markers_drawn}");
-            ImGui.TreePop();
+            odg_debug_ui();    // overdrive gestures: the test aid (overdrives always ready), Auron's raw sequence (od_gest.cs)
+            ImGui.PopID();
         }
 
-        if (ImGui.TreeNode("Captures (files land next to the mod, collected by run-ffx.ps1)")) {
+        if (ImGui.CollapsingHeader("Loading")) {
+            ImGui.PushID("dev_loading");
+            ImGui.TextWrapped($"load diagnostics: {esc(_ld_status)}");
+            ui_check("diag_load_lines", "load lines (diag_load_lines): one \"load:\" line per battle entry, way back, area / event map change, save load and the title's load in ffxvr_diag.log", ref _diag_load_lines, UiTag.NextLaunch);
+            ui_check("diag_load", "load diagnostics (diag_load): add the expensive parts to those lines (address-space walks, the chr cache table, the wait callers' stack walks, the HDC: line per map free)", ref _diag_load, UiTag.NextLaunch);
+            ImGui.Checkbox("actors line (diag_actors): every 10 s, the live actors that are not drawn, in Fahrenheit's log", ref _diag_actors);
+            ui_check("diag_cluster_bytes", "cluster bytes (diag_cluster_bytes; hooks at the next launch): the game pool's allocations inside each HD cluster load, for its resident size. Off: the Phyre header size stands in. Measurement only (hot path)", ref _diag_cluster_bytes, UiTag.NextLaunch);
+            ui_check("diag_va_log", "ntdll reservation log (diag_va_log; hooks at the next launch): name the caller of every low-2 GB reservation. Off: a patch-free region diff at each map free", ref _diag_va_log, UiTag.NextLaunch);
+            bt_debug_ui();
+            lp_debug_ui();
+            hc_ui();
+            ImGui.TextDisabled($"hooks seen working 0x{seen_mask:X} (0x1FF the core nine; 0x200 open, 0x400 read, 0x800 post fixups, 0x1000 / 0x2000 pool alloc / free, 0x4000 / 0x8000 texture section / create)");
+            ImGui.PopID();
+        }
+
+        if (ImGui.CollapsingHeader("Inspect")) {
+            if (ImGui.TreeNode("Actors (field actor table; the one that moves when you walk is the player)")) {
+                draw_actors();
+                ImGui.TreePop();
+            }
+
+            if (ImGui.TreeNode("Pick a UI element (flat mode: hover it with the mouse, press F9)")) {
+                ImGui.TextWrapped("F9 logs every 2D UI draw under the mouse to ffxvr_diag.log (texture, index count, rectangle, constant buffer) and lists them here. F10 toggles slow motion so things that flash by (damage numbers) can be hovered.");
+                ImGui.SliderInt("slow motion: ms of sleep per frame", ref _slowmo_ms, 20, 1000); ImGui.SameLine(); ImGui.Checkbox("on (F10)", ref _slowmo_on);
+                ImGui.Text("highlight (F11 cycles):"); ImGui.SameLine();
+                ImGui.RadioButton("off##hv", ref _hover_mode, 0); ImGui.SameLine(); ImGui.RadioButton("the quads under the mouse##hv", ref _hover_mode, 1); ImGui.SameLine(); ImGui.RadioButton("every UI quad the mod sees##hv", ref _hover_mode, 2);
+                ImGui.TextDisabled("yellow = under the mouse (what F9 would pick), red = the pointer rule would hide it, green cross = a character's position through the game camera, white = other sprites");
+                ImGui.Text($"picks so far: {_pick_n}");
+                if (_pick_text.Length == 0) ImGui.TextDisabled("(nothing picked yet)");
+                else {
+                    string[] hits = _pick_text.Split('\n'); int hi = 0;
+                    foreach (string h in hits) {
+                        int bar = h.IndexOf("|sig="); string text = bar >= 0 ? h[..bar] : h;
+                        ImGui.TextWrapped(esc(text));
+                        if (bar >= 0) {
+                            string[] f = h[(bar + 5)..].Split(','); ImGui.SameLine();
+                            if (f.Length == 4 && ImGui.SmallButton($"hide this##pk{hi}")) {
+                                var ci = System.Globalization.CultureInfo.InvariantCulture;
+                                float tw = float.Parse(f[0], ci), th = float.Parse(f[1], ci), w = float.Parse(f[2], ci), hh = float.Parse(f[3], ci);
+                                // width gets room for pulsing (about half to 1.3x), height a few units; no duplicates
+                                float[] e = { tw, th, MathF.Floor(w * 0.5f), MathF.Ceiling(w * 1.3f), MathF.Floor(hh - 3), MathF.Ceiling(hh + 3) };
+                                bool dup = _hide_list.Exists(x => x[0] == e[0] && x[1] == e[1] && x[2] == e[2] && x[3] == e[3] && x[4] == e[4] && x[5] == e[5]);
+                                if (!dup && _hide_list.Count < 16) { _hide_list.Add(e); _hide_list_dirty = true; _logger.Info($"hide list: added {tw}x{th} quad {w}x{hh} from a pick"); }
+                            }
+                        }
+                        hi++;
+                    }
+                }
+                ImGui.TreePop();
+            }
+        }
+
+        if (ImGui.CollapsingHeader("Captures")) {
+            ImGui.PushID("dev_captures");
+            ImGui.TextDisabled("Files land next to the mod; run-ffx.ps1 collects them.");
             if (_fn_frame_arm != null) { if (ImGui.Button("Frame census")) { _fn_frame_arm(); _frame_census_n++; } ImGui.SameLine(); ImGui.Text($"{_frame_census_n}  ffxvr_frame.log: one frame's targets, draws, resolves (the automatic census at the first glass break goes to ffxvr_frame_auto.log)"); }
             if (_fn_motion_log != null) { if (ImGui.Button("Motion log (3 s)")) _fn_motion_log(180); ImGui.SameLine(); ImGui.Text("per drawn frame: actor position vs rendered position, view yaw, head yaw -> ffxvr_diag.log (walk and turn with the stick while it runs; Numpad 5 also starts it)"); }
             if (_fn_ui_atlas_dump != null) { if (ImGui.Button("Dump UI atlases")) _fn_ui_atlas_dump(); ImGui.SameLine(); ImGui.Text("the 1024x1024 sprite sheets the UI samples this frame -> ui_atlas_*.dds next to the mod (do it in a battle with a target selected)"); }
@@ -2097,7 +1892,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             }
             if (_fn_measure != null)   { if (ImGui.Button("Measure + images")) { _fn_measure(); _measure_n++; } ImGui.SameLine(); ImGui.Text($"{_measure_n}  ffxvr_diag.log + img_*.bmp: eye 1 vs eye 2"); }
             if (_fn_dump_seq != null)  { if (ImGui.Button("8-frame sequence")) _fn_dump_seq(8); ImGui.SameLine(); ImGui.Text("seq_*.bmp: both eyes, 8 consecutive frames"); }
-            ImGui.TreePop();
+            ImGui.PopID();
         }
     }
 
@@ -2158,18 +1953,10 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (toggles != 0 || act != 0) _bt_user_ev = true;   // a gesture chord or a world grab ends an open battle transition window
     }
 
-    /// <summary>saveui: the main window's row under the ImGui layer checkbox (fh_menu_on_screen) and its live state.</summary>
+    /// <summary>saveui: View > Panels, under "Show mod menus in the headset" (fh_menu_on_screen); its live state is in
+    /// Developer > Logging & status.</summary>
     private void fh_menu_ui() {
-        ImGui.Checkbox("Fahrenheit's save screen on the virtual screen (as on the monitor)", ref _fh_menu_on_screen);
-        if (_fn_imgui_status == null) return;
-        int* v = stackalloc int[6];
-        if (_fn_imgui_status(v, 6) < 6) return;
-        string where = v[1] == 2 ? "on the virtual screen" : v[1] == 1 ? "head-locked" : "not shown";
-        string head = v[0] != 0 ? (v[2] != 0 ? "save screen open: on the screen, placed where you faced; " : "save screen open: on the screen; ") : "";
-        string size = v[4] > 0 ? $", {v[4]}x{v[5]}" : "";
-        string refused = v[3] > 0 ? $", {v[3]} draws refused (no blend state)" : "";
-        ImGui.SameLine();
-        ImGui.TextDisabled(esc($"{head}layer {where}{size}{refused}"));
+        ui_check("fh_menu_on_screen", "Save screen on the big screen", ref _fh_menu_on_screen, UiTag.None, "Fahrenheit's save screen on the virtual screen, as on the monitor (off: head-locked with the mod menus).");
     }
 
     /// <summary>Every setting to the native side, exactly once per frame, whether the window is open or not. The window
@@ -2997,7 +2784,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         if (_fh_dpi_fix && (fonts || vps)) {
             float was = st.FontScaleDpi;
             io.ConfigDpiScaleFonts = false; io.ConfigDpiScaleViewports = false; st.FontScaleDpi = 1f; _dpi_ours = true;
-            if (++_dpi_offs <= 5) _logger.Info(I($"ImGui: DPI font scaling off (fh_dpi_fix=1, as Fahrenheit #376); FontScaleDpi {was:F2} -> 1{(_dpi_offs == 5 ? "; further repeats are only counted (Debug row)" : "")}"));
+            if (++_dpi_offs <= 5) _logger.Info(I($"ImGui: DPI font scaling off (fh_dpi_fix=1, as Fahrenheit #376); FontScaleDpi {was:F2} -> 1{(_dpi_offs == 5 ? "; further repeats are only counted (Developer tab row)" : "")}"));
         } else if (!_fh_dpi_fix && _dpi_ours) {   // ImGui sets FontScaleDpi again at the next frame
             io.ConfigDpiScaleFonts = _dpi_fh_fonts == 1; io.ConfigDpiScaleViewports = _dpi_fh_vps; _dpi_ours = false;
             _logger.Info("ImGui: DPI font scaling back to Fahrenheit's own setting (fh_dpi_fix=0)");
@@ -3062,9 +2849,12 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _cpu_t_end = cpu_now(); _cpu_done = true;
     }
 
-    /// <summary>The F8 window. Without a working native helper it shows why (and the hint), never an empty frame.</summary>
+    /// <summary>The F8 window. Without a working native helper it shows why (and the hint), never an empty frame. Its first size
+    /// (no imgui.ini entry yet) is 30 x 34 em, the size the tabs were laid out for (vr-menu-design 3.2); after that Fahrenheit's
+    /// imgui.ini keeps the player's own.</summary>
     private void draw_window() {
-        ImGui.SetNextWindowSize(new Vector2(520, 0), ImGuiCond.FirstUseEver);
+        float em = ImGui.GetFontSize();
+        ImGui.SetNextWindowSize(new Vector2(30f * em, 34f * em), ImGuiCond.FirstUseEver);
         try {
             if (ImGui.Begin("FFX VR", ref _window_open)) {
                 if (!_native_ready) {
@@ -3075,16 +2865,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     else ImGui.TextDisabled("starting: waiting for the game's renderer");
                     ImGui.TextDisabled("F8: hide");
                 }
-                else {
-                    if (_detour_status != "installed") {
-                        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f));
-                        ImGui.TextWrapped($"Draw detours: {esc(_detour_status)}. Stereo, cursor hiding and the UI panel may not work; core.log has the details.");
-                        ImGui.PopStyleColor(1);
-                    }
-                    if (_ini_note.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped(esc(_ini_note)); ImGui.PopStyleColor(1); }   // R30, for the session
-                    draw_main();
-                    draw_debug();
-                }
+                else draw_menu();   // the header (the detour and ini warnings in it), the tabs (menu.cs)
             }
         }
         finally { ImGui.End(); }

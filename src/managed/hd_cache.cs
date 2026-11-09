@@ -590,10 +590,11 @@ public sealed unsafe partial class FFXVRModule {
         for (int i = 0; i < n; i++) { char ch = tag[i]; b[i] = ch >= 32 && ch < 127 ? (byte)ch : (byte)'?'; }
         b[n] = 0; f(b);
     }
-    /// <summary>Debug > Battle loading: the cache's checkbox and status line.</summary>
+    /// <summary>Developer > Loading: the cache's checkbox and status line.</summary>
     private void hc_ui() {
         if (!_hc_ready) ImGui.BeginDisabled(true);
-        ImGui.Checkbox("hd_cluster_cache: keep the HD textures of the field and battle maps loaded across random battles in one zone (experimental)", ref _hd_cluster_cache);
+        ui_check("hd_cluster_cache", "hd_cluster_cache: keep the HD textures of the field and battle maps loaded across random battles in one zone", ref _hd_cluster_cache, UiTag.Experimental | UiTag.NextLaunch,
+                 "Its load hooks are installed at launch when diag_load_lines, load_lock_release, hd_cluster_cache or diag_load is on.");
         if (!_hc_ready) ImGui.EndDisabled();
         string state = !_hc_ready ? _hc_status : _hc_disabled ? "DISABLED for the session: " + _hc_off_reason
                      : _hc_brake ? "BRAKED until the next zone change: " + _hc_brake_reason : _hd_cluster_cache ? (_hc_growths > 0 ? "on (re-armed after a pool-growth brake; one more disables it)" : "on") : "off";

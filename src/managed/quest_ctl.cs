@@ -83,27 +83,26 @@ public sealed unsafe partial class FFXVRModule {
         int n = _fn_ctl_text(which, b, 512);
         return n > 0 ? Marshal.PtrToStringAnsi((nint)b) ?? "" : "";
     }
-    /// <summary>F8, next to "left stick follows where I look".</summary>
+    /// <summary>F8 > Controls > Moving, under "Walk where you look" (the gate's state: Developer > Logging & status).</summary>
     private void qc_walk_ui() {
-        ImGui.Checkbox("left stick: raw in battle and menus (rotated only while walking)", ref _move_walk_only);
-        ImGui.SameLine(); ImGui.TextDisabled(esc(qc_text(0)));
+        ui_check("move_remap_walk_only", "... only while walking##mwo", ref _move_walk_only, UiTag.None, "The left stick is raw in battle and menus, rotated only while walking.");
     }
-    /// <summary>F8, the Controllers section: the grips, the VD overlay mask, the save screen.</summary>
+    private const string k_grip_tip = "A grip squeezed and released within the squeeze length (the hand still) is LB / RB (L1 / R1); held longer it grabs the world or is a chord. "
+                                    + "Off: the grips are LB / RB at once everywhere (the old behaviour).";
+    /// <summary>F8 > Controls > Controllers: the grips, the VD overlay mask, the save screen (the states: Developer > Logging & status).</summary>
     private void qc_ui() {
-        bool q = _grip_lbrb != 0, all = _grip_lbrb == 2;
-        if (ImGui.Checkbox("grips: quick squeeze = LB / RB in battle and the seat / diorama", ref q)) _grip_lbrb = q ? (all ? 2 : 1) : 0;
-        if (q) {
-            ImGui.SameLine(); if (ImGui.Checkbox("everywhere##griplbrb", ref all)) _grip_lbrb = all ? 2 : 1;
-            ImGui.SameLine(); ImGui.SetNextItemWidth(140f); ImGui.SliderInt("quick squeeze (ms)", ref _grip_tap_ms, 150, 500);
-        }
-        ImGui.TextDisabled(esc(qc_text(1)));
-        ImGui.Checkbox("both stick clicks (Virtual Desktop's overlay) send nothing to the game", ref _vd_overlay_mask);
+        ImGui.Text("Quick grip squeeze = L1 / R1:"); ImGui.SameLine();
+        ui_radio("grip_lbrb", "off##griplbrb", ref _grip_lbrb, 0, UiTag.None, k_grip_tip); ImGui.SameLine();
+        ui_radio("grip_lbrb", "in battle, seat and diorama##griplbrb", ref _grip_lbrb, 1, UiTag.None, k_grip_tip); ImGui.SameLine();
+        ui_radio("grip_lbrb", "everywhere##griplbrb", ref _grip_lbrb, 2, UiTag.None, k_grip_tip);
+        if (_grip_lbrb != 0) { ImGui.SameLine(); ui_slider_int("grip_tap_ms", "squeeze length (ms)##griplbrb", ref _grip_tap_ms, 150, 500, "%d", UiTag.None, null, 140f); }
+        ui_check("vd_overlay_mask", "Keep Virtual Desktop's chord (both stick clicks) away from the game", ref _vd_overlay_mask, UiTag.None, "Both stick clicks open Virtual Desktop's overlay: the game gets neither Back nor R3.");
         bool im = _imgui_vrpad != 0, im_all = _imgui_vrpad == 2;
-        if (ImGui.Checkbox("Quest controllers in Fahrenheit's save screen", ref im)) _imgui_vrpad = im ? (im_all ? 2 : 1) : 0;
+        if (ui_check("imgui_vrpad", "Controllers in Fahrenheit's save screen", ref im, UiTag.None, "Off: not installed at the next launch either.")) _imgui_vrpad = im ? (im_all ? 2 : 1) : 0;
         if (im) {
             ImGui.SameLine();
-            if (ImGui.Checkbox("in every ImGui window too (Start and Back as well: both grips + menu = Fahrenheit's soft reset, a game over in battle)", ref im_all)) _imgui_vrpad = im_all ? 2 : 1;
+            if (ui_check("imgui_vrpad", "and in every mod menu (Start and Back too)##imall", ref im_all, UiTag.None, "Both grips + menu is then Fahrenheit's soft reset (a game over in battle)."))
+                _imgui_vrpad = im_all ? 2 : 1;
         }
-        ImGui.TextDisabled(esc(imgui_pad_status()));
     }
 }

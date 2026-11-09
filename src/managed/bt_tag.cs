@@ -60,12 +60,13 @@ public sealed unsafe partial class FFXVRModule {
         }
     }
     private string btg_ini_text() => $"bt_tag={_bt_tag.ToString(CI)}\nbt_tag_dist={_bt_tag_dist.ToString("F1", CI)}\n";
-    /// <summary>F8 > First person / follow, under the battle follow.</summary>
+    private const string k_btg_tip = "How a swap hands the eyes on: wait until he arrives, tag and wait on the spot, or tag and ride in with him.";
+    /// <summary>F8 > Battle > Battle view, under the battle follow.</summary>
     private void btg_ui() {
-        ImGui.Text("a swap hands the eyes on:"); ImGui.SameLine();
-        ImGui.RadioButton("wait until he arrives##btag", ref _bt_tag, 0); ImGui.SameLine();
-        ImGui.RadioButton("tag and wait on the spot##btag", ref _bt_tag, 1); ImGui.SameLine();
-        ImGui.RadioButton("tag and ride in with him##btag", ref _bt_tag, 2);
+        ImGui.Text("When characters swap:"); ImGui.SameLine();
+        ui_radio("bt_tag", "wait for him##btag", ref _bt_tag, 0, UiTag.None, k_btg_tip); ImGui.SameLine();
+        ui_radio("bt_tag", "tag on the spot##btag", ref _bt_tag, 1, UiTag.None, k_btg_tip); ImGui.SameLine();
+        ui_radio("bt_tag", "ride in with him##btag", ref _bt_tag, 2, UiTag.None, k_btg_tip);
     }
 
     /// <summary>A party member's position (game space), when the entity is that chr id and its actor is live and finite.</summary>

@@ -84,7 +84,7 @@ public sealed unsafe partial class FFXVRModule {
         _fn_cpu_report(v, k_cpu_n + k_cpu_settings);
     }
 
-    /// <summary>Debug (F8): the two grid-timer settings and fast_reads; their numbers are on the cpu: line.</summary>
+    /// <summary>Developer > Logging & status: the two grid-timer settings and fast_reads; their numbers are on the cpu: line.</summary>
     private void timer_debug_ui() {
         ImGui.Checkbox("1 ms timer, no Windows timer throttling (timer_fix)##tfix", ref _timer_fix); ImGui.SameLine();
         ImGui.Checkbox("time the game's frame limiter (limiter_probe)##lprobe", ref _limiter_probe); ImGui.SameLine();

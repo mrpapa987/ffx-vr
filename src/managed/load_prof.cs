@@ -156,29 +156,25 @@ public sealed unsafe partial class FFXVRModule {
         byte* buf = stackalloc byte[512]; buf[0] = 0; f(buf, 512);
         return Marshal.PtrToStringAnsi((nint)buf) ?? "";
     }
-    /// <summary>The main window's row (after the battle transition's).</summary>
-    private void lp_ui() {
-        ImGui.Text("loads, engine lock (load_lock_release):"); ImGui.SameLine();
-        ImGui.RadioButton("off##llr", ref _load_lock_release, 0); ImGui.SameLine();
-        ImGui.RadioButton("battle loads (default)##llr", ref _load_lock_release, 1);
-        if (_load_lock_release == 2) { ImGui.SameLine(); ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f)); ImGui.TextWrapped("all loads (test) is on: set in Debug > Battle loading, not saved (the next launch is back on battle loads)"); ImGui.PopStyleColor(1); }
+    private const string k_llr_tip = "The engine lock is released while a load waits for the headset: off, battle entries and way backs (default), or all loads (test: also area / "
+                                   + "event map changes, save loads, the title's load and the cluster loads the main thread waits for; never saved: written as battle loads, and every launch is back on them). "
+                                   + "The load hooks are installed at launch when diag_load_lines, load_lock_release, hd_cluster_cache or diag_load is on.";
+    /// <summary>Developer > Loading: the engine lock (one radio set; it was also on the main page) and the profiler's switch.</summary>
+    private void lp_debug_ui() {
+        // LD2-R-3: the test mode is never saved
+        ImGui.Text("engine lock (load_lock_release):"); ImGui.SameLine();
+        ui_radio("load_lock_release", "off##llrd", ref _load_lock_release, 0, UiTag.NextLaunch, k_llr_tip); ImGui.SameLine();
+        ui_radio("load_lock_release", "battle loads (default)##llrd", ref _load_lock_release, 1, UiTag.NextLaunch, k_llr_tip); ImGui.SameLine();
+        ui_radio("load_lock_release", "all loads (test)##llrd", ref _load_lock_release, 2, UiTag.NextLaunch, k_llr_tip);
+        if (_load_lock_release == 2) ui_warn("all loads (test) is on: not saved (the next launch is back on battle loads)", k_amber);
         string sess = li_session_text();
         ImGui.TextDisabled("  released while waiting for the headset; " + (_load_lock_release == 2 ? "all loads (test): battle entries and way backs, area / event map changes, save loads, the title's load, cluster loads the main thread waits for" : "battle entries and way backs")
                          + (_ld_any ? "" : " | the load hooks are not installed (they follow diag_load_lines / load_lock_release / hd_cluster_cache at launch): no load is seen")
                          + (_fn_lock_release_status != null ? " | " + esc(lp_status_text()) : "") + (sess.Length > 0 ? " | " + esc(sess) : ""));
-    }
-    /// <summary>Debug > Battle loading: the profiler's switch.</summary>
-    private void lp_debug_ui() {
-        // LD2-R-3: the test mode lives here, away from the main window's default, and is never saved
-        ImGui.Text("engine lock (load_lock_release):"); ImGui.SameLine();
-        ImGui.RadioButton("off##llrd", ref _load_lock_release, 0); ImGui.SameLine();
-        ImGui.RadioButton("battle loads (default)##llrd", ref _load_lock_release, 1); ImGui.SameLine();
-        ImGui.RadioButton("all loads (test)##llrd", ref _load_lock_release, 2);
-        ImGui.TextDisabled("  all loads (test) also releases the lock during area / event map changes, save loads and the title's load, and for cluster loads the main thread waits for. Not saved: it is written as battle loads, and every launch is back on battle loads.");
         ImGui.Text("load profiler (diag_load_prof): one \"prof:\" block after each \"load:\" line"); ImGui.SameLine();
-        ImGui.RadioButton("off##dlp", ref _diag_load_prof, 0); ImGui.SameLine();
-        ImGui.RadioButton("loader thread##dlp", ref _diag_load_prof, 1); ImGui.SameLine();
-        ImGui.RadioButton("+ render thread##dlp", ref _diag_load_prof, 2);
+        ui_radio("diag_load_prof", "off##dlp", ref _diag_load_prof, 0, UiTag.NextLaunch, "The sampler follows this at once; the two exact probes hook at launch."); ImGui.SameLine();
+        ui_radio("diag_load_prof", "loader thread##dlp", ref _diag_load_prof, 1, UiTag.NextLaunch, "The sampler follows this at once; the two exact probes hook at launch."); ImGui.SameLine();
+        ui_radio("diag_load_prof", "+ render thread##dlp", ref _diag_load_prof, 2, UiTag.NextLaunch, "The sampler follows this at once; the two exact probes hook at launch.");
         ImGui.TextDisabled($"  the sampler follows this at once; the two exact probes (0x465AB0, 0x58FC20) hook at launch: {(_ld_any ? esc(_pr_status) : "off (no load hooks: no phase, no window, no probe)")}");
     }
 }

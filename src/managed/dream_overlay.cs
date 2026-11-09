@@ -36,12 +36,12 @@ public sealed unsafe partial class FFXVRModule {
              + $" | filter-shaped quads with the wrong colour (left alone): {v[5]}" + (v[8] != 0 ? $" | flag reads failed {v[8]}" : "");
     }
 
-    /// <summary>The main window's row (after the UI panel's checkbox).</summary>
+    private const string k_dream_tip = "The game's dream filter (a sepia flashback look) in the headset: hidden, tinting both eyes, or on the UI panel as before.";
+    /// <summary>F8 > View > Panels (the status: Developer > Logging & status).</summary>
     private void dream_ui() {
-        ImGui.Text("dream filter (sepia flashback look) in the headset:"); ImGui.SameLine();
-        ImGui.RadioButton("hide (default)##dream", ref _dream_overlay, 1); ImGui.SameLine();
-        ImGui.RadioButton("tint both eyes##dream", ref _dream_overlay, 2); ImGui.SameLine();
-        ImGui.RadioButton("show on the panel (old)##dream", ref _dream_overlay, 0);
-        if (_fn_dream_status != null) ImGui.TextDisabled("  " + esc(dream_status_text()));
+        ImGui.Text("Flashback (sepia) filter:"); ImGui.SameLine();
+        ui_radio("dream_overlay", "hide##dream", ref _dream_overlay, 1, UiTag.None, k_dream_tip); ImGui.SameLine();
+        ui_radio("dream_overlay", "tint both eyes##dream", ref _dream_overlay, 2, UiTag.None, k_dream_tip); ImGui.SameLine();
+        ui_radio("dream_overlay", "on the panel (old)##dream", ref _dream_overlay, 0, UiTag.None, k_dream_tip);
     }
 }

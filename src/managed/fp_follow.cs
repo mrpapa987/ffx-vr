@@ -169,11 +169,10 @@ public sealed unsafe partial class FFXVRModule {
         string m = I($"eye capture: control back (or first person left) on map {map_name()} after {o[5]:F0} frames (about {o[5] / 60f:F1} s): the root moved {o[6]:F1} units, {d} of the view at the start ({o[8]:F1} along, {o[9]:F1} across); the largest single-frame step {o[10]:F1} at +{o[11]:F0} frames; the eye at most {o[12]:F1} units from where it was when control went off; black frames {o[13]:F0}, camera cuts {o[14]:F0}, hold restarts {o[15]:F0} (fp_event_hold {(_fp_event_hold ? 1 : 0)}, leash {_fp_event_leash:F0}); on his root: {(_fpcap_share_slot >= 0 ? I($"{_fpcap_share}, nearest {_fpcap_share_dmin:F2}") : "nobody")}; the nearest scene depth: the uidepth: lines");
         _logger.Info(m); d7_log(m);
     }
-    /// <summary>F8, under the eye jumps.</summary>
+    /// <summary>F8 > View > First person (the hold's state: Developer > Logging & status).</summary>
     private void fpev_ui() {
-        ImGui.Checkbox("hold the eye while the game moves you (control off)##fpev", ref _fp_event_hold); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("leash (units)##fpev", ref _fp_event_leash, 2f, 40f, "%.0f");
-        if (_fn_fp_event != null) { ImGui.SameLine(); ImGui.TextDisabled(I($"{(_fpev_st[0] == 1f ? $"holding {_fpev_st[1]:F1} s, the eye {_fpev_st[2]:F1} units off" : _fpev_st[0] == 2f ? "gliding back" : "not holding")}; holds {_fpev_st[3]:F0}")); }
+        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye while the game moves you (control off) in first person."); ImGui.SameLine();
+        ui_slider("fp_event_leash", "slack (units)##fpev", ref _fp_event_leash, 2f, 40f, "%.0f", UiTag.None, "How far the game may move you before the eye trails.", 140f);
     }
 
     /// <summary>finding 1: is h (an actor's +0x830) the marked model object?</summary>

@@ -247,17 +247,20 @@ public sealed unsafe partial class FFXVRModule {
                      $" | view {(_fp_mode == 1 ? "first person" : _fp_mode == 3 ? "third person" : _fp_mode == 2 ? "diorama" : "seat")} | smooth anchor: {_sa_status}");
     }
 
-    /// <summary>The First person / follow section's riding block (F8, Debug).</summary>
+    /// <summary>F8 > View > First person: the riding options.</summary>
     private void ride_ui() {
+        ImGui.Text("Riding: smooth the bobbing:"); ImGui.SameLine();
+        ui_radio("ride_smooth", "off##rs", ref _ride_smooth, 0); ImGui.SameLine();
+        ui_radio("ride_smooth", "height##rs", ref _ride_smooth, 1); ImGui.SameLine();
+        ui_radio("ride_smooth", "height + sideways##rs", ref _ride_smooth, 2); ImGui.SameLine();
+        ui_slider("ride_smooth_ms", "ms##rsms", ref _ride_smooth_ms, 0f, 1000f, "%.0f", UiTag.None, "The smoothing's lag.", 140f);
+        ui_check("ride_hide_mount", "Riding: also hide the chocobo##rhm", ref _ride_hide_mount, UiTag.None, "First person: if its head and neck are in the way."); ImGui.SameLine();
+        ui_slider("ride_hide_radius", "radius##rhr", ref _ride_hide_radius, 0.5f, 12f, "%.1f", UiTag.None, "The hide radius while riding.", 120f);
+    }
+    /// <summary>Developer > First person & body: the riding status.</summary>
+    private void ride_debug_ui() {
         ImGui.Text("chocobo:"); ImGui.SameLine();
         if (_ride_att) ImGui.Text(esc(_ride_status) + $" - rider parts matched last frame {_ride_counts & 0xFFFF}, bird parts {_ride_counts >> 16} ({(_ride_hide_mount ? "hidden" : "shown")}; first person only)");
         else ImGui.TextDisabled("on foot (riding = the followed actor is attached to another actor's bone, +0x19C)");
-        ImGui.Text("  bob smoothing while riding:"); ImGui.SameLine();
-        ImGui.RadioButton("off##rs", ref _ride_smooth, 0); ImGui.SameLine();
-        ImGui.RadioButton("height##rs", ref _ride_smooth, 1); ImGui.SameLine();
-        ImGui.RadioButton("height + sideways##rs", ref _ride_smooth, 2); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("ms##rsms", ref _ride_smooth_ms, 0f, 1000f, "%.0f");
-        ImGui.Checkbox("first person: also hide the chocobo (if its head and neck are in the way)", ref _ride_hide_mount); ImGui.SameLine();
-        ImGui.SetNextItemWidth(120); ImGui.SliderFloat("hide radius while riding", ref _ride_hide_radius, 0.5f, 12f, "%.1f");
     }
 }

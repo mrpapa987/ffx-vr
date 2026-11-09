@@ -124,30 +124,28 @@ public sealed unsafe partial class FFXVRModule {
         return Marshal.PtrToStringAnsi((nint)b) ?? "";
     }
 
-    /// <summary>The main window's row, under the turn speed.</summary>
+    private const string k_sr_tip = "Between two game frames the headset shows the last frame again, turned by the stick: smooth turning at the headset's rate. "
+                                  + "First person and the seat; all views adds third person and the diorama, where the result is approximate.";
+    /// <summary>F8 > Controls > Turning, under the turn speed (the status: Developer > Logging & status).</summary>
     private void sr_ui() {
         bool on = _stick_reproject != 0;
         if (on) _sr_ui_mode = _stick_reproject;
-        if (ImGui.Checkbox("smooth stick turns at the headset rate##sr", ref on)) _stick_reproject = on ? (_sr_ui_mode == 2 ? 2 : 1) : 0;
+        if (ui_check("stick_reproject", "Extra-smooth stick turning (headset rate)##sr", ref on, UiTag.None, k_sr_tip)) _stick_reproject = on ? (_sr_ui_mode == 2 ? 2 : 1) : 0;
         if (_stick_reproject != 0) {
-            ImGui.SameLine(); ImGui.RadioButton("first person + seat##sr", ref _stick_reproject, 1);
-            ImGui.SameLine(); ImGui.RadioButton("all views (third person, diorama: approximate)##sr", ref _stick_reproject, 2);
+            ImGui.SameLine(); ui_radio("stick_reproject", "first person + seat##sr", ref _stick_reproject, 1, UiTag.None, k_sr_tip);
+            ImGui.SameLine(); ui_radio("stick_reproject", "all views (approximate)##sr", ref _stick_reproject, 2, UiTag.Experimental, k_sr_tip);
         }
-        if (_xr_want) { string s = sr_status_text(out _); if (s.Length > 0) ImGui.TextDisabled("  " + esc(s)); }
     }
 
-    /// <summary>Debug > Stick reprojection and the loading keepalive.</summary>
+    /// <summary>Developer > Rendering > Stick reprojection and the loading keepalive (the mode: Controls > Turning).</summary>
     private void sr_debug_ui() {
         ImGui.TextWrapped("Between two game frames the headset shows the last frame again, turned by the stick yaw added since it was drawn "
                         + "(first person and the seat; with 'all views' also third person and the diorama, where the turn's pivot is the player and "
                         + "the result is approximate). The same extra frames keep the headset fed while the game loads (the stick stops a few degrees "
                         + "past the held frame). Screens, the stereo screen, the save screen and the glass break are held unturned. Test with Virtual "
                         + "Desktop at 120 Hz and SSW Disabled: the sr: line in ffxvr_diag.log has the numbers (once per headset session, and every 10 s with "
-                        + "the verbose log, diag_verbose, at the top of Debug).");
-        ImGui.Text("stick_reproject:"); ImGui.SameLine();
-        ImGui.RadioButton("off##srd", ref _stick_reproject, 0); ImGui.SameLine();
-        ImGui.RadioButton("first person + seat (default)##srd", ref _stick_reproject, 1); ImGui.SameLine();
-        ImGui.RadioButton("all views##srd", ref _stick_reproject, 2);
+                        + "the verbose log, diag_verbose, at the top of the Developer tab).");
+        ImGui.TextDisabled(I($"stick_reproject={_stick_reproject} (Controls > Turning > Extra-smooth stick turning)"));
         ImGui.SetNextItemWidth(160f); ImGui.SliderFloat("margin before the slot's deadline (stick_reproject_margin_ms)##srd", ref _sr_margin_ms, 0.5f, 6f, "%.1f ms");
         ImGui.Checkbox("an extra frame first when a game frame cannot make the open slot (stick_reproject_predict)##srd", ref _sr_predict);
         ImGui.SetNextItemWidth(160f); ImGui.SliderFloat("wider rendered view per side (stick_overscan)##srd", ref _stick_overscan, 0f, 4f, "%.1f deg");

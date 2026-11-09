@@ -445,20 +445,23 @@ public sealed unsafe partial class FFXVRModule {
         return s != null ? Marshal.PtrToStringAnsi((nint)s) ?? "" : "";
     }
 
-    /// <summary>The main window: a collapsible "VR hands (experimental)" header under the view mode and turning controls.</summary>
+    /// <summary>F8 > Hands (the tab that replaced the "VR hands (experimental)" header; menu.cs draws its experimental tag).</summary>
     private void hands2_ui() {
-        if (_fn_hands2_set == null) return;
-        if (!ImGui.CollapsingHeader("VR hands (experimental)##h2")) return;
-        ImGui.Checkbox("VR hands: your own hands at the controllers##h2on", ref _vr_hands);
+        if (_fn_hands2_set == null) { ImGui.TextDisabled("VR hands need the native helper's hands support (not loaded)."); return; }
+        ui_check("vr_hands", "VR hands: your own hands at the controllers##h2on", ref _vr_hands, UiTag.Common, "Hands drawn at the controllers in first person (with your body hidden) and the views ticked below.");
         int* v = stackalloc int[k_h2_status_n];
         string st = hands2_status(v);
         if (st.Length > 0) { ImGui.SameLine(); ImGui.TextDisabled(esc(st)); }
         bool body = _fp_body_mode != 0 || !_fp_hide_body || (_hands_dev && _hands_on);
         if (_vr_hands && body) {
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
-            ImGui.TextWrapped("Not drawn in first person while your body is shown: pick \"hide my whole body\" and tick \"hide the player's body\" (Debug > First person / follow) to see the hands"
-                              + (_hands_dev && _hands_on ? ", and turn the old bone hands off." : "."));
+            ImGui.TextWrapped("Not drawn in first person while your body is shown"
+                              + (_hands_dev && _hands_on ? "; the old bone hands are on too (Developer > First person & body)." : "."));
             ImGui.PopStyleColor(1);
+            // vr-menu-design 2.3: the warning pointed into Debug, which players no longer see. Fix it: View > First person > Your
+            // body: hide all (fp_body_mode=0, saved) and the session's "hide the player's body" (on by default; Developer tab).
+            if (ImGui.Button("Fix it##h2body")) { _fp_body_mode = 0; _fp_hide_body = true; }
+            ImGui.SetItemTooltip("Your body: hide all (View > First person; ini fp_body_mode=0), and the player's body hidden this session (the default)");
         }
         if (_vr_hands && _h2_pack_sent == "") {   // S3: the whole fallback list failed (a single rejection moves on to the next pack)
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
@@ -468,13 +471,13 @@ public sealed unsafe partial class FFXVRModule {
         hands2_pack_ui(v);
         ImGui.Text("show in: first person (with your body hidden), and"); ImGui.SameLine();
         bool dio = (_vr_hands_views & 2) != 0, tp = (_vr_hands_views & 4) != 0, seat = (_vr_hands_views & 8) != 0;
-        if (ImGui.Checkbox("the diorama##h2v2", ref dio)) _vr_hands_views = dio ? _vr_hands_views | 2 : _vr_hands_views & ~2;
-        ImGui.SameLine(); if (ImGui.Checkbox("third person##h2v4", ref tp)) _vr_hands_views = tp ? _vr_hands_views | 4 : _vr_hands_views & ~4;
-        ImGui.SameLine(); if (ImGui.Checkbox("the seat view##h2v8", ref seat)) _vr_hands_views = seat ? _vr_hands_views | 8 : _vr_hands_views & ~8;
+        if (ui_check("vr_hands_views", "the diorama##h2v2", ref dio)) _vr_hands_views = dio ? _vr_hands_views | 2 : _vr_hands_views & ~2;
+        ImGui.SameLine(); if (ui_check("vr_hands_views", "third person##h2v4", ref tp)) _vr_hands_views = tp ? _vr_hands_views | 4 : _vr_hands_views & ~4;
+        ImGui.SameLine(); if (ui_check("vr_hands_views", "the seat view##h2v8", ref seat)) _vr_hands_views = seat ? _vr_hands_views | 8 : _vr_hands_views & ~8;
         ImGui.TextDisabled("In the diorama and the seat view the hands are your own size in the scaled world: life-size to you, giant beside the miniature, and they go behind its walls and ground like a real hand would.");
         ImGui.TextDisabled("Never in battle, on screens, menus, FMVs, battle transitions or under the dream filter. A controller put down for 10 s (nothing touched) hides its hand (with the touch sensors only).");
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("idle finger curl##h2rc", ref _vr_hands_rest_curl, 0f, 1f, "%.2f"); ImGui.SameLine();
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("size##h2sc", ref _vr_hands_scale, 0.8f, 1.25f, "%.2f x"); ImGui.SameLine();
+        ui_slider("vr_hands_rest_curl", "idle finger curl##h2rc", ref _vr_hands_rest_curl, 0f, 1f, "%.2f", UiTag.None, null, 160f); ImGui.SameLine();
+        ui_slider("vr_hands_scale", "size##h2sc", ref _vr_hands_scale, 0.8f, 1.25f, "%.2f x", UiTag.None, null, 160f); ImGui.SameLine();
         if (ImGui.SmallButton("defaults##h2rs")) { _vr_hands_rest_curl = 0.20f; _vr_hands_scale = 1.00f; }
         if (_vr_hands && v[16] == 0 && v[5] == 1) ImGui.TextDisabled("The controllers' touch sensors are not bound (another runtime or profile?): the fingers follow the trigger and grip only, and a controller put down is not hidden.");
         if (_fn_hands2_cal != null) {
@@ -497,12 +500,12 @@ public sealed unsafe partial class FFXVRModule {
         }
         hands2_tap_ui();
         if (ImGui.TreeNode("fine tune##h2ft")) {
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("yaw##h2", ref _vr_hands_yaw, -45f, 45f, "%.0f deg"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("pitch##h2", ref _vr_hands_pitch, -45f, 45f, "%.0f deg"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("roll##h2", ref _vr_hands_roll, -45f, 45f, "%.0f deg");
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("out##h2", ref _vr_hands_off_r, -0.10f, 0.10f, "%.3f m"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("up##h2", ref _vr_hands_off_u, -0.10f, 0.10f, "%.3f m"); ImGui.SameLine();
-            ImGui.SetNextItemWidth(110); ImGui.SliderFloat("back##h2", ref _vr_hands_off_b, -0.10f, 0.10f, "%.3f m"); ImGui.SameLine();
+            ui_slider("vr_hands_yaw", "yaw##h2", ref _vr_hands_yaw, -45f, 45f, "%.0f deg", UiTag.None, null, 110f); ImGui.SameLine();
+            ui_slider("vr_hands_pitch", "pitch##h2", ref _vr_hands_pitch, -45f, 45f, "%.0f deg", UiTag.None, null, 110f); ImGui.SameLine();
+            ui_slider("vr_hands_roll", "roll##h2", ref _vr_hands_roll, -45f, 45f, "%.0f deg", UiTag.None, null, 110f);
+            ui_slider("vr_hands_off_right", "out##h2", ref _vr_hands_off_r, -0.10f, 0.10f, "%.3f m", UiTag.None, null, 110f); ImGui.SameLine();
+            ui_slider("vr_hands_off_up", "up##h2", ref _vr_hands_off_u, -0.10f, 0.10f, "%.3f m", UiTag.None, null, 110f); ImGui.SameLine();
+            ui_slider("vr_hands_off_back", "back##h2", ref _vr_hands_off_b, -0.10f, 0.10f, "%.3f m", UiTag.None, null, 110f); ImGui.SameLine();
             if (ImGui.SmallButton("reset##h2ft")) { _vr_hands_yaw = _vr_hands_pitch = _vr_hands_roll = 0f; _vr_hands_off_r = _vr_hands_off_u = _vr_hands_off_b = 0f; }
             ImGui.TextDisabled("In the hand's own frame: yaw turns about the back of the hand, pitch tips the fingers up or down, roll turns about the fingers; out, up and back move it from the thumb side, out of the back of the hand, toward the elbow.");
             ImGui.TreePop();
@@ -513,20 +516,20 @@ public sealed unsafe partial class FFXVRModule {
     /// point pose, the gate, the last tap and near miss, the counters).</summary>
     private void hands2_tap_ui() {
         if (_fn_hands2_tap_set == null || !ImGui.TreeNode("gestures##h2g")) return;
-        ImGui.Checkbox("tap to press action (squeeze the grip and push your hand forward)##h2tap", ref _vr_hands_tap);
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("tap sensitivity##h2ts", ref _vr_hands_tap_sens, 0.5f, 2f, "%.2f"); ImGui.SameLine();
+        ui_check("vr_hands_tap", "tap to press action (squeeze the grip and push your hand forward)##h2tap", ref _vr_hands_tap);
+        ui_slider("vr_hands_tap_sens", "tap sensitivity##h2ts", ref _vr_hands_tap_sens, 0.5f, 2f, "%.2f", UiTag.None, null, 160f); ImGui.SameLine();
         _vr_hands_tap_sens = float.IsFinite(_vr_hands_tap_sens) ? Math.Clamp(_vr_hands_tap_sens, 0.5f, 2f) : 1f;   // review N2: Ctrl+click typing
         ImGui.TextDisabled(I($"(tap distance: a push of {10f / _vr_hands_tap_sens:F0} cm)")); ImGui.SameLine();
         if (ImGui.SmallButton("default##h2ts")) _vr_hands_tap_sens = 1.00f;
-        ImGui.Checkbox("also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
-        ImGui.Checkbox("haptic tick##h2taph", ref _vr_hands_tap_haptic);
-        ImGui.Checkbox("require a pointing finger (index off the trigger)##h2tapp", ref _vr_hands_tap_point); ImGui.SameLine();
-        ImGui.Checkbox("don't pass the grip to the game while a tap can fire (LB / RB)##h2tapg", ref _vr_hands_tap_hold_grip);
+        ui_check("vr_hands_tap_dialogue", "also advance dialogue (tap while a text box is up)##h2tapd", ref _vr_hands_tap_dialogue); ImGui.SameLine();
+        ui_check("vr_hands_tap_haptic", "haptic tick##h2taph", ref _vr_hands_tap_haptic);
+        ui_check("vr_hands_tap_point", "require a pointing finger (index off the trigger)##h2tapp", ref _vr_hands_tap_point); ImGui.SameLine();
+        ui_check("vr_hands_tap_hold_grip", "don't pass the grip to the game while a tap can fire (LB / RB)##h2tapg", ref _vr_hands_tap_hold_grip);
         ImGui.TextDisabled(esc("Squeeze the grip and push your hand forward about a hand's width (" + (10f / _vr_hands_tap_sens).ToString("F0", CI) + " cm) toward what you are facing. "
                            + "It presses " + _vr_hands_tap_button.ToUpperInvariant() + (_vr_hands_tap_button == "a" ? " (confirm: talk, examine, open)" : " (vr_hands_tap_button in the ini; A is confirm)") + ". Only in first person in the field: never in battle, menus, the sphere grid, the save screen, movies or blitzball, "
                            + "while you turn with the stick or move your head fast, while you have no control of the character or a choice box is up, or (unless ticked above) while a text box is up. A reach with the grip squeezed presses too: let go of the grip when you don't mean it. "
                            + "With \"don't pass the grip\" ticked, a grip squeezed where a tap can fire is held back from the game (LB / RB) until you let go."));
-        if (_fn_hands2_tap_status != null) {
+        if (_diag_verbose && _fn_hands2_tap_status != null) {   // the live readout: developer mode only (vr-menu-design 2.4)
             float* v = stackalloc float[k_tap_status_n];
             for (int i = 0; i < k_tap_status_n; i++) v[i] = 0f;
             byte* line = _fn_hands2_tap_status(v, k_tap_status_n);
@@ -562,6 +565,7 @@ public sealed unsafe partial class FFXVRModule {
             if (_h2_packs.Count == 0) ImGui.TextDisabled("no hand packs in the mod folder's hands\\ (reinstall the mod)");
             ImGui.EndCombo();
         }
+        ImGui.SetItemTooltip("The hand model drawn at the controllers\nini: vr_hands_pack");
         ImGui.SameLine(); if (ImGui.SmallButton("rescan##h2pk")) hands2_scan(true);
         if (_h2_pack_try > 0 && !string.IsNullOrEmpty(_h2_pack_sent)) {   // review N6: the fallback is drawn, not the selection
             ImGui.SameLine(); ImGui.TextDisabled(esc($"(using '{_h2_pack_sent}': '{_vr_hands_pack}' could not be loaded)"));

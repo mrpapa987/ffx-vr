@@ -142,16 +142,18 @@ public sealed unsafe partial class FFXVRModule {
         _ej_face_logs++;
         _logger.Info(_ej_face_logs == 60 ? s + " (no more of these lines this session)" : s);
     }
-    /// <summary>F8, under "camera cuts:" (next to "blink").</summary>
+    /// <summary>F8 > View > Comfort, under the camera cuts (the counters: Developer > Logging & status).</summary>
     private void ej_ui() {
-        ImGui.Text("eye jumps:"); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderInt("blink frames##ej", ref _eye_jump_blink, 0, 15, _eye_jump_blink == 0 ? "off" : "%d"); ImGui.SameLine();
-        ImGui.SetNextItemWidth(140); ImGui.SliderFloat("jump over (units)##ej", ref _eye_jump_units, 4f, 40f, "%.0f");
-        if (_fn_eye_jump_set != null) { ImGui.SameLine(); ImGui.TextDisabled($"seen {_ej_stats[0]}, blinked {_ej_stats[1]} (extended {_ej_stats[2]}, held back {_ej_stats[3]}){(_cut_blink ? $"; cut blinks held back {_ej_stats[6]}" : "")}"); }
-        ImGui.Text("battle: face the enemies:"); ImGui.SameLine();
-        ImGui.RadioButton("off##bf", ref _battle_face, 0); ImGui.SameLine();
-        ImGui.RadioButton("body forward##bf", ref _battle_face, 1); ImGui.SameLine();
-        ImGui.RadioButton("where you look##bf", ref _battle_face, 2);
-        if (_fn_eye_jump_set != null) { ImGui.SameLine(); ImGui.TextDisabled($"turned {_ej_stats[4]}, kept {_ej_stats[5]} (under 15 deg)"); }
+        ImGui.Text("Blink when the view jumps:"); ImGui.SameLine();
+        ui_slider_int("eye_jump_blink", "frames##ej", ref _eye_jump_blink, 0, 15, _eye_jump_blink == 0 ? "off" : "%d", UiTag.None, "A short blink when the eye jumps in one step (0 = off).", 140f); ImGui.SameLine();
+        ui_slider("eye_jump_units", "distance (units)##ej", ref _eye_jump_units, 4f, 40f, "%.0f", UiTag.None, "A jump over this distance blinks.", 140f);
+    }
+    private const string k_bf_tip = "In battle, turn the view toward the enemies: off, by the body's forward, or by where you look.";
+    /// <summary>F8 > Battle > Battle view.</summary>
+    private void ej_face_ui() {
+        ImGui.Text("Face the enemies:"); ImGui.SameLine();
+        ui_radio("battle_face", "off##bf", ref _battle_face, 0, UiTag.None, k_bf_tip); ImGui.SameLine();
+        ui_radio("battle_face", "body forward##bf", ref _battle_face, 1, UiTag.None, k_bf_tip); ImGui.SameLine();
+        ui_radio("battle_face", "where you look##bf", ref _battle_face, 2, UiTag.None, k_bf_tip);
     }
 }

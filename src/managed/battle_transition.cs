@@ -64,16 +64,16 @@ public sealed unsafe partial class FFXVRModule {
         return Marshal.PtrToStringAnsi((nint)buf) ?? "";
     }
 
-    /// <summary>The main window's row (next to the UI panel's).</summary>
+    private const string k_bt_tip = "The glass break at a battle start: the world frozen around you, the shatter locked to your head, or the original (flat, as before).";
+    /// <summary>F8 > Battle > Battle start (the transition's status: Developer > Logging & status).</summary>
     private void bt_ui() {
-        ImGui.Text("battle start (glass break):"); ImGui.SameLine();
-        ImGui.RadioButton("frozen world##bt", ref _battle_transition, 2); ImGui.SameLine();
-        ImGui.RadioButton("head-locked##bt", ref _battle_transition, 1); ImGui.SameLine();
-        ImGui.RadioButton("old (as before)##bt", ref _battle_transition, 0);
-        if (_fn_bt_status != null) ImGui.TextDisabled("  transition: " + esc(bt_status_text()));
+        ImGui.Text("Battle start effect:"); ImGui.SameLine();
+        ui_radio("battle_transition", "frozen world##bt", ref _battle_transition, 2, UiTag.Common, k_bt_tip); ImGui.SameLine();
+        ui_radio("battle_transition", "head-locked##bt", ref _battle_transition, 1, UiTag.Common, k_bt_tip); ImGui.SameLine();
+        ui_radio("battle_transition", "original##bt", ref _battle_transition, 0, UiTag.Common, k_bt_tip);
     }
 
-    /// <summary>Debug > Battle loading: the diagnostics switch.</summary>
+    /// <summary>Developer > Loading: the diagnostics switch.</summary>
     private void bt_debug_ui() {
         ImGui.Checkbox("battle transition lines (diag_transition): one \"bt:\" line per frame inside a battle transition window in ffxvr_diag.log (capped)", ref _diag_transition);
     }

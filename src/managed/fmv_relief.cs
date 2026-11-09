@@ -109,27 +109,32 @@ public sealed unsafe partial class FFXVRModule {
         return _fmv3d_str[which] = System.Text.Encoding.ASCII.GetString(now);
     }
 
-    /// <summary>The main window's row (in the View block, after "2D screens").</summary>
+    private const string k_fmv_grid_tip = "The depth mesh: the 640 grid on the plain depth (smooth, recommended), or the 320 grid of round 7 (sharp v2 edges show as a staircase).";
+    /// <summary>F8 > Movies > 3D movies (the relief's state: Developer > Rendering).</summary>
     private void fmv3d_ui() {
-        ImGui.Checkbox("FMVs in 3D (needs converted depth)##fmv3d", ref _fmv_depth);
+        ui_check("fmv_depth", "Movies in 3D (needs the depth pack)##fmv3d", ref _fmv_depth, UiTag.Common, "A converted FMV plays on the virtual screen with real depth (tools\\convert-fmv-depth.ps1 makes the depth on your PC).");
         if (!_fmv_depth) return;
-        ImGui.SameLine(); ImGui.SetNextItemWidth(120); ImGui.SliderFloat("amount##fmv3d", ref _fmv_depth_amount, 0f, 1f, "%.2f");
-        ImGui.SameLine(); ImGui.Checkbox("flatten the bottom 15% (subtitles)##fmv3d", ref _fmv_depth_flat_subs);
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("depth range: the farthest, behind the screen##fmv3d", ref _fmv_depth_range, 0.5f, 20f, "%.1f m");
-        ImGui.SameLine(); ImGui.SetNextItemWidth(160); ImGui.SliderFloat("pop-out: the nearest, in front##fmv3d", ref _fmv_depth_pop, 0f, 2f, "%.2f m");
-        ImGui.TextDisabled("grid:"); ImGui.SameLine();
-        ImGui.RadioButton("640 grid, smooth depth (recommended)##fmv3dgrid", ref _fmv_depth_grid, 1); ImGui.SameLine();
-        ImGui.RadioButton("320 grid (round 7)##fmv3dgrid", ref _fmv_depth_grid, 0); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
-        ImGui.SliderFloat("edge softening (depth texels)##fmv3d", ref _fmv_depth_soften, 0f, 1.5f, "%.1f");
-        ImGui.SetNextItemWidth(160); ImGui.SliderFloat("smoothing (less shimmer, within a shot)##fmv3d", ref _fmv_depth_smooth, 0f, 0.95f, "%.2f");
+        ImGui.SameLine(); ui_slider("fmv_depth_amount", "amount##fmv3d", ref _fmv_depth_amount, 0f, 1f, "%.2f", UiTag.Common, null, 120f);
+        ImGui.SameLine(); ui_check("fmv_depth_flat_subs", "Keep subtitles flat##fmv3d", ref _fmv_depth_flat_subs, UiTag.None, "The bottom 15% of the picture stays flat (subtitles).");
+        ui_slider("fmv_depth_range", "Depth behind the screen##fmv3d", ref _fmv_depth_range, 0.5f, 20f, "%.1f m", UiTag.None, "The farthest content, behind the screen.", 160f);
+        ImGui.SameLine(); ui_slider("fmv_depth_pop", "pop-out in front##fmv3d", ref _fmv_depth_pop, 0f, 2f, "%.2f m", UiTag.None, "The nearest content, in front of the screen.", 160f);
+        ImGui.Text("Depth grid:"); ImGui.SameLine();
+        ui_radio("fmv_depth_grid", "640, smooth (recommended)##fmv3dgrid", ref _fmv_depth_grid, 1, UiTag.None, k_fmv_grid_tip); ImGui.SameLine();
+        ui_radio("fmv_depth_grid", "320##fmv3dgrid", ref _fmv_depth_grid, 0, UiTag.None, k_fmv_grid_tip);
+        if (_diag_verbose) {   // the guided grid stays a developer choice (it was in Debug)
+            ImGui.SameLine();
+            ui_radio("fmv_depth_grid", "640, guided##fmv3dgrid", ref _fmv_depth_grid, 2, UiTag.Experimental | UiTag.Dev, "Round 10's guided grid: it streaks at silhouettes.");
+        }
+        ui_slider("fmv_depth_soften", "Edge softening (depth texels)##fmv3d", ref _fmv_depth_soften, 0f, 1.5f, "%.1f", UiTag.None, null, 120f); ImGui.SameLine();
+        ui_slider("fmv_depth_smooth", "shimmer smoothing##fmv3d", ref _fmv_depth_smooth, 0f, 0.95f, "%.2f", UiTag.None, "Less shimmer, within a shot.", 160f);
         fmv3d_limits(out float pop, out float range, out bool pl, out bool rl);
         float ds = Math.Max(_xr_screen_dist, 0.6f);
-        ImGui.SameLine(); ImGui.TextDisabled(esc(FormattableString.Invariant($"disparity {fmv3d_disparity(ds - pop):+0.00;-0.00} deg in front{(pl ? $" (pop-out limited to {pop:0.00} m: 1 deg at this screen distance)" : "")}, {fmv3d_disparity(ds + range):+0.00;-0.00} deg behind{(rl ? $" (range limited to {range:0.0} m: 1.5 deg)" : "")}")));
+        ImGui.TextDisabled(esc(FormattableString.Invariant($"disparity {fmv3d_disparity(ds - pop):+0.00;-0.00} deg in front{(pl ? $" (pop-out limited to {pop:0.00} m: 1 deg at this screen distance)" : "")}, {fmv3d_disparity(ds + range):+0.00;-0.00} deg behind{(rl ? $" (range limited to {range:0.0} m: 1.5 deg)" : "")}")));
         string note = fmv3d_text(1);
         if (note.Length > 0) ImGui.TextDisabled("  " + esc(note));
     }
 
-    /// <summary>The Debug header's line (after the FMV sync line), the tight field of view and the sync test knob.</summary>
+    /// <summary>Developer > Rendering: the relief's line (after the FMV sync line), the A/B and test knobs, the tight field of view.</summary>
     private void fmv3d_debug_ui() {
         if (_fn_fmv3d_text == null) return;
         ImGui.TextDisabled(esc(fmv3d_text(0)));
@@ -138,8 +143,7 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.Checkbox("each frame to its own range (old; A/B)##fmv3d", ref _fmv_depth_per_frame); ImGui.SameLine();
             ImGui.Checkbox("old cut ramp (flat at every cut; A/B)##fmv3d", ref _fmv_depth_old_cuts); ImGui.SameLine();
             ImGui.Checkbox("old causal filter (EMA, lags; A/B)##fmv3d", ref _fmv_depth_causal);
-            ImGui.RadioButton("FMV 3D: 640 grid, guided (round 10; experimental: streaks at silhouettes)##fmv3dgrid", ref _fmv_depth_grid, 2);
-            ImGui.SameLine(); ImGui.TextDisabled("(the grid choice in the 3D FMV section returns to the others)");
+            ImGui.TextDisabled("(the guided 640 grid is the third depth grid choice in Movies > 3D movies, in developer mode)");
             ImGui.Checkbox("edge fill (experimental)##fmv3d", ref _fmv_depth_edges); ImGui.SameLine();
             ImGui.Checkbox("3x3 median##fmv3d", ref _fmv_depth_median); ImGui.SameLine(); ImGui.SetNextItemWidth(120);
             ImGui.SliderFloat("edge band (pop-out only)##fmv3d", ref _fmv_depth_edge_band, 0.01f, 0.15f, "%.3f");

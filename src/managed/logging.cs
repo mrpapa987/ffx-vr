@@ -24,7 +24,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool _diag_verbose_read;           // the launch read saw the key (settings_migrate)
     private const int k_log_cap_mb = 4, k_log_cap_verbose_mb = 64;
     private int _log_pushed = -1;              // the (diag_verbose, cap) last sent to native, as verbose | cap << 1 (-1: not yet)
-    private int _diag_on_n; private double _diag_on_at = -1;   // diag_on().Count, refreshed once a second for the main window's line
+    private int _diag_on_n;                    // diag_on().Count, refreshed with the F8 header (menu.cs menu_refresh)
     private bool _log_hello_done;
     private string _native_version = "?";
     private double _log_size_at; private long _log_size = -1;   // the Debug line's file size, read once a second
@@ -96,15 +96,8 @@ public sealed unsafe partial class FFXVRModule {
         d7_log(I($"settings: {(_ini_loaded_keys == 0 ? "no ffxvr.ini at start (defaults)" : I($"ffxvr.ini, {_ini_loaded_keys} keys, rev {_ini_rev_read}"))} | headset_autostart {(_headset_autostart ? 1 : 0)}, start_view {_start_view} | diagnostics on: {(on.Count > 0 ? string.Join(", ", on) : "none")} | log cap {log_cap_mb()} MB"));
     }
 
-    /// <summary>The main window's last line: the version, and a reminder while diagnostics are on.</summary>
-    private void log_main_ui() {
-        ImGui.TextDisabled(esc($"FFX VR {s_mod_version}   native {_native_version}"));
-        if (_now >= _diag_on_at) { _diag_on_at = _now + 1.0; _diag_on_n = diag_on().Count; }   // once a second, not a list every frame
-        int n = _diag_on_n;
-        if (n > 0) { ImGui.SameLine(); ImGui.TextDisabled(I($"| diagnostics: {n} on (Debug)")); }
-    }
-
-    /// <summary>Top of Debug: the versions, which diagnostics are on, diag_verbose, and the log's size.</summary>
+    /// <summary>Top of Developer > Logging & status: the versions, which diagnostics are on, diag_verbose (developer mode: the same key
+    /// as the header's Developer checkbox, vr-menu-design 2.5), and the log's size.</summary>
     private void log_debug_ui() {
         ImGui.TextDisabled(esc($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version}"));
         var on = diag_on();
@@ -114,7 +107,8 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.PopStyleColor(1);
         }
         else ImGui.TextDisabled("diagnostics: all off (the release default; tools\\set-logging.ps1 -Profile Dev turns the developer's set on)");
-        ImGui.Checkbox("verbose log (diag_verbose): the periodic summaries in ffxvr_diag.log, the camera trace, Ctrl+F9 dumps (any diagnostic on: log cap 64 MB instead of 4)", ref _diag_verbose);
+        ui_check("diag_verbose", "developer mode / verbose log (diag_verbose): the periodic summaries in ffxvr_diag.log, the camera trace, Ctrl+F9 dumps (any diagnostic on: log cap 64 MB instead of 4)", ref _diag_verbose, UiTag.None,
+                 "The same switch as the header's Developer checkbox: unticking it hides this tab. The camera trace file starts fresh at the next launch.");
         if (_now >= _log_size_at) {
             _log_size_at = _now + 1.0;
             try { var fi = new FileInfo(Path.Combine(Path.GetDirectoryName(_ini_path) ?? ".", "ffxvr_diag.log")); _log_size = fi.Exists ? fi.Length : -1; } catch { _log_size = -1; }

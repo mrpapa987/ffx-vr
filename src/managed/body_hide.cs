@@ -304,7 +304,7 @@ public sealed unsafe partial class FFXVRModule {
         root = td; return 1;
     }
 
-    /// <summary>The First person / follow section's body hide line (F8, Debug).</summary>
+    /// <summary>Developer > First person & body: the body hide line.</summary>
     private void body_hide_ui() {
         if (_fn_fp_self_set == null) return;
         if (_ride_att) { ImGui.TextDisabled(esc($"body hide: riding (the chocobo rule, radius {_ride_hide_radius:F1})")); return; }
