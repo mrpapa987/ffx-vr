@@ -131,12 +131,12 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>The last item is hovered for a tooltip: build and marshal tooltip text only then (review N1: nothing per frame).</summary>
     private static bool tip_hovered() => ImGui.IsItemHovered(ImGuiHoveredFlags.ForTooltip);
     /// <summary>The last item's tooltip, only while it is hovered (s goes through esc: a '%' is text).</summary>
-    private static void ui_tip(string s) { if (tip_hovered()) ImGui.SetTooltip(esc(s)); }
+    private void ui_tip(string s) { if (tip_hovered()) vrp_tooltip(s); }   // (vr-menu S2: under the item on the headset's panel)
     /// <summary>After the widget: its tooltip (the help, then the ini key; "" = a session-only control) and its tags.</summary>
     private void ui_after(string key, UiTag tags, string? tip) {
         if (tip_hovered()) {
             string k = key.Length > 0 ? "ini: " + key : "not saved (this session only)";
-            ImGui.SetTooltip(esc(string.IsNullOrEmpty(tip) ? k : tip + "\n" + k));
+            vrp_tooltip(string.IsNullOrEmpty(tip) ? k : tip + "\n" + k);
         }
         if ((tags & UiTag.Experimental) != 0) ui_tag("experimental", "Experimental: it may change or misbehave. Tell the developer what you see.");
         if ((tags & UiTag.NextLaunch) != 0 && _nl_pending.Contains(key)) ui_tag("next launch", "Saved now; it takes effect at the next launch of the game.");
@@ -243,14 +243,14 @@ public sealed unsafe partial class FFXVRModule {
         if (st.Length > 0) ui_tip(st);
         ImGui.SameLine(Math.Max(right - devw, ImGui.GetItemRectMax().X - ImGui.GetWindowPos().X + sp));
         ImGui.Checkbox("Developer", ref _diag_verbose);   // developer mode = diag_verbose (design 2.5); its tooltip is built only on hover
-        if (tip_hovered()) ImGui.SetTooltip(esc(k_dev_tip + (_diag_on_n > 0 ? I($"\ndiagnostics on: {_diag_on_n} ({_diag_on_list})") : "\ndiagnostics: all off") + "\nini: diag_verbose"));
+        if (tip_hovered()) vrp_tooltip(k_dev_tip + (_diag_on_n > 0 ? I($"\ndiagnostics on: {_diag_on_n} ({_diag_on_list})") : "\ndiagnostics: all off") + "\nini: diag_verbose");
 
         if (_perf_short.Length > 0) { ImGui.TextDisabled(esc(_perf_short)); ui_tip(_perf_full); ImGui.SameLine(); }
         ImGui.TextDisabled(esc($"FFX VR {s_mod_version}"));
-        if (tip_hovered()) ImGui.SetTooltip(esc($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version}"));
+        if (tip_hovered()) vrp_tooltip($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version}");
         if (_diag_on_n > 0) {
             ImGui.SameLine(); ImGui.TextColored(k_tag_amber, I($"log: {_diag_on_n} on"));
-            if (tip_hovered()) ImGui.SetTooltip(esc($"diagnostics on: {_diag_on_list}. A player's install has them all off: tools\\set-logging.ps1 -Profile Release"));
+            if (tip_hovered()) vrp_tooltip($"diagnostics on: {_diag_on_list}. A player's install has them all off: tools\\set-logging.ps1 -Profile Release");
         }
         if (_diag_verbose && !_verbose_at_launch) ImGui.TextDisabled("Verbose log on for this session. The camera trace starts fresh at the next launch.");
 
@@ -267,7 +267,7 @@ public sealed unsafe partial class FFXVRModule {
         if (over >= 0) { int e = _perf_full.IndexOf('\n', over + 1); ui_warn(e > 0 ? _perf_full[(over + 1)..e] : _perf_full[(over + 1)..], k_amber); }
         if (_nl_pending.Count > 0) {
             ImGui.TextColored(k_amber, I($"{_nl_pending.Count} change{(_nl_pending.Count == 1 ? " applies" : "s apply")} at the next launch"));
-            if (tip_hovered()) ImGui.SetTooltip(esc("Saved now, applied when the game next starts (the hooks they need are installed at launch): " + string.Join(", ", _nl_pending)));
+            if (tip_hovered()) vrp_tooltip("Saved now, applied when the game next starts (the hooks they need are installed at launch): " + string.Join(", ", _nl_pending));
         }
         if (!_diag_verbose && _dev_off_n > 0) {
             ImGui.TextDisabled(I($"{_dev_off_n} developer setting{(_dev_off_n == 1 ? " is" : "s are")} not at the default (turn on Developer to see them)"));
@@ -595,7 +595,7 @@ public sealed unsafe partial class FFXVRModule {
             if (_fn_dream_status != null) ImGui.TextDisabled("flashback filter: " + esc(dream_status_text()));
             if (_fn_backdrop_draws != null) ImGui.TextDisabled($"backdrop draws seen: {_fn_backdrop_draws()}");
             if (_fn_panel_state != null)   // vr-menu S2
-                ImGui.TextDisabled(I($"menu panel: {(_vrp_available ? "available" : "not available")}, {(_vrp_shown ? "shown" : "not shown")}, {_vrp_state[8]:F2} x {_vrp_state[9]:F2} m at {_vrp_state[10]:F2} m, scale {_vrp_state[5]:F2}, grips latched {_vrp_latched}, grabs {_vrp_state[6]:F0}, pairing misses {_vrp_state[7]:F0}, slide {_vrp_state[11]:F0} deg"));
+                ImGui.TextDisabled(I($"menu panel: {(_vrp_available ? "available" : "not available")}, {(_vrp_shown ? "shown" : "not shown")}, {_vrp_state[8]:F2} x {_vrp_state[9]:F2} m at {_vrp_state[10]:F2} m, scale {_vrp_state[5]:F2}, grips latched {_vrp_latched}, grabs {_vrp_state[6]:F0}, misses {_vrp_state[7]:F0}, slide {_vrp_state[11]:F0} deg"));
             if (_xr_want && _fn_haze_status != null) ImGui.TextDisabled("heat haze: " + esc(haze_live_text()));
             if ((_s3_blitz || _s3_all) && _s3_auto && _fn_screen3d_status != null) {
                 int vis; float nd, sd, pl, sp; _fn_screen3d_status(&vis, &nd, &sd, &pl, &sp);

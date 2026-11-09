@@ -265,8 +265,8 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("od_gest_lulu", "Lulu: circles for Fury##odg", ref _od_gest_lulu, UiTag.None, "Draw circles with either controller to spin Fury."); ImGui.SameLine();
         ui_slider("od_circle_cm", "smallest circle (cm)##odg", ref _od_circle_cm, 1f, 20f, "%.0f", UiTag.None, null, 140f); ImGui.SameLine();
         ImGui.SetNextItemWidth(120f);
-        if (ImGui.BeginCombo("stick for Fury##odg", k_odg_stick[_od_lulu_stick])) {
-            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too
+        if (vrp_begin_combo("stick for Fury##odg", k_odg_stick[_od_lulu_stick])) {   // (vr-menu S2: its list draws its own background on the headset's panel)
+            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too, with its background
             for (int i = 0; i < 3; i++) if (ImGui.Selectable(k_odg_stick[i], i == _od_lulu_stick)) _od_lulu_stick = i;
             ImGui.EndCombo();
         }
@@ -285,7 +285,7 @@ public sealed unsafe partial class FFXVRModule {
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }
         // the owner's request (9 Nov): the game's own debug flag, for practice, without developer mode (it was the Developer tab's test aid)
-        ui_check("", "Overdrives always ready (the game's debug flag; for practice, clears at battle end)##odar", ref _od_always_ready, UiTag.None,
+        ui_check("", "Overdrives always ready (the game's debug flag; set in every battle while ticked)##odar", ref _od_always_ready, UiTag.None,
                  "Sets the game's own \"overdrive always available\" flag in every battle this session while ticked; the flag is cleared at each battle's end "
                + "and when you untick it. Not saved. While it is on the overdrive gauge is not spent, so a save made later keeps a full gauge.");
         if (_od_always_wrote) { ImGui.SameLine(); ImGui.TextDisabled("set in this battle"); }
@@ -295,7 +295,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>F8 > Overdrives > Bushido targets: Practice targets (works with the gestures off too) and the targets' layout.</summary>
     private void odt_ui() {
         if (ImGui.Button("Practice targets##odt") && _fn_odt_practice != null) _fn_odt_practice(1);
-        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) ImGui.SetTooltip("A random 3-8 Bushido symbols and a 4 s bar, any time with the headset on (no overdrive window open): the blades, the hits and the buzz as in battle, nothing is sent to the game. With the menu panel in the headset it slides about 30 degrees aside for the round, then back; otherwise close F8 after pressing (its layer is drawn over the 3D view, plates included).");
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.None)) vrp_tooltip("A random 3-8 Bushido symbols and a 4 s bar, any time with the headset on (no overdrive window open): the blades, the hits and the buzz as in battle, nothing is sent to the game. With the menu panel in the headset it slides aside until it clears the targets (or hides, if that is too far), then comes back; otherwise close F8 after pressing (its layer is drawn over the 3D view, plates included).");
         string replay = odg_text(5);
         ImGui.SameLine();
         if (replay.Length == 0) ImGui.BeginDisabled(true);

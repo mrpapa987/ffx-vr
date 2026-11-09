@@ -551,8 +551,8 @@ public sealed unsafe partial class FFXVRModule {
         HandPack? sel = hands2_find(_vr_hands_pack);
         ImGui.Text("hand model:"); ImGui.SameLine(); ImGui.SetNextItemWidth(340);
         string preview = sel != null ? sel.label : _vr_hands_pack + " (not found)";
-        if (ImGui.BeginCombo("##h2pk", preview)) {
-            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too
+        if (vrp_begin_combo("##h2pk", preview)) {   // (vr-menu S2: its list draws its own background on the headset's panel)
+            vrp_union_popup();   // vr-menu S2: the list shows on the menu panel too, with its background
             for (int i = 0; i < _h2_packs.Count; i++) {
                 HandPack k = _h2_packs[i];
                 bool ok = k.usable;
@@ -560,8 +560,8 @@ public sealed unsafe partial class FFXVRModule {
                 if (ImGui.Selectable(k.label + (ok ? "" : "  (cannot be used)") + "##h2pk" + i.ToString(CI), sel == k) && ok) _vr_hands_pack = k.id;
                 if (!ok) ImGui.EndDisabled();
                 if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
-                    ImGui.SetTooltip(esc((ok ? "" : "Cannot be used: " + (k.error ?? k.native_error) + "\n") + "folder hands\\" + k.id + (k.source.Length > 0 ? "\nsource: " + k.source : "")
-                                         + (k.priv ? "\nMade from a model you own: keep it on this PC, do not share it." : "")));
+                    vrp_tooltip((ok ? "" : "Cannot be used: " + (k.error ?? k.native_error) + "\n") + "folder hands\\" + k.id + (k.source.Length > 0 ? "\nsource: " + k.source : "")
+                                         + (k.priv ? "\nMade from a model you own: keep it on this PC, do not share it." : ""));
             }
             if (_h2_packs.Count == 0) ImGui.TextDisabled("no hand packs in the mod folder's hands\\ (reinstall the mod)");
             ImGui.EndCombo();

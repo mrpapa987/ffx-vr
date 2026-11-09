@@ -5,8 +5,11 @@ namespace FFXVR;
 // vr-menu S2 (research vr-menu-design.md section 3, in the session scratchpad): the F8 window's own panel in the headset. While the
 // headset is on (and the ImGui layer and vr_menu_panel are on, and native has the panel ready) the F8 window is drawn as a separate
 // ImGui window "FFX VR###ffxvr_vr" at the right edge of the screen, 30 x 34 em, opaque, with bigger padding; every frame its rectangle
-// (and that of a combo list it opened, the window's own beside it) goes to native (ffxvr_panel_set), which crops it out of the ImGui
-// capture 1:1 into a world-locked quad fixed in the room (ffxvr_native.cpp vpanel_*; ffxvr_panel.h). The flat window keeps its own place and size in imgui.ini.
+// (and that of a combo list or tooltip it opened, the window's own beside it) goes to native (ffxvr_panel_set), which sends every
+// ImGui draw clipped inside it into the panel's own capture and shows that 1:1 as a world-locked quad fixed in the room
+// (ffxvr_native.cpp vpanel_*; ffxvr_panel.h). The head-locked ImGui layer keeps everything else (the save screen, F7). ImGui draws a
+// top-level window's decorations with the whole display as the clip, so this window and its popups draw none: their backgrounds
+// are drawn here, clipped to themselves (review S1). The flat window keeps its own place and size in imgui.ini.
 //
 //   vr_menu_panel     1 (default) / 0: 0 keeps the F8 window on the head-locked ImGui layer, as before S2 (a way back)
 //   vr_menu_distance  0.4..2.5 m (1.0): where the panel opens, ahead of the eyes (level)
@@ -15,7 +18,8 @@ namespace FFXVR;
 //   The grab writes the three: let go of the panel and they become where it was left (and its size); the next open uses them.
 //
 // Opening: F8 (keyboard only, the owner's decision). Where it was if that is within 50 degrees of the gaze and 3 m, else in front.
-// Home, the headset's recentre and "Bring here" put it in front again. Practice targets slides it 30 degrees aside for the round.
+// Home, the headset's recentre and "Bring here" put it in front again. A Bushido targets round (Practice targets or a real one)
+// slides it aside until it clears the targets (about 53 degrees at the defaults), or hides it for the round when that is too far.
 public sealed unsafe partial class FFXVRModule {
 
     private bool  _vr_menu_panel = true;        // ini vr_menu_panel
@@ -28,6 +32,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _vrp_drawing, _vrp_drawn;     // the headset's window is being drawn / was drawn this frame (its rectangle is valid)
     private float _vrp_x0, _vrp_y0, _vrp_x1, _vrp_y1, _vrp_em;   // the window and the popups it opened this frame (ImGui coordinates)
     private float _vrp_wx0, _vrp_wy0, _vrp_wx1, _vrp_wy1;        // the window alone (the panel's pose is its centre: it stays put when a list opens)
+    private Vector4 _vrp_popup_bg;                               // the popup background colour while vrp_popup_push hides ImGui's own
     private readonly float[] _vrp_state = new float[12];
     private readonly float[] _vrp_set = new float[14];
     private delegate* unmanaged[Cdecl]<int, float*, int, void> _fn_panel_set;     // ABI 58
@@ -72,26 +77,80 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.SetNextWindowSize(size, ImGuiCond.Always);
         Vector4 bg = *ImGui.GetStyleColorVec4(ImGuiCol.WindowBg); bg.W = 1f;   // opaque: compresses cleanly in Virtual Desktop's video
         var st = ImGui.GetStyle();
-        ImGui.PushStyleColor(ImGuiCol.WindowBg, bg);
         ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, st.FramePadding * 1.5f);
         ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, st.ItemSpacing * 1.25f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0f);   // (the border is a decoration, clipped to the display)
         _vrp_drawing = true;
         try {
-            if (ImGui.Begin("FFX VR###ffxvr_vr", ref _window_open, ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings | ImGuiWindowFlags.NoDocking)) {
+            // no title bar, background, border or scrollbar of ImGui's own: they would be clipped to the whole display and stay on the
+            // head-locked layer (review S1); F8 closes it, the header says what it is
+            if (ImGui.Begin("FFX VR###ffxvr_vr", ref _window_open, ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoSavedSettings
+                            | ImGuiWindowFlags.NoDocking | ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoBackground | ImGuiWindowFlags.NoScrollbar)) {
                 Vector2 p = ImGui.GetWindowPos(), s = ImGui.GetWindowSize();
+                vrp_fill(p, s, bg);
                 _vrp_x0 = p.X; _vrp_y0 = p.Y; _vrp_x1 = p.X + s.X; _vrp_y1 = p.Y + s.Y; _vrp_em = ImGui.GetFontSize(); _vrp_drawn = true;
                 _vrp_wx0 = _vrp_x0; _vrp_wy0 = _vrp_y0; _vrp_wx1 = _vrp_x1; _vrp_wy1 = _vrp_y1;
                 draw_window_body();
             }
         }
-        finally { ImGui.End(); _vrp_drawing = false; ImGui.PopStyleVar(2); ImGui.PopStyleColor(1); }
+        finally { ImGui.End(); _vrp_drawing = false; ImGui.PopStyleVar(3); }
     }
 
-    /// <summary>Inside a popup the headset's window opened (a combo list): its rectangle joins the crop, so the list shows on the
-    /// panel too (design 3.6; tooltips follow the mouse and wait for S3's pointer).</summary>
+    /// <summary>The current window's background, drawn first in its draw list and clipped to its own rectangle (so native routes it to
+    /// the panel with the rest of the window).</summary>
+    private static void vrp_fill(Vector2 p, Vector2 s, Vector4 bg) {
+        ImDrawListPtr dl = ImGui.GetWindowDrawList();
+        dl.PushClipRect(p, p + s, false);
+        dl.AddRectFilled(p, p + s, ImGui.GetColorU32(bg));
+        dl.PopClipRect();
+    }
+
+    /// <summary>Before a popup of the headset's window begins (BeginCombo, BeginTooltip): ImGui's own background and border hidden (both
+    /// are clipped to the display); vrp_union_popup draws the background inside it. Returns whether it pushed (pass it to the pop).</summary>
+    private bool vrp_popup_push() {
+        if (!_vrp_drawing) return false;
+        _vrp_popup_bg = *ImGui.GetStyleColorVec4(ImGuiCol.PopupBg); _vrp_popup_bg.W = 1f;
+        ImGui.PushStyleColor(ImGuiCol.PopupBg, new Vector4(0f, 0f, 0f, 0f));   // alpha 0: ImGui adds no rectangle at all
+        ImGui.PushStyleVar(ImGuiStyleVar.PopupBorderSize, 0f);
+        return true;
+    }
+    private static void vrp_popup_pop(bool pushed) { if (pushed) { ImGui.PopStyleVar(1); ImGui.PopStyleColor(1); } }
+
+    /// <summary>A combo in the headset's window: BeginCombo with vrp_popup_push / _pop around it (the list then calls vrp_union_popup).</summary>
+    private bool vrp_begin_combo(string label, string preview) {
+        bool pushed = vrp_popup_push();
+        bool open = ImGui.BeginCombo(label, preview);
+        vrp_popup_pop(pushed);
+        return open;
+    }
+
+    /// <summary>A tooltip: in the headset's window it sits under the item, inside the window's width, wrapped, with its own background,
+    /// and joins the panel's rectangle (review N3: with stick navigation every helper's tooltip appears beside the nav item, and the
+    /// mouse is not where the panel is); elsewhere ImGui's SetTooltip.</summary>
+    private void vrp_tooltip(string s) {
+        if (!_vrp_drawing || !_vrp_drawn) { ImGui.SetTooltip(esc(s)); return; }
+        float em = ImGui.GetFontSize(), wrap = 24f * em, pad = ImGui.GetStyle().WindowPadding.X;
+        Vector2 a = ImGui.GetItemRectMin(), b = ImGui.GetItemRectMax();
+        float x = MathF.Max(_vrp_wx0, MathF.Min(a.X, _vrp_wx1 - wrap - 2f * pad));
+        ImGui.SetNextWindowPos(new Vector2(x, b.Y + 0.25f * em), ImGuiCond.Always);
+        bool pushed = vrp_popup_push();
+        bool open = ImGui.BeginTooltip();
+        vrp_popup_pop(pushed);
+        if (!open) return;
+        vrp_union_popup();
+        ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + wrap);
+        ImGui.TextUnformatted(s);
+        ImGui.PopTextWrapPos();
+        ImGui.EndTooltip();
+    }
+
+    /// <summary>First thing inside a popup the headset's window opened (a combo list, a tooltip): its background (vrp_popup_push hid
+    /// ImGui's), and its rectangle joins the panel's, so it shows on the panel too (design 3.6). Not on the frame it appears (review
+    /// N2): ImGui hides it then and it still has its last place, possibly a flat-window or F7 combo's.</summary>
     private void vrp_union_popup() {
-        if (!_vrp_drawing || !_vrp_drawn) return;
+        if (!_vrp_drawing || !_vrp_drawn || ImGui.IsWindowAppearing()) return;
         Vector2 p = ImGui.GetWindowPos(), s = ImGui.GetWindowSize();
+        vrp_fill(p, s, _vrp_popup_bg);
         _vrp_x0 = MathF.Min(_vrp_x0, p.X); _vrp_y0 = MathF.Min(_vrp_y0, p.Y); _vrp_x1 = MathF.Max(_vrp_x1, p.X + s.X); _vrp_y1 = MathF.Max(_vrp_y1, p.Y + s.Y);
     }
 
