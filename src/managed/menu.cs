@@ -247,7 +247,7 @@ public sealed unsafe partial class FFXVRModule {
         int over = _perf_full.IndexOf("\nOver the knee:", StringComparison.Ordinal);
         if (over >= 0) { int e = _perf_full.IndexOf('\n', over + 1); ui_warn(e > 0 ? _perf_full[(over + 1)..e] : _perf_full[(over + 1)..], k_amber); }
         if (_nl_pending.Count > 0) {
-            ImGui.TextColored(k_amber, I($"{_nl_pending.Count} change{(_nl_pending.Count == 1 ? "" : "s")} apply at the next launch"));
+            ImGui.TextColored(k_amber, I($"{_nl_pending.Count} change{(_nl_pending.Count == 1 ? " applies" : "s apply")} at the next launch"));
             ImGui.SetItemTooltip(esc("Saved now, applied when the game next starts (the hooks they need are installed at launch): " + string.Join(", ", _nl_pending)));
         }
         if (!_diag_verbose && _dev_off_n > 0) {
