@@ -5305,6 +5305,13 @@ static void unpatch_all() {
 }
 
 } // namespace
+// vr-menu S2 review S1: the F8 window's ImGui draws go to the menu panel's own capture (defined with the panel, vpanel_*; outside the
+// globals' anonymous namespace, as they are)
+bool g_vp_route_now = false;                 // the ImGui draw being re-issued is the panel's (ffxvr_on_draw, for eye2_begin)
+extern ID3D11RenderTargetView* g_vp_cap_rtv;
+static bool vpanel_route_draw();
+static void vpanel_route_shift();
+static void vpanel_route_unshift();
 
 static void ui_census_geometry();   // census helper, defined below ffxvr_on_draw's neighbours
 static void ui_pass_begin();        // the UI pass opener, defined with the clear hooks
@@ -8600,7 +8607,11 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         return 1;   // into the UI texture (eye2_begin handles it)
     }
     g_imgui_draw_now = (g_imgui_layer && g_overlay_phase && g_xr_want && g_imgui_rtv != nullptr && g_backbuffer && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_backbuffer);
-    if (g_imgui_draw_now) { g_imgui_draws_frame++; return 1; }   // into the ImGui layer texture (eye2_begin handles it)
+    if (g_imgui_draw_now) {   // into the ImGui layer texture, or the F8 window's into the menu panel's (eye2_begin handles it)
+        g_vp_route_now = vpanel_route_draw();
+        if (!g_vp_route_now) g_imgui_draws_frame++;
+        return 1;
+    }
     // Battle transition, render-thread truth (battle-transition.md 4.2). The capture is the overlay phase's draw into one target
     // that is not the backbuffer, without depth (BrokenScreen_capturedFrame: 0x6D4E20 runs first in the renderer frame, before
     // its first clear): tracked even while idle (pointer compares and the bind-time cache only), the first match per frame.
@@ -9210,7 +9221,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
         return 1;
     }
     if (g_ui_draw_now || g_imgui_draw_now) {
-        ID3D11RenderTargetView* target = g_imgui_draw_now ? g_imgui_rtv : g_ui_rtv;
+        ID3D11RenderTargetView* target = g_imgui_draw_now ? (g_vp_route_now ? g_vp_cap_rtv : g_imgui_rtv) : g_ui_rtv;   // vr-menu S2: the F8 window's draws to the menu panel's capture
         if (target == nullptr || g_ctx == nullptr) return 0;
         // saveui A: never captured with a null (blending off) state: such a draw goes to the backbuffer / the game's target only.
         // Checked before anything is saved or bound, so a refusal leaves the pipeline untouched.
@@ -9227,6 +9238,7 @@ extern "C" __declspec(dllexport) int ffxvr_eye2_begin(int pass) {
         g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rts, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // no depth: draw order is the layering; UAVs kept (R42, B9-4)
         g_e2s.om_swapped = true;
         g_ctx->OMSetBlendState(g_ui_blend, nullptr, 0xFFFFFFFF);
+        if (g_imgui_draw_now && g_vp_route_now) vpanel_route_shift();   // vr-menu S2: the window at (0, 0) of the panel's capture; eye2_end puts it back
         return 1;
     }
     if (!g_stereo || g_ctx == nullptr || g_device == nullptr) { g_e2_begin_fail++; return 0; }
@@ -9335,6 +9347,7 @@ extern "C" __declspec(dllexport) void ffxvr_eye2_end() {
     e2_restore();   // R11a: the saved real bindings, while g_in_eye2 is still true (the restore passes our detours)
     if (g_ui_pass_active_draw) {
         g_ui_pass_active_draw = false;
+        vpanel_route_unshift();   // vr-menu S2: the viewport and scissor a routed draw moved
         g_ctx->OMSetBlendState(g_saved_blend, g_saved_blend_factor, g_saved_sample_mask);
         if (g_saved_blend) { g_saved_blend->Release(); g_saved_blend = nullptr; }
         g_in_eye2 = false;
@@ -10491,11 +10504,14 @@ bool ffxvr_copy_pass(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, 
 // vr-menu S2 (research vr-menu-design.md section 3; the pure parts in ffxvr_panel.h, unit-tested): the F8 window's own panel,
 // fixed in the room. Managed draws the window at the right edge of the screen while the headset is on and sends its rectangle
 // every frame (ffxvr_panel_set, render thread: render_imgui after its ffxvr_begin_frame, which bumped g_frames and ran xr_tick).
-// The capture xr_tick submits holds the draws of the previous render_imgui, so the rectangle used is the one stamped with
-// g_frames - 1 (a mismatch shows no panel that frame and is counted). The crop goes 1:1 into the panel's 1536 x 1536 swapchain (ffxvr_xr.cpp swapchain 6) and is shown as a
-// world-locked quad in the reference space, facing the eye; its place in the full ImGui layer is made transparent. A grip
-// latches to the panel at its press edge when the controller points roughly at it or reaches it, moves it, and with the other
-// grip resizes it; a latched grip is hidden from every other grip use (vpanel_input). Practice targets slides it 30 degrees aside.
+// Fahrenheit's RenderDrawData follows in the same Present: each ImGui draw whose scissor lies inside that rectangle is re-issued
+// into the panel's own 1536 x 1536 capture instead of the ImGui layer's (vpanel_route_*; review S1: the head-locked layer keeps
+// whatever lies under the window, the save screen and F7 included, and needs no hole). The next xr_tick copies that capture 1:1
+// into the panel's swapchain (ffxvr_xr.cpp swapchain 6, made at the first open) and shows it as a world-locked quad in the
+// reference space, facing the eye. A grip latches to the panel at its press edge when the controller points roughly at it or
+// reaches it, moves it, and with the other grip resizes it; a latched grip is hidden from every other grip use (vrpad_take, the one
+// writer of g_vrpad, at every game frame and every stickrep extra frame). A Bushido targets round (Practice targets or a real one)
+// slides it aside, clear of the targets, or hides it for the round when that would be too far.
 static const char k_panel_hlsl[] =
     "Texture2D t : register(t0); SamplerState s : register(s0);\n"
     "struct V { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
@@ -10508,10 +10524,8 @@ static const char k_panel_hlsl[] =
     "    float4 p = t.Sample(s, i.uv);\n"
     "    float3 c = saturate(p.rgb / max(p.a, 1e-6));\n"
     "    return float4(p.a > 0.0 ? srgb_enc(srgb_dec(c) * p.a) : float3(0, 0, 0), p.a);\n"
-    "}\n"
-    "float4 ps_zero(V i) : SV_Target { return float4(0, 0, 0, 0); }\n";
-ID3D11PixelShader* g_vp_ps[3] = { nullptr, nullptr, nullptr };   // ps_crop, ps_crop_srgb, ps_zero
-ID3D11RasterizerState* g_vp_rs_scissor = nullptr;
+    "}\n";
+ID3D11PixelShader* g_vp_ps[2] = { nullptr, nullptr };   // ps_crop, ps_crop_srgb
 bool g_vp_pass_tried = false, g_vp_pass_ok = false;
 
 struct VpIn {   // managed's last ffxvr_panel_set
@@ -10523,11 +10537,23 @@ struct VpIn {   // managed's last ffxvr_panel_set
     uint32_t frame = 0;                             // g_frames at the call
 };
 VpIn g_vp_in;
+// The routing (render thread: ffxvr_panel_set, then ffxvr_on_draw / ffxvr_eye2_begin / _end for each of Fahrenheit's ImGui draws).
+ID3D11Texture2D* g_vp_cap_tex = nullptr; ID3D11RenderTargetView* g_vp_cap_rtv = nullptr;   // the panel's capture, 1536 x 1536 (~9.4 MB)
+bool g_vp_route_ok = false;                         // xr_tick: the draws that follow this hook may go to the panel's capture
+vpanel::Rect g_vp_rr, g_vp_rwr;                     // this frame's rectangle and the window's alone, backbuffer pixels (ffxvr_panel_set)
+uint32_t g_vp_rr_frame = 0;                         // g_frames at that ffxvr_panel_set
+float g_vp_bb_w = 0.f;                              // the backbuffer's width then (the em in capture pixels)
+vpanel::Rect g_vp_cap_r, g_vp_cap_wr;               // what the capture holds: the rectangles its draws were routed with (origin at 0, 0)
+uint32_t g_vp_cap_frame = 0;                        // ... and their frame
+uint32_t g_vp_draws_frame = 0, g_vp_draws_last = 0; // draws routed to it this frame / in the frame the capture holds
+bool g_vp_shifted = false; UINT g_vp_sv_nvp = 0, g_vp_sv_nsc = 0; D3D11_VIEWPORT g_vp_sv_vp = {}; D3D11_RECT g_vp_sv_sc = {};
+std::atomic<float> g_vp_curl_sq[2] = { { 0.f }, { 0.f } };   // review N1: a latched grip's own squeeze, for its hand's finger curl only
+// The panel.
 vpanel::Pose g_vp_pose = { { 0, 0, 0, 1 }, { 0, 0, 0 } };   // the panel this session (the reference space); g_vp_have: placed
 bool g_vp_have = false, g_vp_open_prev = false, g_vp_replace = false, g_vp_shown = false;
 float g_vp_scale = 1.f, g_vp_w = 0.f, g_vp_h = 0.f, g_vp_rem_dist = 1.f, g_vp_rem_height = -0.15f, g_vp_eye_d = 0.f;
 vpanel::Grab g_vp_grab; vpanel::Slide g_vp_slide;
-uint32_t g_vp_misses = 0, g_vp_ends = 0, g_vp_shown_10s = 0, g_vp_miss_10s = 0, g_vp_grab_10s = 0;
+uint32_t g_vp_misses = 0, g_vp_ends = 0, g_vp_shown_10s = 0, g_vp_miss_10s = 0, g_vp_grab_10s = 0, g_vp_routed_10s = 0;
 ULONGLONG g_vp_t_prev = 0;
 vpanel::Rect g_vp_crop;
 
@@ -10538,19 +10564,17 @@ static bool vpanel_pass_init() {
     HMODULE m = LoadLibraryW(L"d3dcompiler_47.dll");
     PFN_D3DCompile compile = m ? reinterpret_cast<PFN_D3DCompile>(GetProcAddress(m, "D3DCompile")) : nullptr;
     if (!compile) { diag("menu panel: D3DCompile not found: the F8 window stays on the head-locked layer"); return false; }
-    const char* entry[3] = { "ps_crop", "ps_crop_srgb", "ps_zero" };
+    const char* entry[2] = { "ps_crop", "ps_crop_srgb" };
     bool ok = true;
-    for (int k = 0; k < 3; ++k) {
+    for (int k = 0; k < 2; ++k) {
         ID3DBlob *pb = nullptr, *e = nullptr;
         const HRESULT h = compile(k_panel_hlsl, sizeof(k_panel_hlsl) - 1, "panel", nullptr, nullptr, entry[k], "ps_4_0", 0, 0, &pb, &e);
         if (SUCCEEDED(h)) { if (FAILED(g_device->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &g_vp_ps[k]))) g_vp_ps[k] = nullptr; pb->Release(); }
         if (g_vp_ps[k] == nullptr) { ok = false; diag("menu panel: %s compile / create failed 0x%08X: %s", entry[k], static_cast<unsigned>(h), e ? static_cast<const char*>(e->GetBufferPointer()) : ""); }
         if (e) e->Release();
     }
-    D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.ScissorEnable = TRUE; rd.DepthClipEnable = TRUE;
-    if (FAILED(g_device->CreateRasterizerState(&rd, &g_vp_rs_scissor))) { g_vp_rs_scissor = nullptr; ok = false; diag("menu panel: the scissor state failed"); }
     g_vp_pass_ok = ok && g_copy_vs != nullptr && g_copy_smp != nullptr;
-    diag("menu panel: %s", g_vp_pass_ok ? "ready (1:1 crop, premultiplied; the hole in the ImGui layer)" : "NOT available: the F8 window stays on the head-locked layer");
+    diag("menu panel: %s", g_vp_pass_ok ? "ready (the F8 window's draws into its own capture, 1:1 crop, premultiplied)" : "NOT available: the F8 window stays on the head-locked layer");
     return g_vp_pass_ok;
 }
 /// The shader view of a source texture (the copy pass's cache); null when it cannot be sampled.
@@ -10563,16 +10587,19 @@ static ID3D11ShaderResourceView* vpanel_srv(ID3D11Texture2D* src) {
     g_plain_srvs[src] = in;
     return in;
 }
-/// The pipeline state the panel's two passes touch, saved and restored (as ffxvr_copy_pass does, plus the scissor rectangles).
+/// The pipeline state the panel's copy touches, saved and restored (as ffxvr_copy_pass does). The viewport and the scissor are
+/// put back only when one was bound (review N9: none bound stays none).
 struct VpPassState {
     ID3D11RenderTargetView* rtv[8] = {}; ID3D11DepthStencilView* dsv = nullptr;
-    UINT nvp = 1; D3D11_VIEWPORT vp = {}; UINT nsc = 1; D3D11_RECT sc = {};
+    UINT nvp = 0; D3D11_VIEWPORT vp = {}; UINT nsc = 0; D3D11_RECT sc = {};
     ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11GeometryShader* gs = nullptr;
     ID3D11ShaderResourceView* srv = nullptr; ID3D11SamplerState* smp = nullptr;
     ID3D11BlendState* bs = nullptr; float bf[4] = {}; UINT mask = 0; ID3D11DepthStencilState* ds = nullptr; UINT ref = 0;
     ID3D11RasterizerState* rs = nullptr; ID3D11InputLayout* il = nullptr; D3D11_PRIMITIVE_TOPOLOGY topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
     void save() {
-        g_ctx->OMGetRenderTargets(8, rtv, &dsv); g_ctx->RSGetViewports(&nvp, &vp); g_ctx->RSGetScissorRects(&nsc, &sc);
+        g_ctx->OMGetRenderTargets(8, rtv, &dsv);
+        g_ctx->RSGetViewports(&nvp, nullptr); if (nvp) { nvp = 1; g_ctx->RSGetViewports(&nvp, &vp); }
+        g_ctx->RSGetScissorRects(&nsc, nullptr); if (nsc) { nsc = 1; g_ctx->RSGetScissorRects(&nsc, &sc); }
         g_ctx->VSGetShader(&vs, nullptr, nullptr); g_ctx->PSGetShader(&ps, nullptr, nullptr); g_ctx->GSGetShader(&gs, nullptr, nullptr);
         g_ctx->PSGetShaderResources(0, 1, &srv); g_ctx->PSGetSamplers(0, 1, &smp);
         g_ctx->OMGetBlendState(&bs, bf, &mask); g_ctx->OMGetDepthStencilState(&ds, &ref); g_ctx->RSGetState(&rs);
@@ -10615,23 +10642,67 @@ static bool vpanel_copy_crop(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, 
     st.restore();
     return true;
 }
-/// XrHost clear_rect (ffxvr_xr.cpp, the full ImGui layer): the rectangle of dst made transparent (a scissored draw of zero).
-static bool vpanel_clear_rect(ID3D11RenderTargetView* dst, UINT w, UINT h, int x, int y, int rw, int rh) {
-    if (!g_vp_pass_ok || dst == nullptr || g_ctx == nullptr || rw <= 0 || rh <= 0 || w == 0 || h == 0) return false;
-    VpPassState st; st.save();
-    InEye2 guard;
-    ID3D11RenderTargetView* rt[1] = { dst };
-    g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);
-    D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
-    g_ctx->RSSetViewports(1, &vp);
-    const D3D11_RECT sc = { x, y, x + rw, y + rh };
-    g_ctx->RSSetScissorRects(1, &sc);
-    g_ctx->VSSetShader(g_copy_vs, nullptr, 0); g_ctx->PSSetShader(g_vp_ps[2], nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
-    g_ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(g_vp_rs_scissor);
-    g_ctx->IASetInputLayout(nullptr); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_ctx->Draw(3, 0);
-    st.restore();
+
+// -- the panel's capture and the routing of the F8 window's draws (review S1) ---------------------------------------------------
+/// The capture: 1536 x 1536 in the backbuffer's format (so the ImGui blend writes what it writes into the ImGui layer's capture),
+/// made while the panel is on in a running headset, transparent when new.
+static bool vpanel_cap_ensure() {
+    if (g_backbuffer == nullptr || g_device == nullptr) return false;
+    D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+    bd.Width = vpanel::k_side; bd.Height = vpanel::k_side;
+    ID3D11Texture2D* const was = g_vp_cap_tex;
+    ensure_copy(g_vp_cap_tex, g_vp_cap_rtv, bd);
+    if (g_vp_cap_tex != was && g_vp_cap_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_vp_cap_rtv, clear); }
+    if (g_vp_cap_tex != was) diag("menu panel: capture %s (%ux%u, format %d)", g_vp_cap_tex && g_vp_cap_rtv ? "made" : "FAILED", bd.Width, bd.Height, static_cast<int>(bd.Format));
+    return g_vp_cap_tex != nullptr && g_vp_cap_rtv != nullptr;
+}
+static void vpanel_cap_release() {
+    g_vp_route_ok = false;
+    if (g_vp_cap_tex) g_plain_srvs_forget(g_vp_cap_tex);
+    if (g_vp_cap_rtv) { g_vp_cap_rtv->Release(); g_vp_cap_rtv = nullptr; }
+    if (g_vp_cap_tex) { g_vp_cap_tex->Release(); g_vp_cap_tex = nullptr; }
+    g_vp_cap_frame = 0; g_vp_draws_frame = g_vp_draws_last = 0;
+}
+/// xr_tick, after the submit (with clear_imgui): the capture starts clean for the draws that follow.
+static void vpanel_cap_clear() {
+    if (g_vp_cap_rtv == nullptr || g_vp_draws_last == 0) return;
+    InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_vp_cap_rtv, clear);
+}
+/// ffxvr_on_draw, for each ImGui draw into the captures (render thread, Fahrenheit's RenderDrawData): the panel's when the panel is
+/// armed, this frame's rectangle came in this frame and the draw's scissor (ImGui's backend sets one per draw command) lies inside
+/// it. Counted here; the ImGui layer counts the others.
+static bool vpanel_route_draw() {
+    if (!g_vp_route_ok || g_vp_cap_rtv == nullptr || g_vp_rr_frame != g_frames || vpanel::empty(g_vp_rr) || g_ctx == nullptr) return false;
+    UINT n = 0; g_ctx->RSGetScissorRects(&n, nullptr);
+    if (n == 0) return false;
+    n = 1; D3D11_RECT sc = {}; g_ctx->RSGetScissorRects(&n, &sc);
+    if (!vpanel::scissor_inside(static_cast<int>(sc.left), static_cast<int>(sc.top), static_cast<int>(sc.right), static_cast<int>(sc.bottom), g_vp_rr, vpanel::k_route_slack)) return false;
+    if (g_vp_cap_frame != g_frames) { g_vp_cap_frame = g_frames; g_vp_cap_r = g_vp_rr; g_vp_cap_wr = g_vp_rwr; }
+    g_vp_draws_frame++;
     return true;
+}
+/// ffxvr_eye2_begin, after binding the panel's capture for a routed draw: the viewport and the scissor moved by the rectangle's
+/// origin, so the window lands at (0, 0) of the capture. ImGui's backend sets the viewport once per RenderDrawData and the scissor
+/// per draw: vpanel_route_unshift (ffxvr_eye2_end) puts both back for the next draw and for the backbuffer.
+static void vpanel_route_shift() {
+    g_vp_sv_nvp = 0; g_ctx->RSGetViewports(&g_vp_sv_nvp, nullptr); if (g_vp_sv_nvp) { g_vp_sv_nvp = 1; g_ctx->RSGetViewports(&g_vp_sv_nvp, &g_vp_sv_vp); }
+    g_vp_sv_nsc = 0; g_ctx->RSGetScissorRects(&g_vp_sv_nsc, nullptr); if (g_vp_sv_nsc) { g_vp_sv_nsc = 1; g_ctx->RSGetScissorRects(&g_vp_sv_nsc, &g_vp_sv_sc); }
+    const LONG ox = g_vp_cap_r.x, oy = g_vp_cap_r.y;
+    if (g_vp_sv_nvp) {
+        D3D11_VIEWPORT vp = g_vp_sv_vp; vp.TopLeftX -= static_cast<float>(ox); vp.TopLeftY -= static_cast<float>(oy);
+        g_ctx->RSSetViewports(1, &vp);
+    }
+    if (g_vp_sv_nsc) {
+        const D3D11_RECT sc = { (std::max)(0L, g_vp_sv_sc.left - ox), (std::max)(0L, g_vp_sv_sc.top - oy), (std::max)(0L, g_vp_sv_sc.right - ox), (std::max)(0L, g_vp_sv_sc.bottom - oy) };
+        g_ctx->RSSetScissorRects(1, &sc);
+    }
+    g_vp_shifted = true;
+}
+static void vpanel_route_unshift() {
+    if (!g_vp_shifted) return;
+    g_vp_shifted = false;
+    if (g_vp_sv_nvp) g_ctx->RSSetViewports(1, &g_vp_sv_vp);
+    if (g_vp_sv_nsc) g_ctx->RSSetScissorRects(1, &g_vp_sv_sc);
 }
 
 /// The eye centre and the head's orientation (the views located at the last xr_frame); false before a pose is known.
@@ -10640,25 +10711,52 @@ static bool vpanel_head(vpanel::V3* eye, vpanel::Q* hq) {
     *hq = vpanel::Q{ g_xr_raw_q[0], g_xr_raw_q[1], g_xr_raw_q[2], g_xr_raw_q[3] };
     return g_xr_active && vpanel::finite3(*eye) && vpanel::finiteq(*hq) && (hq->x != 0.f || hq->y != 0.f || hq->z != 0.f || hq->w != 0.f);
 }
-static void vpanel_off() {   // the headset off: nothing is kept (a new session starts in front)
+static void vpanel_off() {   // the headset off: nothing is kept (a new session starts in front; the capture is freed)
     vpanel::reset(g_vp_grab); g_vp_slide = vpanel::Slide{}; g_vp_have = false; g_vp_open_prev = false; g_vp_shown = false;
+    for (auto& c : g_vp_curl_sq) c.store(0.f, std::memory_order_relaxed);
+    vpanel_cap_release();
 }
-/// xr_tick, before xr_frame: this frame's panel into ui (ptex, the crop, the pose and size, the hole). cap_ok: the capture holds the
-/// previous Present's ImGui draws (what the ImGui layer's tex2 needs too).
-static void vpanel_frame(XrUiPanel& ui, bool cap_ok) {
+/// A targets round's start (review S2, N7): where the panel goes, from its azimuth against the round's forward (latched by odt at
+/// the open), its angular half-width and the targets' extent (the round's own layout). Not placed yet or no size: hidden.
+static vpanel::SlidePlan vpanel_plan(vpanel::V3 eye, vpanel::Q hq) {
+    if (!g_vp_have || !(g_vp_w > 0.f)) { vpanel::SlidePlan p; p.hide = true; return p; }
+    const odt::Round& r = g_odt.r;
+    const float fyaw = r.fr.ok ? atan2f(-r.fr.f.x, -r.fr.f.z) : vpanel::head_yaw(hq);
+    const vpanel::V3 v = vpanel::sub(g_vp_pose.p, eye);
+    const float a0 = vpanel::wrap_pi(atan2f(-v.x, -v.z) - fyaw) * 180.f / vpanel::k_pi;
+    const float hd = sqrtf(v.x * v.x + v.z * v.z);
+    const float hw = atan2f(0.5f * g_vp_w, (std::max)(hd, 0.05f)) * 180.f / vpanel::k_pi;
+    return vpanel::slide_plan(a0, hw, vpanel::targets_half_deg(r.g.D, r.g.H, r.g.spread, r.g.rad));
+}
+/// xr_tick, before xr_frame: this frame's panel into ui (ptex, the crop, the pose and size), and the routing armed for the draws
+/// that follow this hook.
+static void vpanel_frame(XrUiPanel& ui) {
     g_vp_shown = false;
-    const bool want = (g_vp_in.flags & 3) == 3;
+    g_vp_draws_last = g_vp_draws_frame; g_vp_draws_frame = 0;
+    g_vp_routed_10s += g_vp_draws_last;
+    const bool enabled = (g_vp_in.flags & 2) != 0;     // vr_menu_panel
+    const bool want = (g_vp_in.flags & 3) == 3;        // ... and the F8 window drawn for the headset
     if (!want) g_vp_open_prev = false;
     vpanel::V3 eye; vpanel::Q hq;
     const bool head = vpanel_head(&eye, &hq);
     const ULONGLONG now = GetTickCount64();
     const float dt = g_vp_t_prev ? static_cast<float>(now - g_vp_t_prev) / 1000.f : 0.f;
     g_vp_t_prev = now;
-    const bool practice = g_odt.r.on && g_odt.r.practice;
-    if (want && head && g_vp_pass_ok && g_imgui_layer && cap_ok && g_imgui_tex != nullptr && xr_panel_ready()) {
+    // the capture while the panel is on in a running headset (so the first open's draws already reach it); the swapchain at the
+    // first open (xr_panel_ensure, review N6)
+    const bool can = head && enabled && g_vp_pass_ok && g_imgui_layer && xr_panel_possible();
+    if (!enabled && g_vp_cap_tex != nullptr) vpanel_cap_release();
+    g_vp_route_ok = can && vpanel_cap_ensure();
+    const bool ready = g_vp_route_ok && want && xr_panel_ensure();
+    // a targets round: the plan at its start, the slide (or the hiding) until it ends
+    const bool round = g_odt.r.on;
+    vpanel::SlidePlan plan;
+    if (round && !g_vp_slide.active) plan = head ? vpanel_plan(eye, hq) : vpanel::SlidePlan{ 0.f, true };
+    vpanel::slide_step(g_vp_slide, round, plan, eye, dt);
+    if (ready) {
         // opened (or Home, the headset's recentre, "bring it here"); a re-place waits while a grip moves it (a latch is never dropped
         // here: a grip let go of the panel must stay hidden from the game until it is released)
-        if ((!g_vp_open_prev || g_vp_replace || !g_vp_have) && g_vp_grab.anchor == 0) {
+        if ((!g_vp_open_prev || g_vp_replace || !g_vp_have) && g_vp_grab.anchor == 0 && g_vp_slide.cur == 0.f) {
             const bool keep = g_vp_have && !g_vp_replace && vpanel::keep_pose(g_vp_pose, eye, hq);
             if (!keep) g_vp_pose = vpanel::place_front(eye, hq, g_vp_in.dist, g_vp_in.height);
             g_vp_have = true; g_vp_replace = false;
@@ -10666,45 +10764,43 @@ static void vpanel_frame(XrUiPanel& ui, bool cap_ok) {
                  vpanel::len(vpanel::sub(g_vp_pose.p, eye)), g_vp_pose.p.y - eye.y);
         }
         g_vp_open_prev = true;
-        if (g_vp_in.frame + 1 != g_frames) { g_vp_misses++; g_vp_miss_10s++; }   // the rectangle is not this capture's: no panel this frame
-        else {
-            D3D11_TEXTURE2D_DESC td; g_imgui_tex->GetDesc(&td);
-            const vpanel::Rect r = vpanel::crop(g_vp_in.r[0], g_vp_in.r[1], g_vp_in.r[2], g_vp_in.r[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(td.Width), static_cast<int>(td.Height));
-            vpanel::Rect wr = vpanel::crop(g_vp_in.wr[0], g_vp_in.wr[1], g_vp_in.wr[2], g_vp_in.wr[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(td.Width), static_cast<int>(td.Height));
+        // the capture holds the previous Present's routed draws: shown when they were routed with the rectangle of that frame
+        if (g_vp_cap_frame + 1 != g_frames || g_vp_draws_last == 0) { g_vp_misses++; g_vp_miss_10s++; }   // none reached it: no panel this frame
+        else if (!g_vp_slide.hide) {
+            const vpanel::Rect r{ 0, 0, (std::min)(g_vp_cap_r.w, vpanel::k_side), (std::min)(g_vp_cap_r.h, vpanel::k_side) };
+            vpanel::Rect wr{ g_vp_cap_wr.x - g_vp_cap_r.x, g_vp_cap_wr.y - g_vp_cap_r.y, g_vp_cap_wr.w, g_vp_cap_wr.h };   // the window in the capture
             if (vpanel::empty(wr)) wr = r;
-            if (!vpanel::empty(r)) {
+            if (!vpanel::empty(r) && g_vp_in.ds_w > 0.f && g_vp_bb_w > 0.f) {
                 if (g_vp_grab.anchor == 0) g_vp_scale = vpanel::clampf(std::isfinite(g_vp_in.scale) ? g_vp_in.scale : 1.f, vpanel::k_scale_min, vpanel::k_scale_max);   // the setting, except during a grab
-                const float em_cap = g_vp_in.em * static_cast<float>(td.Width) / g_vp_in.ds_w;
+                const float em_cap = g_vp_in.em * g_vp_bb_w / g_vp_in.ds_w;
                 const float mpp = vpanel::m_per_px(em_cap, g_vp_scale);
-                vpanel::slide_step(g_vp_slide, practice, g_vp_pose, eye, hq, dt);
                 const vpanel::Pose sp = vpanel::slid(g_vp_pose, g_vp_slide, eye);
-                ui.ptex = g_imgui_tex; ui.pcrop_x = r.x; ui.pcrop_y = r.y; ui.pcrop_w = r.w; ui.pcrop_h = r.h;
                 // the quad covers the window and its popups; the pose is the window's centre, which stays put while a list opens
                 float ox = 0.f, oy = 0.f; vpanel::crop_offset(wr, r, mpp, &ox, &oy);
                 const vpanel::V3 qc = vpanel::offset_centre(sp, ox, oy);
+                ui.ptex = g_vp_cap_tex; ui.pcrop_x = 0; ui.pcrop_y = 0; ui.pcrop_w = r.w; ui.pcrop_h = r.h;
                 ui.pq[0] = sp.q.x; ui.pq[1] = sp.q.y; ui.pq[2] = sp.q.z; ui.pq[3] = sp.q.w;
                 ui.pp[0] = qc.x; ui.pp[1] = qc.y; ui.pp[2] = qc.z;
                 ui.pw = r.w * mpp; ui.ph = r.h * mpp;
-                vpanel::hole_uv(r, static_cast<int>(td.Width), static_cast<int>(td.Height), ui.hole);
                 // the grab's rectangle is the window's (a grip on an open list latches only where the window is)
                 g_vp_shown = true; g_vp_w = wr.w * mpp; g_vp_h = wr.h * mpp; g_vp_crop = r; g_vp_shown_10s++;
                 g_vp_eye_d = vpanel::len(vpanel::sub(g_vp_pose.p, eye));
             }
         }
     }
-    else if (!practice) vpanel::slide_step(g_vp_slide, false, g_vp_pose, eye, hq, dt);   // a round over while hidden: back
     static ULONGLONG next = 0;
     if (now >= next) {
         next = now + 10000;
         if (g_vp_shown_10s + g_vp_miss_10s > 0)
-            diagv("panel: 10 s: shown %u frames, %.2f x %.2f m (crop %dx%d, scale %.2f), %.2f m from the eye, slide %.0f deg | pairing misses %u (session %u) | grabs ended %u (session %u), latched now %d",
-                  g_vp_shown_10s, g_vp_w, g_vp_h, g_vp_crop.w, g_vp_crop.h, g_vp_scale, g_vp_eye_d, g_vp_slide.cur, g_vp_miss_10s, g_vp_misses, g_vp_grab_10s, g_vp_ends, vpanel::mask(g_vp_grab));
-        g_vp_shown_10s = g_vp_miss_10s = g_vp_grab_10s = 0;
+            diagv("panel: 10 s: shown %u frames, %.2f x %.2f m (crop %dx%d, scale %.2f), %.2f m from the eye, slide %.0f deg%s | %u draws routed to it | misses %u (session %u) | grabs ended %u (session %u), latched now %d",
+                  g_vp_shown_10s, g_vp_w, g_vp_h, g_vp_crop.w, g_vp_crop.h, g_vp_scale, g_vp_eye_d, g_vp_slide.cur, g_vp_slide.hide ? " (hidden for a targets round)" : "",
+                  g_vp_routed_10s, g_vp_miss_10s, g_vp_misses, g_vp_grab_10s, g_vp_ends, vpanel::mask(g_vp_grab));
+        g_vp_shown_10s = g_vp_miss_10s = g_vp_grab_10s = g_vp_routed_10s = 0;
     }
 }
-/// xr_tick, right after xr_input_get (render thread): the grab, from the raw grips; then every latched grip is hidden from the
-/// rest of the mod and the game (its squeeze reads 0: no world grab, no quick squeeze or LB / RB, no chord, no hands tap). The
-/// copy is masked before it becomes g_vrpad, which the input thread reads.
+/// vrpad_take, right after xr_input_get (render thread, every game frame and every stickrep extra frame): the grab, from the raw
+/// grips; then every latched grip is hidden from the rest of the mod and the game (its squeeze reads 0: no world grab, no quick
+/// squeeze or LB / RB, no chord, no hands tap). The copy is masked before it becomes g_vrpad, which the input thread reads.
 static void vpanel_input(XrInput& in) {
     vpanel::V3 eye; vpanel::Q hq;
     const bool head = vpanel_head(&eye, &hq);
@@ -10715,9 +10811,11 @@ static void vpanel_input(XrInput& in) {
         h[k].grip_ok = s.grip_valid; h[k].grip = vpanel::Pose{ { s.grip_q[0], s.grip_q[1], s.grip_q[2], s.grip_q[3] }, { s.grip_p[0], s.grip_p[1], s.grip_p[2] } };
         h[k].aim_ok = s.aim_valid;   h[k].aim = vpanel::Pose{ { s.aim_q[0], s.aim_q[1], s.aim_q[2], s.aim_q[3] }, { s.aim_p[0], s.aim_p[1], s.aim_p[2] } };
     }
-    // no new latch inside an injecting Bushido window or a practice round (the grips are the overdrive's), nor while sliding aside
-    const bool allow = head && !odg_grips_are_gestures() && !(g_odt.r.on && g_odt.r.practice) && g_vp_slide.cur == 0.f;
-    const int ev = vpanel::grab_step(g_vp_grab, h, g_vp_shown && head, allow, g_vp_pose, g_vp_scale, g_vp_w, g_vp_h, eye);
+    // no new latch inside an injecting Bushido window or any targets round (the grips are the overdrive's), nor while aside; no move
+    // while aside either (a latch taken before the round stays, masked, until it is let go)
+    const bool aside = g_vp_slide.active || g_vp_slide.cur != 0.f;
+    const bool allow = head && !odg_grips_are_gestures() && !g_odt.r.on && !aside;
+    const int ev = vpanel::grab_step(g_vp_grab, h, g_vp_shown && head && !aside, allow, g_vp_pose, g_vp_scale, g_vp_w, g_vp_h, eye);
     for (int k = 0; k < 2; ++k) if (ev & (k ? vpanel::G_LATCH_R : vpanel::G_LATCH_L)) xr_haptic(k, 0.3f, 0.04f);   // as the world grab's latch
     if (ev & vpanel::G_END) {
         vpanel::remember(g_vp_pose, eye, &g_vp_rem_dist, &g_vp_rem_height);
@@ -10725,27 +10823,54 @@ static void vpanel_input(XrInput& in) {
         diag("menu panel: frame %u: let go at %.2f m (level), %.2f m against the eye, scale %.2f", g_frames, g_vp_rem_dist, g_vp_rem_height, g_vp_scale);
     }
     const int m = vpanel::mask(g_vp_grab);
-    for (int k = 0; k < 2; ++k) if (m & (1 << k)) in.hand[k].squeeze = 0.f;
+    for (int k = 0; k < 2; ++k) {
+        g_vp_curl_sq[k].store((m & (1 << k)) ? in.hand[k].squeeze : 0.f, std::memory_order_relaxed);   // review N1: the holding hand stays curled
+        if (m & (1 << k)) in.hand[k].squeeze = 0.f;
+    }
 }
-/// vr-menu S2, from managed every frame (render thread, render_imgui, after ffxvr_begin_frame: stamped with this g_frames). flags: 1 the F8 window is
-/// drawn as the headset's window this frame, 2 vr_menu_panel. v: x0, y0, x1, y1 (the window and its popups, ImGui coordinates), the
-/// em (px), DisplaySize w / h, vr_menu_distance, vr_menu_height, vr_menu_scale (n >= 10; fewer: no panel), then optionally x0, y0,
-/// x1, y1 of the window alone (n >= 14; else the window is the whole rectangle).
+/// The one writer of g_vrpad (review B1): xr_tick at every game frame and sr_extra_inner at every stickrep extra frame between
+/// them (render thread). The panel's grab runs on the raw input first, so a grip latched to it never reaches g_vrpad's readers
+/// (the input thread's pad, the ImGui pad feed, hands_latch's snapshot) at any rate. vrmenu_chk/s2/probe_vrpad.py checks that no
+/// other xr_input_get or g_vrpad write exists.
+static void vrpad_take() {
+    XrInput in; xr_input_get(&in);
+    vpanel_input(in);
+    g_vrpad = in;
+}
+/// The finger curl's squeeze for hand h (review N1): its masked grip's own squeeze while it holds the panel, else the pad's.
+static float vpanel_curl_squeeze(int h, float pad_squeeze) {
+    const float raw = (h == 0 || h == 1) ? g_vp_curl_sq[h].load(std::memory_order_relaxed) : 0.f;
+    return (std::max)(pad_squeeze, raw);
+}
+/// vr-menu S2, from managed every frame (render thread, render_imgui: after this hook in the same Present, before Fahrenheit's
+/// RenderDrawData). flags: 1 the F8 window is drawn as the headset's window this frame, 2 vr_menu_panel. v: x0, y0, x1, y1 (the
+/// window and its popups, ImGui coordinates), the em (px), DisplaySize w / h, vr_menu_distance, vr_menu_height, vr_menu_scale
+/// (n >= 10; fewer: no panel), then optionally x0, y0, x1, y1 of the window alone (n >= 14; else the window is the whole rectangle).
+/// The rectangle in backbuffer pixels routes this frame's draws (vpanel_route_draw).
 extern "C" __declspec(dllexport) void ffxvr_panel_set(int flags, const float* v, int n) {
+    g_vp_rr = vpanel::Rect{}; g_vp_rwr = vpanel::Rect{}; g_vp_rr_frame = g_frames;
     if (v == nullptr || n < 10) { g_vp_in.flags = 0; g_vp_in.frame = g_frames; return; }
     g_vp_in.flags = flags;
     for (int k = 0; k < 4; ++k) g_vp_in.r[k] = v[k];
     g_vp_in.em = v[4]; g_vp_in.ds_w = v[5]; g_vp_in.ds_h = v[6]; g_vp_in.dist = v[7]; g_vp_in.height = v[8]; g_vp_in.scale = v[9];
     for (int k = 0; k < 4; ++k) g_vp_in.wr[k] = n >= 14 ? v[10 + k] : v[k];
     g_vp_in.frame = g_frames;
+    if ((flags & 3) == 3 && g_backbuffer != nullptr) {
+        D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
+        g_vp_bb_w = static_cast<float>(bd.Width);
+        g_vp_rr = vpanel::crop(g_vp_in.r[0], g_vp_in.r[1], g_vp_in.r[2], g_vp_in.r[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(bd.Width), static_cast<int>(bd.Height));
+        g_vp_rwr = vpanel::crop(g_vp_in.wr[0], g_vp_in.wr[1], g_vp_in.wr[2], g_vp_in.wr[3], g_vp_in.ds_w, g_vp_in.ds_h, static_cast<int>(bd.Width), static_cast<int>(bd.Height));
+        if (vpanel::empty(g_vp_rwr)) g_vp_rwr = g_vp_rr;
+    }
 }
-/// out: [0] available (the shaders and the session's panel swapchain), [1] shown in this frame's submit, [2] latched grips (1 left,
-/// 2 right), [3] / [4] the distance (level) and height to open at, from the last grab, [5] the scale now, [6] grabs ended (session),
-/// [7] pairing misses (session), [8] / [9] the F8 window's size on the panel (m), [10] its distance from the eye, [11] the slide angle (deg).
+/// out: [0] available (the shaders and a running session whose panel swapchain exists or can be made), [1] shown in this frame's
+/// submit, [2] latched grips (1 left, 2 right), [3] / [4] the distance (level) and height to open at, from the last grab, [5] the
+/// scale now, [6] grabs ended (session), [7] misses (session: frames the panel was open but its capture held none of the last
+/// frame's draws), [8] / [9] the F8 window's size on the panel (m), [10] its distance from the eye, [11] the slide angle (deg).
 /// Returns the count written.
 extern "C" __declspec(dllexport) int ffxvr_panel_state(float* out, int n) {
     if (out == nullptr || n <= 0) return 0;
-    const float v[12] = { (g_vp_pass_ok && xr_panel_ready()) ? 1.f : 0.f, g_vp_shown ? 1.f : 0.f, static_cast<float>(vpanel::mask(g_vp_grab)),
+    const float v[12] = { (g_vp_pass_ok && xr_panel_possible()) ? 1.f : 0.f, g_vp_shown ? 1.f : 0.f, static_cast<float>(vpanel::mask(g_vp_grab)),
                           g_vp_rem_dist, g_vp_rem_height, g_vp_scale, static_cast<float>(g_vp_ends), static_cast<float>(g_vp_misses),
                           g_vp_w, g_vp_h, g_vp_eye_d, g_vp_slide.cur };
     const int k = n < 12 ? n : 12;
@@ -12277,8 +12402,9 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         const XrHand& hd = g_hs.hand[h];
         if (!g_hs.valid || !hd.grip_valid) { g_h2w.grip_lost[h]++; g_h2_tot.grip_lost[h]++; g_h2_fs[h].anchor = false; tap_sample(h, tap_gate, nullptr); continue; }
         HvXform grip; hands_grip_ref(hd, g_hs.ref_q, g_hs.ref_p, &grip);
-        HvCtrl ctl = { hd.trigger, hd.squeeze, hd.trigger_touch, hd.thumb_stick, hd.thumb_rest, hd.thumb_face };
-        if (!g_hs.touch) ctl.thumb_stick = hd.squeeze > 0.5f;   // review N10: no touch sensors: a gripping hand's thumb is taken as down on the controller
+        const float curl_sq = vpanel_curl_squeeze(h, hd.squeeze);   // vr-menu S2 review N1: a hand holding the menu panel stays curled (its pad squeeze is masked)
+        HvCtrl ctl = { hd.trigger, curl_sq, hd.trigger_touch, hd.thumb_stick, hd.thumb_rest, hd.thumb_face };
+        if (!g_hs.touch) ctl.thumb_stick = curl_sq > 0.5f;   // review N10: no touch sensors: a gripping hand's thumb is taken as down on the controller
         hv_fingers_update(&g_h2_fs[h], ctl, dt);
         if (!g_hs.touch) g_h2_fs[h].put_down = false;
         if (g_hs.touch && hv_put_down_update(&g_h2_fs[h], ctl, grip.R, grip.t, dt)) {   // S2: a controller on the desk for 10 s, nothing touched: that hand is not drawn.
@@ -13114,12 +13240,12 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_want) return 1;
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
-    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop, vpanel_clear_rect };
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
     if (g_xr_want) {
         if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
         copy_pass_init();   // SU-8: the copy shaders compile at headset start, not inside the first frame's submit (tried once; a later call is a no-op)
-        vpanel_pass_init(); // vr-menu S2: the panel's crop and hole shaders, the same rule
+        vpanel_pass_init(); // vr-menu S2: the panel's crop shaders, the same rule
         return 1;
     }   // g_xr_fails clears in xr_tick after 5 s alive
     g_xr_fails++; g_xr_retry_at = now + (g_xr_fails < 3 ? 2000 : 5000);
@@ -15178,15 +15304,15 @@ static void xr_tick() {
     const bool ui_frame = (g_ui_state == UI_DONE && g_ui_pass_frame + 1 == g_frames && g_eye1_final && g_eye2_final && g_ui_tex);   // g_frames was bumped at the top of this hook
     // The ImGui layer: what Fahrenheit drew after our hook last Present.
     g_imgui_draws_last = g_imgui_draws_frame; g_imgui_draws_frame = 0;
-    bool im_cap_ok = false;   // vr-menu S2: the capture holds the last Present's draws (the menu panel's crop source)
     if (g_imgui_layer && g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
         ID3D11Texture2D* const was = g_imgui_tex;
         ensure_copy(g_imgui_tex, g_imgui_rtv, bd);
         ensure_ui_blend();   // saveui A: before the first ImGui draw can be re-issued into the capture (eye2_begin refuses without it)
         if (g_imgui_tex != was && g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); }   // a new capture starts transparent
-        im_cap_ok = g_imgui_tex && g_imgui_tex == was && g_imgui_draws_last > 0;
-        if (im_cap_ok && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;   // (a new texture holds none of last frame's draws)
+        // (a new texture holds none of last frame's draws; vr-menu S2: the F8 window's draws went to the menu panel's capture and
+        // are not counted here, so F8 alone does not bring this layer up)
+        if (g_imgui_tex && g_imgui_tex == was && g_imgui_draws_last > 0 && (g_imgui_force || g_imgui_draws_last >= g_imgui_min_draws)) ui.tex2 = g_imgui_tex;
     }
     // saveui C: Fahrenheit's save screen (fh_menu_on_screen and 0x8CB994, from managed) is a full-screen 2D program: while it is
     // open the frame goes to the virtual screen and the ImGui layer lies on it (below). Not inside a battle transition window (the
@@ -15369,7 +15495,7 @@ static void xr_tick() {
         ui.im_world = true; memcpy(ui.im_q, screen.q, sizeof(ui.im_q)); memcpy(ui.im_p, screen.p, sizeof(ui.im_p)); ui.im_w = screen.width;
     }
     g_imgui_where = ui.tex2 == nullptr ? 0 : ui.im_world ? 2 : 1;
-    vpanel_frame(ui, im_cap_ok);   // vr-menu S2: the F8 window's own panel (any base mode: 3D, screens, movies, the save screen)
+    vpanel_frame(ui);   // vr-menu S2: the F8 window's own panel (any base mode: 3D, screens, movies, the save screen)
     {   // saveui A.3: the ImGui layer, every 10 s while it drew (screen frames included: the boot menu used to leave no trace)
         static ULONGLONG next = 0; static uint32_t f_screen = 0, f_screen_shown = 0, f_3d_shown = 0, f_world = 0, draws_max = 0, f_draws = 0;
         if (g_imgui_draws_last > 0) f_draws++;
@@ -15424,7 +15550,8 @@ static void xr_tick() {
     if (!g_bt_frozen) xr_apply_poses(out);         // frozen: the override keeps the head pose the pin was taken with (eye poses, IPD offset, FOV)
     motion_log_tick();
     clear_imgui();   // submitted above; the ImGui draws that follow this hook start clean
-    { XrInput in; xr_input_get(&in); vpanel_input(in); g_vrpad = in; }   // vr-menu S2: the menu panel's grab first; a grip latched to it is masked in the copy
+    vpanel_cap_clear();   // vr-menu S2: the menu panel's capture too
+    vrpad_take();   // vr-menu S2: the menu panel's grab first; a grip latched to it is masked in the copy (the one writer of g_vrpad)
     if (g_vrpad.ready) { g_vrpad_frames++; g_vrpad_packet++; }
     if (sr_clock && out.began) turn_advance(out.display_time, false);   // stickrep: the yaw at the display time of the frame about to render (the stick as synced at this wait)
     haptics_tick();   // rumble to haptics (render thread: every xrApplyHapticFeedback stays here, next to xrSyncActions)
@@ -16607,7 +16734,7 @@ static int sr_extra_inner(double t0) {
     sr_note_begin(out);
     if (out.began) {
         if (!g_bt_frozen) xr_apply_poses(out);                     // the next game frame renders with this slot's head pose
-        xr_input_get(&g_vrpad); if (g_vrpad.ready) g_vrpad_packet++;
+        vrpad_take(); if (g_vrpad.ready) g_vrpad_packet++;   // vr-menu S2 review B1: through the panel's grab and mask, as xr_tick
         if (g_sr_mode > 0) turn_advance(out.display_time, true);   // ... and this slot's stick yaw (gestures and haptics stay at the game rate)
     }
     else g_sr_s.fails++;

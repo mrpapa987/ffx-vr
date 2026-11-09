@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: MIT
 // ffxvr_panel.h -- vr-menu S2 (research vr-menu-design.md section 3): the F8 window's own panel, fixed in the room. Pure logic:
-// no Windows, no D3D, no OpenXR, no logging, no allocation. The native side (ffxvr_native.cpp, the vpanel_* glue in xr_tick)
-// places the panel, crops the F8 window out of the ImGui capture and runs the grab once a frame; ffxvr_xr.cpp submits the quad
-// and uses hole_px for the full ImGui layer. A unit test (vrmenu_chk/s2/panel_test.cpp in the session scratchpad) drives all of it.
+// no Windows, no D3D, no OpenXR, no logging, no allocation. The native side (ffxvr_native.cpp, the vpanel_* glue) sends the F8
+// window's ImGui draws into the panel's own capture (scissor_inside picks them), places the panel and runs the grab once a frame
+// and at every stickrep extra frame; ffxvr_xr.cpp submits the quad. A unit test (vrmenu_chk/s2/panel_test.cpp in the session scratchpad) drives all of it.
 //
 // Conventions: the OpenXR reference space (LOCAL): metres, x right, y up, z back; a pose's forward is its -Z. A quad's visible
 // face is its +Z, so a panel faces the eye when its +Z points at it. Yaw: forward = (-sin yaw, 0, -cos yaw), as the native
 // file's head yaw (atan2(-f.x, -f.z)); a positive yaw turns left.
 //
-// The owner's decisions (8 Nov): grab anywhere on the panel; F8 stays the only way to open it; Practice targets slides it about
-// 30 degrees aside for the round, then back; it stays visible during movies.
+// The owner's decisions (8 Nov): grab anywhere on the panel; F8 stays the only way to open it; Practice targets slides it aside
+// for the round, then back (review S2: far enough to clear the targets, slide_plan; hidden when that is too far); it stays
+// visible during movies.
 //
 // S2's grab has no laser (that is S3): a grip latches to the panel at its press edge when the controller points roughly at it (the
 // aim ray hits the rectangle widened by k_ray_margin) or reaches it (the grip within k_reach of the rectangle). A latched grip
 // belongs to the panel until it is let go (the native side hides it from the world grab, quick squeezes, LB / RB, the hands tap
 // and the chords). One hand moves the panel rigidly with the grip; two hands also scale it by the change of their distance.
 #pragma once
-#define FFXVR_PANEL_REV 2
+#define FFXVR_PANEL_REV 3
 #include <cmath>
 #include <cstdint>
 
@@ -36,7 +37,10 @@ constexpr float k_keep_deg = 50.f, k_keep_m = 3.f;        // reopen at the last 
 constexpr float k_ray_margin = 0.03f;                     // the aim ray: the rectangle widened by 3 cm (design 3.4)
 constexpr float k_reach = 0.15f;                          // the grip within 15 cm of the rectangle also grabs
 constexpr float k_resize_min_d = 0.05f;                   // two hands closer than this do not scale
-constexpr float k_slide_deg = 30.f, k_slide_rate = 120.f; // Practice targets: degrees aside; degrees a second
+constexpr float k_slide_rate = 120.f;                     // a targets round: the slide's degrees a second
+constexpr float k_slide_margin = 4.f, k_slide_max = 60.f; // ... clear of the targets by this much; further than this: hidden instead
+constexpr float k_target_glow = 1.22f;                    // a Bushido plate's glow ring, of its radius (ffxvr_odtarget.h k_glow_out)
+constexpr int   k_route_slack = 4;                        // a draw's scissor may stick out of the panel's rectangle by this many pixels
 
 inline V3 add(V3 a, V3 b) { return V3{ a.x + b.x, a.y + b.y, a.z + b.z }; }
 inline V3 sub(V3 a, V3 b) { return V3{ a.x - b.x, a.y - b.y, a.z - b.z }; }
@@ -129,24 +133,15 @@ inline Rect crop(float x0, float y0, float x1, float y1, float ds_w, float ds_h,
     Rect r; r.x = ix0; r.y = iy0; r.w = ix1 - ix0; r.h = iy1 - iy0;
     return r;
 }
-/// The crop as a fraction of the capture (u0, v0, u1, v1), for the full ImGui layer's hole.
-inline void hole_uv(const Rect& r, int cap_w, int cap_h, float uv[4]) {
-    if (empty(r) || cap_w <= 0 || cap_h <= 0) { uv[0] = uv[1] = uv[2] = uv[3] = 0.f; return; }
-    uv[0] = static_cast<float>(r.x) / cap_w; uv[1] = static_cast<float>(r.y) / cap_h;
-    uv[2] = static_cast<float>(r.x + r.w) / cap_w; uv[3] = static_cast<float>(r.y + r.h) / cap_h;
+/// Which ImGui draws are the panel's (review S1): ImGui's D3D11 backend sets one scissor rectangle per draw command, the clip rect
+/// of the window (or popup) that draws it. A draw belongs to the F8 window when its scissor (l, t, r, b, render target pixels)
+/// lies inside the panel's rectangle widened by slack; the background and foreground lists and every other window clip to the
+/// whole display or to their own rectangles. (The F8 window and its popups draw no decorations with the display-wide clip:
+/// managed draws their backgrounds inside them.) An empty scissor is nobody's.
+inline bool scissor_inside(int l, int t, int r, int b, const Rect& rr, int slack) {
+    if (empty(rr) || r <= l || b <= t) return false;
+    return l >= rr.x - slack && t >= rr.y - slack && r <= rr.x + rr.w + slack && b <= rr.y + rr.h + slack;
 }
-/// The hole in a destination of dw x dh pixels, widened by pad (the layer's copy filters a pixel or so across the edge), clamped.
-inline Rect hole_px(const float uv[4], int dw, int dh, int pad) {
-    if (!(uv[2] > uv[0]) || !(uv[3] > uv[1]) || dw <= 0 || dh <= 0) return Rect{};
-    // +-1e-3 px: a fraction from hole_uv times the size lands a hair off a whole pixel, which must not grow the hole by one
-    const int x0 = static_cast<int>(floorf(clampf(uv[0], 0.f, 1.f) * dw + 1e-3f)) - pad, y0 = static_cast<int>(floorf(clampf(uv[1], 0.f, 1.f) * dh + 1e-3f)) - pad;
-    const int x1 = static_cast<int>(ceilf(clampf(uv[2], 0.f, 1.f) * dw - 1e-3f)) + pad, y1 = static_cast<int>(ceilf(clampf(uv[3], 0.f, 1.f) * dh - 1e-3f)) + pad;
-    Rect r; r.x = x0 < 0 ? 0 : x0; r.y = y0 < 0 ? 0 : y0;
-    r.w = (x1 > dw ? dw : x1) - r.x; r.h = (y1 > dh ? dh : y1) - r.y;
-    if (r.w <= 0 || r.h <= 0) return Rect{};
-    return r;
-}
-
 /// The quad's centre against the panel's pose, in metres along the panel's right (dx) and up (dy). The pose is the F8 window's
 /// centre; the crop c also holds the popups the window opened (a combo list), so the quad is shifted by the crop's centre against
 /// the window's and the window part stays where it is while a list widens the crop (design 3.6). win: the window alone (crop() of
@@ -243,7 +238,8 @@ inline int grab_step(Grab& g, const HandIn in[2], bool on, bool allow, Pose& pn,
     }
     else {
         const float d1 = len(sub(in[1].grip.p, in[0].grip.p));
-        if (g.d0 > k_resize_min_d && d1 > k_resize_min_d) scale = clampf(g.scale0 * d1 / g.d0, k_scale_min, k_scale_max);
+        if (!(g.d0 > k_resize_min_d) && d1 > k_resize_min_d) { g.d0 = d1; g.scale0 = scale; }   // a pair that formed too close: it starts here
+        else if (g.d0 > k_resize_min_d && d1 > k_resize_min_d) scale = clampf(g.scale0 * d1 / g.d0, k_scale_min, k_scale_max);
         p = add(mul(add(in[0].grip.p, in[1].grip.p), 0.5f), g.c_off);
     }
     p = clamp_dist(p, eye);
@@ -252,20 +248,43 @@ inline int grab_step(Grab& g, const HandIn in[2], bool on, bool allow, Pose& pn,
     return ev | G_MOVED;
 }
 
-// -- Practice targets: aside for the round --------------------------------------------------------------------------------
-struct Slide { float cur = 0.f, target = 0.f; V3 pivot{ 0.f, 0.f, 0.f }; };
-/// Once a frame (dt seconds, capped at 0.1). on: a practice round is running. At its start the side is the panel's own (left of
-/// the gaze: further left), and the pivot the eye; the angle eases at k_slide_rate both ways.
-inline void slide_step(Slide& s, bool on, const Pose& pn, V3 eye, Q hq, float dt) {
+// -- a Bushido targets round (Practice targets or a real one): aside for the round ------------------------------------------
+/// The targets' half-extent in azimuth (degrees) seen from the eyes (ffxvr_odtarget.h: two spots spread apart, d ahead of the
+/// eyes and h below them; plates of radius rad facing the eyes, with their glow). A plate's glow ring is a cone of angular radius
+/// rho around its centre's direction (az_c, el_c); at that elevation the cone reaches az_c + asin(sin rho / cos el_c) in azimuth.
+inline float targets_half_deg(float d, float h, float spread, float rad) {
+    if (!(d > 0.f) || !std::isfinite(d) || !std::isfinite(h) || !std::isfinite(spread) || !std::isfinite(rad)) return 0.f;
+    const float x = 0.5f * fabsf(spread), r = k_target_glow * fabsf(rad);
+    const float dist = sqrtf(x * x + h * h + d * d), hz = sqrtf(x * x + d * d);
+    const float sr = clampf(r / dist, 0.f, 1.f), ce = hz / dist;   // sin rho; cos of the centre's elevation
+    const float spread_az = ce > 1e-4f ? asinf(clampf(sr / ce, 0.f, 1.f)) : k_pi * 0.5f;
+    return (atan2f(x, d) + spread_az) * 180.f / k_pi;
+}
+struct SlidePlan { float deg = 0.f; bool hide = false; };
+/// Where the panel goes for a round. a0: its centre's azimuth against the targets' forward (degrees, + left); hw: its angular
+/// half-width; t: targets_half_deg. Already clear (its inner edge t + k_slide_margin out or more): it stays. Otherwise it turns
+/// to its own side (left of the forward: left) until its inner edge is k_slide_margin past the targets; if its centre would then
+/// be more than k_slide_max from the forward, it is hidden for the round instead.
+inline SlidePlan slide_plan(float a0, float hw, float t) {
+    SlidePlan p;
+    if (!std::isfinite(a0) || !std::isfinite(hw) || !std::isfinite(t)) { p.hide = true; return p; }
+    const float need = t + k_slide_margin + fabsf(hw);
+    if (fabsf(a0) >= need) return p;
+    if (need > k_slide_max) { p.hide = true; return p; }
+    p.deg = (a0 >= 0.f ? need : -need) - a0;
+    return p;
+}
+struct Slide { float cur = 0.f, target = 0.f; bool active = false, hide = false; V3 pivot{ 0.f, 0.f, 0.f }; };
+/// Once a frame (dt seconds, capped at 0.1). on: a round is running; plan: slide_plan, taken at the round's start only (the side
+/// and the angle stay for the round); the pivot is the eye at the start of a slide. The angle eases at k_slide_rate both ways.
+inline void slide_step(Slide& s, bool on, const SlidePlan& plan, V3 eye, float dt) {
     if (!(dt >= 0.f)) dt = 0.f;
     if (dt > 0.1f) dt = 0.1f;
-    if (on && s.target == 0.f) {
-        const V3 v = sub(pn.p, eye);
-        const float rel = wrap_pi(atan2f(-v.x, -v.z) - head_yaw(hq));
-        s.target = rel >= 0.f ? k_slide_deg : -k_slide_deg;
+    if (on && !s.active) {
+        s.active = true; s.hide = plan.hide; s.target = plan.hide ? 0.f : plan.deg;
         if (s.cur == 0.f) s.pivot = eye;
     }
-    if (!on) s.target = 0.f;
+    if (!on) { s.active = false; s.hide = false; s.target = 0.f; }
     const float step = k_slide_rate * dt;
     if (s.cur < s.target) s.cur = s.cur + step > s.target ? s.target : s.cur + step;
     else if (s.cur > s.target) s.cur = s.cur - step < s.target ? s.target : s.cur - step;

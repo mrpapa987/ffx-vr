@@ -28,7 +28,7 @@ typedef XrResult (XRAPI_PTR *PFN_xrGetDisplayRefreshRateFB)(XrSession session, f
 #include <cstring>
 #include <vector>
 #include "ffxvr_xr.h"
-#include "ffxvr_panel.h"   // vr-menu S2: the hole rectangle (pure)
+#include "ffxvr_panel.h"   // vr-menu S2: the panel swapchain's side (pure)
 
 namespace {
 
@@ -107,9 +107,9 @@ struct Eye {
 };
 Eye g_eye[7];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye; 6: the menu panel (vr-menu S2)
 constexpr int k_panel_sc = 6;
-// vr-menu S2: this frame's crop origin for the panel's copy, and the full ImGui layer's hole (fractions of the capture), set by xr_frame
-// before the submits that use them
-int g_panel_crop_x = 0, g_panel_crop_y = 0; float g_imgui_hole[4] = { 0, 0, 0, 0 };
+// vr-menu S2: this frame's crop origin for the panel's copy, set by xr_frame before the submit that uses it
+int g_panel_crop_x = 0, g_panel_crop_y = 0;
+bool g_panel_sc_failed = false;                    // vr-menu S2: making the panel's swapchain failed this session (not tried again)
 uint32_t g_max_layers = 0;                       // XrSystemProperties::graphicsProperties.maxLayerCount (logged once)
 // R8b (with R15): the last layers submitted with fresh images. A frame whose base layer cannot go out fresh (no eye
 // image, or a swapchain wait that timed out) re-sends the held base layer for up to 30 frames instead of a black
@@ -373,14 +373,15 @@ template <typename T> bool load(T& fn, const char* name, XrInstance inst) {
     return true;
 }
 
+void destroy_eye(Eye& e) {
+    if (e.mid_rtv) { e.mid_rtv->Release(); e.mid_rtv = nullptr; }
+    if (e.mid)     { e.mid->Release();     e.mid = nullptr; }
+    if (e.sc != XR_NULL_HANDLE && p_xrDestroySwapchain) p_xrDestroySwapchain(e.sc);
+    e.sc = XR_NULL_HANDLE; e.images.clear(); e.w = e.h = 0;
+    e.st = SC_IDLE; e.idx = 0; e.retries = 0; e.ever_released = false; e.hard_fails = 0;
+}
 void destroy_eyes() {
-    for (Eye& e : g_eye) {
-        if (e.mid_rtv) { e.mid_rtv->Release(); e.mid_rtv = nullptr; }
-        if (e.mid)     { e.mid->Release();     e.mid = nullptr; }
-        if (e.sc != XR_NULL_HANDLE && p_xrDestroySwapchain) p_xrDestroySwapchain(e.sc);
-        e.sc = XR_NULL_HANDLE; e.images.clear(); e.w = e.h = 0;
-        e.st = SC_IDLE; e.idx = 0; e.retries = 0; e.ever_released = false; e.hard_fails = 0;
-    }
+    for (Eye& e : g_eye) destroy_eye(e);
     g_held = HeldBase{}; g_held_episode = 0; g_sc_stuck = -1;
 }
 
@@ -393,7 +394,46 @@ bool xr_take_stuck() { const bool v = g_stuck_stop; g_stuck_stop = false; return
 void xr_counters(unsigned* held_frames, unsigned* wait_timeouts) { if (held_frames) *held_frames = g_held_frames; if (wait_timeouts) *wait_timeouts = g_wait_timeouts; }   // held: base-layer frames (quads held alone are in the diag log)
 void xr_eye_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[0].w; if (h) *h = g_eye[0].h; }   // 0 x 0 while no session
 void xr_imgui_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[4].w; if (h) *h = g_eye[4].h; }   // 0 x 0 while no session
+/// One swapchain (index i, w x h, the session's format) and its UNORM intermediate. On failure what / res name the step (res stays
+/// XR_SUCCESS for the intermediate) and the caller tears down (xr_stop, or destroy_eye for the menu panel's).
+bool sc_create(int i, UINT w, UINT h, const char** what, XrResult* res) {
+    Eye& e = g_eye[i];
+    e.w = w; e.h = h; *what = nullptr; *res = XR_SUCCESS;
+    XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
+    sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
+    XrResult r = p_xrCreateSwapchain(g_session, &sc, &e.sc);
+    if (XR_FAILED(r)) { e.sc = XR_NULL_HANDLE; *what = "xrCreateSwapchain"; *res = r; return false; }
+    uint32_t n = 0; p_xrEnumerateSwapchainImages(e.sc, 0, &n, nullptr);
+    std::vector<XrSwapchainImageD3D11KHR> imgs(n, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
+    r = p_xrEnumerateSwapchainImages(e.sc, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()));
+    if (XR_FAILED(r)) { *what = "xrEnumerateSwapchainImages"; *res = r; return false; }
+    for (auto& im : imgs) e.images.push_back(im.texture);
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = e.w; td.Height = e.h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
+        *what = "intermediate texture"; return false;
+    }
+    g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : i == 5 ? "screen right" : "menu panel", i, e.w, e.h, n);
+    return true;
+}
+/// vr-menu S2 review N6: the menu panel's swapchain (1:1 crops of the F8 window up to 1536 x 1536, ~9.4 MB an image) at its first
+/// use in a session (render thread, xr_tick: no frame of ours is in flight); none for a player who never opens it. A failure is
+/// logged once and not tried again this session (the F8 window stays on the head-locked layer).
+bool xr_panel_ensure() {
+    if (g_eye[k_panel_sc].sc != XR_NULL_HANDLE) return true;
+    if (!xr_panel_possible() || g_h.device == nullptr || p_xrCreateSwapchain == nullptr) return false;
+    const char* what = nullptr; XrResult sr = XR_SUCCESS;
+    if (sc_create(k_panel_sc, vpanel::k_side, vpanel::k_side, &what, &sr)) return true;
+    destroy_eye(g_eye[k_panel_sc]);
+    g_panel_sc_failed = true;
+    g_h.diag("xr: menu panel swapchain failed (%s, %d): the F8 window stays on the head-locked layer this session", what ? what : "?", static_cast<int>(sr));
+    return false;
+}
 bool xr_panel_ready() { return g_session != XR_NULL_HANDLE && g_running && g_eye[k_panel_sc].sc != XR_NULL_HANDLE; }
+bool xr_panel_possible() { return g_session != XR_NULL_HANDLE && g_running && !g_panel_sc_failed && g_sc_format != DXGI_FORMAT_UNKNOWN; }
 uint32_t xr_max_layers() { return g_max_layers; }
 bool xr_srgb() { return g_sc_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; }
 
@@ -560,36 +600,24 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
+    g_panel_sc_failed = false;
     for (int i = 0; i < 7; ++i) {
-        Eye& e = g_eye[i];
+        if (i == k_panel_sc) continue;                 // vr-menu S2 review N6: the menu panel's at its first use (xr_panel_ensure)
+        UINT w, h;
         if (i < 2) {
             // The headset's recommended width at the game's 16:9 aspect (the
             // configuration of the long stable run; full 3840x2160 is a
             // separate experiment).
-            e.w = vcv[i].recommendedImageRectWidth; e.h = e.w * 9 / 16;
-            if (e.h > vcv[i].maxImageRectHeight) { e.h = vcv[i].maxImageRectHeight; e.w = e.h * 16 / 9; }
+            w = vcv[i].recommendedImageRectWidth; h = w * 9 / 16;
+            if (h > vcv[i].maxImageRectHeight) { h = vcv[i].maxImageRectHeight; w = h * 16 / 9; }
         }
-        else if (i == 4) { e.w = 1920; e.h = 1080; }       // the ImGui layer (saveui D): exactly half a 4K capture, so the copy's taps are a 2x2 box; ~34 px/deg on a 56 deg quad, above the display's ~25
-        else if (i == k_panel_sc) { e.w = vpanel::k_side; e.h = vpanel::k_side; }   // vr-menu S2: the menu panel, 1:1 crops of the F8 window up to 1536 x 1536 (~9.4 MB an image)
-        else { e.w = 2560; e.h = 1440; }                   // the virtual screen (2, 5), the UI panel (3)
-        XrSwapchainCreateInfo sc = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
-        sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
-        sc.format = g_sc_format; sc.sampleCount = 1; sc.width = e.w; sc.height = e.h; sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
-        r = p_xrCreateSwapchain(g_session, &sc, &e.sc);
-        if (XR_FAILED(r)) { fail("xrCreateSwapchain", r); xr_stop(); return false; }
-        uint32_t n = 0; p_xrEnumerateSwapchainImages(e.sc, 0, &n, nullptr);
-        std::vector<XrSwapchainImageD3D11KHR> imgs(n, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
-        r = p_xrEnumerateSwapchainImages(e.sc, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data()));
-        if (XR_FAILED(r)) { fail("xrEnumerateSwapchainImages", r); xr_stop(); return false; }
-        for (auto& im : imgs) e.images.push_back(im.texture);
-
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = e.w; td.Height = e.h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
-            set_status("intermediate texture failed"); xr_stop(); return false;
+        else if (i == 4) { w = 1920; h = 1080; }       // the ImGui layer (saveui D): exactly half a 4K capture, so the copy's taps are a 2x2 box; ~34 px/deg on a 56 deg quad, above the display's ~25
+        else { w = 2560; h = 1440; }                   // the virtual screen (2, 5), the UI panel (3)
+        const char* what = nullptr; XrResult sr = XR_SUCCESS;
+        if (!sc_create(i, w, h, &what, &sr)) {
+            if (XR_FAILED(sr)) fail(what, sr); else set_status("intermediate texture failed");
+            xr_stop(); return false;
         }
-        g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : i == 5 ? "screen right" : "menu panel", i, e.w, e.h, n);
     }
     if (p_xrGetDisplayRefreshRateFB) {   // stickrep: the refresh rate (the session's; VDXR answers with VD's setting)
         float hz = 0.f;
@@ -705,10 +733,6 @@ void copy_release(int i, ID3D11Texture2D* src) {
     if (src != nullptr) {
         if (i == k_panel_sc) copied = g_h.copy_crop != nullptr && g_h.copy_crop(src, e.mid_rtv, e.w, e.h, g_panel_crop_x, g_panel_crop_y);   // vr-menu S2: 1:1 crop
         else copied = g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : i == 4 ? 2 : 0);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui)
-        if (copied && i == 4 && g_h.clear_rect != nullptr) {   // vr-menu S2: the menu panel shows the F8 window: its place in the full layer is transparent
-            const vpanel::Rect hr = vpanel::hole_px(g_imgui_hole, static_cast<int>(e.w), static_cast<int>(e.h), 2);
-            if (!vpanel::empty(hr)) g_h.clear_rect(e.mid_rtv, e.w, e.h, hr.x, hr.y, hr.w, hr.h);
-        }
     }
     if (copied) g_h.ctx->CopyResource(e.images[e.idx], e.mid);
     stage("release image");
@@ -993,7 +1017,6 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         // and width, 16:9 onto 16:9, after the screen quad in the layer order), as the menu sits over the game's frame on the
         // monitor. Only over a screen base (a held base keeps its mode, so use_screen is this frame's truth); otherwise head-locked.
         const bool im_world = im_src && ui->im_world && use_screen;
-        for (int k = 0; k < 4; ++k) g_imgui_hole[k] = (ui != nullptr && ui->ptex != nullptr) ? ui->hole[k] : 0.f;   // vr-menu S2: holed only while the panel shows the window
         if (im_src && submit_eye(4, ui->tex2)) {
             have_imgui = true;
             imq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // saveui B: premultiplied (the capture is; the copy keeps it so)
@@ -1020,7 +1043,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             have_imgui = true; imq = g_held.imq; g_held.imgui_age++; g_held_quads++;
         }
         // vr-menu S2: the menu panel, world-locked in the reference space (any base mode: 3D, screens, movies, the save screen), last
-        // in the order so it lies over the ImGui layer (whose copy of the window is holed out). Premultiplied, as the ImGui layer.
+        // in the order so it lies over the ImGui layer (which no longer holds the window's draws). Premultiplied, as the ImGui layer.
         XrCompositionLayerQuad pnq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_panel = false;
         const bool p_src = base && ui != nullptr && ui->ptex != nullptr && ui->pcrop_w > 0 && ui->pcrop_h > 0
