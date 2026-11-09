@@ -169,19 +169,22 @@ settings to try, in this order, one at a time:
 
    It edits `GameSetting.ini` in Documents (a backup is made the first time;
    `-Profile flat` restores it). If you miss the 4K sharpness, use
-   `-Width 2880 -Height 1620` (or 3200x1800). Check in F8 that the line says
-   `game renders 2560x1440`: if it still says 3840x2160, this launch path does
+   `-Width 2880 -Height 1620` (or 3200x1800). Check in F8 (hover the frame / GPU
+   line at the top) that the text says `game renders 2560x1440`: if it still says 3840x2160, this launch path does
    not read `Resolution=` (as it ignores `MSAA=`), so set it in the game's
    launcher (`FFX&X-2_LAUNCHER.exe`) instead. The headset's eye image stays
    2496x1404, so no low-resolution warning should appear.
-2. **Then `msaa=2`** (F8: MSAA for the scene targets, "2x"; or `msaa=2` in
-   ffxvr.ini). It takes effect at the next start. Edges alias a little more.
+2. **Then `msaa=2`** (F8 > View > Graphics & performance > Anti-aliasing "2x";
+   or `msaa=2` in ffxvr.ini). It takes effect when the game next creates its
+   scene targets (F8 shows `next scene` beside it until then; at the latest the
+   next start). Edges alias a little more.
 3. Optional comparisons, only to measure: the texture pack off (same spot),
    and `cull_scene=0` ("keep all geometry drawn" off: cheaper, but scenery the
    authored camera does not see can disappear when you look around).
 
-**What to read** (F8, the line under the frame time, updated every second
-with 10 s windows): `GPU budget: span X ms (max Y) against the ~13.5 ms knee`
+**What to read** (F8: the frame / GPU / VRAM line at the top of the window;
+hover it for the full text, whose second line is the GPU budget, updated every
+second with 10 s windows; "Over the knee" also shows as a warning): `GPU budget: span X ms (max Y) against the ~13.5 ms knee`
 (`OVER` when above), `extra frames N/s` (60/s at 120 Hz with fps=60 is
 ideal), `dropped (slots repeated) N/s` (should be near 0) and `fresh frames
 late N%`. Compare the same spots before and after: the djyt0300 entrance,
@@ -196,8 +199,44 @@ writes it whenever something changes, and the mod re-reads it within a
 second if it is edited on disk (so hand edits while the game runs are kept,
 not overwritten). Launch-only keys: `headset_autostart` (start XR at the
 first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
-diorama), `overlay_at_start` (0 = no mod window until F8). `hands_dev=1`
-shows the experimental VR-hands section.
+diorama), `overlay_at_start` (0 = no mod window until F8). `menu_tab` is the
+F8 tab last selected. `hands_dev=1` adds the old bone-hands tools to the
+Developer tab's First person & body group.
+
+## The F8 menu
+
+F8 shows or hides the mod's window (F7 is Fahrenheit's own). Its top lines
+stay in view: **Headset** (the VR view, this session), **Recentre** (Home), the
+headset's status in one line (hover it for the whole text), the frame / GPU /
+VRAM line (hover it for the full performance text), the version, and warnings
+only while there is one. **Developer** sits on the right of the first line.
+Below, one tab bar; the selected tab is remembered (`menu_tab`):
+
+| Tab | Sections |
+| --- | --- |
+| View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
+| Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Help (hover it: every key and chord) |
+| Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
+| Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides); Bushido targets (Practice targets, the layout, more time, art) |
+| Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
+| Hands | VR hands (experimental), with a **Fix it** button when the hands cannot show because your body is shown |
+| Developer | only in developer mode: everything the old Debug section held, in eight groups (Logging & status, Camera & stereo, Rendering, First person & body, Battle internals, Loading, Inspect, Captures) |
+
+Every tooltip ends with the setting's ini key (`not saved` for a control that
+lasts the session). A small amber `experimental` marks the experimental
+items, which come last in their tab; `next launch` appears beside a setting
+that is saved now but needs the next launch (its hook is installed at launch),
+and the header counts them.
+
+**Developer mode is `diag_verbose`.** Ticking **Developer** shows the
+Developer tab at once and turns on the verbose log: the periodic lines in
+`ffxvr_diag.log` (up to 64 MB a session instead of 4), the camera trace and
+Ctrl+F9 dumps; unticking hides the tab and stops them. It applies at once and
+is saved; only the camera trace's fresh file starts at the next launch. While
+the Developer tab is the selected one, the native diagnostics stay armed (as
+the old Debug header did). A release install (`tools\set-logging.ps1 -Profile
+Release`) has it off. With it off, the header says when a developer-only key
+was left away from its default in the ini.
 
 ## Controls (Quest controllers only)
 
@@ -218,19 +257,19 @@ about 8 %, so a finger resting on a trigger presses nothing; a very light half-p
 Battle: Y = Defend, right trigger held = scroll the turn order forward, left trigger = previous in the switch list. Chords
 (never reach the game): right grip + right stick click = the next view, left grip + right stick click = the next party
 member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
-game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Controllers has the
-gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / slashes and punches / strike the targets (the d-pad
+game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Overdrives has the
+gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / strike the targets / slashes and punches (experimental) (the d-pad
 arrows appear on the left, A / B / X / Y and L1 / R1 on the right; cut the big plate with either hand along its sliding chevrons:
-A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right; each plate shows only its big arrow, and "show the button
-letter (small)" adds the letter at the rim; "hide the game's Bushido row (from the next launch)", on by default, hides the game's
-2D button row while the targets are up, keeping the timer). "Practice targets" (same place, headset on, no battle needed) lets you try the targets
-and set the blade pitch, target distance, target height, target size and target spacing first; "Bushido time" (1-3x) slows the game's input timer
-while the targets window is open, if the time is too short. The targets can be textured medallions from the optional art download
+A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right; each plate shows only its big arrow, and "Show the button
+letter" adds the letter at the rim; "Hide the game's Bushido row", on by default and applied from the next launch, hides the game's
+2D button row while the targets are up, keeping the timer). "Practice targets" (F8 > Overdrives > Bushido targets, headset on, no battle
+needed) lets you try the targets and set the blade angle, distance, height, size and spacing first; "More time for Bushido" (1-3x) slows the
+game's input timer while the targets window is open, if the time is too short. The targets can be textured medallions from the optional art download
 (`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the same folder as the mod's zip, then run
 `tools\install-mod.ps1`) or a pack you make yourself
 (docs/design-notes.md, "Bushido target art (local pack)").
 
-Keys (F8 > Controllers): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
+Keys (F8 > Controls): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
 behaviour; 2 = quick squeeze everywhere), `grip_tap_ms` (300, 150..500), `grip_tap_press_ms` (0: the LB / RB press lasts 2
 game polls, one turn-order row; raise it, e.g. 100, if a squeeze is ever missed; at most 150, as a longer press trips the
@@ -277,19 +316,19 @@ developer tool for now.
 streamed out of `data\FFX_Data.vbf` (read only, nothing extracted), decoded by ffmpeg, and run through
 Video-Depth-Anything-**Small** (Apache-2.0) on the GPU. Output: one `<name>.fvd` per video (320x180 a frame, 240x180
 for the 4:3 clips; format in `tools/fmvdepth/FORMAT.md`), `manifest.json` and `convert.log` in
-`<game>\fahrenheit\mods\ffxvr\fmvdepth\`. With F8 > View > `FMVs in 3D (needs converted depth)` (ini `fmv_depth=1`,
+`<game>\fahrenheit\mods\ffxvr\fmvdepth\`. With F8 > Movies > `Movies in 3D (needs the depth pack)` (ini `fmv_depth=1`,
 off by default; `fmv_depth_amount`, `fmv_depth_range`, `fmv_depth_pop`, `fmv_depth_grid`, `fmv_depth_soften`, `fmv_depth_smooth`, `fmv_depth_flat_subs`) a converted FMV plays on the virtual screen with real depth in
-the headset (stage S3, design-notes "FMV relief screen"); any other FMV stays on the flat screen, and F8 says why.
+the headset (stage S3, design-notes "FMV relief screen"); any other FMV stays on the flat screen, and F8 > Movies says why.
 
-Recommended relief settings (F8 > View, under `FMVs in 3D`; these are the defaults since 6 Nov 2026, from the owner's own
-tuning on converter v2 files): `amount` 1.00, `depth range` 10 m (ini `fmv_depth_range=10`), `pop-out` 0.5 m
-(`fmv_depth_pop=0.5`), grid `640 grid, smooth depth (recommended)` (`fmv_depth_grid=1`), `edge softening` 1.0 depth texels
-(`fmv_depth_soften=1.0`); `smoothing` 0.36 worked well for him (the default stays 0.6). A larger screen distance (he used
+Recommended relief settings (F8 > Movies > 3D movies; these are the defaults since 6 Nov 2026, from the owner's own
+tuning on converter v2 files): `amount` 1.00, `Depth behind the screen` 10 m (ini `fmv_depth_range=10`), `pop-out in front`
+0.5 m (`fmv_depth_pop=0.5`), Depth grid `640, smooth (recommended)` (`fmv_depth_grid=1`), `Edge softening` 1.0 depth texels
+(`fmv_depth_soften=1.0`); `shimmer smoothing` 0.36 worked well for him (the default stays 0.6). A larger screen distance (he used
 5.2 m) gives the depth more room: the comfort limits allow more pop-out the further the screen is. The sliders go to 20 m
 and 2 m, but at a near screen the limits cap them (+1 deg in front, -1.5 deg behind) and the line next to the sliders says
 "limited". An ini saved by an older build keeps its own range and pop-out; set them by hand to try these. The
-`320 grid (round 7)` choice shows sharp v2 edges as a staircase; F8 > Debug's `640 grid, guided (round 10)` is
-experimental and streaks at silhouettes.
+`320` grid choice shows sharp v2 edges as a staircase; the third choice, `640, guided` (round 10, shown in developer mode
+only), is experimental and streaks at silhouettes.
 
 **The depth is derived from Square Enix's videos: it is made locally, it stays private, and it is never shipped.**
 The folder holds `PRIVATE-do-not-share.txt`; `package-release.ps1` fails on any `.fvd` or `fmvdepth\` path;

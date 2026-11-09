@@ -1257,6 +1257,12 @@ units) too high; the other characters are fine. Suspect the head point
 picked for his model (tall hair?). Needs a battle census, actor table and
 motion log while viewing as Wakka.
 
+Simple settings page (owner, 8 Nov 2026): a game-styled ImGui page (the blue gradient windows, a game-like font, the
+hand cursor) with only the common settings (the `C` tags in research/vr-menu-design.md 2.3), drawn by the F8 menu's
+own widget helpers; opened from the controllers (both stick clicks clash with Virtual Desktop's overlay: left grip +
+left menu button, or R3 held 1 s while paused); the game's Config menu stays untouched, as Fahrenheit did for the save
+screens. After the F8 reorganisation and the VR panel (S1-S3) are done and agreed.
+
 Controls, Quest controllers only (owner, 4 Nov 2026; design research/quest-controls-design.md, built 5 Nov on branch
 quest-ctl, ABI 44; the pure rules in src/native/ffxvr_pad.h with a unit test; owner test pending). Done:
 (1) **Save / load screen**: Fahrenheit's save UI is ImGui, and ImGui's Win32 backend reads pad 0 through its own XInput
@@ -5820,3 +5826,41 @@ background time and the textures' time. Turning the box off releases the texture
 - **Not verified (nobody here can run the game):** the feel and the defaults (practice is the place to tune them), whether the
   blade's direction suits the Quest grips (the pitch slider), the draw path's placement in every view, and the game facts the
   first scheme also rests on.
+
+## The F8 menu reorganised (vr-menu S1, branch `vr-menu`, 8 Nov 2026)
+
+Design: research/vr-menu-design.md (session scratchpad), sections 2 and 6, with the owner's decisions of 8 Nov (developer
+mode = `diag_verbose`; tabs and labels as proposed, judged in the headset). Managed only; ABI unchanged (57).
+
+- **Layout** (`menu.cs`): a header that stays in view (Headset, Recentre, the status in one line with the whole text in
+  its tooltip, frame / GPU / VRAM with the full perf text in its tooltip, the version, warnings only when present,
+  **Developer** on the right), then one tab bar: View, Controls, Battle, Overdrives, Movies, Hands, Developer. The selected
+  tab draws in its own child window (`NavFlattened`), so the header never scrolls away; the tab is remembered in the new
+  ini key `menu_tab`. A new install's window opens at 30 x 34 em; an existing imgui.ini keeps its size.
+- **Developer mode is `diag_verbose`**, live: the tab appears or goes the same frame, `log_push` sends the log settings in
+  that frame's `push_all`, and only the camera trace's fresh file waits for the next launch (a note says so). While the
+  Developer tab is the selected one, `ffxvr_diag_keepalive(2)` keeps the native diagnostics armed, as the Debug header did.
+  The Developer tab holds all of the old Debug in eight groups, plus the live readouts that sat beside the player
+  settings (a player tab shows status only when it is actionable).
+- **Widget helpers** `ui_check`, `ui_radio`, `ui_slider`, `ui_slider_int` take the ini key first; the tooltip ends with
+  `ini: <key>`, and the tags are drawn after the widget: `UiTag.Experimental` (small amber `experimental`; experimental
+  items come last in their tab), `UiTag.NextLaunch` (`next launch` while `NextLaunch.Pending` lists the key: the launch
+  snapshot taken in `init` before the hooks are queued, against the values now), `UiTag.Dev`, and `UiTag.Common`, which
+  draws nothing and marks the later simple page's controls. `msaa` shows `next scene` until the game makes new scene
+  targets. With developer mode off, the header counts the developer-only keys (`k_dev_keys`) whose ini value is not the
+  code default (taken from `ini_text()` before the file is read).
+- **No duplicates:** the 12 keys the old menu drew twice (heat_haze, stick_reproject, ui_adaptive, ui_backing, shadow_cam,
+  fp_self_shadow, load_lock_release, screen_width, screen_distance, fmv_depth_grid, seat_height, seat_forward) are drawn
+  once. `diag_verbose` is the one key drawn twice on purpose (the header and the Developer tab). The Hands tab's body
+  warning has a **Fix it** button (fp_body_mode=0 and the session's "hide the player's body").
+- **Settings still reach native only through `push_all`**, every frame, drawn or not. What stays tied to drawing is what
+  was tied to the Debug tree before: the keepalive, and in Developer > First person & body (with `hands_dev=1` only) the
+  old bone hands' calibration countdown, `ffxvr_hands_method` and the bone finder's lift; `hands` is forced off there
+  without `hands_dev` (native ignores it anyway: `push_hands` sends `hands_dev && hands`).
+- **Check:** vrmenu_chk/check.py (session scratchpad) reads the old (799852a) and new sources: every one of the old 390
+  widgets has a widget (ini keys by key and radio value, session controls by variable, buttons and headers by label, with
+  the renames listed), every written key has a widget or is hand-edit only (design 1.2, plus `bt_tag_dist`), no key is
+  drawn in two places, the helper keys agree with the parse switch, and the Common / NextLaunch tags match the design and
+  `NextLaunch.Pending`. The C# is not compiled here.
+- **Not verified (nobody here can run the game):** the layout at the owner's 35 px text, the tab restore on the first
+  frame, the header's right-aligned checkbox in a narrow window, and the tags' small font.
