@@ -11,7 +11,7 @@ namespace FFXVR;
 //
 //   stick_reproject (ini and overlay, at once): 0 off (one frame per Present, the stick on the Present clock, as before);
 //     1 first person and the seat (default); 2 also third person and the diorama (approximate: their pivot is the player).
-//   stick_reproject_margin_ms (0.5-6, 2.5), stick_reproject_predict (1), stick_overscan (0-4 deg, 0): Debug.
+//   stick_reproject_margin_ms (0.5-6, 2.5), stick_reproject_predict (1), stick_overscan (0-4 deg, 0): Developer tab.
 //   keepalive (0): the extra frames only during stalls, unturned (with stick_reproject=0). keepalive_mt_protect (1): the
 //     immediate context's multithread protection, applied once per game session at the first headset start
 //     (never turned off again; a change needs a restart).
@@ -31,8 +31,8 @@ public sealed unsafe partial class FFXVRModule {
     private float _stick_overscan = 0f;                // ini stick_overscan (degrees per side, horizontal)
     private bool  _keepalive = false;                  // ini keepalive: the loading keepalive alone (meaningful with stick_reproject=0)
     private bool  _keepalive_mt = false;               // ini keepalive_mt_protect: SR-X2, no longer turns protection on (it re-routed the context's entry points past the detours: the mod went blind); read for compatibility, always written 0
-    private bool  _sr_inject = false;                  // Debug, never saved: every extra frame turned 5 deg right (the direction test)
-    private volatile bool _sr_stall_req;               // Debug: the main thread sleeps 3 s in the job join (the keepalive test)
+    private bool  _sr_inject = false;                  // Developer tab, never saved: every extra frame turned 5 deg right (the direction test)
+    private volatile bool _sr_stall_req;               // Developer tab: the main thread sleeps 3 s in the job join (the keepalive test)
     private int   _turn_key_dir;                       // Numpad 1 / 3 this frame: -1 / 0 / +1 (handle_hotkeys; ffxvr_turn_keys)
     private delegate* unmanaged[Cdecl]<int, float, int, float, int, int, int, float, void> _fn_sr_set;   // ABI 25
     private delegate* unmanaged[Cdecl]<int, void> _fn_sr_gate;                                          // ABI 25 (the main-thread hooks)

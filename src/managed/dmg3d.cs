@@ -332,7 +332,9 @@ public sealed unsafe partial class FFXVRModule {
         if (!_dmg3d) return;
         ui_slider("dmg3d_scale", "size##dmg3d", ref _dmg_size, 0.3f, 3f, "%.2f", UiTag.None, null, 160f); ImGui.SameLine();
         ui_slider("dmg3d_lift", "lift##dmg3d", ref _dmg_lift, -10f, 20f, "%.1f units", UiTag.None, null, 160f); ImGui.SameLine();
-        ui_check("dmg3d_hide2d", "hide the flat numbers##dmg3d", ref _dmg_hide2d, UiTag.NextLaunch, "The game's flat numbers are left off the panel. Takes effect at the next launch: the setting is saved now, the hook it needs is installed at launch.");
+        ui_check("dmg3d_hide2d", "hide the flat numbers##dmg3d", ref _dmg_hide2d, UiTag.NextLaunch, _dmg_hide_at_launch
+                 ? "The game's flat numbers are left off the panel. Applies at once: the hook it needs was installed at launch."
+                 : "The game's flat numbers are left off the panel. Turned on, it takes effect at the next launch: the setting is saved now, the hook it needs is installed at launch.");
         if (!_dmg_atlas) ImGui.TextDisabled("battle.dds not found yet (found at the first target menu or number of a battle)");
     }
 }

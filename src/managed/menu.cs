@@ -116,7 +116,9 @@ public sealed unsafe partial class FFXVRModule {
         bool ch = ImGui.Checkbox(label, ref v); ui_after(key, tags, tip); return ch;
     }
     private bool ui_radio(string key, string label, ref int v, int value, UiTag tags = UiTag.None, string? tip = null) {
-        bool ch = ImGui.RadioButton(label, ref v, value); ui_after(key, tags, tip); return ch;
+        bool ch = ImGui.RadioButton(label, ref v, value);
+        ui_after(key, v == value ? tags : tags & ~UiTag.NextLaunch, tip);   // review N5: one "next launch" per row, on the selected choice
+        return ch;
     }
     private bool ui_slider(string key, string label, ref float v, float lo, float hi, string fmt, UiTag tags = UiTag.None, string? tip = null, float width = 0f) {
         if (width > 0f) ImGui.SetNextItemWidth(width);
@@ -126,10 +128,16 @@ public sealed unsafe partial class FFXVRModule {
         if (width > 0f) ImGui.SetNextItemWidth(width);
         bool ch = ImGui.SliderInt(label, ref v, lo, hi, fmt); ui_after(key, tags, tip); return ch;
     }
+    /// <summary>The last item is hovered for a tooltip: build and marshal tooltip text only then (review N1: nothing per frame).</summary>
+    private static bool tip_hovered() => ImGui.IsItemHovered(ImGuiHoveredFlags.ForTooltip);
+    /// <summary>The last item's tooltip, only while it is hovered (s goes through esc: a '%' is text).</summary>
+    private static void ui_tip(string s) { if (tip_hovered()) ImGui.SetTooltip(esc(s)); }
     /// <summary>After the widget: its tooltip (the help, then the ini key; "" = a session-only control) and its tags.</summary>
     private void ui_after(string key, UiTag tags, string? tip) {
-        string k = key.Length > 0 ? "ini: " + key : "not saved (this session only)";
-        ImGui.SetItemTooltip(esc(string.IsNullOrEmpty(tip) ? k : tip + "\n" + k));
+        if (tip_hovered()) {
+            string k = key.Length > 0 ? "ini: " + key : "not saved (this session only)";
+            ImGui.SetTooltip(esc(string.IsNullOrEmpty(tip) ? k : tip + "\n" + k));
+        }
         if ((tags & UiTag.Experimental) != 0) ui_tag("experimental", "Experimental: it may change or misbehave. Tell the developer what you see.");
         if ((tags & UiTag.NextLaunch) != 0 && _nl_pending.Contains(key)) ui_tag("next launch", "Saved now; it takes effect at the next launch of the game.");
         if ((tags & UiTag.Dev) != 0) ui_tag("dev", "Shown in developer mode only.", false);
@@ -140,7 +148,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.PushFont(null, _our_px * 0.8f);
         try { if (amber) ImGui.TextColored(k_tag_amber, text); else ImGui.TextDisabled(text); }
         finally { ImGui.PopFont(); }
-        ImGui.SetItemTooltip(esc(tip));
+        ui_tip(tip);
     }
     /// <summary>Above a tab's experimental items, which come last (design 2.4).</summary>
     private static void ui_exp_separator() { ImGui.Spacing(); ImGui.Separator(); }
@@ -163,13 +171,16 @@ public sealed unsafe partial class FFXVRModule {
         menu_refresh();
         draw_header();
         int sel = -1;
-        if (ImGui.BeginTabBar("##ffxvr_tabs", ImGuiTabBarFlags.FittingPolicyShrink)) {
+        // Mixed (review N4): shrink to the style's minimum tab width, then scroll, so a narrow window keeps the labels readable
+        if (ImGui.BeginTabBar("##ffxvr_tabs", ImGuiTabBarFlags.FittingPolicyMixed)) {
             try {
                 for (int i = 0; i < k_tab_key.Length; i++) {
                     if (i == k_tab_dev && !_diag_verbose) continue;   // developer mode = diag_verbose: the tab comes and goes the same frame
-                    var fl = _menu_tab_restore && k_tab_key[i] == _menu_tab ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+                    // review S4: the Developer tab is never restored (menu_tab=developer opens View): the native diagnostics are
+                    // armed only after a click on the tab this session, as the old Debug header (collapsed at every launch) needed
+                    var fl = _menu_tab_restore && i != k_tab_dev && k_tab_key[i] == _menu_tab ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
                     bool open = ImGui.BeginTabItem(k_tab_label[i], fl);
-                    if (i == k_tab_hands) ImGui.SetItemTooltip("VR hands at the controllers (experimental)");
+                    if (i == k_tab_hands) ui_tip("VR hands at the controllers (experimental)");
                     if (open) { sel = i; ImGui.EndTabItem(); }
                 }
             }
@@ -179,7 +190,8 @@ public sealed unsafe partial class FFXVRModule {
         if (sel < 0) return;
         _menu_tab = k_tab_key[sel];
         // As opening the old Debug header did: while the Developer tab is the selected one, keep the native diagnostics armed
-        // (1 s heartbeat, slot-0 readback); another tab, or the window closed, disarms them.
+        // (1 s heartbeat, slot-0 readback); another tab, or the window closed, disarms them. It is never restored at launch (above),
+        // so being selected means it was clicked this session.
         if (sel == k_tab_dev && _fn_diag_keepalive != null) _fn_diag_keepalive(2);
         try {
             if (ImGui.BeginChild(k_tab_child[sel], Vector2.Zero, ImGuiChildFlags.NavFlattened)) {
@@ -198,7 +210,10 @@ public sealed unsafe partial class FFXVRModule {
     }
 
     private const string k_dev_tip = "Developer mode: shows the Developer tab and turns on the verbose log: periodic lines in ffxvr_diag.log (up to 64 MB a session "
-                                   + "instead of 4), the camera trace, Ctrl+F9 dumps. Applies now; the camera trace file starts fresh at the next launch.";
+                                   + "instead of 4), the camera trace, Ctrl+F9 dumps. It also turns on the developer's automatic captures: one frame census at the "
+                                   + "first battle frame in the headset (a one-frame hitch), up to 3 slow-GPU dumps instead of 1, the overdrive log and the per-movie "
+                                   + "FMV lines. Applies now; the camera trace file starts fresh at the next launch. Once raised, the log cap stays at 64 MB until "
+                                   + "the next start (unticking does not close the log).";
 
     /// <summary>Always visible (design 2.2): Headset, Recentre, the status in one line (the full text in its tooltip), Developer
     /// on the right; the perf line and the version; warnings and notes only when present.</summary>
@@ -208,9 +223,9 @@ public sealed unsafe partial class FFXVRModule {
         float right = ImGui.GetCursorPosX() + ImGui.GetContentRegionAvail().X;
         float devw = ImGui.GetFrameHeight() + style.ItemInnerSpacing.X + ImGui.CalcTextSize("Developer").X;
         ImGui.Checkbox("Headset", ref _xr_want);   // session only; pushed every frame by push_all, until the native side accepts (it waits for the first 3D frame)
-        ImGui.SetItemTooltip("The headset view, this session (View > Starting: start in the headset)\nnot saved (this session only)");
+        ui_tip("The headset view, this session (View > Starting: start in the headset)\nnot saved (this session only)");
         ImGui.SameLine(); if (ImGui.Button("Recentre") && _fn_xr_recenter != null) _fn_xr_recenter();
-        ImGui.SetItemTooltip("Home: the view and the big screen in front of you again");
+        ui_tip("Home: the view and the big screen in front of you again");
         string st = xr_status_text();
         int cut = st.IndexOf("  yaw ", StringComparison.Ordinal);
         string brief = cut > 0 ? st[..cut] : st;
@@ -221,17 +236,17 @@ public sealed unsafe partial class FFXVRModule {
         }
         ImGui.SameLine();
         ImGui.TextDisabled(esc(fit(brief, right - devw - sp - ImGui.GetCursorPosX())));
-        if (st.Length > 0) ImGui.SetItemTooltip(esc(st));
+        if (st.Length > 0) ui_tip(st);
         ImGui.SameLine(Math.Max(right - devw, ImGui.GetItemRectMax().X - ImGui.GetWindowPos().X + sp));
-        ui_check("diag_verbose", "Developer", ref _diag_verbose, UiTag.None,
-                 k_dev_tip + (_diag_on_n > 0 ? I($"\ndiagnostics on: {_diag_on_n} ({_diag_on_list})") : "\ndiagnostics: all off"));
+        ImGui.Checkbox("Developer", ref _diag_verbose);   // developer mode = diag_verbose (design 2.5); its tooltip is built only on hover
+        if (tip_hovered()) ImGui.SetTooltip(esc(k_dev_tip + (_diag_on_n > 0 ? I($"\ndiagnostics on: {_diag_on_n} ({_diag_on_list})") : "\ndiagnostics: all off") + "\nini: diag_verbose"));
 
-        if (_perf_short.Length > 0) { ImGui.TextDisabled(esc(_perf_short)); ImGui.SetItemTooltip(esc(_perf_full)); ImGui.SameLine(); }
+        if (_perf_short.Length > 0) { ImGui.TextDisabled(esc(_perf_short)); ui_tip(_perf_full); ImGui.SameLine(); }
         ImGui.TextDisabled(esc($"FFX VR {s_mod_version}"));
-        ImGui.SetItemTooltip(esc($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version}"));
+        if (tip_hovered()) ImGui.SetTooltip(esc($"FFX VR {s_mod_version} | native {_native_version} | Fahrenheit {s_fh_version}"));
         if (_diag_on_n > 0) {
             ImGui.SameLine(); ImGui.TextColored(k_tag_amber, I($"log: {_diag_on_n} on"));
-            ImGui.SetItemTooltip(esc($"diagnostics on: {_diag_on_list}. A player's install has them all off: tools\\set-logging.ps1 -Profile Release"));
+            if (tip_hovered()) ImGui.SetTooltip(esc($"diagnostics on: {_diag_on_list}. A player's install has them all off: tools\\set-logging.ps1 -Profile Release"));
         }
         if (_diag_verbose && !_verbose_at_launch) ImGui.TextDisabled("Verbose log on for this session. The camera trace starts fresh at the next launch.");
 
@@ -248,12 +263,32 @@ public sealed unsafe partial class FFXVRModule {
         if (over >= 0) { int e = _perf_full.IndexOf('\n', over + 1); ui_warn(e > 0 ? _perf_full[(over + 1)..e] : _perf_full[(over + 1)..], k_amber); }
         if (_nl_pending.Count > 0) {
             ImGui.TextColored(k_amber, I($"{_nl_pending.Count} change{(_nl_pending.Count == 1 ? " applies" : "s apply")} at the next launch"));
-            ImGui.SetItemTooltip(esc("Saved now, applied when the game next starts (the hooks they need are installed at launch): " + string.Join(", ", _nl_pending)));
+            if (tip_hovered()) ImGui.SetTooltip(esc("Saved now, applied when the game next starts (the hooks they need are installed at launch): " + string.Join(", ", _nl_pending)));
         }
         if (!_diag_verbose && _dev_off_n > 0) {
             ImGui.TextDisabled(I($"{_dev_off_n} developer setting{(_dev_off_n == 1 ? " is" : "s are")} not at the default (turn on Developer to see them)"));
-            ImGui.SetItemTooltip(esc("Changed in ffxvr.ini, drawn only in the Developer tab: " + _dev_off_list));
+            ui_tip("Changed in ffxvr.ini, drawn only in the Developer tab: " + _dev_off_list);
         }
+        dev_live_ui();   // review S3: session-only developer states still running with Developer off
+    }
+
+    /// <summary>Review S3: the session-only developer states that keep running when Developer is off (F10 / F11 work for every
+    /// player): one amber line naming them, with [clear]. Nothing is cleared by itself: a tester may want them kept.</summary>
+    private void dev_live_ui() {
+        bool eye2 = _stereo_on && !_xr_want, lift = _hands_dev && _wig_on;   // eye 2 is off in flat play by default (and forced on in the headset)
+        if (_diag_verbose || !(_slowmo_on || _hover_mode != 0 || _bisect_mode != 0 || _ovr_freeze || eye2 || lift)) return;
+        string s = "Developer tools still active:" + (_slowmo_on ? " slow motion (F10)," : "") + (_hover_mode != 0 ? " the UI highlight (F11)," : "")
+                 + (_bisect_mode != 0 ? (_bisect_mode == 1 ? " a hidden draw range," : " only a draw range shown,") : "") + (_ovr_freeze ? " the game camera frozen," : "")
+                 + (eye2 ? " eye 2 rendered without the headset," : "") + (lift ? " a bone lifted (bone finder)," : "");
+        ImGui.TextColored(k_amber, esc(s.TrimEnd(',')));
+        ImGui.SameLine(); if (ImGui.SmallButton("clear##devlive")) dev_live_clear();
+        ui_tip("Turns them all off (they are session-only and not saved). Developer shows their controls again.");
+    }
+    private void dev_live_clear() {
+        _slowmo_on = false; _hover_mode = 0; _bisect_mode = 0; _ovr_freeze = false;   // push_all / render_imgui_inner send them every frame
+        if (!_xr_want) _stereo_on = false;
+        if (_wig_on) { _wig_on = false; if (_fn_bone_wiggle != null) _fn_bone_wiggle(_wig_rec, _wig_slot, 0f); }   // the lift is sent only while its section draws
+        _logger.Info("menu: the developer states were cleared from the header (slow motion, UI highlight, draw range, frozen camera, eye 2, bone lift)");
     }
 
     // -- the tabs ---------------------------------------------------------------------------------------------------------
@@ -295,7 +330,7 @@ public sealed unsafe partial class FFXVRModule {
         ui_slider("seat_height", "Seat height##seat", ref _ovr_up, -sr, sr, "%.0f units", UiTag.None, "Raise or lower the seat view (Numpad 7 / 9).");
         ui_slider("seat_forward", "Seat forward##seat", ref _ovr_forward, -sf, sf, "%.0f units", UiTag.None, "Move the seat view forward or back (Numpad + / -).");
         ImGui.SameLine(); if (ImGui.Button("Reset##seat")) { _ovr_yaw = _ovr_pitch = 0; _ovr_right = _ovr_up = _ovr_forward = 0; }
-        ImGui.SetItemTooltip("Seat height and forward back to 0 (the camera override's yaw, pitch and right too; Numpad 5 does the same)");
+        ui_tip("Seat height and forward back to 0 (the camera override's yaw, pitch and right too; Numpad 5 does the same)");
 
         ImGui.SeparatorText("Third person & diorama");
         ImGui.Text("Third person:"); ImGui.SameLine();
@@ -347,7 +382,7 @@ public sealed unsafe partial class FFXVRModule {
         // The format has no '%': ImGui shows it as it is (a Ctrl+click entry takes the step count, clamped below).
         int ots = (int)MathF.Round(text_scale_step(_overlay_text_scale) * 20f);
         if (ui_slider_int("overlay_text_scale", "Menu text size##ots", ref ots, 10, 40, I($"{ots / 20f:F2}"), UiTag.Common,
-                          I($"This menu, Eye 2 and the labels (now {ImGui.GetFontSize():F0} px)."), 160f)) _overlay_text_scale = text_scale_step(ots / 20f);
+                          "This menu, Eye 2 and the labels (the size now: Developer > Logging & status).", 160f)) _overlay_text_scale = text_scale_step(ots / 20f);
         ImGui.SameLine(); if (ImGui.SmallButton("default##ots")) _overlay_text_scale = 1f;
 
         if (ImGui.CollapsingHeader("Graphics & performance")) {
@@ -412,11 +447,11 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("gestures", "Grab the world with the grips (seat and diorama)", ref _gestures, UiTag.None, "One hand pans; two hands pan, turn, tilt and zoom."); ImGui.SameLine();
         ui_slider("gest_tilt", "wrist-roll tilt##gest", ref _gest_tilt, -2f, 2f, "%.1f", UiTag.None, "The tilt's gain (wrist roll).", 120f); ImGui.SameLine();
         if (ImGui.SmallButton("reset grab")) { if (_fn_gesture_reset != null) _fn_gesture_reset(); }
-        ImGui.SetItemTooltip("The grab's move, turn, tilt and zoom back to none (Numpad 5 too)");
+        ui_tip("The grab's move, turn, tilt and zoom back to none (Numpad 5 too)");
 
         ImGui.SeparatorText("Help");
         ImGui.TextDisabled("Home: recentre.  End: next view.  F8: this menu.  (?)");
-        ImGui.SetItemTooltip(esc(k_help_text));
+        ui_tip(k_help_text);
     }
 
     private const string k_bv_tip = "The view a battle starts in; the view from before returns when the battle ends.";
@@ -493,7 +528,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>Hands (design 2.3, tab "Hands"): today's "VR hands (experimental)" header, hands.cs.</summary>
     private void tab_hands() {
         ImGui.TextColored(k_tag_amber, "experimental");
-        ImGui.SetItemTooltip("VR hands are experimental: they may change or misbehave. Tell the developer what you see.");
+        ui_tip("VR hands are experimental: they may change or misbehave. Tell the developer what you see.");
         hands2_ui();
     }
 
@@ -571,6 +606,7 @@ public sealed unsafe partial class FFXVRModule {
             }
             ImGui.TextDisabled("overdrives: " + esc(odg_text(0)));
             ImGui.TextDisabled("overdrives, last: " + esc(odg_text(1)));
+            ImGui.TextDisabled(esc(odt_row_text()));
             if (_fn_cull_dist_get != null) ImGui.TextDisabled("characters cull patch: " + (_fn_cull_dist_get() != 0 ? "patched" : (_cull_dist_rc != 0 ? I($"not applied (rc {_cull_dist_rc}, see diag log)") : "off")));
             if (_fn_cull_scene_get != null) ImGui.TextDisabled("scene cull patch: " + (_fn_cull_scene_get() != 0 ? "patched" : (_cull_scene_rc != 0 ? I($"not applied (rc {_cull_scene_rc}, see diag log)") : "off")));
             if (_fn_msaa_status != null) {
@@ -595,7 +631,7 @@ internal struct LaunchKeys {
 }
 
 /// <summary>vr-menu S1 (design 2.4, "next launch"): which keys differ from what the launch installed, so that a change waits for
-/// the next launch. dmg3d_hide2d / od_targets_hide2d (their hooks, dmg3d_init / odt_row_init), diag_cluster_bytes / diag_va_log
+/// the next launch. dmg3d_hide2d turned on without its hook (dmg3d_init; once hooked it is live both ways), od_targets_hide2d either way (its patch and hook are made only at init, odt_row_init), diag_cluster_bytes / diag_va_log
 /// (ld_init), diag_load_prof's two probes (on / off), cursor_source=game without the cursor hooks (diag7_init: queued with
 /// cursor_source=game or diag_build7 at launch; going back to legacy is live), and the load hooks (ld_init: queued only when
 /// one of diag_load_lines, load_lock_release, hd_cluster_cache, diag_load was on at launch). smooth_anchor is not here: the job
@@ -604,7 +640,8 @@ internal static class NextLaunch {
     public static bool LoadHooks(in LaunchKeys k) => k.load_lines || k.lock_release != 0 || k.hd_cache || k.diag_load;
     public static List<string> Pending(in LaunchKeys at, in LaunchKeys now) {
         var p = new List<string>();
-        if (now.dmg_hide2d != at.dmg_hide2d) p.Add("dmg3d_hide2d");
+        // review S1: only on without the hook; hooked at launch, the switch is live both ways
+        if (now.dmg_hide2d && !at.dmg_hide2d) p.Add("dmg3d_hide2d");
         if (now.odt_hide2d != at.odt_hide2d) p.Add("od_targets_hide2d");
         if (now.cluster_bytes != at.cluster_bytes) p.Add("diag_cluster_bytes");
         if (now.va_log != at.va_log) p.Add("diag_va_log");

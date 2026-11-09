@@ -27,7 +27,7 @@ namespace FFXVR;
 //   vr_hands_yaw / _pitch / _roll       degrees, +-45, default 0: fine tune in the hand frame (yaw and roll mirrored for the left hand)
 //   vr_hands_off_right / _up / _back    metres, +-0.10, default 0: offset in the hand frame (out from the thumb side, back of the
 //                       hand, toward the elbow; "out" mirrored for the left hand)
-//   vr_hands_debug      bits, default 0 (Debug only): 1 the wrist axes (red X, green Y, blue Z), 2 the boxes instead of the hand
+//   vr_hands_debug      bits, default 0 (Developer tab only): 1 the wrist axes (red X, green Y, blue Z), 2 the boxes instead of the hand
 //                       mesh, 4 one placement line per drawn frame in ffxvr_diag.log (300 at most per switch-on); 8 is the "log
 //                       one pose dump" button's one-shot.
 //   Tap build (design-notes "Hands: the tap gesture"; native ffxvr_hands2_tap_set, hv_tap_update):
@@ -461,7 +461,7 @@ public sealed unsafe partial class FFXVRModule {
             // vr-menu-design 2.3: the warning pointed into Debug, which players no longer see. Fix it: View > First person > Your
             // body: hide all (fp_body_mode=0, saved) and the session's "hide the player's body" (on by default; Developer tab).
             if (ImGui.Button("Fix it##h2body")) { _fp_body_mode = 0; _fp_hide_body = true; }
-            ImGui.SetItemTooltip("Your body: hide all (View > First person; ini fp_body_mode=0), and the player's body hidden this session (the default)");
+            ui_tip("Your body: hide all (View > First person; ini fp_body_mode=0), and the player's body hidden this session (the default)");
         }
         if (_vr_hands && _h2_pack_sent == "") {   // S3: the whole fallback list failed (a single rejection moves on to the next pack)
             ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.8f, 0.3f, 1f));
@@ -565,7 +565,7 @@ public sealed unsafe partial class FFXVRModule {
             if (_h2_packs.Count == 0) ImGui.TextDisabled("no hand packs in the mod folder's hands\\ (reinstall the mod)");
             ImGui.EndCombo();
         }
-        ImGui.SetItemTooltip("The hand model drawn at the controllers\nini: vr_hands_pack");
+        ui_tip("The hand model drawn at the controllers\nini: vr_hands_pack");
         ImGui.SameLine(); if (ImGui.SmallButton("rescan##h2pk")) hands2_scan(true);
         if (_h2_pack_try > 0 && !string.IsNullOrEmpty(_h2_pack_sent)) {   // review N6: the fallback is drawn, not the selection
             ImGui.SameLine(); ImGui.TextDisabled(esc($"(using '{_h2_pack_sent}': '{_vr_hands_pack}' could not be loaded)"));
@@ -579,7 +579,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.TextDisabled("Your own hands from a model you own: tools\\import-hands.ps1 (README: \"Your own hands\"), then rescan.");
     }
 
-    /// <summary>Debug > First person / follow: the vr_hands_debug bits and the one-shot pose dump.</summary>
+    /// <summary>Developer > First person & body: the vr_hands_debug bits and the one-shot pose dump.</summary>
     private void hands2_debug_ui() {
         if (_fn_hands2_set == null) return;
         ImGui.Text("VR hands v2:"); ImGui.SameLine();

@@ -4,7 +4,7 @@ namespace FFXVR;
 
 // FMV sync probe (S2 of the FMV depth plan, 4 Nov 2026; design-notes "FMV sync probe (S2, 4 Nov 2026)"): F8's one FMV line.
 // The per-FMV log lines are native's (ffxvr_native.cpp fmv_frame, ffxvr_fmv.h, which lists every field with its evidence);
-// this line is read here only while the Debug header is drawn, with the same guarded reads (ffxvr_safe_read), so no export
+// this line is read here only while the Developer tab is drawn, with the same guarded reads (ffxvr_safe_read), so no export
 // changed. Module offsets (VA - 0x400000), as FhUtil.ptr_at takes them:
 //   0x8DED3C  dword  the movie manager (VA 0xCDED3C), 0x750 bytes; +0x6D0 playing, +0x6D8 the game's frame number (0xFFFE =
 //                    ended), +0x6DC the video id, +0x6FC paused, +0x4F0 char[0x80] the file name; the embedded player at
@@ -25,7 +25,7 @@ public sealed unsafe partial class FFXVRModule {
     private FmvSync.State _fmv_last_st; private int _fmv_last_ev = int.MinValue, _fmv_last_view = int.MinValue, _fmv_last_fvd_st = -1; private uint _fmv_last_fvd_n;
     private string _fmv_line = "";
 
-    /// <summary>The Debug header's FMV line (render thread, only while the header is drawn).</summary>
+    /// <summary>The Developer tab's FMV line (render thread, only while the tab is drawn).</summary>
     private void fmv_debug_ui() => ImGui.TextDisabled(esc(fmv_line()));
 
     private string fmv_line() {

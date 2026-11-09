@@ -44,7 +44,7 @@ public sealed unsafe partial class FFXVRModule {
         return $"heat haze: {v[1]} draws this frame, {what}";
     }
 
-    /// <summary>The Debug status line: the frame's counts and the session's.</summary>
+    /// <summary>The Developer tab status line: the frame's counts and the session's.</summary>
     private string haze_status_text() {
         int* v = stackalloc int[12];
         if (!haze_status(v)) return "";

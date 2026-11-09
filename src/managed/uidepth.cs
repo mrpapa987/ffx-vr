@@ -14,7 +14,7 @@ namespace FFXVR;
 //   ui_adaptive_margin (factor, default 0.85): the panel goes to the nearest depth times this.
 //   ui_backing (0..1, default 0.35; 0 = off): the opacity of the dark halo behind the UI content. The halo grows from near-opaque
 //     UI only (text, borders, icons), so a translucent window's fill is not darkened behind (review UD-9).
-//   The projection slot the depth is linearised with (Debug only, not saved): 0 auto (default: the slot the scene's VP block is
+//   The projection slot the depth is linearised with (Developer tab only, not saved): 0 auto (default: the slot the scene's VP block is
 //   built from, detected each frame), 1 the near variant, 2 the main slot (it reads about 2x the near variant in this game).
 public sealed unsafe partial class FFXVRModule {
 
@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule {
     private float _ui_adaptive_min = 0.6f;        // ini ui_adaptive_min (m)
     private float _ui_adaptive_margin = 0.85f;    // ini ui_adaptive_margin (factor on the nearest depth)
     private float _ui_backing = 0.35f;            // ini ui_backing (0 = off)
-    private int   _ui_adaptive_proj = 0;          // Debug: 0 auto (default), 1 near-variant projection, 2 main (not saved)
+    private int   _ui_adaptive_proj = 0;          // Developer tab: 0 auto (default), 1 near-variant projection, 2 main (not saved)
     private delegate* unmanaged[Cdecl]<int, float, float, float, int, void> _fn_uidepth_set;   // ABI 20
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_uidepth_status;                 // ABI 20: (out, n) -> count of values
 
@@ -52,7 +52,7 @@ public sealed unsafe partial class FFXVRModule {
         return $"panel at {v[0]:F2} m{near}: {state}";
     }
 
-    /// <summary>The Debug status line: the live values, the passes' GPU cost and the depth row in use.</summary>
+    /// <summary>The Developer tab status line: the live values, the passes' GPU cost and the depth row in use.</summary>
     private string uidepth_status_text() {
         float* v = stackalloc float[15];
         if (!uidepth_status(v)) return "";

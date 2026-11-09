@@ -17,7 +17,7 @@ namespace FFXVR;
 //     runs again. 0 off; 1 battle loads, the entry and the way back (the default: the tested case); 2 all loads, a test mode
 //     (review LD2-1): also area / event map changes and loads from the title until their first new-camera frame, and a
 //     loadPCluster call alone while the main thread is blocked in the loader's wait-all (load_lines.cs). Mode 2 is offered
-//     in Debug > Battle loading only and is never saved (LD2-R-3): it is written as 1, and a 2 read at launch becomes 1, so
+//     in Developer > Loading only and is never saved (LD2-R-3): it is written as 1, and a 2 read at launch becomes 1, so
 //     every launch is back on the tested mode; a hand edit while the game runs still applies at once. (LL-1's old mode 2, a
 //     release over the game's Present, is a different thing and stays deleted.)
 //

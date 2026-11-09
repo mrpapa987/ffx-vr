@@ -17,24 +17,24 @@ namespace FFXVR;
 //   fmv_depth_pop        0..0.5 m (default 0.15): how far in front of it the nearest content comes;
 //   fmv_depth_smooth     0..0.95 (default 0.6): the per-pixel temporal filter within a shot. Since round 7.4 the worker's
 //                        centred one (frames -3 .. +3, edge-aware, never across a cut, no lag; its time sigma is 3 x this);
-//                        with "old causal filter" (Debug, session-only) the EMA as before (changes over 24 of 255 pass at once);
-//   fmv_depth_median     0 / 1 (default 1; Debug): a 3x3 median on each decoded depth frame (speckle);
-//   fmv_depth_edge_fill  0 / 1 (default 0; Debug; was fmv_depth_edges, default 1, ignored since round 6): the edge fill: a triangle stretched across a depth edge shows the colour of
+//                        with "old causal filter" (Developer tab, session-only) the EMA as before (changes over 24 of 255 pass at once);
+//   fmv_depth_median     0 / 1 (default 1; Developer tab): a 3x3 median on each decoded depth frame (speckle);
+//   fmv_depth_edge_fill  0 / 1 (default 0; Developer tab; was fmv_depth_edges, default 1, ignored since round 6): the edge fill: a triangle stretched across a depth edge shows the colour of
 //                        the far side instead of a smear;
-//   fmv_depth_edge_band  0.01..0.15 (default 0.04; Debug; never 0, review3 N-5): the band at the border over which content in front of the screen is
+//   fmv_depth_edge_band  0.01..0.15 (default 0.04; Developer tab; never 0, review3 N-5): the band at the border over which content in front of the screen is
 //                        brought back to the screen plane; content behind it is never feathered (the window rule, owner
 //                        test round 3: the old feather on everything made a "shelf" at the top edge);
-//   each frame to its own range  Debug, session-only (round 7): the depth normalised per frame as the converter stored it
+//   each frame to its own range  Developer tab, session-only (round 7): the depth normalised per frame as the converter stored it
 //                        (the default since round 7 is one fixed range per shot from the index: the subject stops sinking back
 //                        when something nearer enters);
-//   old cut ramp         Debug, session-only (round 7.3): every cut starts flat and ramps in over 150 ms (the default
+//   old cut ramp         Developer tab, session-only (round 7.3): every cut starts flat and ramps in over 150 ms (the default
 //                        switches at once at a cut whose depth is ready; the 150 ms ramp stays for returns from flat);
-//   depth as colour      Debug, session-only: the depth drawn as colour (red near, green middle, blue far) to judge it;
+//   depth as colour      Developer tab, session-only: the depth drawn as colour (red near, green middle, blue far) to judge it;
 //   fmv_depth_flat_subs  0 / 1 (default 0): the bottom 15 % of the video stays flat (the subtitles are in the same image and
 //                        would otherwise lie on the relief);
-//   fmv_depth_tight_fov  0 / 1 (default 1; Debug): each eye's projection is narrowed to the screen (review SF-1), so the eye
+//   fmv_depth_tight_fov  0 / 1 (default 1; Developer tab): each eye's projection is narrowed to the screen (review SF-1), so the eye
 //                        image's rows go to the video; 0 = the eye's whole field of view (an A/B against Virtual Desktop);
-//   depth frame offset   -3..3 (Debug, session-only: not saved, 0 at every start; review N6): the depth frame shown is the
+//   depth frame offset   -3..3 (Developer tab, session-only: not saved, 0 at every start; review N6): the depth frame shown is the
 //                        video frame + this (a sync test knob).
 // ABI 41: ffxvr_fmv3d_set (every frame from push_all) and ffxvr_fmv3d_text (the text, only while it is drawn); ABI 42:
 // ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), flags 1 flatten the bottom, 2 tight fov, 4 edge fill, 8 median,
@@ -49,18 +49,18 @@ public sealed unsafe partial class FFXVRModule {
     private float _fmv_depth_range = 10f;          // ini fmv_depth_range (m; 0.5-20, default 10 since round 10c, was 3)
     private float _fmv_depth_pop = 0.5f;           // ini fmv_depth_pop (m; 0-2, default 0.5 since round 10c, was 0.15)
     private float _fmv_depth_smooth = 0.6f;        // ini fmv_depth_smooth
-    private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Debug)
-    private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Debug; default 0 since round 6: the fill made blocks along silhouettes)
-    private bool  _fmv_depth_colour = false;       // Debug, session-only
-    private bool  _fmv_depth_causal = false;       // Debug, session-only (round 7.4): the old causal filter (EMA) instead of the centred one (A/B)
-    private bool  _fmv_depth_old_cuts = false;     // Debug, session-only (round 7.3): every cut starts flat and ramps in over 150 ms, as before (A/B)
-    private bool  _fmv_depth_per_frame = false;    // Debug, session-only (round 7): each frame normalised to its own range, as before (A/B)
-    private int   _fmv_depth_grid = 1;             // ini fmv_depth_grid (round 10c): 0 round 7's 320 grid, 1 the 640 grid on the plain depth (default), 2 the guided upsample (Debug only: streaks) (flags bits 8-9)
+    private bool  _fmv_depth_median = true;        // ini fmv_depth_median (Developer tab)
+    private bool  _fmv_depth_edges = false;        // ini fmv_depth_edges (Developer tab; default 0 since round 6: the fill made blocks along silhouettes)
+    private bool  _fmv_depth_colour = false;       // Developer tab, session-only
+    private bool  _fmv_depth_causal = false;       // Developer tab, session-only (round 7.4): the old causal filter (EMA) instead of the centred one (A/B)
+    private bool  _fmv_depth_old_cuts = false;     // Developer tab, session-only (round 7.3): every cut starts flat and ramps in over 150 ms, as before (A/B)
+    private bool  _fmv_depth_per_frame = false;    // Developer tab, session-only (round 7): each frame normalised to its own range, as before (A/B)
+    private int   _fmv_depth_grid = 1;             // ini fmv_depth_grid (round 10c): 0 round 7's 320 grid, 1 the 640 grid on the plain depth (default), 2 the guided upsample (Movies, shown in developer mode: streaks) (flags bits 8-9)
     private float _fmv_depth_soften = 1f;          // ini fmv_depth_soften (round 10c): edge softening, depth texels 0..1.5, default 1.0 (flags bits 10-13, tenths)
-    private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Debug)
+    private float _fmv_depth_edge_band = 0.04f;    // ini fmv_depth_edge_band (Developer tab)
     private bool  _fmv_depth_flat_subs = false;    // ini fmv_depth_flat_subs
-    private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Debug)
-    private int   _fmv_depth_offset = 0;           // Debug, session-only (not in the ini)
+    private bool  _fmv_depth_tight_fov = true;     // ini fmv_depth_tight_fov (Developer tab)
+    private int   _fmv_depth_offset = 0;           // Developer tab, session-only (not in the ini)
     private delegate* unmanaged[Cdecl]<int, float, int, int, float, float, float, float, void> _fn_fmv3d_set;   // ABI 43
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_fmv3d_text;         // ABI 41: (which, buf, cap) -> length
     private readonly byte[][] _fmv3d_raw = { new byte[600], new byte[600] };         // the bytes last turned into _fmv3d_str (per which)
@@ -97,7 +97,7 @@ public sealed unsafe partial class FFXVRModule {
         return 0.063f * (1f / z - 1f / ds) * 57.29578f;
     }
 
-    /// <summary>Native's text (0 the Debug line, 1 the main window's note); a new string only when its bytes changed.</summary>
+    /// <summary>Native's text (0 the Developer tab line, 1 the main window's note); a new string only when its bytes changed.</summary>
     private string fmv3d_text(int which) {
         var f = _fn_fmv3d_text; if (f == null) return "";
         byte* b = stackalloc byte[600];
@@ -121,7 +121,7 @@ public sealed unsafe partial class FFXVRModule {
         ImGui.Text("Depth grid:"); ImGui.SameLine();
         ui_radio("fmv_depth_grid", "640, smooth (recommended)##fmv3dgrid", ref _fmv_depth_grid, 1, UiTag.None, k_fmv_grid_tip); ImGui.SameLine();
         ui_radio("fmv_depth_grid", "320##fmv3dgrid", ref _fmv_depth_grid, 0, UiTag.None, k_fmv_grid_tip);
-        if (_diag_verbose) {   // the guided grid stays a developer choice (it was in Debug)
+        if (_diag_verbose || _fmv_depth_grid == 2) {   // the guided grid is a developer choice (it was in Debug); shown whenever it is the value, so the row always has a selection (review N6)
             ImGui.SameLine();
             ui_radio("fmv_depth_grid", "640, guided##fmv3dgrid", ref _fmv_depth_grid, 2, UiTag.Experimental | UiTag.Dev, "Round 10's guided grid: it streaks at silhouettes.");
         }

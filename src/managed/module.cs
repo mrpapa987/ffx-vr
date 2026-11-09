@@ -243,7 +243,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private int _eye2_source = 0;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_draws;
     private delegate* unmanaged[Cdecl]<int> _fn_eye2_same_inputs;      // eye-2 draws last frame with no swapped input and no eye-2 constants (an upper bound)
-    private delegate* unmanaged[Cdecl]<int, void> _fn_diag_keepalive;  // keeps the native per-frame diagnostics armed; only while Debug is expanded
+    private delegate* unmanaged[Cdecl]<int, void> _fn_diag_keepalive;  // keeps the native per-frame diagnostics armed; only while the Developer tab is selected
     private delegate* unmanaged[Cdecl]<int*, int*, int, int> _fn_eye2_size;
     private bool  _stereo_on = false;
     private float _ipd = 6f;
@@ -1096,15 +1096,15 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "fmv_depth_amount":  pf(k, v, ref _fmv_depth_amount, 0f, 1f); _fmv_depth_amount_seen = true; break;   // the "3D movie" mapping's multiplier (default 1)
                 case "fmv_depth_range":   pf(k, v, ref _fmv_depth_range, 0.5f, 20f); break;   // m behind the screen for the farthest content (default 10 since round 10c; a saved value is kept)
                 case "fmv_depth_pop":     pf(k, v, ref _fmv_depth_pop, 0f, 2f); break;        // m in front of the screen for the nearest content (default 0.5 since round 10c; a saved value is kept)
-                case "fmv_depth_grid":    pi(k, v, ref _fmv_depth_grid, 0, 2); break;         // round 10c: 0 the 320 grid, 1 the 640 grid on the plain depth (default), 2 guided (Debug)
+                case "fmv_depth_grid":    pi(k, v, ref _fmv_depth_grid, 0, 2); break;         // round 10c: 0 the 320 grid, 1 the 640 grid on the plain depth (default), 2 guided (Movies, shown in developer mode)
                 case "fmv_depth_soften":  pf(k, v, ref _fmv_depth_soften, 0f, 1.5f); break;  // round 10c: edge softening, depth texels (default 1.0)
                 case "fmv_depth_smooth":  pf(k, v, ref _fmv_depth_smooth, 0f, 0.95f); break;  // the temporal filter within a shot (default 0.6)
-                case "fmv_depth_median":  pb(k, v, ref _fmv_depth_median); break;            // Debug: the 3x3 median (default 1)
+                case "fmv_depth_median":  pb(k, v, ref _fmv_depth_median); break;            // Developer tab: the 3x3 median (default 1)
                 case "fmv_depth_edges":   break;                                             // round 6: the old edge fill key (saved as 1 by every earlier build) is ignored: the fill starts off
-                case "fmv_depth_edge_fill": pb(k, v, ref _fmv_depth_edges); break;           // Debug: the edge fill (default 0)
-                case "fmv_depth_edge_band": pf(k, v, ref _fmv_depth_edge_band, 0.01f, 0.15f); break;   // Debug: where pop-out ramps to the screen plane at the border (default 0.04)
+                case "fmv_depth_edge_fill": pb(k, v, ref _fmv_depth_edges); break;           // Developer tab: the edge fill (default 0)
+                case "fmv_depth_edge_band": pf(k, v, ref _fmv_depth_edge_band, 0.01f, 0.15f); break;   // Developer tab: where pop-out ramps to the screen plane at the border (default 0.04)
                 case "fmv_depth_flat_subs": pb(k, v, ref _fmv_depth_flat_subs); break;  // the bottom 15 % flat (subtitles; default 0)
-                case "fmv_depth_tight_fov": pb(k, v, ref _fmv_depth_tight_fov); break;  // Debug: the relief's projection narrowed to the screen (default 1; review SF-1)
+                case "fmv_depth_tight_fov": pb(k, v, ref _fmv_depth_tight_fov); break;  // Developer tab: the relief's projection narrowed to the screen (default 1; review SF-1)
                 case "fmv_depth_offset":  break;                                         // session-only since review N6: an old line is ignored (the offset starts at 0)
                 case "hist_mode":         pi(k, v, ref _hist_mode, 0, 2); break;
                 case "follow_pans":       pb(k, v, ref _follow_pans); break;
@@ -2022,13 +2022,13 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         haze_push();     // heat haze: heat_haze (every frame; applied at the next Present)
         fmv3d_push();    // fmv-relief (S3): fmv_depth and its settings (every frame; applied at the next Present)
         slow_push();     // the slow-GPU guard: slow_guard, slow_guard_restart (every frame)
-        sr_push();       // stickrep: stick_reproject and its Debug knobs, the turn keys (every frame)
+        sr_push();       // stickrep: stick_reproject and its Developer tab knobs, the turn keys (every frame)
         if (_fn_bisect_set != null) _fn_bisect_set(_bisect_mode, _bisect_a, _bisect_b);
         { long t = cpu_now(); push_player(); _cpu_player += cpu_now() - t; }   // before fp_set: it can switch the view for a battle (cpu-lean: timed)
         push_hands();
         { long t = cpu_now(); hands2_push(); _cpu_hands += cpu_now() - t; }   // VR hands v2: vr_hands_*, the calibration (hands.cs)
         qc_push();   // Quest-only controls: the walk gate's game bits, the grips, the save screen's feed (quest_ctl.cs; after hands2_push: its tap read)
-        odg_push();  // overdrive gestures: the settings, the Debug test aid (od_gest.cs)
+        odg_push();  // overdrive gestures: the settings, the Developer tab test aid (od_gest.cs)
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
@@ -2773,7 +2773,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     /// <summary>FH-1, every frame before our push (render thread, after Fahrenheit's NewFrame, so always after its platform_bind
     /// wrote the flags). Writes only on an edge: the first frame, a context Fahrenheit made again, someone turning the flags on
-    /// again (logged 5 times, then only counted in the Debug row), or fh_dpi_fix going to 0.</summary>
+    /// again (logged 5 times, then only counted in the Developer tab row), or fh_dpi_fix going to 0.</summary>
     private void dpi_apply() {
         ImGuiIOPtr io = ImGui.GetIO(); ImGuiStylePtr st = ImGui.GetStyle();
         bool fonts = io.ConfigDpiScaleFonts, vps = io.ConfigDpiScaleViewports;

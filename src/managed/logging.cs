@@ -24,10 +24,11 @@ public sealed unsafe partial class FFXVRModule {
     private bool _diag_verbose_read;           // the launch read saw the key (settings_migrate)
     private const int k_log_cap_mb = 4, k_log_cap_verbose_mb = 64;
     private int _log_pushed = -1;              // the (diag_verbose, cap) last sent to native, as verbose | cap << 1 (-1: not yet)
+    private int _log_cap_max;                  // review S2: the highest cap sent this session; never lowered (see log_push)
     private int _diag_on_n;                    // diag_on().Count, refreshed with the F8 header (menu.cs menu_refresh)
     private bool _log_hello_done;
     private string _native_version = "?";
-    private double _log_size_at; private long _log_size = -1;   // the Debug line's file size, read once a second
+    private double _log_size_at; private long _log_size = -1;   // the Developer tab line's file size, read once a second
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_log_config;   // ABI 26
     private delegate* unmanaged[Cdecl]<byte*> _fn_build_info;             // ABI 26
 
@@ -78,10 +79,13 @@ public sealed unsafe partial class FFXVRModule {
     private bool diag_any() => _diag_verbose || _diag7 || _diag_load || _diag_load_lines || _diag_actors || _diag_cluster_bytes || _diag_va_log || _diag_transition
                                || _diag_load_prof != 0;
 
-    /// <summary>From push_all, every frame: diag_verbose and the cap, sent only when they change.</summary>
+    /// <summary>From push_all, every frame: diag_verbose and the cap, sent only when they change. The cap is never lowered during
+    /// a session (review S2): native closes a log that is already past a lowered cap until the next start (diag_close), so unticking
+    /// Developer after a long verbose session would silence every later line, errors included. The cap is only a size guard.</summary>
     private void log_push() {
         if (_fn_log_config == null) return;
-        int cap = log_cap_mb(), v = _diag_verbose ? 1 : 0, key = v | (cap << 1);
+        int cap = Math.Max(log_cap_mb(), _log_cap_max), v = _diag_verbose ? 1 : 0, key = v | (cap << 1);
+        _log_cap_max = cap;
         if (key == _log_pushed) return;
         _log_pushed = key;
         _fn_log_config(v, cap);
@@ -114,6 +118,6 @@ public sealed unsafe partial class FFXVRModule {
             try { var fi = new FileInfo(Path.Combine(Path.GetDirectoryName(_ini_path) ?? ".", "ffxvr_diag.log")); _log_size = fi.Exists ? fi.Length : -1; } catch { _log_size = -1; }
         }
         ImGui.TextDisabled(_log_size < 0 ? "ffxvr_diag.log: not written yet this session"
-                                         : I($"ffxvr_diag.log: {_log_size / 1024} KB this session (cap {log_cap_mb()} MB; the previous session is ffxvr_diag.prev.log)"));
+                                         : I($"ffxvr_diag.log: {_log_size / 1024} KB this session (cap {Math.Max(log_cap_mb(), _log_cap_max)} MB, never lowered before the next start; the previous session is ffxvr_diag.prev.log)"));
     }
 }

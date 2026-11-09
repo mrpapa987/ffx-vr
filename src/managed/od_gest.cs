@@ -19,7 +19,7 @@ namespace FFXVR;
 // Practice targets (F8, any time with the headset on and no overdrive window open, outside battle too): a random 3-8 symbols or
 // the last Bushido seen, a 4 s bar, the full hit test, visuals and buzz, nothing sent; F8 and the log get "practice: N of N in x s".
 // Native decides and logs (odg: lines: one per window, Auron's expected sequence and every press the game saw); this file
-// pushes the settings, draws the F8 rows, and (Debug, a diagnostic profile, this session only) sets the game's own
+// pushes the settings, draws the F8 rows, and (Developer tab, a diagnostic profile, this session only) sets the game's own
 // "overdrives always ready" flag. A hand grabbing the world gestures nothing; in an injecting Bushido window the grips do not
 // grab (a clenched punch is a punch), a quick squeeze is not L1 / R1 (only a punch is) and the VR triggers are held back.
 // Bushido's opposite pairs in a row (Shooting Star's Left, Right; Banishing Blade's Right, Left) go at once when the game
@@ -60,7 +60,7 @@ public sealed unsafe partial class FFXVRModule {
     private int _odt_row_calls, _odt_row_hidden, _odt_row_faults; private uint _odt_row_frame = uint.MaxValue; private bool _odt_row_val;
     private float _od_circle_cm = 4f, _od_slash_speed = 1.6f;
     private int   _od_lulu_stick = 0;
-    private bool  _od_always_ready;     // Debug, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
+    private bool  _od_always_ready;     // Developer tab, a diagnostic profile, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
     private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
@@ -217,7 +217,7 @@ public sealed unsafe partial class FFXVRModule {
             $"od_visuals={(_od_visuals ? 1 : 0)}\n" +
             $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n";
     }
-    /// <summary>Every frame from push_all: the settings; the Debug test aid.</summary>
+    /// <summary>Every frame from push_all: the settings; the Developer tab test aid.</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
@@ -269,7 +269,7 @@ public sealed unsafe partial class FFXVRModule {
             for (int i = 0; i < 3; i++) if (ImGui.Selectable(k_odg_stick[i], i == _od_lulu_stick)) _od_lulu_stick = i;
             ImGui.EndCombo();
         }
-        ImGui.SetItemTooltip("ini: od_lulu_stick");
+        ui_tip("ini: od_lulu_stick");
         ui_check("od_gest_tidus_swing", "Tidus: swing for Swordplay##odg", ref _od_gest_tidus, UiTag.None,
                  "Swing the right controller for Slice & Dice / Spiral Cut: a swing presses A once; the light blade and a small copy of the bar show where it lands. Off by default: an early swing restarts the bar."); ImGui.SameLine();
         ui_slider("od_slash_speed", "swing speed (m/s)##odg", ref _od_slash_speed, 0.8f, 5f, "%.1f", UiTag.None, "The speed a swing (or Auron's slash) must reach.", 140f);
@@ -310,10 +310,12 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("od_targets_badge", "Show the button letter##odt", ref _od_tgt_badge, UiTag.None,
                  "Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");
         ImGui.SameLine(); ui_check("od_targets_hide2d", "Hide the game's Bushido row##odt", ref _od_tgt_hide2d, UiTag.NextLaunch,
-                 I($"From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch. Two ways, either is enough: the detour on 0x892740 ({_odt_row_status}; {_odt_row_check}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}) and the call-site patch at 0x89B411 ({odt_patch_name(_odt_patch_state)}). Each Bushido's odt line in ffxvr_diag.log says which ran."));
+                 "From just before a strike-the-targets window opens until it closes, the game's own row of Bushido buttons is left out of the UI panel (it is drawn above the targets in the headset). The timer stays. Takes effect at the next launch (the patch and the detour are made at launch; their state: Developer > Logging & status).");
 
         ImGui.TextDisabled(replay.Length > 0 ? "last Bushido seen: " + esc(replay) : "Replay last Bushido: after one Bushido this session");
     }
+    /// <summary>Developer > Logging & status: the Bushido row's two ways (was in the row checkbox's tooltip, built every frame).</summary>
+    private string odt_row_text() => I($"Bushido row hide: the detour on 0x892740 ({_odt_row_status}; {_odt_row_check}; calls {_odt_row_calls}, hidden {_odt_row_hidden}, faults {_odt_row_faults}) and the call-site patch at 0x89B411 ({odt_patch_name(_odt_patch_state)}); either is enough, each Bushido's odt line in ffxvr_diag.log says which ran");
     /// <summary>Developer > Battle internals: the test aid and Auron's raw sequence.</summary>
     private void odg_debug_ui() {
         if (!ImGui.TreeNode("Overdrive gestures (test aid)")) return;

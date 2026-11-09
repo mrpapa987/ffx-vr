@@ -5,7 +5,7 @@ namespace FFXVR;
 // Build 7: battle-cursor and engine diagnostics, LOG ONLY (design-notes "Build 7: battle-cursor and engine diagnostics
 // (log only)"; research SYNTHESIS.md stage C1 and section 6). Nothing here changes what the game or the headset shows:
 // every hooked game function is always called, and the only drawing is the opt-in "show cursor anchors" dots on the
-// monitor (Debug > Build 7). The ini switch diag_build7 (default 0 since the loads build) gates the logging, the native stall
+// monitor (Developer > Logging & status > Build 7). The ini switch diag_build7 (default 0 since the loads build) gates the logging, the native stall
 // watchdog and the XInputSetState hook's log (the hook itself also follows haptics). The four game-function hooks belong to
 // the features that use them (loads build): the target and turn pointers to cursor_source=game (C2), the job join to
 // smooth_anchor, the backbuffer resize (build 9's invalidation signal) to nothing, it is always installed; each is also
@@ -169,7 +169,7 @@ public sealed unsafe partial class FFXVRModule {
     private void h7_join() {
         d7_void o = System.Threading.Volatile.Read(ref _o7_join) ?? d7_resolve_main(ref _o7_join, _a7_join, _h7_join!);
         o();
-        if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Debug: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
+        if (_sr_stall_req) { _sr_stall_req = false; System.Threading.Thread.Sleep(3000); }   // stickrep Developer tab: "stall the main thread 3 s" (the keepalive test; main thread, after the original)
         sg_join_install();   // the shadow pool guard, once, on the main thread between frames (shadow_cam.cs)
         dmg3d_join();        // 3D damage numbers: the nodes the battle UI just drew (dmg3d.cs; one bool read while off)
         if (_diag7 || _smooth_anchor) { try { d7_join_record(); } catch { _d7_main_faults++; } }   // the smooth anchor needs the snapshot too
@@ -417,7 +417,7 @@ public sealed unsafe partial class FFXVRModule {
             d7_log(sb.ToString());
         }
 
-        // 6.1 visual: the game's anchors as dots on the monitor (Debug > Build 7; never in the headset)
+        // 6.1 visual: the game's anchors as dots on the monitor (Developer > Logging & status > Build 7; never in the headset)
         if (_d7_dots && !_xr_on && cam_ok) {
             Vector2 ds = ImGui.GetIO().DisplaySize; ImDrawListPtr dl = ImGui.GetForegroundDrawList();
             Vector2 px(float x, float y) => new Vector2((x + 960f) / 1920f * ds.X, (y + 540f) / 1080f * ds.Y);   // UI units -> monitor pixels
