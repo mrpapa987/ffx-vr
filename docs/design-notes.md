@@ -6095,7 +6095,7 @@ the left grip held + a press of the left menu button.
 ## The event hold through a sphere grab's own camera cut (branch `eye-hold2`, 10 Nov 2026)
 
 **The event hold** (fix-eye, `ffxvr_eyejump.h` `ej::EvHold`, `ffxvr_fp_event`; F8 > View > First person > "Steady view during
-scripted moves", ini `fp_event_hold`, default off; `fp_event_leash`, "slack (units)", default 12). In first person on foot, when
+scripted moves", ini `fp_event_hold`, default off; `fp_event_leash`, "slack (units)", default 12, 5..40 since review round 2). In first person on foot, when
 player control goes off, the eye's horizontal position stays where it was while the game moves Tidus's root, on a leash: further
 than the leash, the eye trails at that distance; a single step over twice the leash (a staging) restarts the hold at the new root.
 The height follows the head as usual. It ends at control's return, a map change / load / re-pick, the view leaving first person,
@@ -6186,6 +6186,25 @@ control-off moments (text boxes, road cutscenes) before the cloister.
 - **N1** (above, "engaged"). **N3:** a release (managed's, or a gap in the steps) clears the ring and the open window, so a cut
   just after re-entering first person is not measured from where he was before. **N4:** "held on through N" counts every cut
   of the kept windows, not the windows. **N6:** one count per line.
+- **Round 2 (`FFXVR_EJ_REV` 10).**
+  - **R2-S1: the late cut only with the eye pinned near the slack** (`EvCfg::late_pin` = 0.75 x leash off the root at the cut).
+    A grab-style hold within the slack (the cloister's 3.94, djyt0600's 9.1 / 10.5) now keeps through any later cut until control
+    returns. A longer take at the socket with a second cut 3.5 s on (the reviewer's L1) stays out of the wall. Round 1's
+    cutscene probe (walked to the leash, 12 off) still ends at its first late cut, 6.0 s.
+    - Costs: a run to a mark beyond the slack (djyt0000-like, the reviewer's L2) that cuts again 3 s on blinks onto the root at
+      the mark. A cutscene that moved him under the slack in its first 1.5 s keeps the eye under 1 m off him until control, a
+      staging or 45 s: the view a grab gives.
+    - With the gate, a grab never logs "a camera cut 3 s or more after the hold engaged": such lines come from cutscenes or runs
+      over the slack.
+  - **R2-N4: the two-step staging needs two real halves** (each step at least half the leash; a blend's halves are, even at
+    1:2). A 23.5 set followed by a walking step pulls instead of restarting.
+  - **R2-N1:** managed's engaged test also needs the eye's offset to have grown by `k_engage` since the control-off edge, which
+    matches native's "the root moved" for a hold starting inside a glide (no run, no give-back). No ABI change.
+  - **R2-N2:** the slack's minimum is 5 (slider and ini). Under it a scripted walk pulls and blinks every few frames; native
+    still clamps 2..40.
+  - **R2-N3:** a given-back hold run that had taken over the plain run makes it a plain run again. Not done: telling a
+    setting-off or drawn-head end (`EVW_OFF`) from a cutscene's, which would need the end reason in the export. It can give back
+    a real grab's run, bounded by the 6 refunds.
 - **Left as notes.**
   - N2: the window and S1's block count Presents. At a 30 Hz present rate (no FFX-60fps) the window spans 4 ticks, and a
     djyt0000-speed run across a cut can release. That degrades to f12e7db's behaviour, not worse. Keying both to time would fix it.
@@ -6208,5 +6227,8 @@ control-off moments (text boxes, road cutscenes) before the cloister.
 - **The glue** (evh_tick verbatim, `glue2_test`): the line budgets, the lines from the trace, the blink. **The capture**
   (`cap2_test`, `FpCap` transpiled): the budgets, the takeover, the trace through native into managed (the run starts at frame
   1098, the push after the engagement).
-- **Mutants.** 62 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 4
-  whose lines this change rewrote (their equivalents are in the 62).
+- **Round 2 tests.** The reviewer's probe2 L1 (the grab with a second cut 3.5 s on: held to control's return), L2, T1 and a
+  1:2 blend; the pin's boundary (8.9 / 9.1 off); the late count from the engagement while pinned; a glide-start driven through
+  native into managed (no run).
+- **Mutants.** 70 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 4
+  whose lines this change rewrote (their equivalents are in the 70).

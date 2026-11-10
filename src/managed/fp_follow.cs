@@ -132,7 +132,7 @@ public sealed unsafe partial class FFXVRModule {
     // Review S1: the cut that starts a cutscene can reach native a frame before the control flag, or on the same frame: a cut on
     // the edge frame or the 2 before blocks the start (EV_BLOCKED). Review S3: no hold while the eye is on the drawn head.
     // review S1: off by default until the owner's capture confirms the cause (the game moving the root); F8 ticks it for a test
-    private bool _fp_event_hold = false; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 0), fp_event_leash (units, 2..40)
+    private bool _fp_event_hold = false; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 0), fp_event_leash (units, 5..40; review R2-N2: under 5 a scripted walk pulls and blinks every few frames)
     private delegate* unmanaged[Cdecl]<int, float, float*, int, int> _fn_fp_event;   // ABI 50
     private long _fpev_key = -1; private readonly float[] _fpev_st = new float[17];   // the last eligible frame's (slot, scene generation); native's state for F8
     /// <summary>push_player, every frame after the eye is sent: eligible = the field, first person, on foot (not riding), not
@@ -151,7 +151,8 @@ public sealed unsafe partial class FFXVRModule {
         // the automatic capture (a diagnostic profile only): the motion log for 20-40 s. eye-hold2: the owner's 6 runs went to text
         // boxes and road cutscenes before the cloister, so the 6 now start when the hold engages (native's state just returned: it
         // keeps the eye FpCap.k_engage or more off the root, i.e. the game moved him), and a plain control-off edge has its own 2
-        bool engaged = FpCap.Engaged(_fpev_st[0], _fpev_st[2]);
+        if (off && !_fpcap.off_prev) _fpev_off0 = _fpev_st[2];   // review R2-N1: the eye's offset at the edge (a glide still under way)
+        bool engaged = FpCap.Engaged(_fpev_st[0], _fpev_st[2], _fpev_off0);
         bool can = false;
         if (off && (!_fpcap.off_prev || (engaged && !_fpcap.held))) {
             can = diag_any() && _fn_motion_log != null && !(read(FhUtil.ptr_at<uint>(GameGates.k_menu), out uint menu) && menu != 0);   // not for a field menu
@@ -175,7 +176,7 @@ public sealed unsafe partial class FFXVRModule {
             else if (_eye_share_d < _fpcap_share_dmin) _fpcap_share_dmin = _eye_share_d;
         }
     }
-    private FpCapState _fpcap; private float _fpcap_seq; private int _fpcap_lines; private int _fpcap_share_slot = -1; private string _fpcap_share = ""; private float _fpcap_share_dmin;
+    private FpCapState _fpcap; private float _fpcap_seq; private int _fpcap_lines; private float _fpev_off0; private int _fpcap_share_slot = -1; private string _fpcap_share = ""; private float _fpcap_share_dmin;
     private int _eye_share_slot = -1, _eye_share_id; private nint _eye_share_name; private float _eye_share_d; private ulong _eye_share_frame = ulong.MaxValue;   // eye_disp_step's shared-root actor this frame
     private static string chr_kind(int chr_id) { uint t = (uint)chr_id >> 12; return t == 0 ? "a party / event character model" : t == 2 ? "an NPC" : t == 4 ? "a 'w' model" : t == 5 ? "an object (chr/obj)" : I($"type {t}"); }
     /// <summary>The capture's one summary line when control is back (native's episode, ej::Episode): the diag log, with the motion lines.</summary>
@@ -189,8 +190,8 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>F8 > View > First person (the hold's state: Developer > Logging & status).</summary>
     private void fpev_ui() {
-        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye where you stood while the game moves you at an interaction (control off) in first person: it must move you within 1.5 s; a camera cut that moves you past the slack, or comes 3 s after it moved you, lets go."); ImGui.SameLine();
-        ui_slider("fp_event_leash", "slack (units)##fpev", ref _fp_event_leash, 2f, 40f, "%.0f", UiTag.None, "How far the game may move you before the eye trails.", 140f);
+        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye where you stood while the game moves you at an interaction (control off) in first person: it must move you within 1.5 s; a camera cut that moves you past the slack, or comes 3 s after it moved you to the slack, lets go."); ImGui.SameLine();
+        ui_slider("fp_event_leash", "slack (units)##fpev", ref _fp_event_leash, 5f, 40f, "%.0f", UiTag.None, "How far the game may move you before the eye trails.", 140f);
     }
 
     /// <summary>finding 1: is h (an actor's +0x830) the marked model object?</summary>
@@ -253,8 +254,8 @@ internal static class FpMark {
 
 /// <summary>fix-eye: the automatic capture's state (FpCap.Step). eye-hold2: runs = the hold's runs, plain = the plain control-off runs
 /// (last = the last plain run's start), held = the hold engaged this episode; review S2: hold_run = this episode's run counts as the
-/// hold's, refunds = hold runs given back.</summary>
-internal struct FpCapState { public int runs, plain, left, refunds; public bool ext, off_prev, episode, held, hold_run; public double last; }
+/// hold's, refunds = hold runs given back, took_over = this episode's hold run was its plain run (R2-N3).</summary>
+internal struct FpCapState { public int runs, plain, left, refunds; public bool ext, off_prev, episode, held, hold_run, took_over; public double last; }
 /// <summary>fix-eye: the automatic capture (research/sphere-grab-eye.md section 4): the motion log runs k_frames (20 s), extended once
 /// to k_frames_max (40 s) in all while control stays off. eye-hold2 (logs8: the 6 runs were spent on text boxes and road cutscenes
 /// before the cloister): k_runs a session start when the event hold engages (native keeps the eye k_engage or more off the root:
@@ -269,22 +270,24 @@ internal static class FpCap {
     public const int k_runs = 6, k_runs_plain = 2, k_frames = 1200, k_frames_max = 2400, k_ext_at = 60;
     public const double k_gap = 30.0;
     public const float k_engage = 1f;   // units: ej::EvCfg::engage (native's "engaged" line uses the same)
-    /// <summary>ffxvr_fp_event's out 0 (1 = holding) and 2 (the eye's offset from its base now): is the hold at work?</summary>
-    public static bool Engaged(float state, float off_units) => state == 1f && off_units >= k_engage;
+    /// <summary>ffxvr_fp_event's out 0 (1 = holding) and 2 (the eye's offset from its base now): is the hold at work? Review R2-N1:
+    /// native also needs the root moved k_engage from the start (a hold that starts inside the last glide begins off the root), so
+    /// the offset must also have grown by k_engage over off0, the offset at the control-off edge (0 unless a glide was under way).</summary>
+    public static bool Engaged(float state, float off_units, float off0) => state == 1f && off_units >= k_engage && off_units >= off0 + k_engage;
     public static int Step(ref FpCapState s, bool off, bool can, bool engaged, bool holding, double now) {
         int r = 0;
         if (off && !s.off_prev) {
-            s.episode = false; s.held = false; s.hold_run = false;
+            s.episode = false; s.held = false; s.hold_run = false; s.took_over = false;
             if (can && s.plain < k_runs_plain && (s.plain == 0 || now - s.last >= k_gap)) { s.plain++; s.last = now; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
         }
         if (off && engaged && !s.held) {
             s.held = true;
-            if (s.episode && s.left > 0) { if (s.runs < k_runs) { s.runs++; s.plain--; s.hold_run = true; } }
+            if (s.episode && s.left > 0) { if (s.runs < k_runs) { s.runs++; s.plain--; s.hold_run = true; s.took_over = true; } }
             else if (can && s.runs < k_runs) { s.runs++; s.left = k_frames; s.ext = false; s.episode = true; s.hold_run = true; r = k_frames; }
         }
         else if (off && s.hold_run && !holding) {   // review S2: the hold ended before control came back: a cutscene
             s.hold_run = false;
-            if (s.refunds < k_runs) { s.refunds++; s.runs--; }
+            if (s.refunds < k_runs) { s.refunds++; s.runs--; if (s.took_over) { s.plain++; s.took_over = false; } }   // R2-N3: a taken-over plain run is plain again
         }
         if (s.left > 0) {
             s.left--;

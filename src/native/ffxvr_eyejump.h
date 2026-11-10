@@ -15,8 +15,9 @@
 // edge), EV_PULL / EV_BLOCKED; 7 (review 2): min_start 20 (the shared scratch test keys its expectations on this); 8 (eye-hold2,
 // 10 Nov 2026): a camera cut ends the hold only with a root jump over the leash around it (EvCfg::cut_win), and the hold's
 // "engaged" mark (the eye held over EvCfg::engage off the root); 9 (eye-hold2 review): the engagement deadline (arm_s), a cut
-// late in an engaged hold ends it (late_s), the staging restart on two steps, the ring cleared on a release.
-#define FFXVR_EJ_REV 9
+// late in an engaged hold ends it (late_s), the staging restart on two steps, the ring cleared on a release; 10 (review round 2):
+// the late cut only with the eye pinned near the leash (late_pin), the two-step staging only with two real halves.
+#define FFXVR_EJ_REV 10
 #include <cmath>
 #include <cstdint>
 
@@ -280,13 +281,17 @@ inline bool limit_start(Limit& l, uint32_t frame, int window) {
 // - the engagement deadline (arm_s 1.5 s): a hold that has not engaged (the game moved him and the eye is held at least `engage`
 //   off: the hold at work) by then ends with the usual glide (under a unit: unseen). Every known interaction moves him at once
 //   (the grab at +4 frames, djyt0600's 9.1 set and djyt0000's run from the edge); a talk or a cutscene that talks first gets none.
-// - a late cut (late_s 3 s): in an engaged hold, a camera cut 3 s or more after the engagement ends it, jump or not. The grab's own
-//   cut comes with its move (at the engagement) and the whole engaged grab lasts 1.8 s, so it keeps; a cutscene that moved him
-//   in its first 1.5 s goes back to him at its next shot change. The cost: a long interaction that cuts again 3 s after it moved
-//   him lets the eye glide (or blink) onto the root at the mark. The capture shows only the grab's one cut, so this is the
-//   conservative side of the unknown; a capture of a long interaction would tell.
+// - a late cut (late_s 3 s): in an engaged hold, a camera cut 3 s or more after the engagement ends it, jump or not, when the eye
+//   is pinned near the leash (review round 2, R2-S1: the eye at least late_pin x leash off the root: the game moved him beyond the
+//   slack). The grab's own cut comes with its move (at the engagement); a grab-style hold within the slack (the cloister's 3.94,
+//   djyt0600's 9.1 / 10.5 sets) keeps through any later cut until control returns, so a longer take at the socket with a second
+//   cut stays out of the wall. A cutscene that walked him to the leash in its first 1.5 s goes back to him at its next shot
+//   change. The costs: a run to a mark beyond the slack (djyt0000-like) that cuts again 3 s on lets the eye blink onto the root
+//   at the mark; a cutscene that moved him under the slack in its first 1.5 s keeps the eye under 1 m off him until control,
+//   a staging or 45 s (the view a grab gives).
 // Review S1: a staging is a single step over 2 x leash OR two steps together over it (FFX-60fps blends a tick step of up to 30
-// units over two Presents, 13 + 13 for a 26-unit staging); the single-step pull for 12-24 stays.
+// units over two Presents, 13 + 13 for a 26-unit staging); the single-step pull for 12-24 stays. Review round 2 (R2-N4): the two
+// steps must both be at least half the leash (a blend's halves, even at 1:2), so a 23.5 set followed by a walking step pulls.
 // Pure: the native glue (build_override_view's primary advance call) passes the eye base and the frame's inputs.
 struct EvCfg {
     float leash  = 12.f;   // ini fp_event_leash: units (12 = about 1.05 m)
@@ -297,7 +302,8 @@ struct EvCfg {
     float engage = 1.f;    // eye-hold2: the hold is "engaged" once it keeps the eye this far off the root and the root has moved
                            // this far from where control went off (review N1: not a glide's leftover at the start)
     float arm_s  = 1.5f;   // review B1: a hold not engaged after this long ends (a glide under a unit; 0 = never)
-    float late_s = 3.f;    // review B1: in an engaged hold, a camera cut this long after the engagement ends it (0 = never)
+    float late_s = 3.f;    // review B1: in an engaged hold, a camera cut this long after the engagement ends it (0 = never) ...
+    float late_pin = 0.75f;// ... R2-S1: when the eye is at least this fraction of the leash off the root (pinned near the slack)
     float reset() const { return 2.f * leash; }       // a single root step over this restarts the hold at the root
     float glide_max() const { return 0.5f * leash; }  // an offset under this glides back, else a blink and a snap
 };
@@ -359,6 +365,7 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
     if (release) { h.hist_n = 0; h.cut_left = 0; }   // review N3: no reference from before a gap, a load or another map
     // review S1: the move over the last two steps (FFX-60fps's two-Present halves), from the ring before this base goes in
     const float step2 = h.hist_n >= 2 ? hlen(bx - h.hist[(h.hist_n - 2) % k_ev_hist][0], bz - h.hist[(h.hist_n - 2) % k_ev_hist][1]) : step;
+    const float half1 = h.hist_n >= 2 ? hlen(h.hist[(h.hist_n - 1) % k_ev_hist][0] - h.hist[(h.hist_n - 2) % k_ev_hist][0], h.hist[(h.hist_n - 1) % k_ev_hist][1] - h.hist[(h.hist_n - 2) % k_ev_hist][1]) : 0.f;   // R2-N4: the first of the two
     // eye-hold2: the base w steps ago (the oldest kept when fewer; this one when none), then this base into the ring
     const int w = c.cut_win < 1 ? 1 : c.cut_win > k_ev_hist - 1 ? k_ev_hist - 1 : c.cut_win;
     float rx = bx, rz = bz;
@@ -374,7 +381,8 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
         // from there inside the window is a new scene; a window that closes without one is the interaction's own cut: held on
         bool scene = false, late = false;
         if (cut) {
-            late = h.engaged && c.late_s > 0.f && h.t - h.engage_t >= c.late_s;   // review B1: a later shot of a cutscene
+            late = h.engaged && c.late_s > 0.f && h.t - h.engage_t >= c.late_s                // review B1: a later shot of a cutscene,
+                && hlen(h.H[0] - bx, h.H[1] - bz) >= c.late_pin * L;                          // R2-S1: with the eye pinned near the slack
             if (h.cut_left <= 0) { h.cut_ref[0] = rx; h.cut_ref[1] = rz; h.cut_jump = 0.f; h.win_cuts = 0; }
             h.cut_left = w + 1; h.cuts++; h.win_cuts++;
         }
@@ -388,7 +396,8 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
         const int why = !enabled ? EVW_OFF : !want ? EVW_CONTROL : release ? EVW_RELEASE : scene ? EVW_CUT : late ? EVW_LATE
                       : (c.max_s > 0.f && h.t >= c.max_s) ? EVW_CAP : unarmed ? EVW_ARM : EVW_NONE;
         if (why == EVW_NONE) {
-            const bool staged = step > c.reset() || (step2 > c.reset() && !h.reset_last);   // review S1: one step or two halves
+            const bool staged = step > c.reset()                                              // review S1: one step or two halves
+                || (step2 > c.reset() && !h.reset_last && step >= 0.5f * L && half1 >= 0.5f * L);   // (R2-N4: both real halves)
             h.reset_last = staged;
             if (staged) { h.H[0] = bx; h.H[1] = bz; h.resets++; ev = EV_RESET; }   // a staging: the usual blink (the jump)
             else {

@@ -1065,7 +1065,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "cut_blink":         pb(k, v, ref _cut_blink); break;
                 case "eye_jump_blink": case "eye_jump_units": case "battle_face": ej_parse(k, v); break;   // eye jumps (eye_jump.cs)
                 case "fp_event_hold":     pb(k, v, ref _fp_event_hold); break;                 // fix-eye: the eye held while control is off in first person (fp_follow.cs)
-                case "fp_event_leash":    pf(k, v, ref _fp_event_leash, 2f, 40f); break;      // ... how far the game may move him before the eye trails (units)
+                case "fp_event_leash":    pf(k, v, ref _fp_event_leash, 5f, 40f); break;      // ... how far the game may move him before the eye trails (units)
                 case "turn_stick":        pb(k, v, ref _turn_stick); break;
                 case "turn_mode":         pi(k, v, ref _turn_mode, 0, 1); break;
                 case "turn_snap":         pf(k, v, ref _turn_snap, 5f, 90f); break;
