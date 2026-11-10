@@ -120,10 +120,13 @@ public sealed unsafe partial class FFXVRModule {
     // wall socket) and the eye went with it into the wall. While control is off in first person on foot, native holds the eye's
     // horizontal position where it was, on a leash of fp_event_leash units (a single move over twice that is a staging: the hold
     // starts again there, with the blink); at control's return it glides back over 0.3 s under half the leash, else blinks and
-    // snaps. A map change, a load or a re-pick (a new scene generation or followed slot: the release bit), a camera cut, or 45 s end it.
-    // Cutscenes (control off for minutes) end it at their first camera cut, and the 45 s cap ends one without cuts (a scripted
-    // walk under a following camera): an interaction rarely lasts longer (the djyt0000 grab: 27 s with control off). An "object or
-    // actor within 20 units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
+    // snaps. A map change, a load or a re-pick (a new scene generation or followed slot: the release bit), a camera cut that comes
+    // with a new scene, or 45 s end it. eye-hold2 (logs8/djose_grab_1300.log): the grab's own camera cut came 4 frames after control
+    // went off, with the 3.9-unit move to the socket, and ended every hold "after 0.0-0.1 s"; a cut now ends it only when the root
+    // moves more than the leash within 4 frames of it (ej::EvCfg::cut_win: a staging, a teleport, another place). A cutscene that
+    // stages him elsewhere still releases at that cut; one without cuts or stagings ends at the 45 s cap with the eye at most the
+    // leash off him: an interaction rarely lasts longer (the djyt0000 grab: 27 s with control off). An "object or actor within 20
+    // units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
     // Review S1: the cut that starts a cutscene can reach native a frame before the control flag, or on the same frame: a cut on
     // the edge frame or the 2 before blocks the start (EV_BLOCKED). Review S3: no hold while the eye is on the drawn head.
     // review S1: off by default until the owner's capture confirms the cause (the game moving the root); F8 ticks it for a test
@@ -139,31 +142,40 @@ public sealed unsafe partial class FFXVRModule {
         long key = eligible ? ((long)pick << 32) | body_hide_scene_gen(actors, pick) : -1;
         bool rel = eligible && _fpev_key >= 0 && key != _fpev_key;
         if (eligible) _fpev_key = key;
-        // the automatic capture: the motion log for 20-40 s from the frame control goes off (a diagnostic profile only)
-        bool can = false;
-        if (off && !_fpcap.off_prev) {
-            can = diag_any() && _fn_motion_log != null && !(read(FhUtil.ptr_at<uint>(GameGates.k_menu), out uint menu) && menu != 0);   // not for a field menu
-            _fpcap_share_slot = -1; _fpcap_share = ""; _fpcap_share_dmin = 0f;
+        fixed (float* o = _fpev_st) {
+            _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0) | (_fpk_blink ? 8 : 0), _fp_event_leash, o, 17); _fpk_blink = false;   // 8: review S2's blink
+            if (o[4] != _fpcap_seq) { _fpcap_seq = o[4]; if ((_fpcap.episode || _fpcap.held) && !off) fpcap_summary(o); }
         }
-        int ml = FpCap.Step(ref _fpcap, off, can, _now);
-        if (ml > 0) {
-            _fn_motion_log(ml);
-            if (ml == FpCap.k_frames) { string m = I($"eye capture: player control off in first person on map {map_name()}: the motion log runs {FpCap.k_frames / 60} s ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; run {_fpcap.runs} of {FpCap.k_runs} this session"); _logger.Info(m); d7_log(m); }
+        // the automatic capture (a diagnostic profile only): the motion log for 20-40 s. eye-hold2: the owner's 6 runs went to text
+        // boxes and road cutscenes before the cloister, so the 6 now start when the hold engages (native's state just returned: it
+        // keeps the eye FpCap.k_engage or more off the root, i.e. the game moved him), and a plain control-off edge has its own 2
+        bool engaged = FpCap.Engaged(_fpev_st[0], _fpev_st[2]);
+        bool can = false;
+        if (off && (!_fpcap.off_prev || (engaged && !_fpcap.held))) {
+            can = diag_any() && _fn_motion_log != null && !(read(FhUtil.ptr_at<uint>(GameGates.k_menu), out uint menu) && menu != 0);   // not for a field menu
+            if (!_fpcap.off_prev) { _fpcap_share_slot = -1; _fpcap_share = ""; _fpcap_share_dmin = 0f; }
+        }
+        int runs0 = _fpcap.runs;
+        int ml = FpCap.Step(ref _fpcap, off, can, engaged, _now);
+        if (ml > 0) _fn_motion_log(ml);
+        if (ml == FpCap.k_frames || _fpcap.runs != runs0) {   // a new run, or this episode's plain run taken over by the hold
+            string m = _fpcap.runs != runs0
+                ? I($"eye capture: the eye hold engaged on map {map_name()} (the game moved you with control off, the eye held {_fpev_st[2]:F1} units back): the motion log runs {(ml > 0 ? I($"{FpCap.k_frames / 60} s") : "on from control off")} ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; hold run {_fpcap.runs} of {FpCap.k_runs} this session")
+                : I($"eye capture: player control off in first person on map {map_name()}: the motion log runs {FpCap.k_frames / 60} s ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; plain run {_fpcap.plain} of {FpCap.k_runs_plain} this session (the hold's own runs start when it engages)");
+            _logger.Info(m); d7_log(m);
         }
         if (_fpcap.episode && off && _eye_share_frame == _frames && _eye_share_slot >= 0) {   // the actor on his root during the episode (the nearest seen)
             if (_eye_share_slot != _fpcap_share_slot) { _fpcap_share_slot = _eye_share_slot; _fpcap_share = I($"actor {_eye_share_slot} '{actor_name((char*)_eye_share_name)}' (chr_id 0x{_eye_share_id:X}, {chr_kind(_eye_share_id)})"); _fpcap_share_dmin = _eye_share_d; }
             else if (_eye_share_d < _fpcap_share_dmin) _fpcap_share_dmin = _eye_share_d;
         }
-        fixed (float* o = _fpev_st) {
-            _fn_fp_event((off ? 1 : 0) | (_fp_event_hold ? 2 : 0) | (rel ? 4 : 0) | (_fpk_blink ? 8 : 0), _fp_event_leash, o, 17); _fpk_blink = false;   // 8: review S2's blink
-            if (o[4] != _fpcap_seq) { _fpcap_seq = o[4]; if (_fpcap.episode && !off) fpcap_summary(o); }
-        }
     }
-    private FpCapState _fpcap; private float _fpcap_seq; private int _fpcap_share_slot = -1; private string _fpcap_share = ""; private float _fpcap_share_dmin;
+    private FpCapState _fpcap; private float _fpcap_seq; private int _fpcap_lines; private int _fpcap_share_slot = -1; private string _fpcap_share = ""; private float _fpcap_share_dmin;
     private int _eye_share_slot = -1, _eye_share_id; private nint _eye_share_name; private float _eye_share_d; private ulong _eye_share_frame = ulong.MaxValue;   // eye_disp_step's shared-root actor this frame
     private static string chr_kind(int chr_id) { uint t = (uint)chr_id >> 12; return t == 0 ? "a party / event character model" : t == 2 ? "an NPC" : t == 4 ? "a 'w' model" : t == 5 ? "an object (chr/obj)" : I($"type {t}"); }
     /// <summary>The capture's one summary line when control is back (native's episode, ej::Episode): the diag log, with the motion lines.</summary>
     private void fpcap_summary(float* o) {
+        if (!_fpcap.episode && _fpcap_lines >= 30) return;   // eye-hold2: an engaged hold without a run: the line alone, 30 a session
+        if (!_fpcap.episode) _fpcap_lines++;
         int dir = (int)o[7];
         string d = dir == 1 ? "forward" : dir == 2 ? "sideways" : dir == 3 ? "back" : "nowhere (under half a unit)";
         string m = I($"eye capture: control back (or first person left) on map {map_name()} after {o[5]:F0} frames (about {o[5] / 60f:F1} s): the root moved {o[6]:F1} units, {d} of the view at the start ({o[8]:F1} along, {o[9]:F1} across); the largest single-frame step {o[10]:F1} at +{o[11]:F0} frames; the eye at most {o[12]:F1} units from where it was when control went off; black frames {o[13]:F0}, camera cuts {o[14]:F0}, hold restarts {o[15]:F0} (fp_event_hold {(_fp_event_hold ? 1 : 0)}, leash {_fp_event_leash:F0}); on his root: {(_fpcap_share_slot >= 0 ? I($"{_fpcap_share}, nearest {_fpcap_share_dmin:F2}") : "nobody")}; the nearest scene depth: the uidepth: lines");
@@ -233,20 +245,32 @@ internal static class FpMark {
     }
 }
 
-/// <summary>fix-eye: the automatic capture's state (FpCap.Step).</summary>
-internal struct FpCapState { public int runs, left; public bool ext, off_prev, episode; public double last; }
-/// <summary>fix-eye: the automatic capture (research/sphere-grab-eye.md section 4): when control goes off in first person on foot (the
-/// caller's can: a diagnostic profile, no field menu), the motion log runs k_frames (20 s), extended once to k_frames_max (40 s)
-/// in all while control stays off; k_runs a session, k_gap seconds apart. Step returns the frames to (re)start the log with this
-/// frame (0: nothing to do). Pure: the scratch test transpiles it.</summary>
+/// <summary>fix-eye: the automatic capture's state (FpCap.Step). eye-hold2: runs = the hold's runs, plain = the plain control-off runs
+/// (last = the last plain run's start), held = the hold engaged this episode.</summary>
+internal struct FpCapState { public int runs, plain, left; public bool ext, off_prev, episode, held; public double last; }
+/// <summary>fix-eye: the automatic capture (research/sphere-grab-eye.md section 4): the motion log runs k_frames (20 s), extended once
+/// to k_frames_max (40 s) in all while control stays off. eye-hold2 (logs8: the 6 runs were spent on text boxes and road cutscenes
+/// before the cloister): k_runs a session start when the event hold engages (native keeps the eye k_engage or more off the root:
+/// the game moved him), once an episode, with no spacing (grabs come a few seconds apart); a plain control-off edge (the caller's
+/// can: a diagnostic profile, no field menu) gets k_runs_plain, k_gap seconds apart. An engagement inside this episode's plain run
+/// takes the run over (no restart: the log already runs from control off) and gives the plain budget back. Step returns the frames
+/// to (re)start the log with this frame (0: nothing to do). Pure: the scratch test transpiles it.</summary>
 internal static class FpCap {
-    public const int k_runs = 6, k_frames = 1200, k_frames_max = 2400, k_ext_at = 60;
+    public const int k_runs = 6, k_runs_plain = 2, k_frames = 1200, k_frames_max = 2400, k_ext_at = 60;
     public const double k_gap = 30.0;
-    public static int Step(ref FpCapState s, bool off, bool can, double now) {
+    public const float k_engage = 1f;   // units: ej::EvCfg::engage (native's "engaged" line uses the same)
+    /// <summary>ffxvr_fp_event's out 0 (1 = holding) and 2 (the eye's offset from its base now): is the hold at work?</summary>
+    public static bool Engaged(float state, float off_units) => state == 1f && off_units >= k_engage;
+    public static int Step(ref FpCapState s, bool off, bool can, bool engaged, double now) {
         int r = 0;
         if (off && !s.off_prev) {
-            s.episode = false;
-            if (can && s.runs < k_runs && (s.runs == 0 || now - s.last >= k_gap)) { s.runs++; s.last = now; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
+            s.episode = false; s.held = false;
+            if (can && s.plain < k_runs_plain && (s.plain == 0 || now - s.last >= k_gap)) { s.plain++; s.last = now; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
+        }
+        if (off && engaged && !s.held) {
+            s.held = true;
+            if (s.episode && s.left > 0) { if (s.runs < k_runs) { s.runs++; s.plain--; } }
+            else if (can && s.runs < k_runs) { s.runs++; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
         }
         if (s.left > 0) {
             s.left--;
