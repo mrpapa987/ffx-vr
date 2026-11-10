@@ -6091,3 +6091,79 @@ the left grip held + a press of the left menu button.
   presses in one grip, twice), the button then the grip and a squeeze and press within 150 ms do not, Start hidden from the press
   until the release, no quick-squeeze LB from the chord's grip (and the same grip without the chord IS one), the right grip
   (soft reset), extra frames and stalls, the gate; 15 mutants, all killed.
+
+## The event hold through a sphere grab's own camera cut (branch `eye-hold2`, 10 Nov 2026)
+
+**The event hold** (fix-eye, `ffxvr_eyejump.h` `ej::EvHold`, `ffxvr_fp_event`; F8 > View > First person > "Steady view during
+scripted moves", ini `fp_event_hold`, default off; `fp_event_leash`, "slack (units)", default 12). In first person on foot, when
+player control goes off, the eye's horizontal position stays where it was while the game moves Tidus's root, on a leash: further
+than the leash, the eye trails at that distance; a single step over twice the leash (a staging) restarts the hold at the new root.
+The height follows the head as usual. It ends at control's return, a map change / load / re-pick, the view leaving first person,
+the setting off, or 45 s; then the eye glides back over 0.3 s (under half the leash off) or blinks and snaps.
+
+**The owner's test (Djose cloister, `fp_event_hold=1`), measured.** The motion log with the eye columns
+(`logs8/djose_grab_1300.log`, 13:00:22-27) shows one sphere take:
+- frame 1093 (the motion lines' numbering, used here and in the tests; a diag `eye hold:` line names the same step one less, 1092):
+  control goes off at the root (-31.78, 10, -218.25), and the hold starts there;
+- frame 1097: the game cuts its camera and, in the same step, moves the root to (-33, 10, -222), 3.9 units (about 32 cm) toward the
+  socket, split over two frames by the smooth anchor (1.97 + 2.08);
+- the hold ended on that cut, "ended (a camera cut) after 0.1 s", and the eye glided onto the new root in 0.3 s;
+- the root stayed at the socket for the 1.8 s of the take, with the eye at the root: the face in the wall;
+- frames 1203-1204: the root moves back to (-30, -220); 1205: control is back.
+
+The earlier session's grabs had all ended the same way, "after 0.0 s". The rule "a camera cut ends the hold" was added because a
+cut usually means a new scene. But the grab's own cut comes with the scripted snap, so it defeated the hold every time.
+
+**The rule now (`EvCfg::cut_win`, revision 8).** A camera cut ends the hold only when the root (the eye base) moves more than the
+leash between `cut_win` = 4 frames before the cut and 4 frames after it: a new scene (a staging, a teleport, another place).
+- **The window.** It covers a cut and a move that come a frame or two apart in either order, and a snap split over two frames. A
+  second cut inside it keeps the first one's reference. `EvHold` keeps the last 8 bases for it (no allocation).
+- **A cut that keeps the hold** leaves the root within the leash of the eye, so holding on stays safe. The 45 s cap and control's
+  return still bound it. The map change is managed's release bit, as before.
+- **The proposal was a 1.0 s grace after the start** (cuts ignored), then the jump test. The jump test alone is used, at any age
+  of the hold. A longer interaction (djyt0000: 27 s with control off and text boxes) can cut again later, still at the socket,
+  and a fixed grace would release into the wall there. A cutscene that stages him far away in its first second should release
+  at once, not restart the hold at the staging mark.
+- **4 frames**, because a scripted run at 1.02 units a frame across a cut (djyt0000) covers 8.2 units in the 8 frames, under the
+  leash. The chocobo's 2.5 a frame would count as a jump, but the hold is not eligible while riding.
+- **The cost.** A cutscene that starts 3+ frames after control goes off (no cut on the edge: review S1's block still applies to
+  a cut on the edge or the 2 frames before), never stages Tidus elsewhere, and walks him, now keeps the eye up to the leash
+  (about 1 m) off him until a staging cut, control or 45 s. Before, its first cut released it. With the default leash this
+  only matters when he walks under the hold.
+- **Control back** goes from the held point to the root at that moment. In the trace that is (-31.78, -218.25) to (-30, -220),
+  2.5 units, under half the leash: the existing 0.3 s glide (18 frames, at most 0.15 units a frame). Unchanged.
+
+**"Engaged" and the logs.** `EvHold::engaged` is set when the hold first keeps the eye `EvCfg::engage` = 1 unit off the root:
+the game moved him. Text boxes and NPC talks start a hold that never engages.
+- `eye hold:` diag lines now have two budgets. The quiet ones (every start, and the end of a hold that never engaged and saw no
+  cut) get 30 a session. The working ones (engaged, a kept cut, a pull, a staging, a block, and the end of any other hold) keep
+  their 60, so a session full of text boxes no longer silences the cloister.
+- New lines: "engaged N s after control went off: the game moved the root N units ..."; and "a camera cut with the root N units
+  from where it was 4 frames before (not over the leash ...): held on". The end line adds the camera cuts, how many it held on
+  through, and the largest root move around one. A cut that releases says "a camera cut with a jump of the root over the leash:
+  a new scene".
+
+**The automatic capture's budget** (`FpCap`, diagnostic profile only). The owner's 6 motion-log runs went to ordinary
+control-off moments (text boxes, road cutscenes) before the cloister.
+- Now the 6 runs (`k_runs`) start when the hold engages. Managed reads `ffxvr_fp_event` out 0 = holding and out 2 = the eye
+  `k_engage` or more off its base: one frame after native, at the push. One run per episode, with no 30 s spacing (grabs come a
+  few seconds apart).
+- A plain control-off edge gets its own `k_runs_plain` = 2 runs, 30 s apart, as before. When the hold engages inside this
+  episode's plain run, it takes the run over: no restart (the log already runs from control off), and the plain budget is given
+  back.
+- The summary line at control's return is also written for an engaged episode without a run (30 a session).
+- No export changed (the out layout and flags are as before): the ABI stays 62.
+
+**Tests** (scratchpad `eh2_chk`, `run_all.sh`):
+- **The trace transcribed** (`gen_trace.py`: 360 motion frames, the root, control, the cut frame) and replayed through
+  `ej::ev_step`. Against the old header the replay reproduces the logged eye base within 0.017 units (the transcription is
+  faithful). Against revision 8, the eye stays at the held point from 1093 to 1204 (1.87 s, 0.0000 off), 3.94 units back from
+  the root at the socket, and glides 2.5 units back at 1205.
+- **Synthetic scene cuts.** A 30-unit teleport 4 frames in, a 16-unit jump split 8 + 8, a jump 2 frames before the cut, a jump
+  over twice the leash with a cut: all released. A cut with no jump, a cut 6 frames before a jump, a scripted run across a cut,
+  the grab's cut 10 s in: all held on.
+- **The glue** (evh_tick verbatim, `glue2_test`): the line budgets, the lines from the trace, the blink. **The capture**
+  (`cap2_test`, `FpCap` transpiled): the budgets, the takeover, the trace through native into managed (the run starts at frame
+  1098, the push after the engagement).
+- **Mutants.** 40 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 3
+  whose lines this change rewrote (their equivalents are in the 40).
