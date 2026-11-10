@@ -300,7 +300,7 @@ public sealed unsafe partial class FFXVRModule {
                + "Grip it (pointing at it or touching it) to move it, with both grips to resize it. Off: the menu is on the head-locked layer with Fahrenheit's menus, as before.");
         ui_check("vr_menu_chord", "Left grip + left menu button opens or closes this menu##vrp", ref _vr_menu_chord, UiTag.None,
                  "In the headset with the controllers: hold the left grip, then press the left controller's menu button, to open or close this menu, as F8 does. "
-               + "That press does not pause the game, and the grip makes no L1 and grabs nothing. The menu button alone is still Start. "
+               + "That press does not pause the game, and the grip makes no quick-squeeze L1 and grabs nothing (in the field the grip is still L1 while held, as always). The menu button alone is still Start. "
                + "Virtual Desktop keeps long presses and double taps of that button for its own menu. Two short buzzes: opened; one longer: closed.");
         if (!_vr_menu_panel) return;
         ui_slider("vr_menu_distance", "distance (m)##vrp", ref _vr_menu_distance, 0.4f, 2.5f, "%.2f", UiTag.None, "Where it opens: this far ahead of your eyes. Letting go of the panel sets it.", 140f); ImGui.SameLine();

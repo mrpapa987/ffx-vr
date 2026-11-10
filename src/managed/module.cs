@@ -1911,11 +1911,11 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         int before = _fp_mode; _fp_mode = next_view_mode(_fp_mode);
         apply_mode_scale(before, _fp_mode);
     }
+    /// <summary>F8, and (vr-menu S4) the left grip + left menu button chord in the headset: the mod's window shown or hidden.
+    /// The player's own choice is saved again (overlay_open), a failure's forced open ends.</summary>
+    private void toggle_window() { _window_open = !_window_open; _window_open_forced = false; }
     /// <summary>Every key, once per frame, whether the window is open or not. F8, F9-F11 always work; the rest are
     /// ignored while a text box has the keyboard (typing "2,3" with the numpad must not move the camera).</summary>
-    /// <summary>F8, and (vr-menu S4) the left menu button held in the headset: the mod's window shown or hidden. The player's own
-    /// choice is saved again (overlay_open), a failure's forced open ends.</summary>
-    private void toggle_window() { _window_open = !_window_open; _window_open_forced = false; }
     private void handle_hotkeys() {
         _turn_key_dir = 0;   // stickrep: set below unless a text field has the keyboard
         if (ImGui.IsKeyPressed(ImGuiKey.F8)) toggle_window();
