@@ -6126,19 +6126,21 @@ leash between `cut_win` = 4 frames before the cut and 4 frames after it: a new s
   at once, not restart the hold at the staging mark.
 - **4 frames**, because a scripted run at 1.02 units a frame across a cut (djyt0000) covers 8.2 units in the 8 frames, under the
   leash. The chocobo's 2.5 a frame would count as a jump, but the hold is not eligible while riding.
-- **The cost.** A cutscene that starts 3+ frames after control goes off (no cut on the edge: review S1's block still applies to
-  a cut on the edge or the 2 frames before), never stages Tidus elsewhere, and walks him, now keeps the eye up to the leash
-  (about 1 m) off him until a staging cut, control or 45 s. Before, its first cut released it. With the default leash this
-  only matters when he walks under the hold.
+- **The cost, and the review's B1.** S1's block covers only a cut on the control-off edge or in the 2 frames before it. A
+  cutscene whose first cut comes 1 or more frames after control goes off starts a hold. If it never stages Tidus elsewhere and
+  walks him, the jump test alone kept the eye up to the leash (about 1 m) off him, through every cut, until control or 45 s
+  (the review measured 25 s at 12 off). Before, its first cut released it. The two rules below bound it.
 - **Control back** goes from the held point to the root at that moment. In the trace that is (-31.78, -218.25) to (-30, -220),
   2.5 units, under half the leash: the existing 0.3 s glide (18 frames, at most 0.15 units a frame). Unchanged.
 
-**"Engaged" and the logs.** `EvHold::engaged` is set when the hold first keeps the eye `EvCfg::engage` = 1 unit off the root:
-the game moved him. Text boxes and NPC talks start a hold that never engages.
+**"Engaged" and the logs.** `EvHold::engaged` is set when the hold first keeps the eye `EvCfg::engage` = 1 unit off the root and
+the root has moved 1 unit from where control went off (review N1: a hold starting inside the last glide is not engaged by the
+glide's leftover): the game moved him. Text boxes and NPC talks start a hold that never engages.
 - `eye hold:` diag lines now have two budgets. The quiet ones get 30 a session: every start, a cutscene's blocked start, the
-  first cut held on in a hold that never engaged, and the end (control back or the cap) of a hold that never engaged. The working
-  ones keep their 60: engaged, the first cut held on in an engaged hold, a pull, a staging, and every other end (a release by a new
-  scene among them). A session full of text boxes and road cutscenes no longer silences the cloister.
+  first cut held on in a hold that never engaged, and every end of a hold that never engaged (review S2: the deadline, a staging
+  cut, a release, the setting off included). The working ones keep their 60: engaged, the first cut held on in an engaged hold, a
+  pull, a staging, and the end of an engaged hold. Each line takes its own count (review N6). A session full of text boxes and
+  road cutscenes no longer silences the cloister.
 - New lines: "engaged N s after control went off: the game moved the root N units ..."; and, for a hold's first kept cut only,
   "a camera cut with the root N units from where it was 4 frames before (not over the leash ...): held on". The end line adds the
   camera cuts, how many it held on through, and the largest root move around one; a quiet end says "never engaged" with its cut
@@ -6153,18 +6155,58 @@ control-off moments (text boxes, road cutscenes) before the cloister.
   episode's plain run, it takes the run over: no restart (the log already runs from control off), and the plain budget is given
   back.
 - The summary line at control's return is also written for an engaged episode without a run (30 a session).
+- Review S2: a cutscene can still engage (it moves him in its first 1.5 s). Its hold then ends while control is still off (a
+  staging cut, a late cut, a release, the cap), unlike an interaction's, which ends at control's return. So a hold run whose
+  hold ends with control still off is given back (`FpCapState.refunds`, at most 6 a session; the motion log runs on).
 - No export changed (the out layout and flags are as before): the ABI stays 62.
+
+**Review fixes** (fixes/eyehold2-review.md, `FFXVR_EJ_REV` 9):
+- **B1, the engagement deadline (`EvCfg::arm_s` = 1.5 s).** A hold not engaged 1.5 s after control went off ends (`EVW_ARM`,
+  the usual glide, under a unit: unseen).
+  - Every known interaction moves him at once: the cloister grab at +4 frames, djyt0600's 9.1 set "the moment control went off",
+    djyt0000's run from the edge. djyt0600's second set 11 s later is inside a hold that engaged at its start.
+  - A talk, a text box, or a cutscene that talks before it walks gets no hold.
+  - The cost: an interaction that first moves him more than 1.5 s after control goes off is not held.
+- **B1, the late cut (`EvCfg::late_s` = 3 s).** In an engaged hold, a camera cut 3 s or more after the engagement ends it, jump
+  or not (`EVW_LATE`: a glide under half the leash, else a blink and a snap). This answers the question: should a cut long after
+  the engagement still end it?
+  - The measured grab's own cut comes at its engagement, and the whole engaged grab lasts 1.8 s, so it keeps with margin.
+  - A cutscene that moved him in its first 1.5 s goes back to him at its next shot change 3 s on.
+  - The residual is the time to that cut: the review's probe (a walk from 1 s, cuts every 3 s) is held 6.0 s instead of 25.
+  - The cost: a long interaction (djyt0000: 27 s with control off) that cuts its camera again 3 s or more after it moved him
+    glides the eye onto the root at the mark at that cut.
+  - The capture shows only the grab's one cut, so this takes the conservative side of the unknown (a cutscene a metre off him
+    is the failure that was reported). A capture of a long interaction would tell; the motion line has no cut column yet (the
+    review's suggestion, not done here).
+- **S1, a staging over two Presents.** FFX-60fps blends a tick step of up to 30 units over two Presents (13 + 13 for a 26-unit
+  staging), and the smooth anchor accepts the halves.
+  - So a staging is now a single step over twice the leash, or the last two steps together over it, as the body hide's SM-2
+    margin already counts "half + half". The second half of a restart is not another.
+  - The single-step pull for 12-24 stays.
+- **N1** (above, "engaged"). **N3:** a release (managed's, or a gap in the steps) clears the ring and the open window, so a cut
+  just after re-entering first person is not measured from where he was before. **N4:** "held on through N" counts every cut
+  of the kept windows, not the windows. **N6:** one count per line.
+- **Left as notes.**
+  - N2: the window and S1's block count Presents. At a 30 Hz present rate (no FFX-60fps) the window spans 4 ticks, and a
+    djyt0000-speed run across a cut can release. That degrades to f12e7db's behaviour, not worse. Keying both to time would fix it.
+  - N5: an engaged episode's summary line in an ordinary profile (up to 30 a session), and its "on his root" says nobody because
+    the share is tracked only with a run.
 
 **Tests** (scratchpad `eh2_chk`, `run_all.sh`):
 - **The trace transcribed** (`gen_trace.py`: 360 motion frames, the root, control, the cut frame) and replayed through
   `ej::ev_step`. Against the old header the replay reproduces the logged eye base within 0.017 units (the transcription is
-  faithful). Against revision 8, the eye stays at the held point from 1093 to 1204 (1.87 s, 0.0000 off), 3.94 units back from
+  faithful). Against revision 9, the eye stays at the held point from 1093 to 1204 (1.87 s, 0.0000 off), 3.94 units back from
   the root at the socket, and glides 2.5 units back at 1205.
-- **Synthetic scene cuts.** A 30-unit teleport 4 frames in, a 16-unit jump split 8 + 8, a jump 2 frames before the cut, a jump
-  over twice the leash with a cut: all released. A cut with no jump, a cut 6 frames before a jump, a scripted run across a cut,
-  the grab's cut 10 s in: all held on.
+- **Synthetic scene cuts.** All released: a 30-unit teleport 4 frames in, a 16-unit jump split 8 + 8, a jump 2 frames before the
+  cut, a jump over twice the leash with a cut, a cut 3 s after the engagement. All held on: a cut with no jump, a cut 6 frames
+  before a jump, a scripted run across a cut, the grab's snap and cut 1.2 s in, a cut 2.1 s after a late engagement.
+- **The review's probes as regressions.**
+  - P1: the cutscene walk ends late at 6.0 s, not 25 s; talking first ends at 1.5 s, never off him.
+  - P2: 13 + 13 restarts, and the eye is on the new mark. P3: a hold inside a glide does not engage. P6: the ring is cleared by
+    the release.
+  - The deadline and late-cut boundaries, and both set to 0 giving rev 8's behaviour.
 - **The glue** (evh_tick verbatim, `glue2_test`): the line budgets, the lines from the trace, the blink. **The capture**
   (`cap2_test`, `FpCap` transpiled): the budgets, the takeover, the trace through native into managed (the run starts at frame
   1098, the push after the engagement).
-- **Mutants.** 44 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 3
-  whose lines this change rewrote (their equivalents are in the 44).
+- **Mutants.** 62 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 4
+  whose lines this change rewrote (their equivalents are in the 62).

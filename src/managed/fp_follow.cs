@@ -123,10 +123,12 @@ public sealed unsafe partial class FFXVRModule {
     // snaps. A map change, a load or a re-pick (a new scene generation or followed slot: the release bit), a camera cut that comes
     // with a new scene, or 45 s end it. eye-hold2 (logs8/djose_grab_1300.log): the grab's own camera cut came 4 frames after control
     // went off, with the 3.9-unit move to the socket, and ended every hold "after 0.0-0.1 s"; a cut now ends it only when the root
-    // moves more than the leash within 4 frames of it (ej::EvCfg::cut_win: a staging, a teleport, another place). A cutscene that
-    // stages him elsewhere still releases at that cut; one without cuts or stagings ends at the 45 s cap with the eye at most the
-    // leash off him: an interaction rarely lasts longer (the djyt0000 grab: 27 s with control off). An "object or actor within 20
-    // units" gate was not taken: a cutscene's cast stands that near too, so it would not tell the two apart.
+    // moves more than the leash within 4 frames of it (ej::EvCfg::cut_win: a staging, a teleport, another place). Review B1: a hold
+    // the game has not engaged (moved him, the eye held a unit off) 1.5 s after control went off ends (a talk, a cutscene that talks
+    // first), and in an engaged hold a cut 3 s or more after the engagement ends it (a cutscene's next shot; the grab's own cut
+    // comes at its engagement). The 45 s cap ends one without cuts: an interaction rarely lasts longer (the djyt0000 grab: 27 s
+    // with control off). An "object or actor within 20 units" gate was not taken: a cutscene's cast stands that near too, so it
+    // would not tell the two apart.
     // Review S1: the cut that starts a cutscene can reach native a frame before the control flag, or on the same frame: a cut on
     // the edge frame or the 2 before blocks the start (EV_BLOCKED). Review S3: no hold while the eye is on the drawn head.
     // review S1: off by default until the owner's capture confirms the cause (the game moving the root); F8 ticks it for a test
@@ -156,9 +158,13 @@ public sealed unsafe partial class FFXVRModule {
             if (!_fpcap.off_prev) { _fpcap_share_slot = -1; _fpcap_share = ""; _fpcap_share_dmin = 0f; }
         }
         int runs0 = _fpcap.runs;
-        int ml = FpCap.Step(ref _fpcap, off, can, engaged, _now);
+        int ml = FpCap.Step(ref _fpcap, off, can, engaged, _fpev_st[0] == 1f, _now);
         if (ml > 0) _fn_motion_log(ml);
-        if (ml == FpCap.k_frames || _fpcap.runs != runs0) {   // a new run, or this episode's plain run taken over by the hold
+        if (_fpcap.runs < runs0) {   // review S2: the hold ended with control still off (a cutscene, not an interaction)
+            string m = I($"eye capture: the eye hold ended with control still off on map {map_name()} (a cutscene's shot change or staging, or the cap): its hold run given back ({FpCap.k_runs - _fpcap.runs} of {FpCap.k_runs} left; the motion log runs on)");
+            _logger.Info(m); d7_log(m);
+        }
+        else if (ml == FpCap.k_frames || _fpcap.runs != runs0) {   // a new run, or this episode's plain run taken over by the hold
             string m = _fpcap.runs != runs0
                 ? I($"eye capture: the eye hold engaged on map {map_name()} (the game moved you with control off, the eye held {_fpev_st[2]:F1} units back): the motion log runs {(ml > 0 ? I($"{FpCap.k_frames / 60} s") : "on from control off")} ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; hold run {_fpcap.runs} of {FpCap.k_runs} this session")
                 : I($"eye capture: player control off in first person on map {map_name()}: the motion log runs {FpCap.k_frames / 60} s ({FpCap.k_frames_max / 60} s while control stays off), with the eye columns; plain run {_fpcap.plain} of {FpCap.k_runs_plain} this session (the hold's own runs start when it engages)");
@@ -183,7 +189,7 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>F8 > View > First person (the hold's state: Developer > Logging & status).</summary>
     private void fpev_ui() {
-        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye while the game moves you (control off) in first person."); ImGui.SameLine();
+        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye where you stood while the game moves you at an interaction (control off) in first person: it must move you within 1.5 s; a camera cut that moves you past the slack, or comes 3 s after it moved you, lets go."); ImGui.SameLine();
         ui_slider("fp_event_leash", "slack (units)##fpev", ref _fp_event_leash, 2f, 40f, "%.0f", UiTag.None, "How far the game may move you before the eye trails.", 140f);
     }
 
@@ -246,31 +252,39 @@ internal static class FpMark {
 }
 
 /// <summary>fix-eye: the automatic capture's state (FpCap.Step). eye-hold2: runs = the hold's runs, plain = the plain control-off runs
-/// (last = the last plain run's start), held = the hold engaged this episode.</summary>
-internal struct FpCapState { public int runs, plain, left; public bool ext, off_prev, episode, held; public double last; }
+/// (last = the last plain run's start), held = the hold engaged this episode; review S2: hold_run = this episode's run counts as the
+/// hold's, refunds = hold runs given back.</summary>
+internal struct FpCapState { public int runs, plain, left, refunds; public bool ext, off_prev, episode, held, hold_run; public double last; }
 /// <summary>fix-eye: the automatic capture (research/sphere-grab-eye.md section 4): the motion log runs k_frames (20 s), extended once
 /// to k_frames_max (40 s) in all while control stays off. eye-hold2 (logs8: the 6 runs were spent on text boxes and road cutscenes
 /// before the cloister): k_runs a session start when the event hold engages (native keeps the eye k_engage or more off the root:
 /// the game moved him), once an episode, with no spacing (grabs come a few seconds apart); a plain control-off edge (the caller's
 /// can: a diagnostic profile, no field menu) gets k_runs_plain, k_gap seconds apart. An engagement inside this episode's plain run
-/// takes the run over (no restart: the log already runs from control off) and gives the plain budget back. Step returns the frames
-/// to (re)start the log with this frame (0: nothing to do). Pure: the scratch test transpiles it.</summary>
+/// takes the run over (no restart: the log already runs from control off) and gives the plain budget back. Review S2: native only
+/// engages within ej::EvCfg::arm_s (1.5 s) of control off, and a hold run whose hold ends while control is still off (holding goes
+/// false: a staging or late cut, a release, the cap: a cutscene, since an interaction's hold ends with control's return) is given
+/// back, at most k_runs times a session (the log runs on). Step returns the frames to (re)start the log with this frame (0: nothing
+/// to do). Pure: the scratch test transpiles it.</summary>
 internal static class FpCap {
     public const int k_runs = 6, k_runs_plain = 2, k_frames = 1200, k_frames_max = 2400, k_ext_at = 60;
     public const double k_gap = 30.0;
     public const float k_engage = 1f;   // units: ej::EvCfg::engage (native's "engaged" line uses the same)
     /// <summary>ffxvr_fp_event's out 0 (1 = holding) and 2 (the eye's offset from its base now): is the hold at work?</summary>
     public static bool Engaged(float state, float off_units) => state == 1f && off_units >= k_engage;
-    public static int Step(ref FpCapState s, bool off, bool can, bool engaged, double now) {
+    public static int Step(ref FpCapState s, bool off, bool can, bool engaged, bool holding, double now) {
         int r = 0;
         if (off && !s.off_prev) {
-            s.episode = false; s.held = false;
+            s.episode = false; s.held = false; s.hold_run = false;
             if (can && s.plain < k_runs_plain && (s.plain == 0 || now - s.last >= k_gap)) { s.plain++; s.last = now; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
         }
         if (off && engaged && !s.held) {
             s.held = true;
-            if (s.episode && s.left > 0) { if (s.runs < k_runs) { s.runs++; s.plain--; } }
-            else if (can && s.runs < k_runs) { s.runs++; s.left = k_frames; s.ext = false; s.episode = true; r = k_frames; }
+            if (s.episode && s.left > 0) { if (s.runs < k_runs) { s.runs++; s.plain--; s.hold_run = true; } }
+            else if (can && s.runs < k_runs) { s.runs++; s.left = k_frames; s.ext = false; s.episode = true; s.hold_run = true; r = k_frames; }
+        }
+        else if (off && s.hold_run && !holding) {   // review S2: the hold ended before control came back: a cutscene
+            s.hold_run = false;
+            if (s.refunds < k_runs) { s.refunds++; s.runs--; }
         }
         if (s.left > 0) {
             s.left--;
