@@ -5,7 +5,7 @@
 #   -Profile Verbose   more logging for a bug report, nothing else: diag_verbose (the periodic summaries, log cap
 #                      64 MB) and diag_load_lines; no extra hooks, patches or samplers (other keys left as they are)
 #   -Profile Dev       the developer's set on: diag_verbose, diag_build7, diag_load, diag_load_lines,
-#                      diag_cluster_bytes, diag_va_log, diag_transition, diag_load_prof=2 (diag_actors is left as it is).
+#                      diag_cluster_bytes, diag_va_log, diag_transition, diag_load_prof=2 (diag_actors and diag_sphere are left as they are).
 #                      These add game hooks, an ntdll patch and a loader sampler: for the developer, not for players
 #   -GameDir <folder>  the game folder (the one with FFX.exe); otherwise found as every script does (tools\paths.ps1)
 #   -IniPath <file>    edit this ffxvr.ini instead (a copy, for a test)

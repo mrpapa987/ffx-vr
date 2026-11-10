@@ -44,6 +44,7 @@ $FfxvrDiagKeys = [ordered]@{
     diag_load          = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the load lines' expensive parts (address-space walks, stack walks)
     diag_load_lines    = @{ Release = '0'; Verbose = '1';   Dev = '1' }   # one load: line per load (no hook of its own)
     diag_actors        = @{ Release = '0'; Verbose = $null; Dev = $null } # the actors: line every 10 s (Fahrenheit's log)
+    diag_sphere        = @{ Release = '0'; Verbose = $null; Dev = $null } # the sphere research log anywhere (sph: lines; in the cloisters it runs with any diagnostic on)
     diag_cluster_bytes = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the game pool's alloc / free hooks (next launch)
     diag_va_log        = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the ntdll reservation patch (next launch)
     diag_transition    = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
