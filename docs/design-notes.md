@@ -6135,13 +6135,14 @@ leash between `cut_win` = 4 frames before the cut and 4 frames after it: a new s
 
 **"Engaged" and the logs.** `EvHold::engaged` is set when the hold first keeps the eye `EvCfg::engage` = 1 unit off the root:
 the game moved him. Text boxes and NPC talks start a hold that never engages.
-- `eye hold:` diag lines now have two budgets. The quiet ones (every start, and the end of a hold that never engaged and saw no
-  cut) get 30 a session. The working ones (engaged, a kept cut, a pull, a staging, a block, and the end of any other hold) keep
-  their 60, so a session full of text boxes no longer silences the cloister.
-- New lines: "engaged N s after control went off: the game moved the root N units ..."; and "a camera cut with the root N units
-  from where it was 4 frames before (not over the leash ...): held on". The end line adds the camera cuts, how many it held on
-  through, and the largest root move around one. A cut that releases says "a camera cut with a jump of the root over the leash:
-  a new scene".
+- `eye hold:` diag lines now have two budgets. The quiet ones get 30 a session: every start, a cutscene's blocked start, the
+  first cut held on in a hold that never engaged, and the end (control back or the cap) of a hold that never engaged. The working
+  ones keep their 60: engaged, the first cut held on in an engaged hold, a pull, a staging, and every other end (a release by a new
+  scene among them). A session full of text boxes and road cutscenes no longer silences the cloister.
+- New lines: "engaged N s after control went off: the game moved the root N units ..."; and, for a hold's first kept cut only,
+  "a camera cut with the root N units from where it was 4 frames before (not over the leash ...): held on". The end line adds the
+  camera cuts, how many it held on through, and the largest root move around one; a quiet end says "never engaged" with its cut
+  count. A cut that releases says "a camera cut with a jump of the root over the leash: a new scene".
 
 **The automatic capture's budget** (`FpCap`, diagnostic profile only). The owner's 6 motion-log runs went to ordinary
 control-off moments (text boxes, road cutscenes) before the cloister.
@@ -6165,5 +6166,5 @@ control-off moments (text boxes, road cutscenes) before the cloister.
 - **The glue** (evh_tick verbatim, `glue2_test`): the line budgets, the lines from the trace, the blink. **The capture**
   (`cap2_test`, `FpCap` transpiled): the budgets, the takeover, the trace through native into managed (the run starts at frame
   1098, the push after the engagement).
-- **Mutants.** 40 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 3
-  whose lines this change rewrote (their equivalents are in the 40).
+- **Mutants.** 44 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 3
+  whose lines this change rewrote (their equivalents are in the 44).
