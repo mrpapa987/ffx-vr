@@ -50,6 +50,11 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_panel_state;         // ABI 58
     private delegate* unmanaged[Cdecl]<int, void> _fn_panel_place;               // ABI 58
     private delegate* unmanaged[Cdecl]<int, float*, int, float*, int, int> _fn_panel_pointer;  // ABI 59: vr-menu S3, the laser pointer; 60: + in (the hand-back)
+    private delegate* unmanaged[Cdecl]<int, int, int> _fn_menu_hold;               // ABI 61: vr-menu S4, the left menu button held
+    private bool  _vr_menu_hold = true;         // ini vr_menu_hold: hold the left menu button to open / close this window (headset + controllers)
+    private int   _vr_menu_hold_ms = 1000;      // ini vr_menu_hold_ms, 400..3000
+    private int   _vmh_seen = -1;               // native's toggle count last seen (-1: not read yet)
+    private double _vmh_pulse2 = -1;            // the open pattern's second pulse, at this ImGui time (-1: none)
     private int   _vr_menu_hand = 0;            // ini vr_menu_hand: 0 either, 1 right, 2 left
     private bool  _vr_menu_haptics = true;      // ini vr_menu_haptics
     private readonly float[] _vrp_ptr = new float[11];
@@ -63,8 +68,9 @@ public sealed unsafe partial class FFXVRModule {
         _fn_panel_state = (delegate* unmanaged[Cdecl]<float*, int, int>)req("ffxvr_panel_state");
         _fn_panel_place = (delegate* unmanaged[Cdecl]<int, void>)req("ffxvr_panel_place");
         _fn_panel_pointer = (delegate* unmanaged[Cdecl]<int, float*, int, float*, int, int>)req("ffxvr_panel_pointer");
+        _fn_menu_hold = (delegate* unmanaged[Cdecl]<int, int, int>)req("ffxvr_menu_hold");
     }
-    private void vrp_clear() { _fn_panel_set = null; _fn_panel_state = null; _fn_panel_place = null; _fn_panel_pointer = null; _vrp_ptr_active = false; _vrp_ptr_btn = false; }
+    private void vrp_clear() { _fn_panel_set = null; _fn_panel_state = null; _fn_panel_place = null; _fn_panel_pointer = null; _vrp_ptr_active = false; _vrp_ptr_btn = false; _fn_menu_hold = null; _vmh_seen = -1; }
 
     private bool vrp_parse(string k, string v) {
         switch (k) {
@@ -74,6 +80,8 @@ public sealed unsafe partial class FFXVRModule {
             case "vr_menu_scale":    pf(k, v, ref _vr_menu_scale, 0.6f, 2f); return true;
             case "vr_menu_hand":     pi(k, v, ref _vr_menu_hand, 0, 2); return true;
             case "vr_menu_haptics":  pb(k, v, ref _vr_menu_haptics); return true;
+            case "vr_menu_hold":     pb(k, v, ref _vr_menu_hold); return true;
+            case "vr_menu_hold_ms":  pi(k, v, ref _vr_menu_hold_ms, 400, 3000); return true;
             default: return false;
         }
     }
@@ -83,7 +91,9 @@ public sealed unsafe partial class FFXVRModule {
         $"vr_menu_height={_vr_menu_height.ToString("F2", CI)}\n" +
         $"vr_menu_scale={_vr_menu_scale.ToString("F2", CI)}\n" +
         $"vr_menu_hand={_vr_menu_hand}\n" +
-        $"vr_menu_haptics={(_vr_menu_haptics ? 1 : 0)}\n";
+        $"vr_menu_haptics={(_vr_menu_haptics ? 1 : 0)}\n" +
+        $"vr_menu_hold={(_vr_menu_hold ? 1 : 0)}\n" +
+        $"vr_menu_hold_ms={_vr_menu_hold_ms}\n";
 
     /// <summary>The F8 window is the headset's panel window this frame (decided from last frame's native state).</summary>
     private bool vrp_use() => _vr_menu_panel && _xr_on && _imgui_layer && _vrp_available && _fn_panel_set != null;
@@ -260,6 +270,24 @@ public sealed unsafe partial class FFXVRModule {
         _vrp_off_press = off;
     }
     private bool _vrp_click_prev;
+
+    /// <summary>vr-menu S4: every frame (render_imgui, open or closed): the setting to native, and each hold native counted toggles the
+    /// window exactly as F8 does (toggle_window), with a buzz on the left hand: two short pulses opening, one longer closing. Native
+    /// gates it (the headset on, the controllers the gamepad) and hides Start from the game and ImGui from the toggle until the release
+    /// (ffxvr_menuhold.h).</summary>
+    private void vrp_hold() {
+        if (_vmh_pulse2 >= 0 && _now >= _vmh_pulse2) { _vmh_pulse2 = -1; if (_fn_haptic != null) _fn_haptic(0, 0.55f, 0.03f); }
+        if (_fn_menu_hold == null) return;
+        int n = _fn_menu_hold(_vr_menu_hold ? 1 : 0, _vr_menu_hold_ms);
+        if (_vmh_seen >= 0 && n != _vmh_seen) {
+            toggle_window();
+            if (_fn_haptic != null) {
+                if (_window_open) { _fn_haptic(0, 0.55f, 0.03f); _vmh_pulse2 = _now + 0.09; }   // opened: tap-tap
+                else { _fn_haptic(0, 0.4f, 0.08f); _vmh_pulse2 = -1; }                          // closed: one longer
+            }
+        }
+        _vmh_seen = n;
+    }
     private uint _vrp_hover_prev;               // the hovered item last frame (a tick needs it held for a frame)
     private readonly float[] _vrp_ptr_in = new float[8];
     private bool _vrp_drawn_last;               // the headset's window was drawn this frame (its rectangle for the park point)
@@ -270,6 +298,10 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("vr_menu_panel", "This menu on its own panel in the room##vrp", ref _vr_menu_panel, UiTag.None,
                  "In the headset this menu is a panel fixed in the room, about 1 m ahead and a little below your eyes. Point at it: the trigger clicks, the stick scrolls. "
                + "Grip it (pointing at it or touching it) to move it, with both grips to resize it. Off: the menu is on the head-locked layer with Fahrenheit's menus, as before.");
+        ui_check("vr_menu_hold", "Hold the left menu button to open or close this menu##vrp", ref _vr_menu_hold, UiTag.None,
+                 "In the headset with the controllers: hold the left controller's menu button (Start for the game) to open or close this menu, as F8 does. "
+               + "A tap still pauses the game; after a hold opens or closes the menu, Start does nothing more until you let go. Two short buzzes: opened; one longer: closed.");
+        if (_vr_menu_hold) { ImGui.SameLine(); ui_slider_int("vr_menu_hold_ms", "hold (ms)##vrp", ref _vr_menu_hold_ms, 400, 3000, "%d", UiTag.None, "How long to hold it.", 140f); }
         if (!_vr_menu_panel) return;
         ui_slider("vr_menu_distance", "distance (m)##vrp", ref _vr_menu_distance, 0.4f, 2.5f, "%.2f", UiTag.None, "Where it opens: this far ahead of your eyes. Letting go of the panel sets it.", 140f); ImGui.SameLine();
         ui_slider("vr_menu_height", "height (m)##vrp", ref _vr_menu_height, -0.6f, 0.3f, "%.2f", UiTag.None, "Where it opens: its centre against your eye height. Letting go of the panel sets it.", 140f); ImGui.SameLine();
