@@ -6095,7 +6095,7 @@ the left grip held + a press of the left menu button.
 ## The event hold through a sphere grab's own camera cut (branch `eye-hold2`, 10 Nov 2026)
 
 **The event hold** (fix-eye, `ffxvr_eyejump.h` `ej::EvHold`, `ffxvr_fp_event`; F8 > View > First person > "Steady view during
-scripted moves", ini `fp_event_hold`, default off; `fp_event_leash`, "slack (units)", default 12, 5..40 since review round 2). In first person on foot, when
+scripted moves", ini `fp_event_hold`, default off, on since 10 Nov 2026 after the owner's Djose test; `fp_event_leash`, "slack (units)", default 12, 5..40 since review round 2). In first person on foot, when
 player control goes off, the eye's horizontal position stays where it was while the game moves Tidus's root, on a leash: further
 than the leash, the eye trails at that distance; a single step over twice the leash (a staging) restarts the hold at the new root.
 The height follows the head as usual. It ends at control's return, a map change / load / re-pick, the view leaving first person,

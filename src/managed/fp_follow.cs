@@ -131,8 +131,9 @@ public sealed unsafe partial class FFXVRModule {
     // would not tell the two apart.
     // Review S1: the cut that starts a cutscene can reach native a frame before the control flag, or on the same frame: a cut on
     // the edge frame or the 2 before blocks the start (EV_BLOCKED). Review S3: no hold while the eye is on the drawn head.
-    // review S1: off by default until the owner's capture confirms the cause (the game moving the root); F8 ticks it for a test
-    private bool _fp_event_hold = false; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 0), fp_event_leash (units, 5..40; review R2-N2: under 5 a scripted walk pulls and blinks every few frames)
+    // review S1: off by default until the owner's capture confirmed the cause (the game moving the root); on by default since the
+    // owner's Djose test (10 Nov 2026: logs8/djose_grab_1300.log, the hold engaged and glided back as designed)
+    private bool _fp_event_hold = true; private float _fp_event_leash = 12f;   // ini fp_event_hold (default 1), fp_event_leash (units, 5..40; review R2-N2: under 5 a scripted walk pulls and blinks every few frames)
     private delegate* unmanaged[Cdecl]<int, float, float*, int, int> _fn_fp_event;   // ABI 50
     private long _fpev_key = -1; private readonly float[] _fpev_st = new float[17];   // the last eligible frame's (slot, scene generation); native's state for F8
     /// <summary>push_player, every frame after the eye is sent: eligible = the field, first person, on foot (not riding), not
@@ -190,7 +191,7 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// <summary>F8 > View > First person (the hold's state: Developer > Logging & status).</summary>
     private void fpev_ui() {
-        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye where you stood while the game moves you at an interaction (control off) in first person: it must move you within 1.5 s; a camera cut that moves you past the slack, or comes 3 s after it moved you to the slack, lets go."); ImGui.SameLine();
+        ui_check("fp_event_hold", "Steady view during scripted moves##fpev", ref _fp_event_hold, UiTag.None, "Hold the eye where you stood while the game moves you at an interaction (control off) in first person: it must move you within 1.5 s; a camera cut that moves you past the slack, or comes 3 s after it moved you to the slack, lets go. On by default."); ImGui.SameLine();
         ui_slider("fp_event_leash", "slack (units)##fpev", ref _fp_event_leash, 5f, 40f, "%.0f", UiTag.None, "How far the game may move you before the eye trails.", 140f);
     }
 
