@@ -6049,3 +6049,31 @@ Facts only, from Fahrenheit at the version the mod targets (`src/runtime/imgui.c
   from the render thread, a button event per press and release, a wheel event per frame while the stick scrolls, and one
   position event per hand-back; and while it points, the backend's SetCursorPos makes Windows post one WM_MOUSEMOVE per frame,
   which the pump turns into a queued event.
+
+## The menu from the controller: hold the left menu button (vr-menu S4, branch `vr-menu`, 10 Nov 2026; ABI 61)
+
+The owner's request after testing S3: open and close the F8 window by holding the left menu button (the game's Start).
+
+- **The toggle is F8's own path.** F8 is the mod's key, not Fahrenheit's (F7 is): `handle_hotkeys` flipped `_window_open` and
+  cleared `_window_open_forced`. That is now `toggle_window()`, called by F8 and by the hold, so both act the same (the window,
+  the saved `overlay_open`, the headset panel, everything that reads `_window_open`). No key press is faked.
+- **Where the hold is seen** (`ffxvr_menuhold.h`, namespace `vmh`, unit-tested in vrmenu_chk/s4): `vpanel_input`, inside
+  `vrpad_take`, the one writer of `g_vrpad`, on the raw input at every game frame and every stickrep extra frame (time from
+  QueryPerformanceCounter, so extra frames do not shorten it; one call counts at most 0.25 s, so a stall is not a hold). A press
+  reaches the game as Start (`pad::compose`: `L.menu` -> START) and ImGui's pad (`ffxvr_imgui_xstate`), as before. At
+  `vr_menu_hold_ms` (1000, 400..3000) the hold toggles once (`g_vmh_toggles`, read by managed through `ffxvr_menu_hold`), and from
+  that call until the release `hand[0].menu` is cleared in the copy that becomes `g_vrpad`: the game and ImGui's pad see Start
+  released, and no second press edge can come from this hold.
+- **The gate:** `vr_menu_hold`, the headset running (`g_xr_active`), the controllers as the gamepad (`vrpad`), the left
+  controller active. A hold begun, or carried on, without it never toggles; a mask already on stays until the release.
+- **Fahrenheit's soft reset** (`runtime/reset.cs`: ImGui's GamepadL1 and GamepadR1 down and a GamepadStart press) sees the hold's
+  first press exactly as it would a tap (the chord with both grips works as before); after the toggle Start is up until the
+  release, so the hold can neither fire it again nor complete it later. With `imgui_vrpad` other than 2 ImGui's pad gets no Start
+  at all (`pad::imgui_mask`).
+- **The game and a held Start:** until the toggle the game sees what a pad's held Start gives today; after it, Start is released.
+  Its known repeat query (0x630D30, the switch list's next / previous) is not on Start as far as the notes go; not verified here.
+- **Haptics** (managed, left hand, always on): opening two pulses of 0.55 / 30 ms 90 ms apart, closing one of 0.4 / 80 ms.
+- **Export (ABI 61):** `ffxvr_menu_hold(on, ms)` sets the two settings and returns the toggle count.
+- **Tests:** vrmenu_chk/s4/menuhold_test.cpp, 31 checks (tap and hold, exactly one toggle, the mask until release, a release
+  just short, extra frames and stalls, the gate, the soft-reset model, the hold time's clamp); 14 mutants, all killed.
+

@@ -206,7 +206,9 @@ Developer tab's First person & body group.
 
 ## The F8 menu
 
-F8 shows or hides the mod's window (F7 is Fahrenheit's own). Its top lines
+F8 shows or hides the mod's window (F7 is Fahrenheit's own). In the headset with
+the Quest controllers, holding the left controller's menu button for a second
+does the same (`vr_menu_hold=1`, `vr_menu_hold_ms=1000`; below). Its top lines
 stay in view: **Headset** (the VR view, this session), **Recentre** (Home), the
 headset's status in one line (hover it for the whole text), the frame / GPU /
 VRAM line (hover it for the full performance text), the version, and warnings
@@ -245,6 +247,15 @@ targets) it slides aside until it is clear of the targets (about 53 degrees at t
 default layout and size), then comes back; if that would be more than 60 degrees
 (a large panel) it hides for the round instead.
 
+- **Open and close it from the controller:** hold the left menu button (the
+  game's Start) for `vr_menu_hold_ms` (1000; 400..3000): the window opens or closes
+  as with F8, with two short buzzes on the left hand when it opens and one longer
+  when it closes. A tap still reaches the game as Start (it pauses), and so does
+  the first moment of a hold; once the hold has toggled the menu, Start is held back
+  from the game and from Fahrenheit's menus until you let go, so it does nothing
+  more (and can never complete Fahrenheit's both-grips + Start soft reset). Only
+  with the headset on and the controllers as the gamepad (`vrpad=1`); Controls >
+  Menu panel > "Hold the left menu button to open or close this menu" turns it off.
 - **Point at it:** each controller's ray shows as a thin beam while it is near
   the panel, with a dot where it meets it (amber while pressed). The trigger is the
   mouse's left button (pressed from 30/255 of its travel, let go below 20/255), the
@@ -321,7 +332,7 @@ was left away from its default in the ini.
 
 The Quest controllers are the gamepad (`vrpad=1`), merged with an Xbox pad if one is connected (buttons OR, the stick
 pushed further wins). Mapping: right A / B = A / B, left X / Y = X / Y, triggers = LT / RT, grips = LB / RB (below), left
-menu = Start, left stick click = Back, right stick click = R3, sticks = sticks.
+menu = Start (held about a second: the mod's window opens or closes instead, as F8; see the F8 menu), left stick click = Back, right stick click = R3, sticks = sticks.
 The triggers count as pressed from about 12 % of their travel (30 / 255, XInput's standard threshold) and as let go below
 about 8 %, so a finger resting on a trigger presses nothing; a very light half-pull does not register.
 
