@@ -12,8 +12,10 @@
 #pragma once
 // fix-eye (7 Nov 2026), revision 2: a grab no longer mutes a jump; 3: a big jump after a blink has ended blinks again; 4: the
 // event hold (EvHold); 5: a no-control episode's summary (Episode); 6 (review): min_gap 6, the hold's no_start (a cut at the
-// edge), EV_PULL / EV_BLOCKED; 7 (review 2): min_start 20 (the shared scratch test keys its expectations on this).
-#define FFXVR_EJ_REV 7
+// edge), EV_PULL / EV_BLOCKED; 7 (review 2): min_start 20 (the shared scratch test keys its expectations on this); 8 (eye-hold2,
+// 10 Nov 2026): a camera cut ends the hold only with a root jump over the leash around it (EvCfg::cut_win), and the hold's
+// "engaged" mark (the eye held over EvCfg::engage off the root).
+#define FFXVR_EJ_REV 8
 #include <cmath>
 #include <cstdint>
 
@@ -260,13 +262,26 @@ inline bool limit_start(Limit& l, uint32_t frame, int window) {
 // when control went off, on a leash: when the game moves the root further than `leash`, the eye trails it at that distance. A
 // single root step over 2 x leash is a scene staging: the hold starts again at the new root (the eye-jump blink covers it). The
 // height keeps the head rule over the root (stairs, a kneel). When control returns the eye glides back over glide_s if it is
-// under leash / 2 off, else it snaps with a blink. A camera cut or max_s seconds end the hold the same way; a map change, a load
-// or a re-pick (managed) and the setting off end it with a snap. One hold per no-control episode: it starts on the edge only.
+// under leash / 2 off, else it snaps with a blink. A camera cut that comes with a new scene (below) or max_s seconds end the hold
+// the same way; a map change, a load or a re-pick (managed) and the setting off end it with a snap. One hold per no-control
+// episode: it starts on the edge only.
+// eye-hold2 (10 Nov 2026, logs8/djose_grab_1300.log): the grab's own camera cut ended the hold. In the Djose cloister the hold
+// started at frame 1092 (control off), and at 1096 the game cut its camera and moved the root 3.9 units toward the socket over
+// two frames (the smooth anchor's halves, 1.97 + 2.08): the hold ended "(a camera cut) after 0.1 s" and the eye glided into the
+// wall for the 1.8 s of the take. So a cut no longer ends the hold by itself: it ends it only when the root (the eye base) moves
+// more than the leash between cut_win frames before the cut and cut_win frames after it (a new scene: a staging, a teleport,
+// another place; the cut and the move can come a frame or two apart in either order, and a snap can be split over two frames).
+// A cut without such a jump leaves the root within the leash of the eye, so holding on stays safe and the cap still bounds it;
+// the map change is managed's release. Not a time grace after the start: a longer interaction can cut again later, still at the
+// socket, and a cutscene's staging jump in its first second should release at once rather than restart the hold there.
 // Pure: the native glue (build_override_view's primary advance call) passes the eye base and the frame's inputs.
 struct EvCfg {
     float leash  = 12.f;   // ini fp_event_leash: units (12 = about 1.05 m)
     float glide_s = 0.3f;  // the glide back, seconds
     float max_s  = 45.f;   // the hold ends after this long (a cutscene without a cut; 0 = no cap)
+    int   cut_win = 4;     // eye-hold2: frames before and after a cut over which a root move over the leash is a new scene (0..7;
+                           // 4 + 4 at a scripted run's 1.02 units a frame is 8.2, under the leash: a run across a cut is no jump)
+    float engage = 1.f;    // eye-hold2: the hold is "engaged" once it keeps the eye this far off the root (the game moved him)
     float reset() const { return 2.f * leash; }       // a single root step over this restarts the hold at the root
     float glide_max() const { return 0.5f * leash; }  // an offset under this glides back, else a blink and a snap
 };
@@ -275,7 +290,8 @@ struct EvCfg {
 // frame or just before (a cutscene's start): no hold this episode.
 enum EvEvent : int { EV_NONE = 0, EV_START, EV_RESET, EV_GLIDE, EV_SNAP, EV_PULL, EV_BLOCKED };
 enum EvWhy : int { EVW_NONE = 0, EVW_CONTROL, EVW_RELEASE, EVW_CUT, EVW_CAP, EVW_OFF };
-static const char* const k_ev_why[] = { "-", "control back", "a map change, a load, a re-pick or a gap in first person", "a camera cut", "the time cap", "fp_event_hold off, the eye on the drawn head, or first person left" };
+static const char* const k_ev_why[] = { "-", "control back", "a map change, a load, a re-pick or a gap in first person", "a camera cut with a jump of the root over the leash: a new scene", "the time cap", "fp_event_hold off, the eye on the drawn head, or first person left" };
+constexpr int k_ev_hist = 8;   // eye-hold2: the bases kept for the cut test (cut_win is clamped to k_ev_hist - 1)
 struct EvHold {
     bool     on = false;
     bool     want_prev = false;   // the last step's want (the start is on its rising edge)
@@ -294,24 +310,54 @@ struct EvHold {
     int      resets = 0;
     float    end_off = 0.f;       // the offset when it ended
     int      why = EVW_NONE;      // why it ended
+    // eye-hold2: the cut test. hist = the last bases (x, z), every step, held or not; a cut arms a window of cut_win more steps
+    // measured from the base cut_win steps before it (cut_ref); cut_jump = the largest distance from it in the window.
+    float    hist[k_ev_hist][2] = {};
+    uint32_t hist_n = 0;          // bases written (the ring's next slot is hist_n % k_ev_hist)
+    int      cut_left = 0;        // steps left in the window (0: none open)
+    float    cut_ref[2] = {};
+    float    cut_jump = 0.f;      // the largest root move around the cut in the open (or last) window
+    int      cuts = 0;            // cuts seen this hold
+    int      cuts_kept = 0;       // ... of them, windows closed without a new scene (the hold went on); the glue logs each
+    bool     engaged = false;     // the eye was held over EvCfg::engage off the root at some step of this hold
+    uint32_t engage_frame = 0;
 };
 inline float hlen(float x, float z) { return std::sqrt(x * x + z * z); }
 /// One advance frame. P = the eye base (x and z replaced while held or gliding). want = an eligible frame with control off
 /// (managed); enabled = fp_event_hold (the caller also clears it while the eye is on the drawn head, review S3, and outside first
-/// person); release = managed's map change / load / re-pick (or a gap in the steps); cut = a camera cut since the last step;
-/// no_start = a camera cut on this frame or within the 2 before (review S1: the cut that starts a cutscene can come a frame before
-/// the control flag, or in the same game frame, and the hold must not swallow it). dt = seconds since the last frame.
+/// person); release = managed's map change / load / re-pick (or a gap in the steps); cut = a camera cut since the last step (it
+/// ends the hold only with a root jump over the leash within cut_win steps of it: eye-hold2); no_start = a camera cut on this frame
+/// or within the 2 before (review S1: the cut that starts a cutscene can come a frame before the control flag, or in the same game
+/// frame, and the hold must not swallow it). dt = seconds since the last frame.
 inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release, bool cut, bool no_start, float dt, const EvCfg& c, uint32_t frame) {
     const bool rising = want && !h.want_prev;
     h.want_prev = want;
-    if (!finite3(P) || !std::isfinite(dt)) { h.on = false; h.glide = false; h.prev_ok = false; return EV_NONE; }
+    if (!finite3(P) || !std::isfinite(dt)) { h.on = false; h.glide = false; h.prev_ok = false; h.hist_n = 0; h.cut_left = 0; return EV_NONE; }
     const float bx = P[0], bz = P[2];
     const float step = h.prev_ok ? hlen(bx - h.prev[0], bz - h.prev[1]) : 0.f;
     h.prev[0] = bx; h.prev[1] = bz; h.prev_ok = true;
+    // eye-hold2: the base w steps ago (the oldest kept when fewer; this one when none), then this base into the ring
+    const int w = c.cut_win < 1 ? 1 : c.cut_win > k_ev_hist - 1 ? k_ev_hist - 1 : c.cut_win;
+    float rx = bx, rz = bz;
+    if (h.hist_n > 0) {
+        const uint32_t back = h.hist_n < static_cast<uint32_t>(w) ? h.hist_n : static_cast<uint32_t>(w);
+        const float* q = h.hist[(h.hist_n - back) % k_ev_hist]; rx = q[0]; rz = q[1];
+    }
+    h.hist[h.hist_n % k_ev_hist][0] = bx; h.hist[h.hist_n % k_ev_hist][1] = bz; h.hist_n++;
     const float L = c.leash > 0.5f ? c.leash : 0.5f;
     int ev = EV_NONE;
     if (h.on) {
-        const int why = !enabled ? EVW_OFF : !want ? EVW_CONTROL : release ? EVW_RELEASE : cut ? EVW_CUT : (c.max_s > 0.f && h.t >= c.max_s) ? EVW_CAP : EVW_NONE;
+        // eye-hold2: a cut opens a window (this step and w more) measured from the base w steps before it; a root over the leash
+        // from there inside the window is a new scene; a window that closes without one is the interaction's own cut: held on
+        bool scene = false;
+        if (cut) { if (h.cut_left <= 0) { h.cut_ref[0] = rx; h.cut_ref[1] = rz; h.cut_jump = 0.f; } h.cut_left = w + 1; h.cuts++; }
+        if (h.cut_left > 0) {
+            const float j = hlen(bx - h.cut_ref[0], bz - h.cut_ref[1]);
+            if (j > h.cut_jump) h.cut_jump = j;
+            if (j > L) scene = true;
+            else if (--h.cut_left == 0) h.cuts_kept++;
+        }
+        const int why = !enabled ? EVW_OFF : !want ? EVW_CONTROL : release ? EVW_RELEASE : scene ? EVW_CUT : (c.max_s > 0.f && h.t >= c.max_s) ? EVW_CAP : EVW_NONE;
         if (why == EVW_NONE) {
             if (step > c.reset()) { h.H[0] = bx; h.H[1] = bz; h.resets++; ev = EV_RESET; }   // a staging: the usual blink (the jump)
             else {
@@ -323,6 +369,7 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
             h.t += dt > 0.f ? dt : 0.f;
             const float off = hlen(h.H[0] - bx, h.H[1] - bz);
             if (off > h.off_max) h.off_max = off;
+            if (!h.engaged && off >= c.engage) { h.engaged = true; h.engage_frame = frame; }   // eye-hold2: the hold at work
             P[0] = h.H[0]; P[2] = h.H[1];
             return ev;
         }
@@ -338,6 +385,7 @@ inline int ev_step(EvHold& h, float P[3], bool want, bool enabled, bool release,
         const float ox = h.glide ? h.G[0] : 0.f, oz = h.glide ? h.G[1] : 0.f;
         h.on = true; h.glide = false; h.H[0] = bx + ox; h.H[1] = bz + oz; h.t = 0.f; h.start_frame = frame;
         h.start[0] = bx; h.start[1] = bz; h.off_max = hlen(ox, oz); h.step_max = 0.f; h.resets = 0; h.end_off = 0.f; h.why = EVW_NONE;
+        h.cut_left = 0; h.cut_jump = 0.f; h.cuts = 0; h.cuts_kept = 0; h.engaged = false; h.engage_frame = 0;   // eye-hold2
         P[0] = h.H[0]; P[2] = h.H[1];
         return EV_START;
     }

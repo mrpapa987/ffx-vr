@@ -2227,6 +2227,7 @@ int        g_evh_flags = 0; uint32_t g_evh_flags_frame = 0;   // managed's flags
 uint32_t   g_evh_rel_seq = 0, g_evh_rel_seen = 0, g_evh_cut_seen = 0;
 bool       g_evh_out_on = false; float g_evh_out[2] = {};     // this frame's held / gliding horizontal eye position (render x, z)
 uint32_t   g_evh_lines = 0, g_evh_holds = 0, g_evh_tick_frame = 0; bool g_evh_ticked = false;
+uint32_t   g_evh_lines_q = 0, g_evh_quiet = 0;   // eye-hold2: the quiet lines (a start, the end of a hold that never engaged: 30 a session); quiet ends past them
 ej::Episode g_evep; float g_evep_out[11] = {}; uint32_t g_evep_seq = 0;   // the last finished no-control episode (ffxvr_fp_event's out 4..14)
 static void evh_tick(float P[3]) {
     const bool fresh = g_frames - g_evh_flags_frame <= 2u;   // managed stopped sending (no actor table, a load): no control-off frame
@@ -2240,6 +2241,7 @@ static void evh_tick(float P[3]) {
     const bool cut = g_cam_cuts_any != g_evh_cut_seen; g_evh_cut_seen = g_cam_cuts_any;
     const bool cut_near = cut || (g_cam_cut_seen && g_frames - g_cam_cut_frame <= 2u);   // review S1: a cut on the edge or the 2 frames before
     const float bx = P[0], bz = P[2];
+    const bool was_engaged = g_evh.on && g_evh.engaged; const int kept0 = g_evh.cuts_kept;
     const int ev = ej::ev_step(g_evh, P, want, enabled, release, cut, cut_near, g_dt, g_evh_cfg, g_frames);
     g_evh_out_on = ej::ev_active(g_evh); g_evh_out[0] = P[0]; g_evh_out[1] = P[2];
     if (ej::ep_step(g_evep, want && g_fp_mode == 1, g_fp_pos, P, g_yaw_view, g_blink_frames > 0, cut, g_frames) == ej::EP_END) {   // the capture's summary (managed logs it)
@@ -2250,21 +2252,42 @@ static void evh_tick(float P[3]) {
     if (ev == ej::EV_START) g_evh_holds++;
     if (ev == ej::EV_SNAP && g_evh.end_off >= 1.f) ej_blink();   // control back (or the hold released) far from the root: blink and snap
     if (ev == ej::EV_PULL) ej_blink();                              // review N2: a 12-24 unit staging step moves the eye: blinked too
-    if (ev == ej::EV_NONE || g_evh_lines >= 60) return;
+    // eye-hold2: two line budgets. Text boxes and NPC talks start a hold that never engages (nothing moves him): their start and
+    // end lines share 30 a session ("quiet"), so the lines of the holds that do work (the game moved him: engaged, a kept or a
+    // releasing cut, a pull, a staging, their end) keep their own 60 for the interactions later in the session (the cloister).
+    const bool engaged_now = g_evh.on && g_evh.engaged && !was_engaged;
+    const bool kept_now = g_evh.cuts_kept != kept0;
+    const bool quiet = ev == ej::EV_START || ((ev == ej::EV_GLIDE || ev == ej::EV_SNAP) && !g_evh.engaged && g_evh.why == ej::EVW_CONTROL && g_evh.cuts == 0);
+    if (quiet) {
+        if (g_evh_lines_q >= 30) { if (ev != ej::EV_START) g_evh_quiet++; }
+        else {
+            g_evh_lines_q++;
+            const char* lq = g_evh_lines_q == 30 ? " (no more quiet eye hold: lines this session: the starts, and the ends of holds that never engaged)" : "";
+            if (ev == ej::EV_START)
+                diag("eye hold: frame %u: player control off in first person: the eye's horizontal position held at (%.1f %.1f) (leash %.1f units, a staging over %.1f restarts it, cap %.0f s)%s", g_frames, P[0], P[2], g_evh_cfg.leash, g_evh_cfg.reset(), g_evh_cfg.max_s, lq);
+            else
+                diag("eye hold: frame %u: ended (control back) after %.1f s: never engaged (the eye at most %.1f units off the root, no camera cut) -> %s%s", g_frames, g_evh.t, g_evh.off_max, ev == ej::EV_GLIDE ? "a glide back" : "a snap", lq);
+        }
+        return;
+    }
+    if ((ev == ej::EV_NONE && !engaged_now && !kept_now) || g_evh_lines >= 60) return;
     g_evh_lines++;
     const char* last = g_evh_lines == 60 ? " (no more eye hold: lines this session)" : "";
-    if (ev == ej::EV_START)
-        diag("eye hold: frame %u: player control off in first person: the eye's horizontal position held at (%.1f %.1f) (leash %.1f units, a staging over %.1f restarts it, cap %.0f s)%s", g_frames, P[0], P[2], g_evh_cfg.leash, g_evh_cfg.reset(), g_evh_cfg.max_s, last);
-    else if (ev == ej::EV_BLOCKED)
+    if (engaged_now && ev == ej::EV_NONE)   // (a pull's own line says it on its frame)
+        diag("eye hold: frame %u: engaged %.1f s after control went off: the game moved the root %.1f units from where it was, the eye held %.1f units back (at most %.1f a step)%s", g_frames, g_evh.t,
+             ej::hlen(bx - g_evh.start[0], bz - g_evh.start[1]), ej::hlen(P[0] - bx, P[2] - bz), g_evh.step_max, last);
+    if (kept_now && ev == ej::EV_NONE)
+        diag("eye hold: frame %u: a camera cut with the root %.1f units from where it was %d frames before (not over the leash %.1f: the same scene, the interaction's own cut): held on (cuts %d this hold)%s", g_frames, g_evh.cut_jump, g_evh_cfg.cut_win, g_evh_cfg.leash, g_evh.cuts, last);
+    if (ev == ej::EV_BLOCKED)
         diag("eye hold: frame %u: player control off with a camera cut %u frames before (a cutscene's start): no hold this time%s", g_frames, g_frames - g_cam_cut_frame, last);
     else if (ev == ej::EV_PULL)
         diag("eye hold: frame %u: a root step over the leash %.1f (the largest this hold %.1f): the eye pulled along, blinked%s", g_frames, g_evh_cfg.leash, g_evh.step_max, last);
     else if (ev == ej::EV_RESET)
         diag("eye hold: frame %u: the root moved %.1f units in one frame (a scene staging, over %.1f): the hold starts again at the new root (the eye-jump blink)%s", g_frames, g_evh.step_max, g_evh_cfg.reset(), last);
-    else
-        diag("eye hold: frame %u: ended (%s) after %.1f s: the root %.1f units from where control went off (the largest single step %.1f), the eye trailed it by up to %.1f, resets %d; the eye %.1f units off the root at the end -> %s%s",
-             g_frames, ej::k_ev_why[g_evh.why], g_evh.t, ej::hlen(bx - g_evh.start[0], bz - g_evh.start[1]), g_evh.step_max, g_evh.off_max, g_evh.resets, g_evh.end_off,
-             ev == ej::EV_GLIDE ? "a glide back" : g_evh.end_off >= 1.f ? "a blink and a snap" : "a snap (under a unit)", last);
+    else if (ev == ej::EV_GLIDE || ev == ej::EV_SNAP)
+        diag("eye hold: frame %u: ended (%s) after %.1f s: the root %.1f units from where control went off (the largest single step %.1f), the eye trailed it by up to %.1f, resets %d, camera cuts %d (held on through %d; the largest root move around one %.1f); the eye %.1f units off the root at the end -> %s (quiet holds not logged so far %u)%s",
+             g_frames, ej::k_ev_why[g_evh.why], g_evh.t, ej::hlen(bx - g_evh.start[0], bz - g_evh.start[1]), g_evh.step_max, g_evh.off_max, g_evh.resets, g_evh.cuts, g_evh.cuts_kept, g_evh.cut_jump, g_evh.end_off,
+             ev == ej::EV_GLIDE ? "a glide back" : g_evh.end_off >= 1.f ? "a blink and a snap" : "a snap (under a unit)", g_evh_quiet, last);
 }
 
 /// The first-person eye's base from the player's position and head (fy = the view heading's forward, render space).
