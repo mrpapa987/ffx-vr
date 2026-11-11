@@ -499,6 +499,7 @@ public sealed unsafe partial class FFXVRModule {
             }
         }
         hands2_tap_ui();
+        sphh_ui();   // sphere hands (sphere_hands.cs)
         if (ImGui.TreeNode("fine tune##h2ft")) {
             ui_slider("vr_hands_yaw", "yaw##h2", ref _vr_hands_yaw, -45f, 45f, "%.0f deg", UiTag.None, null, 110f); ImGui.SameLine();
             ui_slider("vr_hands_pitch", "pitch##h2", ref _vr_hands_pitch, -45f, 45f, "%.0f deg", UiTag.None, null, 110f); ImGui.SameLine();

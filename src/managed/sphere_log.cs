@@ -13,12 +13,14 @@ namespace FFXVR;
 //   - a compact line every 0.5 s (only when something in it changed, else one every 5 s): Tidus's root and heading, the game's
 //     talk state (the confirm request, the chosen worker), the trial's carried-sphere variable and its socket variables, the text
 //     and choice windows, the nearest interaction workers and object actors with their distance from Tidus and each VR hand;
-//   - a full snapshot (every interaction worker within 120 units with its talk block, every object actor and every actor
+//   - a full snapshot (every talk-enabled worker within 120 units with its talk block, every object actor and every actor
 //     within 40 units with its flags, attachment, model and index-buffer keys, the skinned draws near Tidus, the text of each
 //     open window, Tidus's sub-positions while an object shares his root) on: entering the map, player control off and on,
 //     a new button press, the game's confirm request, a change of its talk target, a choice box opening or closing, a text
 //     window opening, and a change of the carried / socket variables.
-//   Bounded: 4000 compact lines and 150 full snapshots a session, at most 4 snapshots a second.
+//   Bounded: 4000 compact lines and 400 full snapshots a session (150 before sphere hands S1+2), at most 4 snapshots a second.
+//   Since S1+2 a snapshot lists only the talk-enabled workers (and the target), 40 at most, and the grab feature (sphere_hands.cs)
+//   shares these reads.
 //
 // Game facts used (installed build, module offsets = VA - 0x400000; checked in our exe's disassembly, dis_full.txt and the
 // Ghidra export; facts from Fahrenheit, the FFX screen reader and FFXDataParser re-derived there, no code taken):
@@ -45,7 +47,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool _diag_sphere;   // ini diag_sphere (default 0; Developer): the sphere research log anywhere (it runs in the cloisters with any diagnostic on)
     private delegate* unmanaged[Cdecl]<float*, int, int> _fn_sph_hands;   // ABI 63: the drawn hands' positions (render space)
 
-    private const int k_sph_lines_max = 4000, k_sph_full_max = 150;
+    private const int k_sph_lines_max = 4000, k_sph_full_max = 400;   // sphere hands S1+2: 400 snapshots (the Djose session spent 150 by its last third)
     private const float k_sph_upm = 11.4f;   // game units per metre (the uidepth readback's measure)
     private string _sph_map = ""; private int _sph_trial = -1; private double _sph_map_t = -1;
     private bool _sph_active, _sph_entered;
@@ -76,7 +78,8 @@ public sealed unsafe partial class FFXVRModule {
             if (m != _sph_map) { _sph_map = m; _sph_trial = SphTrial.Find(map_base(m)); _sph_entered = false; _sph_chunk = 0; _sph_chunk_t = -1; _sph_keys_logged.Clear(); }
         }
         bool active = _diag_sphere || (_sph_trial >= 0 && diag_any());
-        if (!active) { if (_sph_active) sph_reset(); return; }
+        bool feat = sphh_wanted();   // sphere hands (sphere_hands.cs): the grab feature needs the same reads
+        if (!active && !feat) { if (_sph_active) sph_reset(); sphh_push_off(); return; }
         _sph_active = true;
         if (_sph_ctl == null) { _sph_ctl = (byte*)Marshal.AllocHGlobal(0x240); _sph_vars = (byte*)Marshal.AllocHGlobal(0x100); }   // kept for the session
         // this frame's cheap reads: the controller, the player, the presses, the windows, the trial's variables
@@ -91,6 +94,8 @@ public sealed unsafe partial class FFXVRModule {
         }
         if (ctl_ok && (_sph_chunk == 0 || _now - _sph_chunk_t >= 2.0 || _now < _sph_chunk_t)) sph_find_chunk(ctl);
         long vsig = sph_vars_read(out int carried);
+        if (feat) sphh_push(ctl_ok ? ctl : 0, pl_ok, pl, tx, carried); else sphh_push_off();
+        if (!active) return;   // the log below: only with the log on
         // the events that take a full snapshot
         string? why = null;
         if (!_sph_entered) { _sph_entered = true; why = I($"entered map {_sph_map}{(_sph_trial >= 0 ? " (" + SphTrial.T[_sph_trial].name + "'s cloister)" : " (not a cloister: the Developer checkbox)")}"); }
@@ -299,6 +304,7 @@ public sealed unsafe partial class FFXVRModule {
                 sig = sig * 31 + i * 13 + (long)(d * 2f) + hide;
             }
         }
+        sb.Append(sphh_brief(out long gsig)); sig = sig * 31 + gsig;   // sphere hands (sphere_hands.cs): the grab state
         // dedupe: an unchanged line goes out once every 5 s
         if (sig == _sph_compact_sig && _now - _sph_compact_sig_t < 5.0 && _now >= _sph_compact_sig_t) return;
         _sph_compact_sig = sig; _sph_compact_sig_t = _now;
@@ -348,10 +354,10 @@ public sealed unsafe partial class FFXVRModule {
         // the interaction workers: any interaction enabled, within 120 units of Tidus (24 at most), and the chosen target
         if (ctl != 0) {
             short tgt = *(short*)(_sph_ctl + 0x1E8); int n = 0;
-            for (int i = 0; i < count && n < 24; i++) {
+            for (int i = 0; i < count && n < 40; i++) {
                 if (!sph_worker_read(i, actors, out SphW w)) continue;
                 bool is_t = i == tgt;
-                if (!is_t && (!w.block || w.ab == 0 || w.type < 1 || w.type > 3)) continue;
+                if (!is_t && (!w.block || (w.ab & 1) == 0 || w.type < 1 || w.type > 3)) continue;   // S1+2: only the talk-enabled ones (the spheres' own workers filled the list)
                 float d = Vector3.Distance(w.pos, tp);
                 if (!is_t && !(d < 120f)) continue;
                 n++;
@@ -460,6 +466,7 @@ public sealed unsafe partial class FFXVRModule {
     private void sph_ui() {
         ui_check("diag_sphere", "Sphere research log (diag_sphere): in ffxvr_diag.log, the sphere / socket / talk / text state (\"sph:\" lines), anywhere; in a Cloister of Trials it runs with any diagnostic on", ref _diag_sphere);
         ImGui.TextDisabled(esc(I($"sph: map {_sph_map} {(_sph_trial >= 0 ? "(" + SphTrial.T[_sph_trial].name + "'s cloister)" : "(not a cloister)")} | {(_sph_active ? "logging" : "off")} | compact lines {_sph_lines} of {k_sph_lines_max}, snapshots {_sph_full} of {k_sph_full_max}")));
+        sphh_dev_ui();   // sphere hands: the target, the prediction, the sequence (sphere_hands.cs)
     }
 }
 
@@ -474,7 +481,7 @@ internal readonly struct SphTrial {
     public static readonly SphTrial[] T = {
         new("bsyt0100", "Besaid",    122, 0xAC, 17, 4, 0xAC, new[] { 1, 2, 3 }, new[] { "Besaid Sphere", "Glyph Sphere", "Destruction Sphere" }),
         new("klyt1000", "Kilika",    108, 0x58, 11, 1, 0x5B, new[] { 6 }, new[] { "Destruction Sphere" }),
-        new("djyt0600", "Djose",     214, 0x94, 13, 1, 0x94, new[] { 10 }, new[] { "Destruction Sphere" }),
+        new("djyt0600", "Djose",     214, 0x94, 13, 1, 0x94, new[] { 1, 3, 10 }, new[] { "Djose Sphere", "Charged Djose Sphere", "Destruction Sphere" }),   // logs9; 3's name a guess until the game's text shows it
         new("mcyt0500", "Macalania", 239, 0x94, 10, 1, 0x94, new[] { 4, 10, 11 }, new[] { "Macalania Sphere", "Destruction Sphere", "Glyph Sphere" }),
         new("bvyt1100", "Bevelle",   306, 0x32, 72, 1, 0x32 + 61, new[] { 1 }, new[] { "Destruction Sphere" }),
         new("dome0700", "Zanarkand", 320, 0x08, 6, 4, 0x08, new[] { 1, 2, 3 }, new[] { "Besaid Sphere", "Kilika Sphere", "Destruction Sphere" }),
