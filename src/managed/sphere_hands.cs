@@ -19,9 +19,10 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<SphHead*, SphZone*, int, SphTarget*, int, SphWin*, int, void> _fn_sph_set;   // ABI 64
     private delegate* unmanaged[Cdecl]<float*, int, byte*> _fn_sph_status;                                      // ABI 64
 
-    // = native sph::Head / Zone / Target / Win (x86; 76, 52, 60, 116 bytes)
-    [StructLayout(LayoutKind.Sequential)] private struct SphHead { public int bytes, on, control, free_play, carried, talk_target; public uint gen; public float tx, ty, tz, player_radius; public fixed byte carried_name[32]; }
-    [StructLayout(LayoutKind.Sequential)] private struct SphZone { public int widx, kind; public float cx, cy, cz, hx, hz, rot, h, range, htol, atol; public int target; }
+    // = native sph::Head / Zone / Target / Win (x86; 80, 60, 60, 116 bytes: ffxvr_sphere.h's static_assert; native checks Head's
+    // size at every push)
+    [StructLayout(LayoutKind.Sequential)] private struct SphHead { public int bytes, on, control, free_play, carried, talk_target; public uint gen; public float tx, ty, tz, player_radius; public int player_widx; public fixed byte carried_name[32]; }
+    [StructLayout(LayoutKind.Sequential)] private struct SphZone { public int widx, kind; public float cx, cy, cz, hx, hz, rot, h, range, htol, atol; public int target; public uint flags; public int aa; }
     [StructLayout(LayoutKind.Sequential)] private struct SphTarget { public int widx, kind, value, free_slots; public float ax, ay, az; public fixed byte name[32]; }
     [StructLayout(LayoutKind.Sequential)] private struct SphWin { public int open, state, choice_mode, choice_row, n; public fixed byte page[96]; }
 
@@ -46,7 +47,7 @@ public sealed unsafe partial class FFXVRModule {
     /// Off: a head with on = 0 (native also treats a state older than 3 frames as off).
     private void sphh_push_off() {
         if (_fn_sph_set == null || !_sphh_sent_on) return;
-        var h = new SphHead { bytes = sizeof(SphHead), carried = -1, talk_target = -1 };
+        var h = new SphHead { bytes = sizeof(SphHead), carried = -1, talk_target = -1, player_widx = -1 };
         _fn_sph_set(&h, null, 0, null, 0, null, 0);
         _sphh_sent_on = false;
         _sphh_gate = "not in a trial with a socket table, or off";
@@ -81,12 +82,13 @@ public sealed unsafe partial class FFXVRModule {
         _sphh_gate = gate;
         bool on = gate.Length == 0;
         if (on && (_sphh_scan_t < 0 || _now - _sphh_scan_t >= 0.25 || _now < _sphh_scan_t)) sphh_scan(actors, snap, ti, sk!);
-        var h = new SphHead { bytes = sizeof(SphHead), on = on ? 1 : 0, carried = carried, talk_target = -1 };
+        var h = new SphHead { bytes = sizeof(SphHead), on = on ? 1 : 0, carried = carried, talk_target = -1, player_widx = -1 };
         if (ctl != 0) {
             byte* c = _sph_ctl;
             h.control = pl_ok && pl != 0 ? 1 : 0;
             h.free_play = (c[0] & 2) != 0 && c[3] == 0 ? 1 : 0;   // logs9: 0x8B with control, 0x89 / 0x81 (and byte 3 0x10 / 0x30) in an event
             h.talk_target = *(short*)(c + 0x1E8); h.player_radius = *(float*)(c + 0x1F0);
+            h.player_widx = *(short*)(c + 0x0A);   // the player's own worker: never a talk candidate (native sph::tested)
             h.tx = *(float*)(c + 0x218); h.ty = *(float*)(c + 0x21C); h.tz = *(float*)(c + 0x220);   // the player's position as the game tests it
         }
         h.gen = (uint)fp_scene_sig() ^ (uint)(nint)_sph_chunk;
@@ -101,8 +103,11 @@ public sealed unsafe partial class FFXVRModule {
         _sphh_sent_on = true;
     }
 
-    /// Every 0.25 s: the talk-enabled workers within 60 units (the game's candidates, in its order), the trial's sockets among them
-    /// (with their sphere actors), and the sphere model.
+    /// Every 0.25 s: the talk-enabled workers of type 1..3 within 60 units, in the game's order, each with its +0x34 / +0x36 /
+    /// +0xAA (native's sph::tested then keeps the ones the game really tests: review B1, the player's own worker and the door's
+    /// and pedestal's parts are in this list and are not candidates); the trial's sockets among them (with their sphere actors);
+    /// and the sphere model. (Review N6: this walks every worker, about 230 guarded reads, four times a second; the cpu: line's
+    /// push_all "rest" shows its cost in the cloister.)
     private void sphh_scan(Actor* actors, Actor* snap, int ti, SphSockets sk) {
         _sphh_scan_t = _now;
         // the sphere model: the object attached to Tidus (+0x19C = his actor; logs9: f113 on bone 50, shown while carried)
@@ -134,6 +139,7 @@ public sealed unsafe partial class FFXVRModule {
                 z->widx = w.idx2e; z->kind = w.type; z->cx = w.pos.X; z->cy = w.pos.Y; z->cz = w.pos.Z;
                 z->hx = w.p2.X; z->hz = w.p2.Z; z->rot = w.type == 3 ? w.p2.Y : 0f;   // type 3: half-extents +0x30 / +0x38, rotation +0x34; type 2: the other end
                 z->h = w.contact_h; z->range = w.range; z->htol = w.htol; z->atol = w.atol; z->target = tix;
+                z->flags = (uint)w.f34 | ((uint)w.f36 << 16); z->aa = w.aa;
             }
         }
         _sphh_nz = nz; _sphh_nt = nt;
@@ -215,7 +221,7 @@ public sealed unsafe partial class FFXVRModule {
     /// F8 > Hands: the setting and the state.
     private void sphh_ui() {
         ui_check("sphere_hands", "Grab spheres with your hands (Cloisters of Trials)##sphh", ref _sphere_hands, UiTag.None,
-                 "In a Cloister of Trials, in first person with the VR hands: a label names the sphere or socket a hand comes near; a squeeze of that hand's grip there takes or places the sphere with no prompt, then a note says what happened. The prompts are answered automatically only in English; in another language the grip presses A once and the prompt shows as usual. Djose only for now.");
+                 "In a Cloister of Trials, in first person with the VR hands: a label names the sphere or socket a hand comes near; a squeeze of that hand's grip there (or one started within the label's range and held as the hand arrives) takes or places the sphere with no prompt, and a note says what happened. The prompts are answered automatically only in English; in another language the grip presses A once and the prompt shows as usual. Djose only for now.");
         if (_sphere_hands && !_vr_hands) { ImGui.SameLine(); ImGui.TextDisabled("(needs the VR hands on)"); }
     }
     /// F8 > Developer > Inspect: the native state (the target, the prediction, the sequence).
@@ -247,13 +253,15 @@ internal sealed class SphSockets {
     public readonly int[] local, kind, var0, var1;
     SphSockets(int[] local, int[] kind, int[] var0, int[] var1) { this.local = local; this.kind = kind; this.var0 = var0; this.var1 = var1; }
     public int Row(int l) { for (int i = 0; i < local.Length; i++) if (local[i] == l) return i; return -1; }
-    // Djose: the eight recesses 48..55, the pedestal (1, two slots), the upper pedestal (6), and the Destruction Sphere's place
-    // (62, +0x9F: the screen reader's binding; not yet seen in a capture: its prompts unchecked, so a grab there may stop at
-    // "unexpected text" and show the prompt, which is safe).
+    // Djose: the eight recesses 48..55, the pedestal (1, two slots) and the upper pedestal (6). The Destruction Sphere's place
+    // (+0x9F) is not here (review S3): the design's notes name worker 62 both as that place and as the reset glyph, and no
+    // capture has a line for it; the research log (sphere_log.cs) keeps listing it, and the next capture decides.
     static readonly SphSockets s_djose = new(
-        new[] { 48, 49, 50, 51, 52, 53, 54, 55, 1, 6, 62 },
-        new[] { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0 },
-        new[] { 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0xA0, 0x9F },
-        new[] { -1, -1, -1, -1, -1, -1, -1, -1, 0x9E, -1, -1 });
+        new[] { 48, 49, 50, 51, 52, 53, 54, 55, 1, 6 },
+        new[] { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1 },
+        new[] { 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0x9B, 0x9C, 0x9D, 0xA0 },
+        new[] { -1, -1, -1, -1, -1, -1, -1, -1, 0x9E, -1 });
     public static SphSockets? For(string script) => script == "djyt0600" ? s_djose : null;
+    /// Workers of a trial's script the research log always lists, whatever their flags or distance (not yet captured).
+    public static bool Watch(string script, int local) => script == "djyt0600" && (local == 62 || local == 64);
 }

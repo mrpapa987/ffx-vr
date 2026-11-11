@@ -357,9 +357,10 @@ public sealed unsafe partial class FFXVRModule {
             for (int i = 0; i < count && n < 40; i++) {
                 if (!sph_worker_read(i, actors, out SphW w)) continue;
                 bool is_t = i == tgt;
-                if (!is_t && (!w.block || (w.ab & 1) == 0 || w.type < 1 || w.type > 3)) continue;   // S1+2: only the talk-enabled ones (the spheres' own workers filled the list)
+                bool watch = _sph_trial >= 0 && w.chunk == _sph_chunk && SphSockets.Watch(SphTrial.T[_sph_trial].script, w.local);   // always listed (review S3: Djose's 62 / 64, not yet captured)
+                if (!is_t && !watch && (!w.block || (w.ab & 1) == 0 || w.type < 1 || w.type > 3)) continue;   // S1+2: only the talk-enabled ones (the spheres' own workers filled the list)
                 float d = Vector3.Distance(w.pos, tp);
-                if (!is_t && !(d < 120f)) continue;
+                if (!is_t && !watch && !(d < 120f)) continue;
                 n++;
                 float ang = MathF.Atan2(w.pos.Z - tp.Z, w.pos.X - tp.X);
                 L(I($"worker {w.gi}{(is_t ? " (THE TALK TARGET)" : "")} local {w.local} {sph_chunk_name(w.chunk)} type {w.type} +0xAB 0x{w.ab:X2} +0xAA {w.aa} +0x34 0x{w.f34:X4} +0x36 0x{w.f36:X4} | pos ({w.pos.X:F2},{w.pos.Y:F2},{w.pos.Z:F2}) d Tidus {d:F1} dL {sph_d(hok[0], palm[0], w.pos)} dR {sph_d(hok[1], palm[1], w.pos)} bearing {ang:F2} | range +0x40 {w.range:F2} angle tol +0x3C {w.atol:F3} height tol +0x2C {w.htol:F2} touch +0x48 {w.touch:F2} contact h +0x1C {w.contact_h:F2} p2 ({w.p2.X:F1},{w.p2.Y:F1},{w.p2.Z:F1}) | actor #{w.actor_slot}{(w.actor_slot >= 0 && snap != null ? " '" + actor_name(snap[w.actor_slot].chr_name) + "'" : "")}"));
@@ -465,7 +466,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>F8 > Developer > Inspect: the checkbox and the state.</summary>
     private void sph_ui() {
         ui_check("diag_sphere", "Sphere research log (diag_sphere): in ffxvr_diag.log, the sphere / socket / talk / text state (\"sph:\" lines), anywhere; in a Cloister of Trials it runs with any diagnostic on", ref _diag_sphere);
-        ImGui.TextDisabled(esc(I($"sph: map {_sph_map} {(_sph_trial >= 0 ? "(" + SphTrial.T[_sph_trial].name + "'s cloister)" : "(not a cloister)")} | {(_sph_active ? "logging" : "off")} | compact lines {_sph_lines} of {k_sph_lines_max}, snapshots {_sph_full} of {k_sph_full_max}")));
+        ImGui.TextDisabled(esc(I($"sph: map {_sph_map} {(_sph_trial >= 0 ? "(" + SphTrial.T[_sph_trial].name + "'s cloister)" : "(not a cloister)")} | {(_diag_sphere || (_sph_trial >= 0 && diag_any()) ? "logging" : _sph_active ? "no log (read for sphere hands only)" : "off")} | compact lines {_sph_lines} of {k_sph_lines_max}, snapshots {_sph_full} of {k_sph_full_max}")));
         sphh_dev_ui();   // sphere hands: the target, the prediction, the sequence (sphere_hands.cs)
     }
 }

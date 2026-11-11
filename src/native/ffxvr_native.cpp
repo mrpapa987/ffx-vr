@@ -1448,6 +1448,7 @@ HvTapHook g_tap_hook;                                   // the input thread's pr
 // quick squeeze's: >= 3 new packets, 100 ms, a clear packet); g_sph_phys_n: the player's own new button presses and stick pushes
 // (the sequence stops on one).
 volatile LONG g_sph_hold = 0, g_sph_hold_ms = 0;
+int g_sph_near = 0;                                      // render thread: the hands that do not tap (within the label range of a target, an owned grip, a running sequence; review S2)
 volatile LONG g_sph_press = 0, g_sph_press_t0 = 0, g_sph_press_polls = 0, g_sph_phys_n = 0;
 static pad::PressHook s_sph_hook; static bool s_sph_back[2] = {}; static uint16_t s_sph_phys_prev = 0; static bool s_sph_stick_prev = false;   // input thread only
 sph::Grip g_sph_grips[2];                                // render thread: the grips' press edges, a grip owned by a grab until let go
@@ -12769,7 +12770,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         {
             HvXform Hq; hv_xform_mul(grip_ref, GT, &Hq);
             float tip[3]; hv_mat3_vec(Hq.R, tip_h, tip); for (int i = 0; i < 3; ++i) tip[i] += Hq.t[i];
-            tap_sample(h, tap_gate, (((g_sph_hold >> h) & 1) || g_sph_grips[h].owned) ? nullptr : tip);   // sphere hands: a hand at a sphere does not tap
+            tap_sample(h, tap_gate, (((g_sph_near >> h) & 1) || g_sph_grips[h].owned) ? nullptr : tip);   // sphere hands: a hand within the label range of a sphere does not tap (review S2: a squeeze while reaching is the grab's)
         }
         if (g_h2_mesh_n > 0 && nv + g_h2_mesh_n <= k_h2_max_verts) { hv_skin_rigid(g_h2_mesh, g_h2_mesh_n, wb[h], 2, verts + nv); nv += g_h2_mesh_n; }
         memcpy(g_sph_palm[h], wb[h][0].o, sizeof(g_sph_palm[h])); memcpy(g_sph_grip[h], wb[h][1].o, sizeof(g_sph_grip[h]));   // the sphere-hands capture
@@ -13226,7 +13227,11 @@ extern "C" __declspec(dllexport) int ffxvr_sph_hands(float* out, int n) {
 //            g_sph_hold / g_sph_press and counts g_sph_phys_n (vrpad_apply).
 //   grips    a hand within reach of a target has its newly squeezed grip held back from the game (sph::strip, as the tap's
 //            hold-grip), its press edge is the grab (sph::grip_step) and owns the grip until it is let go: no quick-squeeze LB / RB
-//            (g_grip[h].chord), no world grab, no tap arming. Out of reach nothing changes.
+//            (g_grip[h].chord), no world grab, no tap arming. Out of reach nothing changes. Review fixes: only while the
+//            player could start an interaction (control, free play, no window: N3); within the label range the tap is off, and a
+//            grip squeezed there and held into reach is the grab then, one squeezed further away is not (the label says
+//            "Squeeze again": S2).
+//   outcome  the trial's carried variable (S1): the note when it changes; every later end is "done".
 //   labels   GDI text (Segoe UI) rendered into our own 1024 x 128 texture (two rows: the label, the note), drawn as camera-facing
 //            quads in the marker pass of both eyes (no depth test, as every marker), after everything else.
 // Logs: "sphere grab:" lines (each grab: the target, the reach, every step, the result, the time).
@@ -13246,6 +13251,7 @@ int         g_sph_note_hand = -1;
 LONG        g_sph_phys_seen = 0;
 uint32_t    g_sph_grabs = 0, g_sph_done = 0, g_sph_stopped = 0, g_sph_refused = 0;
 sph::Target g_sph_seq_t = {};                 // the target of the running sequence (its name, for the note's fallback)
+bool        g_sph_noted = false;              // the running sequence's note is out (at the variable's change)
 int         g_sphl_nv = 0;
 MkVertex    g_sphl_mk[12];
 ID3D11Texture2D* g_sphl_tex = nullptr; ID3D11ShaderResourceView* g_sphl_srv = nullptr;
@@ -13281,7 +13287,7 @@ static bool sphl_text(int row, const char* text) {
     if (!g_sphl_tex) {
         D3D11_TEXTURE2D_DESC td = {}; td.Width = k_sphl_w; td.Height = 2 * k_sphl_rh; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_sphl_tex)) || !g_sphl_tex) { diag("sphere hands: the label texture could not be made: no labels"); return false; }
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_sphl_tex)) || !g_sphl_tex) { static bool s_said = false; if (!s_said) { s_said = true; diag("sphere hands: the label texture could not be made: no labels"); } return false; }
         if (FAILED(g_device->CreateShaderResourceView(g_sphl_tex, nullptr, &g_sphl_srv))) { g_sphl_tex->Release(); g_sphl_tex = nullptr; return false; }
     }
     strncpy_s(g_sphl_row[row], sizeof(g_sphl_row[row]), text, _TRUNCATE); g_sphl_row_w[row] = 0;
@@ -13392,33 +13398,44 @@ static void sph_grab(int h, int ti, float d_m) {
     g_sph_seq_t = t;
     if (act == sph::A_PLACE) sph::copy_str(g_sph_seq_t.name, g_sph_head.carried_name, sph::k_name);   // the note's fallback: what is placed
     g_sph_seq.start(act, h, t.widx, g_sph_head.carried, g_sph_head.gen, sph_now());
+    g_sph_noted = false;
     g_sph_phys_seen = g_sph_phys_n;
     snprintf(g_sph_last, sizeof(g_sph_last), "%s: running", act == sph::A_TAKE ? "take" : "place");
     diag("sphere grab: %s hand at worker %d (%s, %.2f m; carried %d '%s'): %s started", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_head.carried, g_sph_head.carried_name,
          act == sph::A_TAKE ? "take" : "place");
     xr_haptic(h, 0.35f, 0.025f);
 }
-/// The sequence ended (done or stopped): the log line, the note, the counters.
+/// The sphere moved (the carried variable changed as the action wants; review S1): the note at the hand, now.
+static void sph_note_now() {
+    const sph::Seq& s = g_sph_seq;
+    sph::note_text(s, g_sph_seq_t.name, g_sph_note, sizeof(g_sph_note));
+    g_sph_note_t = sph_now(); g_sph_note_hand = s.hand; g_sph_noted = true;
+    if (s.hand >= 0) memcpy(g_sph_note_p, g_sph_palm[s.hand], sizeof(g_sph_note_p));
+    xr_haptic(s.hand >= 0 ? s.hand : 1, 0.5f, 0.04f);
+    if (s.name[0] && g_sph_seq_t.name[0] && strcmp(s.name, g_sph_seq_t.name) != 0)   // review N8: the value table's name against the game's
+        diag("sphere grab: name check: the game's text says '%s', the value table says '%s' (the labels use the table's)", s.name, g_sph_seq_t.name);
+}
+/// The sequence ended (done or stopped): the log line, the counters; a press of ours the game has not seen yet is dropped.
 static void sph_finish() {
     const sph::Seq& s = g_sph_seq;
+    if (g_sph_press != 0 && g_sph_press_polls == 0) InterlockedExchange(&g_sph_press, 0);   // review N5 (as g_odg_cancel: only before a packet carried it)
     char steps[160] = ""; int o = 0;
     for (int i = 0; i < s.steps && o < static_cast<int>(sizeof(steps)) - 40; ++i) o += snprintf(steps + o, sizeof(steps) - o, "%s%s at +%.2f s", i ? ", " : "", sph::k_page_name[s.step_page[i]], s.step_t[i]);
     const double took = sph_now() - s.t0;
+    char how[160] = "";
     if (s.phase == sph::S_DONE) {
         g_sph_done++;
-        sph::note_text(s, g_sph_seq_t.name, g_sph_note, sizeof(g_sph_note));
-        g_sph_note_t = sph_now(); g_sph_note_hand = s.hand;
-        if (s.hand >= 0) memcpy(g_sph_note_p, g_sph_palm[s.hand], sizeof(g_sph_note_p));
-        xr_haptic(s.hand >= 0 ? s.hand : 1, 0.5f, 0.04f);
-        snprintf(g_sph_last, sizeof(g_sph_last), "%s (%.1f s)", g_sph_note, took);
+        if (!g_sph_noted) sph_note_now();
+        snprintf(how, sizeof(how), "; the variable moved at +%.2f s; ended by: %s; note: %s", s.t_moved - s.t0, sph::k_why_name[s.why], g_sph_note);
+        snprintf(g_sph_last, sizeof(g_sph_last), "%s (%.1f s%s%s)", g_sph_note, took, s.why != sph::W_OK ? "; ended by: " : "", s.why != sph::W_OK ? sph::k_why_name[s.why] : "");
     }
     else {
         g_sph_stopped++;
+        snprintf(how, sizeof(how), "; why: %s%s%s", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
         snprintf(g_sph_last, sizeof(g_sph_last), "stopped: %s%s%s (the prompt shown)", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
     }
-    diag("sphere grab: %s at worker %d: %s after %.2f s, %d presses (the interaction, then %s)%s%s", s.action == sph::A_TAKE ? "take" : "place", s.widx,
-         s.phase == sph::S_DONE ? "DONE" : "STOPPED", took, s.presses, s.steps ? steps : "no page", s.phase == sph::S_DONE ? "; note: " : "; why: ",
-         s.phase == sph::S_DONE ? g_sph_note : sph::k_why_name[s.why]);
+    diag("sphere grab: %s at worker %d: %s after %.2f s, %d presses%s (the interaction, then %s)%s", s.action == sph::A_TAKE ? "take" : "place", s.widx,
+         s.phase == sph::S_DONE ? "DONE" : "STOPPED", took, s.presses, s.retries ? ", one repeated" : "", s.steps ? steps : "no page", how);
 }
 /// Once a frame (xr_tick, before gesture_tick): the reach, the grips, the sequence, the label.
 static void sph_tick() {
@@ -13430,17 +13447,18 @@ static void sph_tick() {
         palm[h][0] = -g_sph_palm[h][0]; palm[h][1] = -g_sph_palm[h][1]; palm[h][2] = g_sph_palm[h][2];   // render -> game space
     }
     const float upm = (g_hb_valid && g_hb_sc > 1e-3f) ? g_hb_sc : 11.4f;
-    g_sph_pred = on ? sph::predict(g_sph_z, g_sph_nz, g_sph_head.tidus, g_sph_head.player_radius) : sph::k_pred_none;
-    // each hand's nearest target within the grab reach
-    int hold = 0; float dh[2] = { 1e9f, 1e9f };
+    g_sph_pred = on ? sph::predict(g_sph_z, g_sph_nz, g_sph_head.tidus, g_sph_head.player_radius, g_sph_head.player_widx) : sph::k_pred_none;
+    // idle: the player could start an interaction now (review N3: no labels, no held-back grip in an event or at an open prompt)
+    bool open = false; for (int k = 0; k < sph::k_wins; ++k) if (g_sph_w[k].open) open = true;
+    const bool idle = on && g_sph_head.control != 0 && g_sph_head.free_play != 0 && !open && !g_sph_seq.running();
+    // each hand's nearest target: within the label range (no tap there, a squeeze arms the grab) and within the grab reach
+    int hold = 0, lab = 0; float dh[2] = { 1e9f, 1e9f };
     for (int h = 0; h < 2; ++h) {
         g_sph_reach[h] = -1;
-        if (!on || !ok[h]) continue;
-        for (int i = 0; i < g_sph_nt; ++i) {
-            const float d = sph::dist3(palm[h], g_sph_t[i].anchor) / upm;
-            if (d <= sph::k_reach_m && d < dh[h] && sph::action(g_sph_head.carried, g_sph_t[i]) != sph::A_NONE) { dh[h] = d; g_sph_reach[h] = i; }
-        }
-        if (g_sph_reach[h] >= 0) hold |= 1 << h;
+        if (!idle || !ok[h]) continue;
+        const int i = sph::nearest(g_sph_head, g_sph_t, g_sph_nt, palm[h], upm, &dh[h]);
+        if (i >= 0 && dh[h] < sph::k_label_m) lab |= 1 << h;
+        if (i >= 0 && dh[h] <= sph::k_reach_m) { g_sph_reach[h] = i; hold |= 1 << h; }
     }
     for (int h = 0; h < 2; ++h) if (g_sph_grips[h].owned) hold |= 1 << h;
     InterlockedExchange(&g_sph_hold_ms, static_cast<LONG>(GetTickCount()));
@@ -13448,7 +13466,7 @@ static void sph_tick() {
     // the grips
     for (int h = 0; h < 2; ++h) {
         const float sq = g_vrpad.ready ? g_vrpad.hand[h].squeeze : 0.f;
-        if (sph::grip_step(g_sph_grips[h], sq, on && ((hold >> h) & 1) && g_sph_reach[h] >= 0)) sph_grab(h, g_sph_reach[h], dh[h]);
+        if (sph::grip_step(g_sph_grips[h], sq, ((lab >> h) & 1) != 0, g_sph_reach[h] >= 0)) sph_grab(h, g_sph_reach[h], dh[h]);
         if (g_sph_grips[h].owned && g_grip[h].down) g_grip[h].chord = true;   // its release is no quick squeeze (LB / RB)
     }
     // the sequence
@@ -13458,20 +13476,20 @@ static void sph_tick() {
         o.carried = g_sph_head.carried; o.talk_target = g_sph_head.talk_target; o.gen = g_sph_head.gen;
         const LONG pn = g_sph_phys_n; o.player = pn != g_sph_phys_seen; g_sph_phys_seen = pn;
         o.press_idle = g_sph_press == 0;
-        for (int k = 0; k < sph::k_wins; ++k) {
-            const sph::Win& w = g_sph_w[k]; sph::ObsWin& ow = o.w[k];
-            ow.open = w.open; ow.state = w.state; ow.mode = w.choice_mode; ow.row = w.choice_row;
-            ow.page = w.open ? sph::classify(w.page, w.n, ow.name, sph::k_name) : sph::P_NONE;
-        }
-        if (!on && g_sph_seq.phase != sph::S_KICK) g_sph_seq.stop(sph::W_GATE);
+        for (int k = 0; k < sph::k_wins; ++k) sph::obs_win(g_sph_w[k], o.w[k]);
+        if (!on && g_sph_seq.phase != sph::S_KICK) { if (fresh) g_sph_seq.watch(o.carried, o.t); g_sph_seq.stop(sph::W_GATE); }
         else if (g_sph_seq.step(o)) { g_sph_press_t0 = static_cast<LONG>(GetTickCount()); g_sph_press_polls = 0; InterlockedExchange(&g_sph_press, XINPUT_GAMEPAD_A); }
+        if (g_sph_seq.moved && !g_sph_noted) sph_note_now();   // review S1: the note when the variable changes
         if (!g_sph_seq.running()) sph_finish();
     }
     g_sph_hide_ui = g_sph_seq.hide_ui();
-    // the label: the nearest target to either palm (none while a sequence runs)
+    g_sph_near = g_sph_seq.running() ? 3 : lab;   // no tap's A within the label range, nor into a running sequence
+    // the label: the nearest target to either palm (kept until another is 3 cm nearer; none in an event or while a sequence runs)
     static char s_label_prev[64] = "";
-    g_sph_pick = (on && !g_sph_seq.running()) ? sph::pick(g_sph_head, g_sph_t, g_sph_nt, palm, ok, upm, g_sph_pred) : sph::Pick();
-    sph::label_text(g_sph_pick, g_sph_t, g_sph_head.carried_name, g_sph_label, sizeof(g_sph_label));
+    g_sph_pick = (idle && !g_sph_seq.running()) ? sph::pick(g_sph_head, g_sph_t, g_sph_nt, palm, ok, upm, g_sph_pred, g_sph_pick.target) : sph::Pick();
+    const int ph = g_sph_pick.hand;
+    const bool again = ph >= 0 && g_sph_reach[ph] == g_sph_pick.target && sph::resqueeze(g_sph_grips[ph], true);   // squeezed away and carried in: "Squeeze again"
+    sph::label_text(g_sph_pick, g_sph_t, g_sph_head.carried_name, g_sph_label, sizeof(g_sph_label), again);
     g_sph_label_a = g_sph_label[0] ? sph::fade(g_sph_pick.d) : 0.f;
     if (g_sph_label_a > 0.f) {
         const float* a = g_sph_t[g_sph_pick.target].anchor;
