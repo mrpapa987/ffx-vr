@@ -29,7 +29,7 @@ public sealed unsafe partial class FFXVRModule {
     /// <summary>The keys only the Developer tab draws, for the header's "not at their defaults" note while developer mode is off
     /// (design 2.4: hidden is not reset). diag_verbose is the toggle itself. vrmenu_chk/check.py keeps this list in step.</summary>
     private static readonly string[] k_dev_keys = {
-        "cursor_source", "diag_actors", "diag_build7", "diag_cluster_bytes", "diag_load", "diag_load_lines", "diag_load_prof", "diag_sphere", "diag_transition",
+        "cursor_source", "diag_actors", "diag_build7", "diag_cluster_bytes", "diag_load", "diag_load_lines", "diag_load_prof", "diag_sphere", "diag_transition", "diag_weapon",
         "diag_va_log", "eye2_preview", "fast_reads", "fh_dpi_fix", "fmv_depth_edge_band", "fmv_depth_edge_fill", "fmv_depth_median",
         "fmv_depth_tight_fov", "fp_actor", "fp_head_fwd", "fp_head_parts", "fp_head_reach", "fp_head_smooth", "fp_head_up", "hands",
         "hands_head", "hands_mirror", "hands_off_back", "hands_off_right", "hands_off_up", "hands_pitch", "hands_roll", "hands_show",

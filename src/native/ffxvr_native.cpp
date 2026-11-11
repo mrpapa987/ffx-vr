@@ -47,6 +47,7 @@
 #include "ffxvr_panel.h"   // vr-menu S2: the F8 window's own panel: placement, the crop, the grab and resize, the slide aside (pure logic)
 #include "ffxvr_pointer.h" // vr-menu S3: the laser pointer: the ray on the panel, the hand, the button, the mask, the wheel, the beam (pure logic)
 #include "ffxvr_menuchord.h" // vr-menu S4: the left grip + the left menu button opens / closes the F8 window (pure logic)
+#include "ffxvr_weapon.h"  // weapon hands: the capture's draw probe, the battle motion classes, the grip maths (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -815,6 +816,10 @@ fpown::IbTable g_fp_ib; uint32_t g_fp_ib_frame = 0, g_fp_ib_gen = 0;
 uint32_t g_fph_ib_player = 0, g_fph_ib_other = 0, g_fph_ib_both = 0, g_fph_ib_miss = 0, g_fph_ib_cnt = 0, g_fph_ib_report = 0;
 uint32_t g_fph_id_kept = 0, g_fph_tie_ib = 0, g_fph_ib_free = 0;   // ... the tied draws the IB table decided; untied draws it kept visible   // this frame's matched draws kept visible by identity (the IB table or a tie's model)
 static inline bool fp_ib_live() { return g_fp_ib.n > 0 && g_frames - g_fp_ib_frame <= 1u; }
+// Weapon capture (ABI 65, ffxvr_wpn_probe / ffxvr_wpn_report; ffxvr_weapon.h Probe): the index-buffer keys of the weapon models
+// managed wants watched, armed for single frames by the research log; the matched draws of the armed frame with what their
+// constant buffer carries. Render thread only (managed arms and reads at Present). Diagnostic: nothing reads it back.
+wpn::Probe g_wpn;
 static inline bool fp_others_live() { return g_fp_others_n > 0 && g_frames - g_fp_others_frame <= 1u; }
 static inline bool fp_others_sent() { return g_frames - g_fp_others_frame <= 1u; }   // managed walked the table (n may be 0)
 static void ride_d2(const float* w, float* dr, float* dm) {
@@ -5370,7 +5375,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 63;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log)
+constexpr int FFXVR_ABI = 65;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: reserved for the sphere-hands branch; 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -8441,6 +8446,38 @@ static void fp_census_note(int idx, const char* what, const float* w, const fpow
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_frame_ev.size() < 2000) g_frame_ev.push_back(ev);
 }
+/// The weapon capture's draw probe (ffxvr_weapon.h; only on the frames managed armed, about two a second while the Developer
+/// checkbox is on): a DrawIndexed from index 0 whose bound index buffer and byte offset are one of the keys is recorded with
+/// what its slot-0 buffer carries (the world matrix and the palette's first slot from the eye image's game bytes). Read-only:
+/// nothing is hidden, moved or uploaded.
+static void wpn_probe_draw(int idx, const LightCb* lc) {
+    if (g_ctx == nullptr || g_draw_kind != 1 || g_draw_start != 0) return;
+    ID3D11Buffer* b = nullptr; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN; UINT o = 0; g_ctx->IAGetIndexBuffer(&b, &f, &o);
+    if (b == nullptr) return;
+    const uint32_t ibk = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(b)); b->Release();   // the pointer as a key only
+    bool cnt = false; const int key = g_wpn.find(ibk, o, g_draw_n, &cnt);
+    if (key < 0) return;
+    wpn::Rec* r = g_wpn.note(g_frames, key, g_draw_n, idx, cnt);
+    if (r == nullptr) return;
+    if (g_cur_dsv != nullptr) r->flags |= wpn::F_DEPTH;
+    if (lc != nullptr) r->flags |= wpn::F_LIGHT;
+    const EyeImage* e = g_eye2_cur;
+    if (e == nullptr || e->eye2.size() != e->size) return;
+    r->flags |= wpn::F_IMAGE; r->cb_size = e->size;
+    const uint8_t* p = e->eye2.data();   // the game's bytes but for eye 2's camera blocks: the world matrix and palette as uploaded
+    UINT wo = 0;                         // the world matrix: view base + 576 (640 in the common layout, 624 in the shifted one)
+    for (UINT cand : { 640u, 624u }) {
+        if (e->size < cand + 48) continue;
+        const float* W = reinterpret_cast<const float*>(p + cand);
+        if (!e->has_world || (W[3] == e->world_pos[0] && W[7] == e->world_pos[1] && W[11] == e->world_pos[2])) { wo = cand; break; }
+    }
+    if (wo != 0) { memcpy(r->w, p + wo, sizeof(r->w)); if (e->has_world) r->flags |= wpn::F_WORLD; }
+    if (e->size >= 1872) {
+        const UINT po = palette_start(p, e->size); const int n = palette_slots(p, e->size, po);
+        r->pal_n = n; r->pal_off = static_cast<int32_t>(po);
+        if (n > 0) { memcpy(r->p0, p + po, sizeof(r->p0)); r->flags |= wpn::F_PALETTE; }
+    }
+}
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     g_dream_eye_now = false; g_dream_blend_now = nullptr;   // set again below for a mode-2 dream layer only
@@ -8463,6 +8500,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     // A light-camera caster (shadow_cam 1): the slot-0 buffer's latest upload this frame was a light camera left alone.
     // (With shadow_cam 0 such a buffer also has its eye image, which the body hide below reads as before.)
     const LightCb* lc = (g_lc_tab_frame == g_frames) ? lightcam_find(g_slot0_cur) : nullptr;
+    if (g_wpn.live(g_frames)) wpn_probe_draw(idx, lc);   // the weapon capture (log only; armed frames)
     if (lc != nullptr && g_eye2_cur == nullptr && g_shadow_cam == 1 && g_fp_self_shadow == 0 && fp_hiding && g_fp_solo < 0 && lc->has_world && g_cur_dsv == nullptr
         && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room) {
         // fp_self_shadow 0: the player's own shadow is hidden, in the whole-body modes only: fp_body_mode 0 without the VR hands
@@ -13166,6 +13204,58 @@ extern "C" __declspec(dllexport) int ffxvr_sph_hands(float* out, int n) {
     for (int i = 0; i < 3; ++i) v[20 + i] = g_hb_P[i];
     v[23] = g_hb_valid ? 1.f : 0.f;
     const int k = (std::min)(n, 24);
+    for (int i = 0; i < k; ++i) out[i] = v[i];
+    return k;
+}
+
+/// The weapon capture (ABI 65; diagnostic, read-only). ffxvr_wpn_probe: the index-buffer keys to watch, (buffer, byte offset,
+/// index count, tag) each, armed for this frame and the next (n <= 0 disarms); returns the keys kept. ffxvr_wpn_report: the
+/// matched draws of the latest armed frame, wpn::k_rec_floats (32) floats a record (ffxvr_weapon.h Probe::report), with that
+/// frame's number and its count of matched draws; returns the records written.
+extern "C" __declspec(dllexport) int ffxvr_wpn_probe(const uint32_t* q, int n) { return g_wpn.set(q, n, g_frames); }
+extern "C" __declspec(dllexport) int ffxvr_wpn_report(float* out, int max_recs, uint32_t* frame, uint32_t* total) { return g_wpn.report(out, max_recs, frame, total); }
+/// A standard battle motion's class (wpn::Phase) | 0x100 when the candidate rule would hold the weapon in the VR hand
+/// (wpn::idle_like: motion = Chr+0x3F0, idle = Chr+0x3F1). Pure; for the research log's labels.
+extern "C" __declspec(dllexport) int ffxvr_wpn_phase(int motion, int idle) { return wpn::phase(motion) | (wpn::idle_like(motion, idle) ? 0x100 : 0); }
+/// The weapon capture (ABI 65; diagnostic, read-only): both VR hands' frames in render space (game space with x and y negated)
+/// as the hands' draw would place them now, drawn or not (the hands are hidden in battle): the draw's own chain (the grip pose,
+/// the calibration, the trims, the pack's wrist fix) on the base the frame's main camera published. Per hand 28 floats, left
+/// then right: [0] 1 when the grip pose is valid, [1..9] the hand (palm) frame's rotation (3 x 3, rows; to the world
+/// p' = o + s R p), [10..12] its origin, [13] s (world units per metre), [14..22] the grip pose's rotation, [23..25] its origin,
+/// [26] the squeeze, [27] the trigger. Then [56] 1 when the base is first person's, [57] the base's view (0 seat, 1 first
+/// person, 2 diorama, 3 third person; -1 none yet), [58] the poses' source (1 the tick's latch of this or the last frame, 0 the
+/// controllers as they are now: VR hands off), [59] the hands' draw: bit 0 left, bit 1 right, drawn on this frame or the last,
+/// [60] the last reason the hands were not drawn (H2Why; 0 none). n = the floats wanted (64 at most). Returns the count written.
+extern "C" __declspec(dllexport) int ffxvr_wpn_hands(float* out, int n) {
+    if (out == nullptr || n <= 0) return 0;
+    float v[64] = {};
+    const bool latched = g_hs.valid && g_frames - g_hs.frame <= 1u;
+    const bool have = g_xr_active && (latched || g_vrpad.ready) && g_hb_mode >= 0 && std::isfinite(g_hb_sc) && g_hb_sc > 1e-3f;
+    const H2Gpu* pk = g_h2_gpu;
+    for (int h = 0; h < 2 && have; ++h) {
+        const XrHand& hd = latched ? g_hs.hand[h] : g_vrpad.hand[h];
+        if (!hd.grip_valid) continue;
+        HvXform grip; hands_grip_ref(hd, latched ? g_hs.ref_q : g_xr_ref_q, latched ? g_hs.ref_p : g_xr_ref_p, &grip);
+        if (!g_xr_translate) for (int i = 0; i < 3; ++i) grip.t[i] -= latched ? g_hs.head_p[i] : g_xr_p[i];
+        HvXform G; hv_default_grip_to_hand(h, &G);
+        if (g_h2_cal_set[h]) memcpy(G.R, g_h2_cal[h], sizeof(G.R));
+        HvXform T; hv_trim(h, g_h2cfg.trim_rad, g_h2cfg.trim_off_m, &T);
+        HvXform GT; hv_xform_mul(G, T, &GT);
+        if (pk != nullptr && (g_h2cfg.debug & 2) == 0) { HvXform PF; hv_trim(h, pk->req.rot, pk->req.off, &PF); hv_xform_mul(GT, PF, &GT); }
+        HvXform Hr; hv_xform_mul(grip, GT, &Hr);
+        HvBone wb[2];
+        hands_to_world(Hr, g_hb_P, g_hb_Rb, g_hb_sc, g_hb_mv, g_hb_dy, &wb[0]);
+        hands_to_world(grip, g_hb_P, g_hb_Rb, g_hb_sc, g_hb_mv, g_hb_dy, &wb[1]);
+        float* o = v + h * 28;
+        o[0] = 1.f;
+        memcpy(o + 1, wb[0].R, sizeof(wb[0].R)); memcpy(o + 10, wb[0].o, sizeof(wb[0].o)); o[13] = wb[0].s;
+        memcpy(o + 14, wb[1].R, sizeof(wb[1].R)); memcpy(o + 23, wb[1].o, sizeof(wb[1].o));
+        o[26] = hd.squeeze; o[27] = hd.trigger;
+    }
+    v[56] = g_hb_valid ? 1.f : 0.f; v[57] = static_cast<float>(g_hb_mode); v[58] = latched ? 1.f : 0.f;
+    v[59] = (g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 1u) ? static_cast<float>(g_h2_grips_last) : 0.f;
+    v[60] = static_cast<float>(g_h2_last_why);
+    const int k = (std::min)(n, 64);
     for (int i = 0; i < k; ++i) out[i] = v[i];
     return k;
 }

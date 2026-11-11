@@ -6232,3 +6232,37 @@ control-off moments (text boxes, road cutscenes) before the cloister.
   native into managed (no run).
 - **Mutants.** 70 for this change, all killed. The fix-eye suite still passes, and fix-eye's own mutants are killed except the 4
   whose lines this change rewrote (their equivalents are in the 70).
+
+## Weapon hands, stage 0: the log-only capture (branch `weapon-hands`, 10 Nov 2026; ABI 65)
+
+**The feature (not built yet):** in a first-person battle the followed character's weapon is drawn in the VR hand while he
+stands idle, and goes back to the game's animation while he acts. This stage only records what the build needs. Nothing in the
+game changes: no game write, no hook, and the draw probe hides, moves and uploads nothing.
+
+**What the game does** (checked in the disassembly):
+- A battle weapon is its own actor, a `w` model allocated in the actor table by `Ch_Allocate` (0x824F90).
+- The battle keeps a table of weapon records at `[0xD3446C]`, 0x390 bytes each, index `chr + 0x1F * hand` (0x795B10). A record
+  holds the weapon's actor (+0x00), its model id (+0x04) and the attach point on the owner (+0x0D): 14 for hand 0 (the weapon),
+  15 for hand 1 (the armour's model). The Chr initialiser 0x79C110 sets the points.
+- 0x793330 attaches the weapon to the owner's actor at that point (`0x832630`: parent +0x19C, bone +0x1A0). 0x793F10 detaches it
+  for a throw and sets Chr+0x4B6 / +0x4B7. Wakka's ball (chr 0x1C), Lulu's doll (0x1D) and Yojimbo's companion (0x1E) also have
+  a Chr record of their own (0x795BB0).
+- The standard battle motion a character plays is the byte Chr+0x3F0, written by the battle's motion setters (0x7882C0,
+  0x7A8FC0). Chr+0x3F1 is the idle in effect. The actor's own motion id is at actor+0x72C (`Ch_SetMotion` 0x837AC0).
+
+**The capture:** F8 > Developer > Inspect > **Weapon research log** (ini `diag_weapon`, default 0), in battles, `wpn:` lines in
+ffxvr_diag.log (`weapon_log.cs`).
+- A full snapshot at the battle's start, on a change of the followed character or the view, and every 10 s.
+- An event block on every change of a party member's motion.
+- After a snapshot or an event of the followed character, the next frame's draws of his weapon models.
+- A compact line every 0.5 s.
+- Bounded: 8000 lines, 300 snapshots and 2000 event blocks a session.
+
+**Native (ABI 65):**
+- `ffxvr_wpn_probe` / `ffxvr_wpn_report`: the weapon models' index-buffer keys are watched for one armed frame. Each matched
+  draw is recorded with its constant buffer's size, world matrix and first palette slot.
+- `ffxvr_wpn_hands`: both VR hands' frames in render space, drawn or not (the hands are hidden in battle).
+- `ffxvr_wpn_phase`: a battle motion's class and the candidate "weapon in the hand" rule.
+- The pure parts are in `ffxvr_weapon.h` (the probe, the motion classes, the grip maths prototype), unit-tested in scratch
+  (`wpn_chk`: 786 checks, 37 mutants killed).
+- ABI 64 is left for the sphere-hands branch.
