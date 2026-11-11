@@ -63,6 +63,7 @@ public sealed unsafe partial class FFXVRModule {
     private readonly List<long> _wpn_key_ids = new();                // this event: the key sets to arm
     private readonly HashSet<int> _wpn_bones_logged = new();         // this battle: the chrs whose hand bones were dumped
     private bool _wpn_probe_due; private ulong _wpn_probe_at; private int _wpn_probe_keys;
+    private int _wpn_fid = -1;   // the followed chr for the log: the battle follow's, else the party member whose actor the eyes are on
 
     /// <summary>settings_parse's default branch: diag_weapon. False: not ours.</summary>
     private bool wpn_parse(string k, string v) {
@@ -83,7 +84,7 @@ public sealed unsafe partial class FFXVRModule {
         d7_log("wpn: " + s + (_wpn_lines == k_wpn_lines_max ? " (no more wpn: lines this session)" : ""));
     }
     private void wpn_reset() {
-        _wpn_active = false; _wpn_follow_prev = -2; _wpn_mode_prev = -1; _wpn_compact_sig = 0; _wpn_probe_due = false;
+        _wpn_active = false; _wpn_fid = -1; _wpn_follow_prev = -2; _wpn_mode_prev = -1; _wpn_compact_sig = 0; _wpn_probe_due = false;
         Array.Clear(_wpn_sig_prev); _wpn_keys.Clear(); _wpn_bones_logged.Clear();
         if (_fn_wpn_probe != null) _fn_wpn_probe(null, 0);
     }
@@ -110,7 +111,10 @@ public sealed unsafe partial class FFXVRModule {
         nint chrs = FhUtil.get_at<nint>(0xD334D4);
         bool chr_ok = chrs != 0 && _fn_safe_read((void*)chrs, _wpn_chr, (uint)(k_wpn_chr_n * k_wpn_chr_size)) != 0;
         Actor* actors = Globals.actors; Actor* snap = tbl_snap(actors);
-        if (_btl_follow_id != _wpn_follow_prev) { why = wpn_why(why, I($"followed chr {_wpn_follow_prev} -> {_btl_follow_id}")); full = true; _wpn_follow_prev = _btl_follow_id; }
+        _wpn_fid = _btl_follow_id >= 0 && _btl_follow_id < k_wpn_chr_n ? _btl_follow_id : -1;
+        if (_wpn_fid < 0 && chr_ok && _fp_actor_idx >= 0)   // the battle follow off: the party member the field pick is on
+            for (int id = 0; id < k_wpn_chr_n; id++) if (wpn_slot(actors, (nint)(*(uint*)(_wpn_chr + id * k_wpn_chr_size))) == _fp_actor_idx) { _wpn_fid = id; break; }
+        if (_wpn_fid != _wpn_follow_prev) { why = wpn_why(why, I($"followed chr {_wpn_follow_prev} -> {_wpn_fid}")); full = true; _wpn_follow_prev = _wpn_fid; }
         if (_fp_mode != _wpn_mode_prev) { why = wpn_why(why, I($"view {_wpn_mode_prev} -> {_fp_mode}")); full = true; _wpn_mode_prev = _fp_mode; }
         if (_now - _wpn_full_t >= 10.0 || _now < _wpn_full_t) { why = wpn_why(why, "10 s"); full = true; }
         int changed = 0;
@@ -200,8 +204,8 @@ public sealed unsafe partial class FFXVRModule {
         int no = full ? _wpn_full : _wpn_ev; string tag = full ? I($"[S{no}] ") : I($"[E{no}] ");
         void L(string s) => wpn_line(tag + s);
         WpnHands hd = wpn_hands();
-        bool follow_in = _btl_follow_id >= 0 && _btl_follow_id < k_wpn_chr_n && (mask & (1 << _btl_follow_id)) != 0;
-        L(I($"=== {why} | map {map_name()} frame {_frames} t {_now:F2} | battle_state 0x{bst:X2} roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] followed chr {_btl_follow_id} (actor #{_fp_actor_idx}) pending {_btl_pending_id} tag state {_btg_state} | view {_fp_mode}{(full && _wpn_full == k_wpn_full_max ? " (the last full snapshot this session)" : "")}"));
+        bool follow_in = _wpn_fid >= 0 && (mask & (1 << _wpn_fid)) != 0;
+        L(I($"=== {why} | map {map_name()} frame {_frames} t {_now:F2} | battle_state 0x{bst:X2} roster [{_btl_roster[0]},{_btl_roster[1]},{_btl_roster[2]}] followed chr {_wpn_fid} (battle follow {_btl_follow_id}, actor #{_fp_actor_idx}) pending {_btl_pending_id} tag state {_btg_state} | view {_fp_mode}{(full && _wpn_full == k_wpn_full_max ? " (the last full snapshot this session)" : "")}"));
         if (full) wpn_battle_line(L);
         if (full || follow_in) {
             L(I($"hands (game space, {hd.s:F2} units = 1 m; base view {hd.mode}{(hd.fp ? " first person" : "")}; poses {(hd.latched ? "the tick's latch" : "live (VR hands off or not latched)")}; drawn bits {hd.drawn}, last hide reason {hd.why}): R {wpn_hand_text(hd.ok1, hd.p1, hd.g1, hd.f1, hd.u1, hd.r1, hd.sq1, hd.tr1)} | L {wpn_hand_text(hd.ok0, hd.p0, hd.g0, hd.f0, hd.u0, hd.r0, hd.sq0, hd.tr0)}"));
@@ -228,9 +232,9 @@ public sealed unsafe partial class FFXVRModule {
                 byte* w = wpn_actor((nint)(*(uint*)r), actors, snap, obuf, out int ws);
                 if (ws >= 0) listed |= 1UL << ws;
                 wpn_weapon_line(L, I($"weapon of chr {id} hand {hand}: record +0x04 model 0x{*(uint*)(r + 4):X} +0x08 0x{*(uint*)(r + 8):X} point +0x0D {r[0x0D]} id +0x0E 0x{*(ushort*)(r + 0x0E):X4} +0x15 {r[0x15]} +0x34 {r[0x34]} +0x3A {r[0x3A]} | "),
-                                (nint)(*(uint*)r), w, ws, r[0x0D], actors, snap, hd, id == _btl_follow_id);
+                                (nint)(*(uint*)r), w, ws, r[0x0D], actors, snap, hd, id == _wpn_fid);
             }
-            if (id == _btl_follow_id && a != null) wpn_bones(L, id, a, rec_ok ? _wpn_rec + id * k_wpn_rec_size : null, actors, snap, obuf, full);
+            if (id == _wpn_fid && a != null) wpn_bones(L, id, a, rec_ok ? _wpn_rec + id * k_wpn_rec_size : null, actors, snap, obuf, full);
         }
         if (full) {
             // the ball's and the doll's own Chr records (ids 0x1C, 0x1D)
@@ -265,7 +269,7 @@ public sealed unsafe partial class FFXVRModule {
     private void wpn_member_line(Action<string> L, int id, byte* c, byte* a, int slot, in WpnHands hd) {
         var sb = new System.Text.StringBuilder();
         int on = -1; for (int i = 0; i < 3; i++) if (_btl_roster[i] == id) on = i;
-        sb.Append(I($"chr 0x{id:X2}{(id == _btl_follow_id ? " (FOLLOWED)" : "")} {(on >= 0 ? I($"field slot {on}") : "not on the roster")} model +0x04 0x{*(uint*)(c + 4):X} in battle +0x10 {c[0x10]} +0xDC8 {c[0xDC8]} | "));
+        sb.Append(I($"chr 0x{id:X2}{(id == _wpn_fid ? " (FOLLOWED)" : "")} {(on >= 0 ? I($"field slot {on}") : "not on the roster")} model +0x04 0x{*(uint*)(c + 4):X} in battle +0x10 {c[0x10]} +0xDC8 {c[0xDC8]} | "));
         if (a == null) sb.Append(I($"actor 0x{*(uint*)c:X8} {(*(uint*)c == 0 ? "none" : "not readable")}"));
         else {
             Vector3 pos = wpn_v3(a + 0x0C), root = wpn_v3(a + 0x200);
@@ -407,7 +411,7 @@ public sealed unsafe partial class FFXVRModule {
     // -- the compact line -----------------------------------------------------------------------------------------------
     private void wpn_compact(bool chr_ok, Actor* actors, Actor* snap, sbyte bst) {
         if (_wpn_lines >= k_wpn_lines_max) return;
-        int id = _btl_follow_id;
+        int id = _wpn_fid;
         var sb = new System.Text.StringBuilder(I($"t {_now:F2} f {_frames} state 0x{bst:X2} view {_fp_mode} | "));
         long sig = bst * 31L + _fp_mode * 7L + id * 131L;
         WpnHands hd = wpn_hands();

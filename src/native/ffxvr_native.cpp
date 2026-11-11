@@ -8452,6 +8452,7 @@ static void fp_census_note(int idx, const char* what, const float* w, const fpow
 /// nothing is hidden, moved or uploaded.
 static void wpn_probe_draw(int idx, const LightCb* lc) {
     if (g_ctx == nullptr || g_draw_kind != 1 || g_draw_start != 0) return;
+    if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return;   // the list is the render thread's (managed arms and reads it there)
     ID3D11Buffer* b = nullptr; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN; UINT o = 0; g_ctx->IAGetIndexBuffer(&b, &f, &o);
     if (b == nullptr) return;
     const uint32_t ibk = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(b)); b->Release();   // the pointer as a key only
