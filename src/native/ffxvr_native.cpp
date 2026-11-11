@@ -13265,7 +13265,11 @@ static double sph_now() {
 }
 /// This frame's state (managed, render thread, every frame from push_all). zones in the game's order (ascending widx).
 extern "C" __declspec(dllexport) void ffxvr_sph_set(const sph::Head* h, const sph::Zone* z, int nz, const sph::Target* t, int nt, const sph::Win* w, int nw) {
-    if (h == nullptr || h->bytes != static_cast<int32_t>(sizeof(sph::Head))) { g_sph_have = false; return; }
+    if (h == nullptr || h->bytes != static_cast<int32_t>(sizeof(sph::Head))) {
+        static bool s_said = false;   // round 2 N12: said once
+        if (h != nullptr && !s_said) { s_said = true; diag("sphere hands: managed's state is %d bytes, this DLL expects %d: the two DLLs do not match (the layouts of ffxvr_sphere.h); sphere hands is off", h->bytes, static_cast<int>(sizeof(sph::Head))); }
+        g_sph_have = false; return;
+    }
     g_sph_head = *h;
     g_sph_head.carried_name[sph::k_name - 1] = 0;
     g_sph_nz = (z && nz > 0) ? (nz < sph::k_zones ? nz : sph::k_zones) : 0;
@@ -13460,15 +13464,17 @@ static void sph_tick() {
         if (i >= 0 && dh[h] < sph::k_label_m) lab |= 1 << h;
         if (i >= 0 && dh[h] <= sph::k_reach_m) { g_sph_reach[h] = i; hold |= 1 << h; }
     }
-    for (int h = 0; h < 2; ++h) if (g_sph_grips[h].owned) hold |= 1 << h;
-    InterlockedExchange(&g_sph_hold_ms, static_cast<LONG>(GetTickCount()));
-    if (g_sph_hold != hold) InterlockedExchange(&g_sph_hold, hold);
     // the grips
     for (int h = 0; h < 2; ++h) {
         const float sq = g_vrpad.ready ? g_vrpad.hand[h].squeeze : 0.f;
         if (sph::grip_step(g_sph_grips[h], sq, ((lab >> h) & 1) != 0, g_sph_reach[h] >= 0)) sph_grab(h, g_sph_reach[h], dh[h]);
-        if (g_sph_grips[h].owned && g_grip[h].down) g_grip[h].chord = true;   // its release is no quick squeeze (LB / RB)
     }
+    // held back from the game: a hand in reach, an owned grip, and both grips while a sequence runs (round 2 S5: a second
+    // squeeze during the grab is not the player's button); such a grip's release is no quick squeeze (LB / RB) either
+    hold = sph::hold_mask(hold, g_sph_grips, g_sph_seq.running());
+    InterlockedExchange(&g_sph_hold_ms, static_cast<LONG>(GetTickCount()));
+    if (g_sph_hold != hold) InterlockedExchange(&g_sph_hold, hold);
+    for (int h = 0; h < 2; ++h) if ((g_sph_grips[h].owned || g_sph_seq.running()) && g_grip[h].down) g_grip[h].chord = true;
     // the sequence
     if (g_sph_seq.running()) {
         sph::Obs o = {};
@@ -13477,7 +13483,7 @@ static void sph_tick() {
         const LONG pn = g_sph_phys_n; o.player = pn != g_sph_phys_seen; g_sph_phys_seen = pn;
         o.press_idle = g_sph_press == 0;
         for (int k = 0; k < sph::k_wins; ++k) sph::obs_win(g_sph_w[k], o.w[k]);
-        if (!on && g_sph_seq.phase != sph::S_KICK) { if (fresh) g_sph_seq.watch(o.carried, o.t); g_sph_seq.stop(sph::W_GATE); }
+        if (!on && g_sph_seq.phase != sph::S_KICK) { if (!fresh) o.gen = g_sph_seq.gen + 1u; g_sph_seq.gate_closed(o); }   // (no fresh state: nothing read counts)
         else if (g_sph_seq.step(o)) { g_sph_press_t0 = static_cast<LONG>(GetTickCount()); g_sph_press_polls = 0; InterlockedExchange(&g_sph_press, XINPUT_GAMEPAD_A); }
         if (g_sph_seq.moved && !g_sph_noted) sph_note_now();   // review S1: the note when the variable changes
         if (!g_sph_seq.running()) sph_finish();

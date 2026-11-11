@@ -77,7 +77,8 @@ struct Head {           // the rest of this frame's state
     int32_t player_widx;    // the player's own worker (the controller's +0x0A; -1 none): never a candidate
     char    carried_name[k_name];
 };
-// sphere_hands.cs's SphZone / SphTarget / SphWin / SphHead (review N4: only Head carries its size)
+// sphere_hands.cs's SphZone / SphTarget / SphWin / SphHead (review N4: only Head carries its size; native refuses and logs
+// a Head of another size. Round 2 N12: a later change to Zone, Target or Win alone must also change Head or bump the ABI)
 static_assert(sizeof(Zone) == 60 && sizeof(Target) == 60 && sizeof(Win) == 116 && sizeof(Head) == 80, "the layouts shared with sphere_hands.cs");
 
 // -- the game's choice, mirrored ----------------------------------------------------------------------------------------
@@ -229,6 +230,15 @@ inline int grip_step(Grip& g, float squeeze, bool in_label, bool in_reach) {
     if (g.armed && !g.owned && in_reach) { g.owned = true; return 1; }
     return 0;
 }
+/// The grips held back from the game (the input thread's strip() latches each until it is let go): a hand in reach of a
+/// target (reach_mask), a grip a grab owns, and both hands for as long as a sequence runs (round 2 S5: a second squeeze
+/// "to be sure" during the grab must not reach the game as LB / RB, which would count as the player's button and stop it).
+inline int hold_mask(int reach_mask, const Grip g[2], bool seq_running) {
+    int m = reach_mask & 3;
+    for (int h = 0; h < 2; ++h) if (g[h].owned) m |= 1 << h;
+    if (seq_running) m = 3;
+    return m;
+}
 /// The hand is in reach with a grip that cannot grab (squeezed away from the target): the label's hint.
 inline bool resqueeze(const Grip& g, bool in_reach) { return g.down && !g.armed && in_reach; }   // (an owned grip is armed)
 /// The input thread's strip (hv_grip_strip's rule per hand): a grip down (> 0.5) while its hand's hold bit is set is held back
@@ -345,14 +355,23 @@ struct Seq {
     void back() { if (moved) { phase = S_DONE; why = W_OK; } else stop(phase == S_WAIT_CONTROL ? W_RESULT : W_CONTROL); }
     void note_press(int page, double t) { ++presses; t_press = t; t_rel = -1e9; pressed_page = page; if (steps < 8) { step_page[steps] = page; step_t[steps] = t - t0; ++steps; } }
     /// The outcome: the carried variable moved as the action wants (a take: from nothing to a sphere; a place: to nothing).
+    /// Only once the game started our interaction (control off with our worker chosen: past S_WAIT_OFF), and the caller checks
+    /// the scene first (round 2 N11: a value read across a map change or a reload is not an outcome).
     void watch(int carried, double t) {
-        if (!moved && running() && carried >= 0 && carried0 >= 0 && (action == A_TAKE ? (carried0 == 0 && carried > 0) : (carried0 > 0 && carried == 0))) { moved = true; t_moved = t; }
+        if (moved || phase < S_WAIT_RECESS || phase > S_WAIT_CONTROL) return;
+        if (carried >= 0 && carried0 >= 0 && (action == A_TAKE ? (carried0 == 0 && carried > 0) : (carried0 > 0 && carried == 0))) { moved = true; t_moved = t; }
+    }
+    /// The feature's gates closed while it ran (the caller's test): the variable still counts in the same scene, then the end.
+    void gate_closed(const Obs& o) {
+        if (!running()) return;
+        if (o.gen == gen) watch(o.carried, o.t);
+        stop(W_GATE);
     }
     /// One frame. Returns 1 when it wants one A pressed now (the caller presses it at once).
     int step(const Obs& o) {
         if (!running()) return 0;
+        if (o.gen != gen) { stop(W_GEN); return 0; }   // the scene first: nothing read after a map change or a reload counts
         watch(o.carried, o.t);
-        if (o.gen != gen) { stop(W_GEN); return 0; }
         if (o.player && phase != S_WAIT_CONTROL) { stop(W_PLAYER); return 0; }   // waiting for control there is nothing left to press: the player may walk on
         if (t_rel < 0 && o.press_idle && o.t > t_press) t_rel = o.t;           // our last press was let go (t_rel < 0: one is out or held)
         const double dt = o.t - t_phase;
