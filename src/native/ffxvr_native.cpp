@@ -48,6 +48,7 @@
 #include "ffxvr_pointer.h" // vr-menu S3: the laser pointer: the ray on the panel, the hand, the button, the mask, the wheel, the beam (pure logic)
 #include "ffxvr_menuchord.h" // vr-menu S4: the left grip + the left menu button opens / closes the F8 window (pure logic)
 #include "ffxvr_weapon.h"  // weapon hands: the capture's draw probe, the battle motion classes, the grip maths (pure logic)
+#include "ffxvr_sphere.h"   // sphere hands: the cloister spheres taken and placed by a grip, the labels, the press sequence (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -72,6 +73,7 @@
 static ID3D11Texture2D* texture_of(ID3D11View* view);   // twins, below
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "gdi32.lib")   // sphere hands: the labels' text (GDI, rendered into our own texture)
 
 // The build's version: tools\build-mod.ps1 writes ffxvr_version.h (not in git) from ffxvr.csproj's <Version> and the git
 // commit before every build; a build without it (Visual Studio alone) says "dev".
@@ -1445,6 +1447,16 @@ volatile LONG g_tap_grip_hold = 0;                     // 1: the hook holds back
 volatile LONG g_tap_grip_hold_ms = 0;                  // GetTickCount when tap_sample last set it (review 3 N1: a render stall ends it after 250 ms)
 static bool   s_tap_grip_back[2] = {};                 // input thread only: this grip is held back until it is let go (hv_grip_strip, review 3 S1)
 HvTapHook g_tap_hook;                                   // the input thread's press state (the last packet, a release still to reach the game)
+// Sphere hands (ffxvr_sphere.h; managed sphere_hands.cs; the glue "Sphere hands" further down). The input thread's share:
+// g_sph_hold (render thread, time-stamped): the hands whose newly squeezed grip is held back from the game (a hand at a sphere or
+// socket; latched until let go, s_sph_back); g_sph_press: the A our press sequence holds now (pad::press_hook's rule, as the
+// quick squeeze's: >= 3 new packets, 100 ms, a clear packet); g_sph_phys_n: the player's own new button presses and stick pushes
+// (the sequence stops on one).
+volatile LONG g_sph_hold = 0, g_sph_hold_ms = 0;
+int g_sph_near = 0;                                      // render thread: the hands that do not tap (within the label range of a target, an owned grip, a running sequence; review S2)
+volatile LONG g_sph_press = 0, g_sph_press_t0 = 0, g_sph_press_polls = 0, g_sph_phys_n = 0;
+static pad::PressHook s_sph_hook; static bool s_sph_back[2] = {}; static uint16_t s_sph_phys_prev = 0; static bool s_sph_stick_prev = false;   // input thread only
+sph::Grip g_sph_grips[2];                                // render thread: the grips' press edges, a grip owned by a grab until let go
 // Diorama gestures (seat view, not first person): a grip grabs the world -
 // one hand pans, two hands pan with the midpoint, rotate with the angle
 // between them and zoom with their distance, all about the midpoint. The
@@ -1657,6 +1669,9 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
         const bool tap_hold = g_tap_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_tap_grip_hold_ms) < 250u;
         const bool hold = odt::strip_grips(tap_hold, g_odt_grip_hold != 0 && GetTickCount() - static_cast<DWORD>(g_odg_tick) < 100u);   // a targets round too (grip_lbrb=0: no raw LB / RB, review N8)
         pass = hv_grip_strip(s_tap_grip_back, gd, hold) & static_cast<int>(g_grip_pass);
+        // sphere hands: a grip squeezed with its hand at a sphere or socket is the grab's, never LB / RB (until it is let go)
+        const LONG sph_hold = GetTickCount() - static_cast<DWORD>(g_sph_hold_ms) < 250u ? g_sph_hold : 0;
+        pass &= sph::strip(s_sph_back, gd, static_cast<int>(sph_hold));
     }
     pad::In in = vrpad_in();
     if (g_vd_mask) {   // Virtual Desktop's overlay chord (both stick clicks): neither Back nor R3 reaches the game (ffxvr_pad.h VdGate)
@@ -1665,6 +1680,22 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
     }
     pad::Out o = pad::compose(in, pass, g_vd_mask ? pad::C_VD_MASK : 0);   // the mapping (ffxvr_pad.h): faces, Start / Back / R3, triggers, sticks
     vrpad_triggers(o.lt, o.rt);   // the deadzone, and in an injecting Bushido window the hold-back (above g_odg_hold_trig); a held one until let go
+    {   // sphere hands: the player's own input (the VR pad's and a real pad's, before any press of ours) for the sequence's stop rule
+        const uint16_t phys = static_cast<uint16_t>(o.buttons | (had_pad ? g.wButtons : 0));
+        const float k = 0.6f, kp = 0.6f * 32767.f;
+        const bool stick = fabsf(o.ls[0]) > k || fabsf(o.ls[1]) > k || fabsf(o.rs[0]) > k || fabsf(o.rs[1]) > k
+                           || (had_pad && (fabsf(static_cast<float>(g.sThumbLX)) > kp || fabsf(static_cast<float>(g.sThumbLY)) > kp || fabsf(static_cast<float>(g.sThumbRX)) > kp || fabsf(static_cast<float>(g.sThumbRY)) > kp));
+        if ((phys & ~s_sph_phys_prev) != 0 || (stick && !s_sph_stick_prev)) InterlockedIncrement(&g_sph_phys_n);
+        s_sph_phys_prev = phys; s_sph_stick_prev = stick;
+    }
+    {   // sphere hands: the press sequence's A (pad::press_hook, as the quick squeeze's)
+        const LONG sb = g_sph_press;
+        const LONG el = sb ? static_cast<LONG>(GetTickCount() - static_cast<DWORD>(g_sph_press_t0)) : 0;
+        const int hk = pad::press_hook(s_sph_hook, sb != 0, g_vrpad_packet, el, 100, g_sph_press_polls, 3);
+        if (hk & HV_HOOK_COUNT) InterlockedIncrement(&g_sph_press_polls);
+        if (hk & HV_HOOK_HOLD) o.buttons = static_cast<uint16_t>(o.buttons | static_cast<WORD>(sb));
+        if (hk & HV_HOOK_RELEASE) InterlockedCompareExchange(&g_sph_press, 0, sb);
+    }
     {   // tap build: the held button (hv_tap_hook, ffxvr_hands.cpp, unit-tested): press_ms and >= 3 new packets (the game ignores a poll
         // with an unchanged packet), never at or past 400 ms; after a release one clear new packet before the next press
         const LONG tb = g_tap_press;
@@ -1823,7 +1854,7 @@ static void gesture_tick() {
         const pad::GripTap& t = g_grip[0];
         if (t.down && t.grab0 && !t.other && GetTickCount() - t.t0 < g_grip_tap_ms && g_grip_snap_mode[0] == g_fp_mode) memcpy(g_gest_move, g_grip_snap[0], sizeof(g_gest_move));
     }
-    bool grab[2] = { grip_grab && !s_odg_held[0] && !g_vmc_owned && L.squeeze > 0.5f && L.grip_valid, grip_grab && !s_odg_held[1] && R.squeeze > 0.5f && R.grip_valid };
+    bool grab[2] = { grip_grab && !s_odg_held[0] && !g_vmc_owned && !g_sph_grips[0].owned && L.squeeze > 0.5f && L.grip_valid, grip_grab && !s_odg_held[1] && !g_sph_grips[1].owned && R.squeeze > 0.5f && R.grip_valid };   // (sphere hands: a grab's grip moves nothing)
     float hp[2][3]; hand_to_ref(L.grip_p, hp[0]); hand_to_ref(R.grip_p, hp[1]);
     const bool was[2] = { g_gest_grab[0], g_gest_grab[1] };
     const int n = (grab[0] ? 1 : 0) + (grab[1] ? 1 : 0), nwas = (was[0] ? 1 : 0) + (was[1] ? 1 : 0);
@@ -5375,7 +5406,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 65;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: reserved for the sphere-hands branch; 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log)
+constexpr int FFXVR_ABI = 65;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -11918,8 +11949,11 @@ static int odt_emit(MkVertex* verts, int room) {
 
 /// only_odt: a 3D frame without the game's UI pass (B1): the targets alone (no markers, damage digits or overdrive visuals,
 /// which keep their UI-frame behaviour).
+// Sphere hands: the labels' quads (built once for both eyes in draw_markers_both, drawn last in each eye with their own texture).
+extern int g_sphl_nv; static bool sphl_wanted(); static void sphl_build(const float bb[12]); static int sphl_emit(MkVertex* verts, int room);
+extern ID3D11ShaderResourceView* g_sphl_srv;
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12], bool only_odt = false) {
-    if (only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) return;
+    if ((only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
     if (dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
@@ -11938,7 +11972,9 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     if (!only_odt) nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals (their own 3072)
     const int nv_pre = nv;
     nv += odt_emit(verts + nv, k_mk_max_verts - nv);   // the targets, last: on top (their own 4608)
-    const bool own = nv > nv_pre && g_mk_pst && g_mk_blend_pm && g_mk_smp_art;   // the targets in their own draw (pst: the art, additive layers)
+    const int nv_odt = nv;
+    nv += sphl_emit(verts + nv, k_mk_max_verts - nv);   // sphere hands: the labels, after everything (their own texture)
+    const bool own = nv_odt > nv_pre && g_mk_pst && g_mk_blend_pm && g_mk_smp_art;   // the targets in their own draw (pst: the art, additive layers)
     if (nv == 0) return;
     D3D11_MAPPED_SUBRESOURCE ms = {};
     if (SUCCEEDED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) { memcpy(ms.pData, verts, sizeof(MkVertex) * nv); g_orig_unmap(g_ctx, g_mk_vb, 0); }
@@ -11971,13 +12007,18 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     { ID3D11ShaderResourceView* sv = g_c3_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp); }   // C3: battle.dds (null when not held: no textured vertices then)
-    if (!own) g_ctx->Draw(static_cast<UINT>(nv), 0);
+    if (!own) { if (nv_odt > 0) g_ctx->Draw(static_cast<UINT>(nv_odt), 0); }
     else {   // the markers, digits and visuals exactly as before; then the targets with pst, the premultiplied blend and the art
         if (nv_pre > 0) g_ctx->Draw(static_cast<UINT>(nv_pre), 0);
         ID3D11ShaderResourceView* sv[3] = { g_odt_art.srv[0], g_odt_art.srv[1], g_odt_art.srv[2] };   // (null without the pack or arrow.png: no such vertices then)
         g_ctx->PSSetShaderResources(1, 3, sv); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
         g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF);
-        g_ctx->Draw(static_cast<UINT>(nv - nv_pre), static_cast<UINT>(nv_pre));
+        g_ctx->Draw(static_cast<UINT>(nv_odt - nv_pre), static_cast<UINT>(nv_pre));
+    }
+    if (nv > nv_odt && g_sphl_srv) {   // sphere hands: the labels with ps and their text texture in slot 0 (white on a dark plate)
+        g_ctx->PSSetShader(g_mk_ps, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF);
+        ID3D11ShaderResourceView* sv = g_sphl_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp);
+        g_ctx->Draw(static_cast<UINT>(nv - nv_odt), static_cast<UINT>(nv_odt));
     }
 
     om_restore_keep(o_rtv, o_dsv);
@@ -12019,13 +12060,15 @@ extern "C" __declspec(dllexport) void ffxvr_markers_scale(float s) { g_marker_sc
 static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, ID3D11Texture2D* e2, ID3D11RenderTargetView* r2, bool only_odt = false) {
     const bool odv = !only_odt && odv_wanted();   // the overdrive visuals may run this pass alone (markers off, nothing marked)
     const bool odt_on = odt_wanted();   // ... and the targets
+    const bool sphl_on = sphl_wanted();   // ... and the sphere labels (both frame kinds)
+    g_sphl_nv = 0;
     if (only_odt) {
         g_odt_nv = 0;
-        if (!odt_on || !g_cam_valid) return;
+        if ((!odt_on && !sphl_on) || !g_cam_valid) return;
     }
     else {
         g_odv_nv = 0; g_odt_nv = 0;
-        if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv && !odt_on) || !g_cam_valid) { g_dmg_nv = 0; return; }
+        if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv && !odt_on && !sphl_on) || !g_cam_valid) { g_dmg_nv = 0; return; }
     }
     float v[12];
     { std::lock_guard<std::mutex> lock(g_mutex); memcpy(v, g_cam, sizeof(v)); if (g_ovr_enabled && g_ovr_freeze && g_ovr_have_base) memcpy(v, g_ovr_base, sizeof(v)); if (g_dmg_n > 0) memcpy(g_dmg_cam, g_cam, sizeof(g_dmg_cam)); }
@@ -12049,7 +12092,8 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
     if (!only_odt) { if (g_markers_3d) dmg_build(bb); else g_dmg_nv = 0; }   // 3D damage numbers: once for both eyes (UI frames only)
     if (odv) odv_build();   // the overdrive visuals: once for both eyes, with the base the eye-1 view just published (g_hb_*)
     if (odt_on) odt_build();   // the targets: the same base
-    if (only_odt ? g_odt_nv == 0 : ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) return;
+    if (sphl_on) sphl_build(bb);   // the sphere labels: the same billboard frame
+    if ((only_odt ? g_odt_nv == 0 : ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb, only_odt); }
     if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb, only_odt); }
@@ -12765,7 +12809,7 @@ static int hands_draw_frame(ID3D11Texture2D* src) {
         {
             HvXform Hq; hv_xform_mul(grip_ref, GT, &Hq);
             float tip[3]; hv_mat3_vec(Hq.R, tip_h, tip); for (int i = 0; i < 3; ++i) tip[i] += Hq.t[i];
-            tap_sample(h, tap_gate, tip);
+            tap_sample(h, tap_gate, (((g_sph_near >> h) & 1) || g_sph_grips[h].owned) ? nullptr : tip);   // sphere hands: a hand within the label range of a sphere does not tap (review S2: a squeeze while reaching is the grab's)
         }
         if (g_h2_mesh_n > 0 && nv + g_h2_mesh_n <= k_h2_max_verts) { hv_skin_rigid(g_h2_mesh, g_h2_mesh_n, wb[h], 2, verts + nv); nv += g_h2_mesh_n; }
         memcpy(g_sph_palm[h], wb[h][0].o, sizeof(g_sph_palm[h])); memcpy(g_sph_grip[h], wb[h][1].o, sizeof(g_sph_grip[h]));   // the sphere-hands capture
@@ -13259,6 +13303,315 @@ extern "C" __declspec(dllexport) int ffxvr_wpn_hands(float* out, int n) {
     const int k = (std::min)(n, 64);
     for (int i = 0; i < k; ++i) out[i] = v[i];
     return k;
+}
+
+// ---------------------------------------------------------------------------
+// Sphere hands, stages 1 + 2 (research/sphere-hands-design.md 9 / 10; the logic in ffxvr_sphere.h, unit-tested; managed
+// sphere_hands.cs reads the game). In a Cloister of Trials in first person with the VR hands: a label near a sphere or socket
+// the hand comes near ("Take Djose Sphere", "Insert Djose Sphere", "Hands full", "Empty recess", "Step closer"), fading in from
+// 0.6 m and clear at the 0.30 m grab reach; a grip squeezed there (a quick squeeze counts) takes or places the sphere: one A for
+// the interaction, then the prompt's lines answered with A one at a time, each only when its exact English text is shown
+// (the choice on row 0), with the prompt hidden in the headset meanwhile; then a note "Picked up Djose Sphere" / "Inserted Djose
+// Sphere" at the hand for 2 s. Anything unexpected (a wording, a language, the player's own button, a timeout, control back
+// early, another target) stops it at once: the prompt shows and the player answers it.
+//   threads  everything here on the render thread (managed's push and xr_tick's sph_tick at Present); the input thread reads
+//            g_sph_hold / g_sph_press and counts g_sph_phys_n (vrpad_apply).
+//   grips    a hand within reach of a target has its newly squeezed grip held back from the game (sph::strip, as the tap's
+//            hold-grip), its press edge is the grab (sph::grip_step) and owns the grip until it is let go: no quick-squeeze LB / RB
+//            (g_grip[h].chord), no world grab, no tap arming. Out of reach nothing changes. Review fixes: only while the
+//            player could start an interaction (control, free play, no window: N3); within the label range the tap is off, and a
+//            grip squeezed there and held into reach is the grab then, one squeezed further away is not (the label says
+//            "Squeeze again": S2).
+//   outcome  the trial's carried variable (S1): the note when it changes; every later end is "done".
+//   labels   GDI text (Segoe UI) rendered into our own 1024 x 128 texture (two rows: the label, the note), drawn as camera-facing
+//            quads in the marker pass of both eyes (no depth test, as every marker), after everything else.
+// Logs: "sphere grab:" lines (each grab: the target, the reach, every step, the result, the time).
+sph::Head   g_sph_head = {};
+sph::Zone   g_sph_z[sph::k_zones] = {}; int g_sph_nz = 0;
+sph::Target g_sph_t[sph::k_targets] = {}; int g_sph_nt = 0;
+sph::Win    g_sph_w[sph::k_wins] = {};
+uint32_t    g_sph_set_frame = 0; bool g_sph_have = false;
+sph::Seq    g_sph_seq;
+sph::Pick   g_sph_pick;
+int         g_sph_pred = sph::k_pred_none, g_sph_reach[2] = { -1, -1 };
+bool        g_sph_hide_ui = false; uint32_t g_sph_hidden_frames = 0;
+char        g_sph_label[64] = "", g_sph_note[64] = "", g_sph_last[200] = "no grab yet";
+float       g_sph_label_a = 0.f, g_sph_label_p[3] = {}, g_sph_note_p[3] = {};
+double      g_sph_note_t = -1e9;
+int         g_sph_note_hand = -1;
+LONG        g_sph_phys_seen = 0;
+uint32_t    g_sph_grabs = 0, g_sph_done = 0, g_sph_stopped = 0, g_sph_refused = 0;
+sph::Target g_sph_seq_t = {};                 // the target of the running sequence (its name, for the note's fallback)
+bool        g_sph_noted = false;              // the running sequence's note is out (at the variable's change)
+int         g_sphl_nv = 0;
+MkVertex    g_sphl_mk[12];
+ID3D11Texture2D* g_sphl_tex = nullptr; ID3D11ShaderResourceView* g_sphl_srv = nullptr;
+char        g_sphl_row[2][64] = {}; int g_sphl_row_w[2] = { 0, 0 };
+constexpr int k_sphl_w = 1024, k_sphl_rh = 64;
+
+static double sph_now() {
+    static LARGE_INTEGER s_f = {}; if (s_f.QuadPart == 0) QueryPerformanceFrequency(&s_f);
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    return s_f.QuadPart ? static_cast<double>(c.QuadPart) / static_cast<double>(s_f.QuadPart) : static_cast<double>(GetTickCount64()) * 1e-3;
+}
+/// This frame's state (managed, render thread, every frame from push_all). zones in the game's order (ascending widx).
+extern "C" __declspec(dllexport) void ffxvr_sph_set(const sph::Head* h, const sph::Zone* z, int nz, const sph::Target* t, int nt, const sph::Win* w, int nw) {
+    if (h == nullptr || h->bytes != static_cast<int32_t>(sizeof(sph::Head))) {
+        static bool s_said = false;   // round 2 N12: said once
+        if (h != nullptr && !s_said) { s_said = true; diag("sphere hands: managed's state is %d bytes, this DLL expects %d: the two DLLs do not match (the layouts of ffxvr_sphere.h); sphere hands is off", h->bytes, static_cast<int>(sizeof(sph::Head))); }
+        g_sph_have = false; return;
+    }
+    g_sph_head = *h;
+    g_sph_head.carried_name[sph::k_name - 1] = 0;
+    g_sph_nz = (z && nz > 0) ? (nz < sph::k_zones ? nz : sph::k_zones) : 0;
+    for (int i = 0; i < g_sph_nz; ++i) g_sph_z[i] = z[i];
+    g_sph_nt = (t && nt > 0) ? (nt < sph::k_targets ? nt : sph::k_targets) : 0;
+    for (int i = 0; i < g_sph_nt; ++i) { g_sph_t[i] = t[i]; g_sph_t[i].name[sph::k_name - 1] = 0; }
+    for (int i = 0; i < sph::k_wins; ++i) {
+        if (w && i < nw) { g_sph_w[i] = w[i]; if (g_sph_w[i].n < 0) g_sph_w[i].n = 0; if (g_sph_w[i].n > sph::k_page) g_sph_w[i].n = sph::k_page; }
+        else g_sph_w[i] = sph::Win();
+    }
+    g_sph_set_frame = g_frames; g_sph_have = true;
+}
+/// The label's quads are wanted (a label or a note to show, in the headset's 3D view).
+static bool sphl_wanted() { return g_xr_active && !g_xr_screen_now && !g_screen3d_now && !g_ovr_suspend && (g_sph_label_a > 0.f || sph::note_alpha(sph_now() - g_sph_note_t) > 0.f); }
+/// row 0 the label, 1 the note: the text rendered with GDI into the texture's row (only when it changed). False: nothing to draw.
+static bool sphl_text(int row, const char* text) {
+    if (!g_device || !g_ctx || !text || !text[0]) return false;
+    if (strcmp(g_sphl_row[row], text) == 0 && g_sphl_srv) return g_sphl_row_w[row] > 0;
+    if (!g_sphl_tex) {
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = k_sphl_w; td.Height = 2 * k_sphl_rh; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_sphl_tex)) || !g_sphl_tex) { static bool s_said = false; if (!s_said) { s_said = true; diag("sphere hands: the label texture could not be made: no labels"); } return false; }
+        if (FAILED(g_device->CreateShaderResourceView(g_sphl_tex, nullptr, &g_sphl_srv))) { g_sphl_tex->Release(); g_sphl_tex = nullptr; return false; }
+    }
+    strncpy_s(g_sphl_row[row], sizeof(g_sphl_row[row]), text, _TRUNCATE); g_sphl_row_w[row] = 0;
+    HDC dc = CreateCompatibleDC(nullptr);
+    if (!dc) return false;
+    BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = k_sphl_w; bi.bmiHeader.biHeight = -k_sphl_rh;   // top-down
+    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bm = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HFONT f = CreateFontW(-40, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    bool ok = false;
+    if (bm && bits && f) {
+        HGDIOBJ ob = SelectObject(dc, bm), of = SelectObject(dc, f);
+        memset(bits, 0, static_cast<size_t>(k_sphl_w) * k_sphl_rh * 4);
+        SetTextColor(dc, RGB(255, 255, 255)); SetBkMode(dc, TRANSPARENT);
+        wchar_t wt[64]; int n = 0; for (; text[n] && n < 63; ++n) wt[n] = static_cast<wchar_t>(static_cast<unsigned char>(text[n])); wt[n] = 0;
+        SIZE sz = {}; GetTextExtentPoint32W(dc, wt, n, &sz);
+        TextOutW(dc, 24, (k_sphl_rh - sz.cy) / 2, wt, n);
+        GdiFlush();
+        const int pw = (std::min)(k_sphl_w, static_cast<int>(sz.cx) + 48);
+        std::vector<uint32_t> px(static_cast<size_t>(k_sphl_w) * k_sphl_rh, 0u);
+        const uint32_t* src = static_cast<const uint32_t*>(bits);
+        for (int y = 0; y < k_sphl_rh; ++y)
+            for (int x = 0; x < pw; ++x) {
+                const int r = 14;   // the plate's rounded corners
+                const int cx = x < r ? r - x : x >= pw - r ? x - (pw - r - 1) : 0, cy = y < r ? r - y : y >= k_sphl_rh - r ? y - (k_sphl_rh - r - 1) : 0;
+                if (cx * cx + cy * cy > r * r) continue;
+                const uint32_t s = src[y * k_sphl_w + x];
+                const uint32_t cov = (std::max)((std::max)(s & 0xFFu, (s >> 8) & 0xFFu), (s >> 16) & 0xFFu);
+                const uint32_t a = 170u + cov * 85u / 255u;
+                px[y * k_sphl_w + x] = cov | (cov << 8) | (cov << 16) | (a << 24);
+            }
+        D3D11_BOX box = { 0, static_cast<UINT>(row * k_sphl_rh), 0, static_cast<UINT>(k_sphl_w), static_cast<UINT>(row * k_sphl_rh + k_sphl_rh), 1 };
+        { InEye2 guard; g_ctx->UpdateSubresource(g_sphl_tex, 0, &box, px.data(), k_sphl_w * 4, 0); }
+        g_sphl_row_w[row] = pw; ok = true;
+        SelectObject(dc, of); SelectObject(dc, ob);
+    }
+    if (f) DeleteObject(f);
+    if (bm) DeleteObject(bm);
+    DeleteDC(dc);
+    return ok;
+}
+/// One camera-facing quad of a texture row (render space position p = its bottom centre), height hm metres, opacity a.
+static void sphl_quad(int row, const float p[3], float hm, float a, const float bb[12]) {
+    if (g_sphl_nv + 6 > static_cast<int>(sizeof(g_sphl_mk) / sizeof(g_sphl_mk[0])) || !(a > 0.f) || g_sphl_row_w[row] <= 0) return;
+    const float sc = (g_hb_valid && g_hb_sc > 1e-3f) ? g_hb_sc : 11.4f;
+    const float h = hm * sc, w = h * static_cast<float>(g_sphl_row_w[row]) / static_cast<float>(k_sphl_rh);
+    const float* R = bb; const float* U = bb + 3;
+    const float u1 = static_cast<float>(g_sphl_row_w[row]) / static_cast<float>(k_sphl_w);
+    const float v0 = static_cast<float>(row) * 0.5f, v1 = v0 + 0.5f;
+    float c[4][3];   // top-left, top-right, bottom-left, bottom-right
+    for (int k = 0; k < 3; ++k) {
+        c[0][k] = p[k] - R[k] * w * 0.5f + U[k] * h; c[1][k] = p[k] + R[k] * w * 0.5f + U[k] * h;
+        c[2][k] = p[k] - R[k] * w * 0.5f;            c[3][k] = p[k] + R[k] * w * 0.5f;
+    }
+    const float uv[4][2] = { { 0.f, v0 }, { u1, v0 }, { 0.f, v1 }, { u1, v1 } };
+    const int idx[6] = { 0, 1, 2, 2, 1, 3 };
+    for (int i = 0; i < 6; ++i) {
+        MkVertex& v = g_sphl_mk[g_sphl_nv++];
+        memcpy(v.p, c[idx[i]], sizeof(v.p));
+        v.c[0] = v.c[1] = v.c[2] = 1.f; v.c[3] = a;
+        v.t[0] = uv[idx[i]][0]; v.t[1] = uv[idx[i]][1]; v.t[2] = 1.f;
+    }
+}
+/// draw_markers_both: the label (above its sphere) and the note (above the hand that grabbed), once for both eyes.
+static void sphl_build(const float bb[12]) {
+    g_sphl_nv = 0;
+    const float sc = (g_hb_valid && g_hb_sc > 1e-3f) ? g_hb_sc : 11.4f;
+    if (g_sph_label_a > 0.f && sphl_text(0, g_sph_label)) {
+        const float p[3] = { g_sph_label_p[0], g_sph_label_p[1] + 0.12f * sc, g_sph_label_p[2] };
+        sphl_quad(0, p, 0.035f, g_sph_label_a, bb);
+    }
+    const float na = sph::note_alpha(sph_now() - g_sph_note_t);
+    if (na > 0.f && g_sph_note[0] && sphl_text(1, g_sph_note)) {
+        const float* hp = g_sph_note_p;
+        if (g_sph_note_hand >= 0 && g_sph_frame[g_sph_note_hand] != 0 && g_frames - g_sph_frame[g_sph_note_hand] <= 2) hp = g_sph_palm[g_sph_note_hand];   // follow the hand
+        const float p[3] = { hp[0], hp[1] + 0.08f * sc, hp[2] };
+        sphl_quad(1, p, 0.035f, na, bb);
+    }
+}
+static int sphl_emit(MkVertex* verts, int room) {
+    if (g_sphl_nv == 0 || room < g_sphl_nv || !g_sphl_srv) return 0;
+    memcpy(verts, g_sphl_mk, sizeof(MkVertex) * g_sphl_nv);
+    return g_sphl_nv;
+}
+/// A grab (a grip's press edge with the hand at target ti): start the sequence, or say why not.
+static void sph_grab(int h, int ti, float d_m) {
+    g_sph_grabs++;
+    const sph::Target& t = g_sph_t[ti];
+    const int act = sph::action(g_sph_head.carried, t);
+    bool open = false; for (int k = 0; k < sph::k_wins; ++k) if (g_sph_w[k].open) open = true;
+    const char* no = nullptr;
+    if (g_sph_seq.running()) no = "a sequence is running";
+    else if (act == sph::A_FULL) no = "hands full (the socket holds a sphere)";
+    else if (act == sph::A_EMPTY) no = "nothing to take (an empty socket, empty hands)";
+    else if (act == sph::A_NONE) no = "the sphere state is not read";
+    else if (g_sph_pred == sph::k_pred_unsure) no = "the game's choice cannot be predicted here (a facing rule)";
+    else if (g_sph_pred != t.widx) no = "step closer (the game would choose another target, or none)";
+    else if (!g_sph_head.control || !g_sph_head.free_play) no = "an event is running (no control)";
+    else if (open) no = "a text window is open";
+    if (no) {
+        g_sph_refused++;
+        snprintf(g_sph_last, sizeof(g_sph_last), "grab refused: %s", no);
+        diag("sphere grab: %s hand at worker %d (%s, %.2f m; the game would choose %d): refused: %s", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_pred, no);
+        xr_haptic(h, 0.6f, 0.03f);
+        return;
+    }
+    g_sph_seq_t = t;
+    if (act == sph::A_PLACE) sph::copy_str(g_sph_seq_t.name, g_sph_head.carried_name, sph::k_name);   // the note's fallback: what is placed
+    g_sph_seq.start(act, h, t.widx, g_sph_head.carried, g_sph_head.gen, sph_now());
+    g_sph_noted = false;
+    g_sph_phys_seen = g_sph_phys_n;
+    snprintf(g_sph_last, sizeof(g_sph_last), "%s: running", act == sph::A_TAKE ? "take" : "place");
+    diag("sphere grab: %s hand at worker %d (%s, %.2f m; carried %d '%s'): %s started", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_head.carried, g_sph_head.carried_name,
+         act == sph::A_TAKE ? "take" : "place");
+    xr_haptic(h, 0.35f, 0.025f);
+}
+/// The sphere moved (the carried variable changed as the action wants; review S1): the note at the hand, now.
+static void sph_note_now() {
+    const sph::Seq& s = g_sph_seq;
+    sph::note_text(s, g_sph_seq_t.name, g_sph_note, sizeof(g_sph_note));
+    g_sph_note_t = sph_now(); g_sph_note_hand = s.hand; g_sph_noted = true;
+    if (s.hand >= 0) memcpy(g_sph_note_p, g_sph_palm[s.hand], sizeof(g_sph_note_p));
+    xr_haptic(s.hand >= 0 ? s.hand : 1, 0.5f, 0.04f);
+    if (s.name[0] && g_sph_seq_t.name[0] && strcmp(s.name, g_sph_seq_t.name) != 0)   // review N8: the value table's name against the game's
+        diag("sphere grab: name check: the game's text says '%s', the value table says '%s' (the labels use the table's)", s.name, g_sph_seq_t.name);
+}
+/// The sequence ended (done or stopped): the log line, the counters; a press of ours the game has not seen yet is dropped.
+static void sph_finish() {
+    const sph::Seq& s = g_sph_seq;
+    if (g_sph_press != 0 && g_sph_press_polls == 0) InterlockedExchange(&g_sph_press, 0);   // review N5 (as g_odg_cancel: only before a packet carried it)
+    char steps[160] = ""; int o = 0;
+    for (int i = 0; i < s.steps && o < static_cast<int>(sizeof(steps)) - 40; ++i) o += snprintf(steps + o, sizeof(steps) - o, "%s%s at +%.2f s", i ? ", " : "", sph::k_page_name[s.step_page[i]], s.step_t[i]);
+    const double took = sph_now() - s.t0;
+    char how[160] = "";
+    if (s.phase == sph::S_DONE) {
+        g_sph_done++;
+        if (!g_sph_noted) sph_note_now();
+        snprintf(how, sizeof(how), "; the variable moved at +%.2f s; ended by: %s; note: %s", s.t_moved - s.t0, sph::k_why_name[s.why], g_sph_note);
+        snprintf(g_sph_last, sizeof(g_sph_last), "%s (%.1f s%s%s)", g_sph_note, took, s.why != sph::W_OK ? "; ended by: " : "", s.why != sph::W_OK ? sph::k_why_name[s.why] : "");
+    }
+    else {
+        g_sph_stopped++;
+        snprintf(how, sizeof(how), "; why: %s%s%s", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
+        snprintf(g_sph_last, sizeof(g_sph_last), "stopped: %s%s%s (the prompt shown)", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
+    }
+    diag("sphere grab: %s at worker %d: %s after %.2f s, %d presses%s (the interaction, then %s)%s", s.action == sph::A_TAKE ? "take" : "place", s.widx,
+         s.phase == sph::S_DONE ? "DONE" : "STOPPED", took, s.presses, s.retries ? ", one repeated" : "", s.steps ? steps : "no page", how);
+}
+/// Once a frame (xr_tick, before gesture_tick): the reach, the grips, the sequence, the label.
+static void sph_tick() {
+    const bool fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u;
+    const bool on = fresh && g_sph_head.on != 0 && vrpad_live() && g_fp_mode == 1;
+    float palm[2][3]; bool ok[2];
+    for (int h = 0; h < 2; ++h) {
+        ok[h] = g_sph_frame[h] != 0 && g_frames - g_sph_frame[h] <= 2u;
+        palm[h][0] = -g_sph_palm[h][0]; palm[h][1] = -g_sph_palm[h][1]; palm[h][2] = g_sph_palm[h][2];   // render -> game space
+    }
+    const float upm = (g_hb_valid && g_hb_sc > 1e-3f) ? g_hb_sc : 11.4f;
+    g_sph_pred = on ? sph::predict(g_sph_z, g_sph_nz, g_sph_head.tidus, g_sph_head.player_radius, g_sph_head.player_widx) : sph::k_pred_none;
+    // idle: the player could start an interaction now (review N3: no labels, no held-back grip in an event or at an open prompt)
+    bool open = false; for (int k = 0; k < sph::k_wins; ++k) if (g_sph_w[k].open) open = true;
+    const bool idle = on && g_sph_head.control != 0 && g_sph_head.free_play != 0 && !open && !g_sph_seq.running();
+    // each hand's nearest target: within the label range (no tap there, a squeeze arms the grab) and within the grab reach
+    int hold = 0, lab = 0; float dh[2] = { 1e9f, 1e9f };
+    for (int h = 0; h < 2; ++h) {
+        g_sph_reach[h] = -1;
+        if (!idle || !ok[h]) continue;
+        const int i = sph::nearest(g_sph_head, g_sph_t, g_sph_nt, palm[h], upm, &dh[h]);
+        if (i >= 0 && dh[h] < sph::k_label_m) lab |= 1 << h;
+        if (i >= 0 && dh[h] <= sph::k_reach_m) { g_sph_reach[h] = i; hold |= 1 << h; }
+    }
+    // the grips
+    for (int h = 0; h < 2; ++h) {
+        const float sq = g_vrpad.ready ? g_vrpad.hand[h].squeeze : 0.f;
+        if (sph::grip_step(g_sph_grips[h], sq, ((lab >> h) & 1) != 0, g_sph_reach[h] >= 0)) sph_grab(h, g_sph_reach[h], dh[h]);
+    }
+    // held back from the game: a hand in reach, an owned grip, and both grips while a sequence runs (round 2 S5: a second
+    // squeeze during the grab is not the player's button); such a grip's release is no quick squeeze (LB / RB) either
+    hold = sph::hold_mask(hold, g_sph_grips, g_sph_seq.running());
+    InterlockedExchange(&g_sph_hold_ms, static_cast<LONG>(GetTickCount()));
+    if (g_sph_hold != hold) InterlockedExchange(&g_sph_hold, hold);
+    for (int h = 0; h < 2; ++h) if ((g_sph_grips[h].owned || g_sph_seq.running()) && g_grip[h].down) g_grip[h].chord = true;
+    // the sequence
+    if (g_sph_seq.running()) {
+        sph::Obs o = {};
+        o.t = sph_now(); o.control = g_sph_head.control != 0; o.free_play = g_sph_head.free_play != 0; o.gate = on;
+        o.carried = g_sph_head.carried; o.talk_target = g_sph_head.talk_target; o.gen = g_sph_head.gen;
+        const LONG pn = g_sph_phys_n; o.player = pn != g_sph_phys_seen; g_sph_phys_seen = pn;
+        o.press_idle = g_sph_press == 0;
+        for (int k = 0; k < sph::k_wins; ++k) sph::obs_win(g_sph_w[k], o.w[k]);
+        if (!on && g_sph_seq.phase != sph::S_KICK) { if (!fresh) o.gen = g_sph_seq.gen + 1u; g_sph_seq.gate_closed(o); }   // (no fresh state: nothing read counts)
+        else if (g_sph_seq.step(o)) { g_sph_press_t0 = static_cast<LONG>(GetTickCount()); g_sph_press_polls = 0; InterlockedExchange(&g_sph_press, XINPUT_GAMEPAD_A); }
+        if (g_sph_seq.moved && !g_sph_noted) sph_note_now();   // review S1: the note when the variable changes
+        if (!g_sph_seq.running()) sph_finish();
+    }
+    g_sph_hide_ui = g_sph_seq.hide_ui();
+    g_sph_near = g_sph_seq.running() ? 3 : lab;   // no tap's A within the label range, nor into a running sequence
+    // the label: the nearest target to either palm (kept until another is 3 cm nearer; none in an event or while a sequence runs)
+    static char s_label_prev[64] = "";
+    g_sph_pick = (idle && !g_sph_seq.running()) ? sph::pick(g_sph_head, g_sph_t, g_sph_nt, palm, ok, upm, g_sph_pred, g_sph_pick.target) : sph::Pick();
+    const int ph = g_sph_pick.hand;
+    const bool again = ph >= 0 && g_sph_reach[ph] == g_sph_pick.target && sph::resqueeze(g_sph_grips[ph], true);   // squeezed away and carried in: "Squeeze again"
+    sph::label_text(g_sph_pick, g_sph_t, g_sph_head.carried_name, g_sph_label, sizeof(g_sph_label), again);
+    g_sph_label_a = g_sph_label[0] ? sph::fade(g_sph_pick.d) : 0.f;
+    if (g_sph_label_a > 0.f) {
+        const float* a = g_sph_t[g_sph_pick.target].anchor;
+        g_sph_label_p[0] = -a[0]; g_sph_label_p[1] = -a[1]; g_sph_label_p[2] = a[2];   // game -> render space
+        if (strcmp(s_label_prev, g_sph_label) != 0) { xr_haptic(g_sph_pick.hand, 0.2f, 0.02f); strncpy_s(s_label_prev, sizeof(s_label_prev), g_sph_label, _TRUNCATE); }
+    }
+    else s_label_prev[0] = 0;
+}
+/// F8 (Developer) and managed's log: 16 values (on, the prediction, the label's target widx / hand / action / distance / opacity,
+/// the sequence's phase / why / presses, grabs, done, stopped, refused, the reach per hand) and a line.
+extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n) {
+    static char s[400];
+    const bool fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u;
+    const int ti = g_sph_pick.target;
+    const float v[16] = { fresh && g_sph_head.on ? 1.f : 0.f, static_cast<float>(g_sph_pred), ti >= 0 ? static_cast<float>(g_sph_t[ti].widx) : -1.f,
+                          static_cast<float>(g_sph_pick.hand), static_cast<float>(g_sph_pick.act), ti >= 0 ? g_sph_pick.d : -1.f, g_sph_label_a,
+                          static_cast<float>(g_sph_seq.phase), static_cast<float>(g_sph_seq.why), static_cast<float>(g_sph_seq.presses),
+                          static_cast<float>(g_sph_grabs), static_cast<float>(g_sph_done), static_cast<float>(g_sph_stopped), static_cast<float>(g_sph_refused),
+                          static_cast<float>(g_sph_reach[0]), static_cast<float>(g_sph_reach[1]) };
+    if (out) for (int k = 0; k < n && k < 16; ++k) out[k] = v[k];
+    char pred[32]; if (g_sph_pred == sph::k_pred_unsure) snprintf(pred, sizeof(pred), "? (a facing rule)"); else if (g_sph_pred == sph::k_pred_none) snprintf(pred, sizeof(pred), "nothing"); else snprintf(pred, sizeof(pred), "worker %d", g_sph_pred);
+    snprintf(s, sizeof(s), "%s | the game would choose %s | label: %s | sequence: %s | last: %s | grabs %u (done %u, stopped %u, refused %u), prompt frames hidden %u",
+             !fresh ? "no state from managed" : g_sph_head.on ? "on" : "off (a gate: see the Hands tab)", pred,
+             g_sph_label[0] ? g_sph_label : "-", sph::k_phase_name[g_sph_seq.phase], g_sph_last, g_sph_grabs, g_sph_done, g_sph_stopped, g_sph_refused, g_sph_hidden_frames);
+    return s;
 }
 
 /// The calibration (ABI 27): op 0 reads both hands' grip -> hand rotations into rc18 (9 floats each, row-major; a hand not
@@ -15762,7 +16115,8 @@ static void xr_tick() {
     g_ui_early = false; g_ui_early_keep = false; g_ui_early_report = g_ui_early_draws; g_ui_early_draws = 0;
     if (ui_frame) {
         e1 = g_eye1_final; e2 = g_eye2_final; ui.tex = g_ui_tex;
-        if (g_markers_3d || g_odv_on || odt_wanted()) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);   // (+ the overdrive visuals, the targets)
+        if (g_sph_hide_ui) { ui.tex = nullptr; g_sph_hidden_frames++; }   // sphere hands: the prompt our press sequence answers is not shown in the headset
+        if (g_markers_3d || g_odv_on || odt_wanted() || sphl_wanted()) draw_markers_both(g_eye1_final, g_eye1_final_rtv, g_eye2_final, g_eye2_final_rtv);   // (+ the overdrive visuals, the targets, the sphere labels)
     }
     else if (g_backbuffer) {
         D3D11_TEXTURE2D_DESC bd; g_backbuffer->GetDesc(&bd);
@@ -15776,7 +16130,7 @@ static void xr_tick() {
         // on a frame that uploaded no real 3D camera (an FMV or menu start, before the screen decision below follows it).
         // Without an eye-2 twin (mono: eye 1 goes to both eyes, review R2-N5) the targets go into eye 1 alone.
         const bool scene3d = !bt_no_split() && !menu && g_cam3d_uploads_frame > 0;
-        if (e1 == g_bb_copy && g_bb_copy_rtv && scene3d && odt_wanted()) {
+        if (e1 == g_bb_copy && g_bb_copy_rtv && scene3d && (odt_wanted() || sphl_wanted())) {   // (+ the sphere labels: the field mostly has no UI pass)
             if (e2 == nullptr) draw_markers_both(g_bb_copy, g_bb_copy_rtv, nullptr, nullptr, true);
             else {
                 D3D11_TEXTURE2D_DESC td; e2->GetDesc(&td);
@@ -15965,6 +16319,7 @@ static void xr_tick() {
         if (g_bt_frozen && any && !s_any_prev) bt_user("a controller grip or stick click");
         s_any_prev = any;
     }
+    sph_tick();   // sphere hands: the grabs, the press sequence, the labels (before gesture_tick: a grab's grip is no quick squeeze)
     if (g_bt_frozen) { g_vrpad_suppress = false; g_gest_active = false; g_gest_grab[0] = g_gest_grab[1] = false; g_gest_chord_down = g_gest_reset_down = g_gest_nchord_down = false; }
     else gesture_tick();
     // What the next frame renders with.
