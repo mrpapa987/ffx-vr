@@ -1450,12 +1450,12 @@ HvTapHook g_tap_hook;                                   // the input thread's pr
 // Sphere hands (ffxvr_sphere.h; managed sphere_hands.cs; the glue "Sphere hands" further down). The input thread's share:
 // g_sph_hold (render thread, time-stamped): the hands whose newly squeezed grip is held back from the game (a hand at a sphere or
 // socket; latched until let go, s_sph_back); g_sph_press: the A our press sequence holds now (pad::press_hook's rule, as the
-// quick squeeze's: >= 3 new packets, 100 ms, a clear packet); g_sph_phys_n: the player's own new button presses and stick pushes
+// quick squeeze's: >= 3 new packets, 100 ms, a clear packet); g_sph_phys_bits: the player's own newly pressed buttons (sph::phys_step;
 // (the sequence stops on one).
 volatile LONG g_sph_hold = 0, g_sph_hold_ms = 0;
 int g_sph_near = 0;                                      // render thread: the hands that do not tap (within the label range of a target, an owned grip, a running sequence; review S2)
-volatile LONG g_sph_press = 0, g_sph_press_t0 = 0, g_sph_press_polls = 0, g_sph_phys_n = 0;
-static pad::PressHook s_sph_hook; static bool s_sph_back[2] = {}; static uint16_t s_sph_phys_prev = 0; static bool s_sph_stick_prev = false;   // input thread only
+volatile LONG g_sph_press = 0, g_sph_press_t0 = 0, g_sph_press_polls = 0, g_sph_phys_bits = 0, g_sph_stick_n = 0;   // (a stick push is only counted, for the log: it stops nothing)
+static pad::PressHook s_sph_hook; static bool s_sph_back[2] = {}; static sph::Phys s_sph_phys;   // input thread only
 sph::Grip g_sph_grips[2];                                // render thread: the grips' press edges, a grip owned by a grab until let go
 // Diorama gestures (seat view, not first person): a grip grabs the world -
 // one hand pans, two hands pan with the midpoint, rotate with the angle
@@ -1685,8 +1685,10 @@ static void vrpad_apply(XINPUT_STATE* st, bool had_pad) {
         const float k = 0.6f, kp = 0.6f * 32767.f;
         const bool stick = fabsf(o.ls[0]) > k || fabsf(o.ls[1]) > k || fabsf(o.rs[0]) > k || fabsf(o.rs[1]) > k
                            || (had_pad && (fabsf(static_cast<float>(g.sThumbLX)) > kp || fabsf(static_cast<float>(g.sThumbLY)) > kp || fabsf(static_cast<float>(g.sThumbRX)) > kp || fabsf(static_cast<float>(g.sThumbRY)) > kp));
-        if ((phys & ~s_sph_phys_prev) != 0 || (stick && !s_sph_stick_prev)) InterlockedIncrement(&g_sph_phys_n);
-        s_sph_phys_prev = phys; s_sph_stick_prev = stick;
+        int pushes = 0;
+        const uint16_t fresh = sph::phys_step(s_sph_phys, phys, stick, &pushes);   // the owner's first test: a stick is not "the player's button"
+        if (fresh) InterlockedOr(&g_sph_phys_bits, static_cast<LONG>(fresh));
+        if (pushes) InterlockedIncrement(&g_sph_stick_n);
     }
     {   // sphere hands: the press sequence's A (pad::press_hook, as the quick squeeze's)
         const LONG sb = g_sph_press;
@@ -13315,7 +13317,11 @@ extern "C" __declspec(dllexport) int ffxvr_wpn_hands(float* out, int n) {
 // Sphere" at the hand for 2 s. Anything unexpected (a wording, a language, the player's own button, a timeout, control back
 // early, another target) stops it at once: the prompt shows and the player answers it.
 //   threads  everything here on the render thread (managed's push and xr_tick's sph_tick at Present); the input thread reads
-//            g_sph_hold / g_sph_press and counts g_sph_phys_n (vrpad_apply).
+//            g_sph_hold / g_sph_press and reports the player's new buttons in g_sph_phys_bits (vrpad_apply).
+//   presses  (the owner's first test, 13 Nov) every press after the first waits for the game's own "a confirm is taken now"
+//            (sph::line_ready / choice_ready from the script windows managed sends) plus a settle; a page still ready 0.3 s
+//            after our press is pressed again, 3 times at most, the result line too; a press the game has not polled within
+//            150 ms is withdrawn. A stick push no longer stops a sequence; a button does, and the log names it.
 //   grips    a hand within reach of a target has its newly squeezed grip held back from the game (sph::strip, as the tap's
 //            hold-grip), its press edge is the grab (sph::grip_step) and owns the grip until it is let go: no quick-squeeze LB / RB
 //            (g_grip[h].chord), no world grab, no tap arming. Out of reach nothing changes. Review fixes: only while the
@@ -13339,7 +13345,7 @@ char        g_sph_label[64] = "", g_sph_note[64] = "", g_sph_last[200] = "no gra
 float       g_sph_label_a = 0.f, g_sph_label_p[3] = {}, g_sph_note_p[3] = {};
 double      g_sph_note_t = -1e9;
 int         g_sph_note_hand = -1;
-LONG        g_sph_phys_seen = 0;
+LONG        g_sph_stick_seen = 0; uint16_t g_sph_stop_bits = 0; uint32_t g_sph_withdrawn = 0;   // the stick pushes at the grab; the button that stopped it; presses withdrawn unpolled
 uint32_t    g_sph_grabs = 0, g_sph_done = 0, g_sph_stopped = 0, g_sph_refused = 0;
 sph::Target g_sph_seq_t = {};                 // the target of the running sequence (its name, for the note's fallback)
 bool        g_sph_noted = false;              // the running sequence's note is out (at the variable's change)
@@ -13356,9 +13362,13 @@ static double sph_now() {
 }
 /// This frame's state (managed, render thread, every frame from push_all). zones in the game's order (ascending widx).
 extern "C" __declspec(dllexport) void ffxvr_sph_set(const sph::Head* h, const sph::Zone* z, int nz, const sph::Target* t, int nt, const sph::Win* w, int nw) {
-    if (h == nullptr || h->bytes != static_cast<int32_t>(sizeof(sph::Head))) {
-        static bool s_said = false;   // round 2 N12: said once
-        if (h != nullptr && !s_said) { s_said = true; diag("sphere hands: managed's state is %d bytes, this DLL expects %d: the two DLLs do not match (the layouts of ffxvr_sphere.h); sphere hands is off", h->bytes, static_cast<int>(sizeof(sph::Head))); }
+    if (h == nullptr || h->bytes != static_cast<int32_t>(sizeof(sph::Head)) || h->sizes != sph::k_sizes) {
+        static bool s_said = false;   // round 2 N12: said once; all four layouts are checked (Head.sizes)
+        if (h != nullptr && !s_said) {
+            s_said = true;
+            diag("sphere hands: managed's state is %d bytes (the other layouts 0x%X), this DLL expects %d (0x%X): the two DLLs do not match (the layouts of ffxvr_sphere.h); sphere hands is off",
+                 h->bytes, h->bytes == static_cast<int32_t>(sizeof(sph::Head)) ? static_cast<unsigned>(h->sizes) : 0u, static_cast<int>(sizeof(sph::Head)), static_cast<unsigned>(sph::k_sizes));
+        }
         g_sph_have = false; return;
     }
     g_sph_head = *h;
@@ -13494,7 +13504,7 @@ static void sph_grab(int h, int ti, float d_m) {
     if (act == sph::A_PLACE) sph::copy_str(g_sph_seq_t.name, g_sph_head.carried_name, sph::k_name);   // the note's fallback: what is placed
     g_sph_seq.start(act, h, t.widx, g_sph_head.carried, g_sph_head.gen, sph_now());
     g_sph_noted = false;
-    g_sph_phys_seen = g_sph_phys_n;
+    InterlockedExchange(&g_sph_phys_bits, 0); g_sph_stick_seen = g_sph_stick_n; g_sph_stop_bits = 0; g_sph_withdrawn = 0;
     snprintf(g_sph_last, sizeof(g_sph_last), "%s: running", act == sph::A_TAKE ? "take" : "place");
     diag("sphere grab: %s hand at worker %d (%s, %.2f m; carried %d '%s'): %s started", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_head.carried, g_sph_head.carried_name,
          act == sph::A_TAKE ? "take" : "place");
@@ -13510,27 +13520,50 @@ static void sph_note_now() {
     if (s.name[0] && g_sph_seq_t.name[0] && strcmp(s.name, g_sph_seq_t.name) != 0)   // review N8: the value table's name against the game's
         diag("sphere grab: name check: the game's text says '%s', the value table says '%s' (the labels use the table's)", s.name, g_sph_seq_t.name);
 }
+/// The buttons of a pad mask by name (the log's "which button").
+static const char* sph_buttons(uint16_t b, char* out, size_t cap) {
+    static const struct { uint16_t bit; const char* name; } k[] = { { XINPUT_GAMEPAD_A, "A" }, { XINPUT_GAMEPAD_B, "B" }, { XINPUT_GAMEPAD_X, "X" }, { XINPUT_GAMEPAD_Y, "Y" },
+        { XINPUT_GAMEPAD_LEFT_SHOULDER, "LB (the left grip)" }, { XINPUT_GAMEPAD_RIGHT_SHOULDER, "RB (the right grip)" }, { XINPUT_GAMEPAD_START, "Start" }, { XINPUT_GAMEPAD_BACK, "Back" },
+        { XINPUT_GAMEPAD_LEFT_THUMB, "L3" }, { XINPUT_GAMEPAD_RIGHT_THUMB, "R3" }, { XINPUT_GAMEPAD_DPAD_UP, "up" }, { XINPUT_GAMEPAD_DPAD_DOWN, "down" }, { XINPUT_GAMEPAD_DPAD_LEFT, "left" }, { XINPUT_GAMEPAD_DPAD_RIGHT, "right" } };
+    size_t o = 0; if (cap) out[0] = 0;
+    for (const auto& e : k) if ((b & e.bit) && o + 24 < cap) o += static_cast<size_t>(snprintf(out + o, cap - o, "%s%s", o ? " + " : "", e.name));
+    if (o == 0 && cap) snprintf(out, cap, "0x%04X", b);
+    return out;
+}
 /// The sequence ended (done or stopped): the log line, the counters; a press of ours the game has not seen yet is dropped.
 static void sph_finish() {
     const sph::Seq& s = g_sph_seq;
     if (g_sph_press != 0 && g_sph_press_polls == 0) InterlockedExchange(&g_sph_press, 0);   // review N5 (as g_odg_cancel: only before a packet carried it)
-    char steps[160] = ""; int o = 0;
+    char steps[200] = ""; int o = 0;
     for (int i = 0; i < s.steps && o < static_cast<int>(sizeof(steps)) - 40; ++i) o += snprintf(steps + o, sizeof(steps) - o, "%s%s at +%.2f s", i ? ", " : "", sph::k_page_name[s.step_page[i]], s.step_t[i]);
     const double took = sph_now() - s.t0;
-    char how[160] = "";
+    char how[260] = "", btn[96] = "", rep[96] = "";
+    const char* why = sph::k_why_name[s.why];
+    if (s.why == sph::W_PLAYER) { char nm[80]; snprintf(btn, sizeof(btn), "the player pressed %s", sph_buttons(g_sph_stop_bits, nm, sizeof(nm))); why = btn; }   // the owner's first test: which button
     if (s.phase == sph::S_DONE) {
         g_sph_done++;
         if (!g_sph_noted) sph_note_now();
-        snprintf(how, sizeof(how), "; the variable moved at +%.2f s; ended by: %s; note: %s", s.t_moved - s.t0, sph::k_why_name[s.why], g_sph_note);
-        snprintf(g_sph_last, sizeof(g_sph_last), "%s (%.1f s%s%s)", g_sph_note, took, s.why != sph::W_OK ? "; ended by: " : "", s.why != sph::W_OK ? sph::k_why_name[s.why] : "");
+        snprintf(how, sizeof(how), "; the variable moved at +%.2f s; ended by: %s; note: %s", s.t_moved - s.t0, why, g_sph_note);
+        snprintf(g_sph_last, sizeof(g_sph_last), "%s (%.1f s%s%s)", g_sph_note, took, s.why != sph::W_OK ? "; ended by: " : "", s.why != sph::W_OK ? why : "");
     }
     else {
         g_sph_stopped++;
-        snprintf(how, sizeof(how), "; why: %s%s%s", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
-        snprintf(g_sph_last, sizeof(g_sph_last), "stopped: %s%s%s (the prompt shown)", sph::k_why_name[s.why], s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
+        snprintf(how, sizeof(how), "; why: %s%s%s", why, s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
+        snprintf(g_sph_last, sizeof(g_sph_last), "stopped: %s%s%s (the prompt shown)", why, s.why == sph::W_TEXT ? ": " : "", s.why == sph::W_TEXT ? sph::k_page_name[s.last_page] : "");
     }
-    diag("sphere grab: %s at worker %d: %s after %.2f s, %d presses%s (the interaction, then %s)%s", s.action == sph::A_TAKE ? "take" : "place", s.widx,
-         s.phase == sph::S_DONE ? "DONE" : "STOPPED", took, s.presses, s.retries ? ", one repeated" : "", s.steps ? steps : "no page", how);
+    if (s.retries || s.blind_presses || g_sph_withdrawn)
+        snprintf(rep, sizeof(rep), ", %d repeated, %d without the ready signal, %u withdrawn unpolled", s.retries, s.blind_presses, g_sph_withdrawn);
+    diag("sphere grab: %s at worker %d: %s after %.2f s, %d presses%s (the interaction, then %s)%s | stick pushes during it %ld (they stop nothing)", s.action == sph::A_TAKE ? "take" : "place", s.widx,
+         s.phase == sph::S_DONE ? "DONE" : "STOPPED", took, s.presses, rep, s.steps ? steps : "no page", how, static_cast<long>(g_sph_stick_n - g_sph_stick_seen));
+    // what the readiness test read at the end (a stop or a press without the ready signal: is the game's flag where we read it?)
+    if (s.phase != sph::S_DONE || s.why != sph::W_OK || s.blind_presses) {
+        char w[260] = ""; int q = 0;
+        for (int k = 0; k < sph::k_wins && q < static_cast<int>(sizeof(w)) - 70; ++k) {
+            const sph::Win& x = g_sph_w[k]; if (!x.open) continue;
+            q += snprintf(w + q, sizeof(w) - q, "%s#%d state %d page end %d cursor %d row %d, script state %d flags 0x%02X", q ? "; " : "", k, x.state, x.page_end, x.choice_mode, x.choice_row, g_sph_head.mw_state[k], g_sph_head.mw_flags[k]);
+        }
+        diag("sphere grab: at the end: windows %s | what a confirm would do (0x86C8B0): %d (1 a line, 2 a choice, 0 nothing; -1 not read) | control %d", q ? w : "none open", sph::msg_kind(g_sph_head), g_sph_head.control);
+    }
 }
 /// Once a frame (xr_tick, before gesture_tick): the reach, the grips, the sequence, the label.
 static void sph_tick() {
@@ -13571,9 +13604,11 @@ static void sph_tick() {
         sph::Obs o = {};
         o.t = sph_now(); o.control = g_sph_head.control != 0; o.free_play = g_sph_head.free_play != 0; o.gate = on;
         o.carried = g_sph_head.carried; o.talk_target = g_sph_head.talk_target; o.gen = g_sph_head.gen;
-        const LONG pn = g_sph_phys_n; o.player = pn != g_sph_phys_seen; g_sph_phys_seen = pn;
+        const uint16_t pb = static_cast<uint16_t>(InterlockedExchange(&g_sph_phys_bits, 0)); o.player = pb != 0; if (pb) g_sph_stop_bits = pb;
+        // a press of ours the game has not polled within 150 ms is withdrawn: its first frame stays near the frame we verified
+        if (g_sph_press != 0 && g_sph_press_polls == 0 && GetTickCount() - static_cast<DWORD>(g_sph_press_t0) > 150u) { InterlockedExchange(&g_sph_press, 0); g_sph_withdrawn++; }
         o.press_idle = g_sph_press == 0;
-        for (int k = 0; k < sph::k_wins; ++k) sph::obs_win(g_sph_w[k], o.w[k]);
+        for (int k = 0; k < sph::k_wins; ++k) sph::obs_win(g_sph_head, g_sph_w[k], k, o.w[k]);
         if (!on && g_sph_seq.phase != sph::S_KICK) { if (!fresh) o.gen = g_sph_seq.gen + 1u; g_sph_seq.gate_closed(o); }   // (no fresh state: nothing read counts)
         else if (g_sph_seq.step(o)) { g_sph_press_t0 = static_cast<LONG>(GetTickCount()); g_sph_press_polls = 0; InterlockedExchange(&g_sph_press, XINPUT_GAMEPAD_A); }
         if (g_sph_seq.moved && !g_sph_noted) sph_note_now();   // review S1: the note when the variable changes

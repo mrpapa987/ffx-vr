@@ -61,6 +61,7 @@ struct Win {            // a render-side message window (slots 0..2), read this 
     int32_t choice_mode;    // its cursor's +0x01: 0 none, 1 up, 2 confirmed
     int32_t choice_row;     // the cursor's +0x02
     int32_t n;          // page bytes read (0: none)
+    int32_t page_end;   // +0x2E: set with state 2 (0x8DE970 / 0x8DED60): 3 = the text's last page is out (the script's waits test it), 2 = more pages
     uint8_t page[k_page];   // the page text (+0x94), the game's encoding
 };
 struct Head {           // the rest of this frame's state
@@ -76,10 +77,18 @@ struct Head {           // the rest of this frame's state
     float   player_radius;  // the controller's +0x1F0
     int32_t player_widx;    // the player's own worker (the controller's +0x0A; -1 none): never a candidate
     char    carried_name[k_name];
+    int32_t sizes;      // k_sizes: the other three layouts' sizes (review round 2 N12: native refuses and logs any other)
+    // the script side's 8 message windows of the current bank (TOMesWinWork, FhUtil 0xF26D70 + bank * 8 * 0x2C; the bank at
+    // 0xF26B82): what the game's own confirm test reads (msg_kind, line_ready)
+    int32_t mw_ok;      // 1: read this frame
+    uint8_t mw_state[8];    // +0x14: 0 none, 1 typing, 2 shown, 3 closing (the render window's state, copied each frame by 0x871F30)
+    uint8_t mw_flags[8];    // +0x1D: 0x02 / 0x20 a window the player answers (a choice), 0x10 the script waits for a confirm on it
+    uint8_t mw_w16[8];      // +0x16 != 0
 };
+constexpr int32_t k_sizes = static_cast<int32_t>(sizeof(Zone) | (sizeof(Target) << 8) | (sizeof(Win) << 16));
 // sphere_hands.cs's SphZone / SphTarget / SphWin / SphHead (review N4: only Head carries its size; native refuses and logs
-// a Head of another size. Round 2 N12: a later change to Zone, Target or Win alone must also change Head or bump the ABI)
-static_assert(sizeof(Zone) == 60 && sizeof(Target) == 60 && sizeof(Win) == 116 && sizeof(Head) == 80, "the layouts shared with sphere_hands.cs");
+// a Head of another size. Round 2 N12: Head.sizes carries the other three sizes, checked on every push)
+static_assert(sizeof(Zone) == 60 && sizeof(Target) == 60 && sizeof(Win) == 120 && sizeof(Head) == 112, "the layouts shared with sphere_hands.cs");
 
 // -- the game's choice, mirrored ----------------------------------------------------------------------------------------
 enum Cand { C_NO = 0, C_YES = 1, C_UNSURE = 2 };
@@ -304,47 +313,93 @@ inline int classify(const uint8_t* b, int n, char* name, int cap) {
     return P_UNKNOWN;
 }
 
+// -- when the game takes a confirm (the owner's first test, 13 Nov: presses on a line the moment it showed were lost) -------
+// The field's input (0x867950) reads the NEW confirm presses of a frame and asks 0x86C8B0 what a confirm would do: 2 when a
+// window of the bank in state 1 or 2 has +0x1D & 0x22 (a choice: the cursor's own input 0x8B62B0 takes the confirm while the
+// cursor is up, mode 1, which 0x8B5FB0 sets only at window state 2), 1 when one has +0x16 != 0 or +0x1D & 0x10 (a line: it
+// sets the controller's confirm bit, byte 0 bit 2), 0 otherwise (the press is lost). The script's wait for a line (0x860AA0)
+// then closes its window when the window is in state 2 with the page ended (render +0x2E == 3) and that bit is set. +0x1D
+// bit 0x10 is set by the script's wait call itself (0x85ABD0), which in the log starts about 2 frames after the line reached
+// state 2: a press whose first frame is earlier than that is lost (it is not "new" any more afterwards). So a line is ready
+// only once its own +0x1D has 0x10; we read it after the game's frame, so a press requested then is new in a later frame.
+/// 0x86C8B0, mirrored: what a new confirm would do now (-1: the script windows were not read).
+inline int msg_kind(const Head& h) {
+    if (!h.mw_ok) return -1;
+    for (int i = 0; i < 8; ++i) {
+        if (h.mw_state[i] != 1 && h.mw_state[i] != 2) continue;
+        if (h.mw_flags[i] & 0x22) return 2;
+        if (h.mw_w16[i] || (h.mw_flags[i] & 0x10)) return 1;
+    }
+    return 0;
+}
+/// The plain line in window k takes a new confirm now.
+inline bool line_ready(const Head& h, const Win& w, int k) {
+    return k >= 0 && k < 8 && w.open && w.state == 2 && w.page_end == 3 && h.mw_ok && h.mw_state[k] == 2 && (h.mw_flags[k] & 0x10) != 0 && msg_kind(h) == 1;
+}
+/// The choice in window k takes a new confirm now (its cursor is up).
+inline bool choice_ready(const Head& h, const Win& w, int k) {
+    return k >= 0 && k < 8 && w.open && w.state == 2 && w.page_end == 3 && w.choice_mode == 1 && h.mw_ok && h.mw_state[k] == 2;
+}
+
 // -- the press sequence ---------------------------------------------------------------------------------------------------
 enum Phase { S_IDLE = 0, S_KICK, S_WAIT_OFF, S_WAIT_RECESS, S_WAIT_CHOICE, S_WAIT_RESULT, S_WAIT_CONTROL, S_DONE, S_ABORT, S_N };
 static const char* const k_phase_name[S_N] = { "idle", "pressing A (the interaction)", "waiting for the event", "waiting for \"You see a sphere-shaped recess.\"",
     "waiting for the choice", "waiting for \"Removed / Inserted\"", "waiting for control", "done", "stopped" };
-enum Why { W_NONE = 0, W_OK, W_TIMEOUT, W_TEXT, W_ROW, W_PLAYER, W_CONTROL, W_TARGET, W_GEN, W_GATE, W_RESULT, W_STUCK, W_NOSTART, W_N };
+enum Why { W_NONE = 0, W_OK, W_TIMEOUT, W_TEXT, W_ROW, W_PLAYER, W_CONTROL, W_TARGET, W_GEN, W_GATE, W_RESULT, W_STUCK, W_NOSTART, W_NOLINE, W_N };
 static const char* const k_why_name[W_N] = { "-", "control back", "a step timed out", "unexpected text (another wording or language)", "the choice's cursor was not on row 0",
     "the player pressed a button", "control came back early", "the game chose another target", "the scene changed", "the feature's gates closed", "the variable did not change",
-    "the game did not take a press (the page stayed)", "the game did not start the interaction" };
-struct ObsWin { int32_t open, state, mode, row, page; char name[k_name]; };
-/// A window as the sequence sees it. An open, fully shown window whose text did not read is unknown text (review S4), not
-/// "no page": the sequence stops on it.
-inline void obs_win(const Win& w, ObsWin& o) {
-    o.open = w.open; o.state = w.state; o.mode = w.choice_mode; o.row = w.choice_row; o.name[0] = 0;
+    "the game did not take our presses (the page stayed)", "the game did not start the interaction", "no result line came (the game went on by itself)" };
+struct ObsWin { int32_t open, state, mode, row, page, ready; char name[k_name]; };
+inline bool is_choice(int page) { return page == P_TAKE_CHOICE || page == P_INSERT_CHOICE; }
+/// Window k as the sequence sees it. An open, fully shown window whose text did not read is unknown text (review S4), not
+/// "no page": the sequence stops on it. ready: the game takes a new confirm on it now (line_ready / choice_ready).
+inline void obs_win(const Head& h, const Win& w, int k, ObsWin& o) {
+    o.open = w.open; o.state = w.state; o.mode = w.choice_mode; o.row = w.choice_row; o.name[0] = 0; o.ready = 0;
     if (!w.open) o.page = P_NONE;
     else if (w.n <= 0) o.page = w.state == 2 ? P_UNKNOWN : P_NONE;
     else o.page = classify(w.page, w.n, o.name, k_name);
+    if (o.page > P_UNKNOWN) o.ready = (is_choice(o.page) ? choice_ready(h, w, k) : line_ready(h, w, k)) ? 1 : 0;
 }
 struct Obs {            // one frame for the sequence
     double  t;          // seconds
     bool    control, free_play, gate;   // gate: Head.on
     int32_t carried, talk_target; uint32_t gen;
-    bool    player;     // a physical button pressed (new) or a stick pushed since the last frame
+    bool    player;     // a physical button newly pressed since the last frame (not a stick: phys_step)
     bool    press_idle; // our press channel is free (the last press went out and was let go, or was dropped)
     ObsWin  w[k_wins];
 };
 constexpr double k_t_off = 1.0, k_t_page = 3.0, k_t_result = 6.0, k_t_control = 5.0, k_press_gap = 0.15;
-constexpr double k_t_stuck = 0.40;   // a page still shown this long after our press on it was let go: the game did not take it (review S4)
+constexpr double k_t_settle = 0.06;  // a page must have been ready this long before a press (a few game frames of margin)
+constexpr double k_t_again = 0.30;   // a page still ready this long after our press on it was let go: the game did not take it; once more
+constexpr int    k_presses_page = 3; // at most this many presses on one page
+constexpr double k_t_stuck = 0.40;   // ... and still up this long after the last one was let go: stopped, the prompt shown
+constexpr double k_t_blind = 1.5;    // a page fully shown this long that never read as ready (a misread of the game's flags): one press as before, no repeat
+constexpr double k_t_noline = 1.0;   // the variable moved and no result line opened within this (it opens 2 frames after): none comes (the door pair's second sphere)
 /// The outcome is the trial's carried variable (review S1): once it has moved the right way (moved; the caller shows the note
-/// at once) every end is "done" (why: how it ended), whatever the pages did after: no result line (the second sphere into the
-/// door pair), a cutscene longer than a step, the player's stick. Before that an end is "stopped".
+/// at once) every end is "done" (why: how it ended), whatever the pages did after. Before that an end is "stopped".
+/// Every press but the first needs its page READY (the game's own test, above) for k_t_settle, and control off. A page still
+/// ready k_t_again after our press on it was let go was not answered: it is pressed again, at most k_presses_page times in
+/// all, the result line included. That repeat cannot be a press too many: it is requested only on a frame where the line's
+/// window is still in state 2 with the script's wait flag set, so the script is still waiting on that very line and control
+/// cannot have returned; the first frame of an earlier press is long past (it was let go k_t_again ago), so no earlier press
+/// can still answer it; and when the line does take a press the window leaves state 2 in that same game frame, so the next
+/// frame we read is not ready and nothing more is requested. (The caller also withdraws a press the game has not polled in
+/// time, and one still unpolled when the sequence ends.)
 struct Seq {
     int phase = S_IDLE, action = A_NONE, why = W_NONE, hand = -1, widx = -1, presses = 0, carried0 = -1, last_page = P_NONE;
-    int pressed_page = P_NONE, retries = 0;   // the page our last press answered; the one repeat of a press the game did not take
+    int pressed_page = P_NONE, page_presses = 0, retries = 0, blind_presses = 0;   // the page our last press answered, our presses on it; all repeats; presses without the ready signal
+    bool blind = false;                       // the last press went out on a page that never read as ready
     bool moved = false;                       // the carried variable changed as the action wants
     uint32_t gen = 0;
     double t0 = 0, t_phase = 0, t_press = -1e9, t_rel = -1e9, t_moved = 0;
+    double t_rdy[P_N], t_shn[P_N];            // since when each page has been ready / fully shown without a break (< 0: not)
     char name[k_name] = {};   // the sphere's name from the game's text (the note's)
     int steps = 0; int step_page[8] = {}; double step_t[8] = {};   // the pages pressed through (the per-grab log line)
 
+    Seq() { for (int i = 0; i < P_N; ++i) { t_rdy[i] = -1.0; t_shn[i] = -1.0; } }
     bool running() const { return phase >= S_KICK && phase <= S_WAIT_CONTROL; }
-    /// While it runs the prompt is hidden in the headset; never after an end.
+    /// While it runs the prompt is hidden in the headset (through the result line: the note at the hand replaces it); never
+    /// after an end.
     bool hide_ui() const { return running(); }
     void start(int act, int h, int w, int carried, uint32_t g, double t) {
         *this = Seq(); phase = S_KICK; action = act; hand = h; widx = w; carried0 = carried; gen = g; t0 = t; t_phase = t;
@@ -353,7 +408,11 @@ struct Seq {
     void stop(int w) { phase = moved ? S_DONE : S_ABORT; why = w; }
     /// Control is back: done when the sphere moved.
     void back() { if (moved) { phase = S_DONE; why = W_OK; } else stop(phase == S_WAIT_CONTROL ? W_RESULT : W_CONTROL); }
-    void note_press(int page, double t) { ++presses; t_press = t; t_rel = -1e9; pressed_page = page; if (steps < 8) { step_page[steps] = page; step_t[steps] = t - t0; ++steps; } }
+    void note_press(int page, double t) {
+        page_presses = page == pressed_page ? page_presses + 1 : 1;
+        ++presses; t_press = t; t_rel = -1e9; pressed_page = page;
+        if (steps < 8) { step_page[steps] = page; step_t[steps] = t - t0; ++steps; }
+    }
     /// The outcome: the carried variable moved as the action wants (a take: from nothing to a sphere; a place: to nothing).
     /// Only once the game started our interaction (control off with our worker chosen: past S_WAIT_OFF), and the caller checks
     /// the scene first (round 2 N11: a value read across a map change or a reload is not an outcome).
@@ -375,26 +434,30 @@ struct Seq {
         if (o.player && phase != S_WAIT_CONTROL) { stop(W_PLAYER); return 0; }   // waiting for control there is nothing left to press: the player may walk on
         if (t_rel < 0 && o.press_idle && o.t > t_press) t_rel = o.t;           // our last press was let go (t_rel < 0: one is out or held)
         const double dt = o.t - t_phase;
-        // the pages open now: anything not of this sequence stops it
-        int seen[P_N] = {}; int choice_row = -1, choice_mode = 0;
+        // the pages open now: anything not of this sequence stops it. shown: fully out and waiting for an answer (a choice:
+        // its cursor up); ready: the game takes a confirm on it now
+        int open[P_N] = {}, shown[P_N] = {}, rdy[P_N] = {}; int choice_row = -1;
         for (int k = 0; k < k_wins; ++k) {
             const ObsWin& w = o.w[k];
             if (!w.open || w.page == P_NONE) continue;
             const bool ours = action == A_TAKE ? (w.page == P_TAKE_INFO || w.page == P_TAKE_CHOICE || w.page == P_REMOVED)
                                                : (w.page == P_RECESS || w.page == P_HOLDING || w.page == P_INSERT_CHOICE || w.page == P_INSERTED);
             if (!ours) { last_page = w.page; stop(W_TEXT); return 0; }
-            if (w.state == 2) seen[w.page] = 1;
-            if ((w.page == P_TAKE_CHOICE || w.page == P_INSERT_CHOICE) && w.state == 2) { choice_row = w.row; choice_mode = w.mode; }
+            open[w.page] = 1;
+            if (w.state == 2 && (!is_choice(w.page) || w.mode == 1)) { shown[w.page] = 1; if (w.ready) rdy[w.page] = 1; if (is_choice(w.page)) choice_row = w.row; }
             if (w.name[0]) copy_str(name, w.name, k_name);   // "A <name> is inserted here." / "You are holding a <name>." / the result line
         }
-        const bool can_press = o.press_idle && !o.control && o.t - t_press >= k_press_gap;
-        // the page we answered is still up: the game did not take the press. A line or a choice gets one repeat (the same page,
-        // verified shown this frame); the result line none (its press is the last before control: never a second one near it)
-        const bool on_choice = pressed_page == P_TAKE_CHOICE || pressed_page == P_INSERT_CHOICE;
-        if (pressed_page != P_NONE && !o.control && t_rel >= 0 && o.t - t_rel >= k_t_stuck && seen[pressed_page] && (!on_choice || choice_mode == 1)) {
-            if (pressed_page == P_REMOVED || pressed_page == P_INSERTED || retries >= 1) { stop(W_STUCK); return 0; }
-            if (on_choice && choice_row != 0) { stop(W_ROW); return 0; }
-            ++retries; note_press(pressed_page, o.t); return 1;
+        for (int p = 0; p < P_N; ++p) {
+            t_shn[p] = shown[p] ? (t_shn[p] < 0 ? o.t : t_shn[p]) : -1.0;
+            t_rdy[p] = rdy[p] ? (t_rdy[p] < 0 ? o.t : t_rdy[p]) : -1.0;
+        }
+        const int choice = action == A_TAKE ? P_TAKE_CHOICE : P_INSERT_CHOICE, result = action == A_TAKE ? P_REMOVED : P_INSERTED;
+        if (shown[choice] && choice_row != 0) { stop(W_ROW); return 0; }   // never an answer on another row
+        // the page we answered is still up and waiting: the game did not take the press
+        if (pressed_page != P_NONE && !o.control && t_rel >= 0 && shown[pressed_page]) {
+            const double since = o.t - t_rel;
+            if (blind || page_presses >= k_presses_page) { if (since >= k_t_stuck) { stop(W_STUCK); return 0; } }
+            else if (since >= k_t_again && rdy[pressed_page] && o.t - t_rdy[pressed_page] >= k_t_settle) { ++retries; note_press(pressed_page, o.t); return 1; }
         }
         switch (phase) {
         case S_KICK:   // the interaction itself: only from free play, nothing open
@@ -410,40 +473,51 @@ struct Seq {
             return 0;
         case S_WAIT_RECESS:
             if (o.control) { back(); return 0; }
-            if (seen[P_INSERT_CHOICE]) { go(S_WAIT_CHOICE, o.t); return step_choice(o, choice_mode, choice_row, can_press); }   // the line already answered
-            if (seen[P_RECESS] && can_press) { note_press(P_RECESS, o.t); go(S_WAIT_CHOICE, o.t); return 1; }
+            if (open[P_INSERT_CHOICE] || open[P_HOLDING]) { go(S_WAIT_CHOICE, o.t); return first(choice, S_WAIT_RESULT, o, shown, rdy); }   // the line already answered
+            if (first(P_RECESS, S_WAIT_CHOICE, o, shown, rdy)) return 1;
             if (dt > k_t_page) stop(W_TIMEOUT);
             return 0;
         case S_WAIT_CHOICE:
             if (o.control) { back(); return 0; }
-            return step_choice(o, choice_mode, choice_row, can_press);
-        case S_WAIT_RESULT: {
-            if (o.control) { back(); return 0; }   // moved and no result line: done
-            const int want = action == A_TAKE ? P_REMOVED : P_INSERTED;
-            if (seen[want] && can_press) { note_press(want, o.t); go(S_WAIT_CONTROL, o.t); return 1; }
-            if (dt > k_t_result) stop(W_TIMEOUT);   // moved: done (no result line came: the prompt, if any comes later, shows)
+            if (first(choice, S_WAIT_RESULT, o, shown, rdy)) return 1;
+            if (dt > k_t_page) stop(W_TIMEOUT);
             return 0;
-        }
-        case S_WAIT_CONTROL:   // never a press here
+        case S_WAIT_RESULT:
+            if (o.control) { back(); return 0; }   // moved and no result line: done
+            if (first(result, S_WAIT_CONTROL, o, shown, rdy)) return 1;
+            if (moved && !open[result] && o.t - t_moved > k_t_noline) { stop(W_NOLINE); return 0; }   // done: nothing is left to answer
+            if (dt > k_t_result) stop(W_TIMEOUT);   // moved: done
+            return 0;
+        case S_WAIT_CONTROL:   // only the result line's repeats (above): never a press on anything else
             if (o.control) { back(); return 0; }
             if (dt > k_t_control) stop(W_TIMEOUT);   // moved: done (a long cutscene)
             return 0;
         default: return 0;
         }
     }
-    int step_choice(const Obs& o, int mode, int row, bool can_press) {
-        const int want = action == A_TAKE ? P_TAKE_CHOICE : P_INSERT_CHOICE;
-        int seen_choice = 0;
-        for (int k = 0; k < k_wins; ++k) if (o.w[k].open && o.w[k].page == want && o.w[k].state == 2) seen_choice = 1;
-        if (seen_choice && mode == 1) {
-            if (row != 0) { stop(W_ROW); return 0; }
-            if (!can_press) return 0;
-            note_press(want, o.t); go(S_WAIT_RESULT, o.t); return 1;
-        }
-        if (o.t - t_phase > k_t_page) stop(W_TIMEOUT);
-        return 0;
+    /// The first press on a page: when it has been ready for k_t_settle; or, never ready but fully shown for k_t_blind, one
+    /// press without a repeat. Returns 1 when it pressed (and moved on to phase next).
+    int first(int page, int next, const Obs& o, const int* shown, const int* rdy) {
+        const bool ready = rdy[page] && o.t - t_rdy[page] >= k_t_settle;
+        const bool late = !rdy[page] && shown[page] && o.t - t_shn[page] >= k_t_blind;
+        if (!ready && !late) return 0;
+        if (!o.press_idle || o.control || o.t - t_press < k_press_gap) return 0;
+        note_press(page, o.t); blind = late; if (late) ++blind_presses;
+        go(next, o.t); return 1;
     }
 };
+
+/// The player's own input for the sequence's stop rule (the input thread): the buttons newly down since the last poll. A
+/// stick is not a button: it answers nothing (the choice's row is checked before every press), and in the owner's first test
+/// the three "the player pressed a button" stops had no button in the game's own input: a stick pushed past 0.6 counted.
+/// sticks: pushes past 0.6 are counted apart, for the log only.
+struct Phys { uint16_t prev = 0; bool stick_prev = false; };
+inline uint16_t phys_step(Phys& p, uint16_t buttons, bool stick_out, int* stick_pushes) {
+    const uint16_t fresh = static_cast<uint16_t>(buttons & ~p.prev);
+    if (stick_out && !p.stick_prev && stick_pushes) ++*stick_pushes;
+    p.prev = buttons; p.stick_prev = stick_out;
+    return fresh;
+}
 
 /// The note once the sphere moved: "Picked up <name>" / "Inserted <name>" (the game's name, else the fallback), "" before.
 inline void note_text(const Seq& s, const char* fallback, char* out, int cap) {

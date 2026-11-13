@@ -432,7 +432,7 @@ public sealed unsafe partial class FFXVRModule {
                 if (co >= GameGates.k_cur_lo && co + GameGates.k_cur_len <= GameGates.k_cur_tab) { byte* c = b + co; cur = I($" | cursor mode {c[1]} row {(sbyte)c[2]} items {c[5]}"); }
                 string txt = "-";
                 if (tp != 0) { for (int k = 0; k < 160; k++) tb[k] = 0; if (_fn_safe_read((void*)(nint)tp, tb, 160) != 0) txt = sph_decode(tb, 160); }
-                L(I($"render window {i}: id {*(ushort*)(w + 0x04)} state {*(ushort*)(w + 0x2C)} x {*(float*)(w + 0x48):F0} y {*(float*)(w + 0x4C):F0} w {*(ushort*)(w + 0x44)} h {*(ushort*)(w + 0x46)}{cur} | page text 0x{tp:X8}: \"{txt}\""));
+                L(I($"render window {i}: id {*(ushort*)(w + 0x04)} state {*(ushort*)(w + 0x2C)} page end +0x2E {*(short*)(w + 0x2E)} x {*(float*)(w + 0x48):F0} y {*(float*)(w + 0x4C):F0} w {*(ushort*)(w + 0x44)} h {*(ushort*)(w + 0x46)}{cur} | page text 0x{tp:X8}: \"{txt}\""));
             }
         }
         // the script side (TOMesWinWork): its own text pointer per window of the current bank
@@ -443,7 +443,7 @@ public sealed unsafe partial class FFXVRModule {
             byte* m = mw + i * 0x2C; ushort st = *(ushort*)(m + 0x14); if (st == 0) continue;
             uint tp = *(uint*)(m + 0x08); string txt = "-";
             if (tp != 0) { for (int k = 0; k < 160; k++) tb[k] = 0; if (_fn_safe_read((void*)(nint)tp, tb, 160) != 0) txt = sph_decode(tb, 160); }
-            L(I($"script window {i} (bank {bank}): state {st} flags 0x{m[0x1D]:X2} +0x20 {m[0x20]} | text 0x{tp:X8}: \"{txt}\""));
+            L(I($"script window {i} (bank {bank}): state {st} flags 0x{m[0x1D]:X2} +0x16 {*(ushort*)(m + 0x16)} +0x20 {m[0x20]} | text 0x{tp:X8}: \"{txt}\""));
         }
     }
     /// <summary>The game's text encoding, its ASCII part (index = byte - 0x30): enough to read a sphere's name. Control codes are

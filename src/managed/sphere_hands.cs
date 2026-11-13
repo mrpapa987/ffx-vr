@@ -12,6 +12,9 @@ namespace FFXVR;
 // Only the trials with a socket table (SphSockets) take part: Djose for now (logs9). The automation matches the prompts' exact
 // English text: in another language the grip still presses A once (the game's own interaction) and the prompt then shows as
 // usual (logged "unexpected text").
+// After the owner's first test (13 Nov): each press waits for the game's own "a confirm is taken now" (native sph::line_ready /
+// choice_ready, from the script side's message windows sent here: sphh_script_windows), so every line is answered by the
+// sequence and nothing is left for the player to press.
 // ini: sphere_hands 0/1, default 1 (it acts only with vr_hands on, in first person, in a trial with a socket table).
 public sealed unsafe partial class FFXVRModule {
 
@@ -19,12 +22,13 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<SphHead*, SphZone*, int, SphTarget*, int, SphWin*, int, void> _fn_sph_set;   // ABI 64
     private delegate* unmanaged[Cdecl]<float*, int, byte*> _fn_sph_status;                                      // ABI 64
 
-    // = native sph::Head / Zone / Target / Win (x86; 80, 60, 60, 116 bytes: ffxvr_sphere.h's static_assert; native checks Head's
-    // size at every push)
-    [StructLayout(LayoutKind.Sequential)] private struct SphHead { public int bytes, on, control, free_play, carried, talk_target; public uint gen; public float tx, ty, tz, player_radius; public int player_widx; public fixed byte carried_name[32]; }
+    // = native sph::Head / Zone / Target / Win (x86; 112, 60, 60, 120 bytes: ffxvr_sphere.h's static_assert; native checks Head's
+    // size and, through Head.sizes, the other three at every push, and logs a mismatch once)
+    [StructLayout(LayoutKind.Sequential)] private struct SphHead { public int bytes, on, control, free_play, carried, talk_target; public uint gen; public float tx, ty, tz, player_radius; public int player_widx; public fixed byte carried_name[32]; public int sizes, mw_ok; public fixed byte mw_state[8]; public fixed byte mw_flags[8]; public fixed byte mw_w16[8]; }
     [StructLayout(LayoutKind.Sequential)] private struct SphZone { public int widx, kind; public float cx, cy, cz, hx, hz, rot, h, range, htol, atol; public int target; public uint flags; public int aa; }
     [StructLayout(LayoutKind.Sequential)] private struct SphTarget { public int widx, kind, value, free_slots; public float ax, ay, az; public fixed byte name[32]; }
-    [StructLayout(LayoutKind.Sequential)] private struct SphWin { public int open, state, choice_mode, choice_row, n; public fixed byte page[96]; }
+    [StructLayout(LayoutKind.Sequential)] private struct SphWin { public int open, state, choice_mode, choice_row, n, page_end; public fixed byte page[96]; }
+    private static int sphh_sizes => sizeof(SphZone) | (sizeof(SphTarget) << 8) | (sizeof(SphWin) << 16);   // = native sph::k_sizes
 
     private const int k_sphh_zones = 24, k_sphh_targets = 16;
     private SphZone* _sphh_z; private SphTarget* _sphh_t; private SphWin* _sphh_w;   // native-shaped buffers (kept for the session)
@@ -47,7 +51,7 @@ public sealed unsafe partial class FFXVRModule {
     /// Off: a head with on = 0 (native also treats a state older than 3 frames as off).
     private void sphh_push_off() {
         if (_fn_sph_set == null || !_sphh_sent_on) return;
-        var h = new SphHead { bytes = sizeof(SphHead), carried = -1, talk_target = -1, player_widx = -1 };
+        var h = new SphHead { bytes = sizeof(SphHead), sizes = sphh_sizes, carried = -1, talk_target = -1, player_widx = -1 };
         _fn_sph_set(&h, null, 0, null, 0, null, 0);
         _sphh_sent_on = false;
         _sphh_gate = "not in a trial with a socket table, or off";
@@ -82,7 +86,7 @@ public sealed unsafe partial class FFXVRModule {
         _sphh_gate = gate;
         bool on = gate.Length == 0;
         if (on && (_sphh_scan_t < 0 || _now - _sphh_scan_t >= 0.25 || _now < _sphh_scan_t)) sphh_scan(actors, snap, ti, sk!);
-        var h = new SphHead { bytes = sizeof(SphHead), on = on ? 1 : 0, carried = carried, talk_target = -1, player_widx = -1 };
+        var h = new SphHead { bytes = sizeof(SphHead), sizes = sphh_sizes, on = on ? 1 : 0, carried = carried, talk_target = -1, player_widx = -1 };
         if (ctl != 0) {
             byte* c = _sph_ctl;
             h.control = pl_ok && pl != 0 ? 1 : 0;
@@ -98,6 +102,7 @@ public sealed unsafe partial class FFXVRModule {
             nz = _sphh_nz;
             for (int i = 0; i < _sphh_nt; i++) { sphh_target_now(i, actors, snap, sk!); nt++; }
             sphh_windows(tx);
+            sphh_script_windows(&h);
         }
         _fn_sph_set(&h, nz > 0 ? _sphh_z : null, nz, nt > 0 ? _sphh_t : null, nt, on ? _sphh_w : null, on ? 3 : 0);
         _sphh_sent_on = true;
@@ -200,7 +205,7 @@ public sealed unsafe partial class FFXVRModule {
     }
     /// The render-side windows 0..2 this frame (the block sph_tick read): open, state, the cursor, the page text (96 bytes).
     private void sphh_windows(in GameGates.Text tx) {
-        for (int k = 0; k < 3; k++) { SphWin* w = _sphh_w + k; w->open = 0; w->state = 0; w->choice_mode = 0; w->choice_row = 0; w->n = 0; }
+        for (int k = 0; k < 3; k++) { SphWin* w = _sphh_w + k; w->open = 0; w->state = 0; w->choice_mode = 0; w->choice_row = 0; w->n = 0; w->page_end = 0; }
         if (_sph_blk == null) return;
         uint blk_va = (uint)(nint)FhUtil.ptr_at<byte>(GameGates.k_blk);
         fixed (byte* b = _sph_blk) {
@@ -209,7 +214,7 @@ public sealed unsafe partial class FFXVRModule {
                 if ((tx.open & (1 << k)) == 0) continue;
                 uint p = *(uint*)(b + GameGates.k_win_tab + k * 4); long o = (long)p - blk_va;
                 if (o < 0 || o + GameGates.k_win_len > GameGates.k_win_tab) continue;
-                w->open = 1; w->state = *(ushort*)(b + o + 0x2C);
+                w->open = 1; w->state = *(ushort*)(b + o + 0x2C); w->page_end = *(short*)(b + o + 0x2E);   // +0x2E: 3 = the last page is out (0x8DE970; the script's waits 0x860AA0 / 0x860990 test it)
                 uint cp = *(uint*)(b + GameGates.k_cur_tab + k * 4); long co = (long)cp - blk_va;
                 if (co >= GameGates.k_cur_lo && co + GameGates.k_cur_len <= GameGates.k_cur_tab) { w->choice_mode = b[co + 1]; w->choice_row = (sbyte)b[co + 2]; }
                 uint tp = *(uint*)(b + o + 0x94);
@@ -218,10 +223,27 @@ public sealed unsafe partial class FFXVRModule {
         }
     }
 
+    /// The script side's 8 message windows of the current bank (TOMesWinWork, FhUtil 0xF26D70 + bank * 8 * 0x2C, 0x2C bytes each;
+    /// the bank a signed byte at 0xF26B82: the tap gate's read, hands.cs): +0x14 the state, +0x1D the flags, +0x16. Native's
+    /// sph::msg_kind / line_ready mirror the game's own confirm test on them (0x86C8B0 from the field's input 0x867950, and the
+    /// script's wait 0x860AA0): a line takes a confirm only once its +0x1D has 0x10 (the owner's first test, 13 Nov: our presses
+    /// on a line the moment it showed were lost).
+    private void sphh_script_windows(SphHead* h) {
+        h->mw_ok = 0;
+        if (!read(FhUtil.ptr_at<sbyte>(0xF26B82), out sbyte bank) || bank < 0 || bank > 15) return;
+        byte* mw = stackalloc byte[8 * 0x2C];
+        if (_fn_safe_read(FhUtil.ptr_at<byte>(0xF26D70) + bank * 8 * 0x2C, mw, 8 * 0x2C) == 0) return;
+        for (int i = 0; i < 8; i++) {
+            byte* m = mw + i * 0x2C; ushort st = *(ushort*)(m + 0x14);
+            h->mw_state[i] = st < 255 ? (byte)st : (byte)255; h->mw_flags[i] = m[0x1D]; h->mw_w16[i] = *(ushort*)(m + 0x16) != 0 ? (byte)1 : (byte)0;
+        }
+        h->mw_ok = 1;
+    }
+
     /// F8 > Hands: the setting and the state.
     private void sphh_ui() {
         ui_check("sphere_hands", "Grab spheres with your hands (Cloisters of Trials)##sphh", ref _sphere_hands, UiTag.None,
-                 "In a Cloister of Trials, in first person with the VR hands: a label names the sphere or socket a hand comes near; a squeeze of that hand's grip there (or one started within the label's range and held as the hand arrives) takes or places the sphere with no prompt, and a note says what happened. The prompts are answered automatically only in English; in another language the grip presses A once and the prompt shows as usual. Djose only for now.");
+                 "In a Cloister of Trials, in first person with the VR hands: a label names the sphere or socket a hand comes near; a squeeze of that hand's grip there (or one started within the label's range and held as the hand arrives) takes or places the sphere with no prompt, and a note says what happened. Each line of the prompt is answered when the game is ready for it, so nothing is left for you to press. The prompts are answered automatically only in English; in another language the grip presses A once and the prompt shows as usual. Djose only for now.");
         if (_sphere_hands && !_vr_hands) { ImGui.SameLine(); ImGui.TextDisabled("(needs the VR hands on)"); }
     }
     /// F8 > Developer > Inspect: the native state (the target, the prediction, the sequence).
