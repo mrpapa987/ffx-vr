@@ -34,7 +34,7 @@ public sealed unsafe partial class FFXVRModule {
         "fmv_depth_tight_fov", "fp_actor", "fp_head_fwd", "fp_head_parts", "fp_head_reach", "fp_head_smooth", "fp_head_up", "hands",
         "hands_head", "hands_mirror", "hands_off_back", "hands_off_right", "hands_off_up", "hands_pitch", "hands_roll", "hands_show",
         "hands_stretch", "hands_swap", "hands_yaw", "hd_cluster_cache", "hide_cursor", "hide_pointers", "keepalive", "limiter_probe",
-        "load_lock_release", "noimg_mode", "shadow_budget", "shadow_near", "slow_guard", "slow_guard_restart", "smooth_anchor",
+        "load_lock_release", "noimg_mode", "shadow_budget", "shadow_near", "slow_guard", "slow_guard_restart", "smooth_anchor", "sphere_carry_offset",
         "stick_overscan", "stick_reproject_margin_ms", "stick_reproject_predict", "timer_fix", "ui_adaptive_margin", "ui_adaptive_min",
         "ui_hide", "vr_hands_debug",
     };

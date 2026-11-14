@@ -48,6 +48,7 @@
 #include "ffxvr_pointer.h" // vr-menu S3: the laser pointer: the ray on the panel, the hand, the button, the mask, the wheel, the beam (pure logic)
 #include "ffxvr_menuchord.h" // vr-menu S4: the left grip + the left menu button opens / closes the F8 window (pure logic)
 #include "ffxvr_weapon.h"  // weapon hands: the capture's draw probe, the battle motion classes, the grip maths (pure logic)
+#include "ffxvr_carry.h"   // carry: a game model's own draws at a VR hand: the slots, the identification, the move, the sphere's rule (pure logic)
 #include "ffxvr_sphere.h"   // sphere hands: the cloister spheres taken and placed by a grip, the labels, the press sequence (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
@@ -429,7 +430,7 @@ struct InEye2 {                        // scoped: sets the guard, restores the p
 // Recent camera-carrying uploads, with both eyes' images, keyed by buffer.
 // The game uploads the next object's buffer before drawing the current one,
 // so the image for a draw is usually not the most recent upload.
-struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2, eye1b, eye2b; uint32_t frame; int kind; bool has_world; float world_pos[3]; bool pal_hands, split; };   // pal_hands: this part carries hand bones; split: drawn twice per eye (eye1/eye2 = left hand, eye1b/eye2b = right hand)
+struct EyeImage { ID3D11Buffer* cb; UINT size; std::vector<uint8_t> eye1, eye2, eye1b, eye2b; uint32_t frame; int kind; bool has_world; float world_pos[3]; bool pal_hands, split; UINT base; int carry_slot, carry_v; };   // pal_hands: this part carries hand bones; split: drawn twice per eye (eye1/eye2 = left hand, eye1b/eye2b = right hand)
 EyeImage g_eye_ring[32];
 int      g_eye_ring_next = 0;
 /// The next ring slot, with every field from its previous use reset (R14): a slot that last held a split hand
@@ -438,6 +439,7 @@ static EyeImage& ring_take(ID3D11Buffer* buf, UINT size, int kind) {
     EyeImage& e = g_eye_ring[g_eye_ring_next]; g_eye_ring_next = (g_eye_ring_next + 1) % 32;
     e.cb = buf; e.size = size; e.frame = g_frames; e.kind = kind;
     e.has_world = false; e.pal_hands = false; e.split = false;
+    e.base = 0; e.carry_slot = 0; e.carry_v = 0;   // carry: the view block's offset (kind 1), the slot that decided on this image (+ 1) and its verdict
     e.eye1b.clear(); e.eye2b.clear();               // clear() keeps the capacity: no reallocation
     return e;
 }
@@ -822,6 +824,12 @@ static inline bool fp_ib_live() { return g_fp_ib.n > 0 && g_frames - g_fp_ib_fra
 // managed wants watched, armed for single frames by the research log; the matched draws of the armed frame with what their
 // constant buffer carries. Render thread only (managed arms and reads at Present). Diagnostic: nothing reads it back.
 wpn::Probe g_wpn;
+// Carry (ABI 66, ffxvr_carry_set / ffxvr_carry_status; ffxvr_carry.h; the glue "Carry" beside ffxvr_on_draw and after the sphere
+// hands): the models managed wants drawn at a VR hand (their index-buffer keys, the transform, the flags; pushed every frame,
+// stale after one without a push) and the carried sphere's rule. Render thread only.
+carry::Slots g_carry; carry::SphereGate g_carry_gate;
+uint32_t g_carry_hands_frame = 0xFFFFFFFFu; bool g_carry_hands_ok = false;   // carry_palm_now: this frame's "the hands will be drawn"
+bool g_carry_log_move = false;                                             // the next move writes its carry: line (one per pick-up)
 static inline bool fp_others_live() { return g_fp_others_n > 0 && g_frames - g_fp_others_frame <= 1u; }
 static inline bool fp_others_sent() { return g_frames - g_fp_others_frame <= 1u; }   // managed walked the table (n may be 0)
 static void ride_d2(const float* w, float* dr, float* dm) {
@@ -4815,7 +4823,7 @@ static const void* maybe_override(const void* src, UINT size, ID3D11Buffer* buf)
         if (g_stereo && buf != nullptr) {               // the same buffer seen from the other eye
             EyeImage& e = ring_take(buf, size, 1);
             e.eye2.assign(p, p + size);
-            e.has_world = has_world; memcpy(e.world_pos, wpos, sizeof(wpos));
+            e.has_world = has_world; memcpy(e.world_pos, wpos, sizeof(wpos)); e.base = base;
 
             // write_camera also publishes the frame's known product for the
             // product-only buffers; that must stay eye 1's, so save and restore.
@@ -5408,7 +5416,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 65;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log)
+constexpr int FFXVR_ABI = 66;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -8512,6 +8520,82 @@ static void wpn_probe_draw(int idx, const LightCb* lc) {
         if (n > 0) { memcpy(r->p0, p + po, sizeof(r->p0)); r->flags |= wpn::F_PALETTE; }
     }
 }
+// -- Carry: the draw's side (ffxvr_carry.h; the push, the sphere's rule and the log lines are after the sphere hands) ----------
+static bool carry_palm_now(int h, float* R9, float* o3, float* s);   // the hand's palm frame as this frame's hands draw will place it (defined after the VR hands)
+/// A newly identified image of slot t's model: the move into both eyes' images, and eye 1's again to the GPU (the draw that
+/// follows uses it; eye 2's replay uploads its own and restores eye 1's, both moved). Returns V_MOVE, or the refusal: then
+/// nothing was written or uploaded.
+static int carry_apply(carry::Slot& t, EyeImage* e) {
+    const UINT wb = e->base + carry::k_world_off;
+    if (wb + 64 > e->size) return carry::R_LAYOUT;
+    float W[16]; memcpy(W, e->eye2.data() + wb, sizeof(W));   // the game's world matrix (write_camera leaves it)
+    if (W[3] != e->world_pos[0] || W[7] != e->world_pos[1] || W[11] != e->world_pos[2]) return carry::R_LAYOUT;
+    float D[16]; bool translated = false; float To[3] = {};
+    if (t.flags & carry::F_HAND) {
+        float R[9], o[3], sc = 0.f, TR[9];
+        if (!carry_palm_now(t.act_hand, R, o, &sc)) return carry::R_NO_HAND;
+        if (!carry::hand_target(R, o, sc, t.m, TR, To) || !carry::anchor(TR, To, W, D, &translated)) return carry::R_LAYOUT;
+    }
+    else { memcpy(D, t.m, sizeof(float) * 12); D[12] = D[13] = D[14] = 0.f; D[15] = 1.f; }
+    const UINT po = palette_start(e->eye2.data(), e->size); const int pf = palette_slots(e->eye2.data(), e->size, po);
+    const int pn = carry::palette_count(e->size, po, pf);   // a palette only in a buffer that can hold one (a rigid variant's other matrices are not multiplied)
+    static std::vector<uint8_t> keep;   // render thread only: eye 2's image, put back if eye 1's is refused (they hold the same world block: not expected)
+    keep.assign(e->eye2.begin(), e->eye2.end());
+    const unsigned got2 = carry::move_image(e->eye2.data(), e->size, e->base, po, pn, D);
+    if (got2 == 0) return carry::R_LAYOUT;
+    const unsigned got1 = carry::move_image(e->eye1.data(), e->size, e->base, po, pn, D);
+    if (got1 == 0) { memcpy(e->eye2.data(), keep.data(), e->size); return carry::R_LAYOUT; }
+    { InEye2 guard; g_ctx->UpdateSubresource(e->cb, 0, nullptr, e->eye1.data(), 0, 0); }   // our detour passes it through
+    if (translated) t.st.translated++;
+    if (g_carry_log_move) {
+        g_carry_log_move = false;
+        bool rigid = false; const float ws = carry::m4_scale(W, &rigid);
+        char pal[96] = "";
+        if (pf > 0 && pn == 0) snprintf(pal, sizeof(pal), " (%d affine blocks there left as they are: the buffer is too small for a palette)", pf);
+        diag("carry: slot %d first move: buffer %u B, view block at +%u, palette %d slots at +%u%s, blocks eye 1 0x%X / eye 2 0x%X (1 W, 2 VW, 4 W^-1, 8 PVW, 16 W^-1 V^-1); "
+             "the game's W t (%.2f %.2f %.2f) scale %.3f%s -> the %s palm, target (%.2f %.2f %.2f) (render space)%s",
+             static_cast<int>(&t - g_carry.s), e->size, e->base, pn, po, pal, got1, got2, W[3], W[7], W[11], ws, rigid ? "" : " (NOT a rotation times one scale)",
+             t.act_hand == 0 ? "left" : t.act_hand == 1 ? "right" : "-", To[0], To[1], To[2], translated ? "; moved by a translation only" : "");
+    }
+    return carry::V_MOVE;
+}
+/// ffxvr_on_draw, only while a slot is live: is this draw a carried model's? Its constant buffer's world translation first
+/// (plain compares), then the bound index buffer. -1: the draw is skipped (F_HIDE); 1: it goes on, moved to the hand (it is not
+/// one of the player's parts any more: the first-person body hide leaves it alone); 0: it goes on as the game issued it.
+static int carry_draw(const LightCb* lc) {
+    if (g_ctx == nullptr || g_draw_kind != 1 || g_draw_start != 0) return 0;
+    if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return 0;
+    EyeImage* e = g_eye2_cur;
+    const bool image = e != nullptr && lc == nullptr && e->kind == 1 && e->has_world && e->base != 0 && e->size >= carry::k_min_size
+                    && e->eye1.size() == e->size && e->eye2.size() == e->size;
+    uint32_t ibk = 0; UINT ibo = 0; bool ib_read = false;
+    for (int i = 0; i < carry::k_slots; ++i) {
+        if (!g_carry.live(i, g_frames)) continue;
+        carry::Slot& t = g_carry.s[i];
+        const bool mine = image && e->carry_slot == i + 1;   // a later segment or pass of an upload this slot decided on
+        if (image && e->carry_slot != 0 && !mine) continue;  // another slot's
+        int v = mine ? carry::V_NONE : carry::prefilter(t, image, image ? e->world_pos : nullptr);
+        if (image && !mine && (t.flags & carry::F_NEAR) != 0) { const float d = sqrtf(carry::dist2(e->world_pos, t.root)); if (t.st.d_min < 0.f || d < t.st.d_min) t.st.d_min = d; }
+        if (v != carry::V_NONE) { t.st.n[v]++; continue; }
+        if (!ib_read) {
+            ib_read = true;
+            ID3D11Buffer* b = nullptr; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN; g_ctx->IAGetIndexBuffer(&b, &f, &ibo);
+            if (b != nullptr) { ibk = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(b)); b->Release(); }   // the pointer as a key only
+        }
+        v = carry::key_verdict(t, ibk, ibo, g_draw_n, t.images, mine);
+        if (v == carry::V_MOVE || v == carry::V_HIDE) {
+            if (mine) v = e->carry_v;
+            else {
+                if (v == carry::V_MOVE) v = carry_apply(t, e);
+                e->carry_slot = i + 1; e->carry_v = v; t.images++;
+            }
+        }
+        t.st.n[v]++;
+        if (v == carry::V_HIDE) return -1;
+        if (v == carry::V_MOVE) return 1;
+    }
+    return 0;
+}
 extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_in_eye2) return 0;
     g_dream_eye_now = false; g_dream_blend_now = nullptr;   // set again below for a mode-2 dream layer only
@@ -8535,6 +8619,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     // (With shadow_cam 0 such a buffer also has its eye image, which the body hide below reads as before.)
     const LightCb* lc = (g_lc_tab_frame == g_frames) ? lightcam_find(g_slot0_cur) : nullptr;
     if (g_wpn.live(g_frames)) wpn_probe_draw(idx, lc);   // the weapon capture (log only; armed frames)
+    const int carried = g_carry.any_live(g_frames) ? carry_draw(lc) : 0;   // carry: a carried model's draw moved to the VR hand (1), or skipped (-1: the test mode)
+    if (carried < 0) return -1;
     if (lc != nullptr && g_eye2_cur == nullptr && g_shadow_cam == 1 && g_fp_self_shadow == 0 && fp_hiding && g_fp_solo < 0 && lc->has_world && g_cur_dsv == nullptr
         && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room) {
         // fp_self_shadow 0: the player's own shadow is hidden, in the whole-body modes only: fp_body_mode 0 without the VR hands
@@ -8552,7 +8638,9 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
         if (whole && (who == 1 || (who == 2 && (g_ride_flags & 4)))) { g_lc_self_hidden++; return -1; }
     }
-    if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+    // (carry review S3: a draw carry moved to the hand is not judged here: its image's world_pos is still the game's place on
+    // the player's hand, inside his radius, so it could be hidden as one of his parts and shift his part indices)
+    if (carried == 0 && (fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         fpown::Why why; int who = fp_part_of(g_eye2_cur->world_pos, &why);
         uintptr_t tex = 0;
         if (fp_hiding && (g_ride_flags & 1) == 0) {   // on foot: the body hide: line's counts
@@ -13653,6 +13741,151 @@ extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n)
     snprintf(s, sizeof(s), "%s | the game would choose %s | label: %s | sequence: %s | last: %s | grabs %u (done %u, stopped %u, refused %u), prompt frames hidden %u",
              !fresh ? "no state from managed" : g_sph_head.on ? "on" : "off (a gate: see the Hands tab)", pred,
              g_sph_label[0] ? g_sph_label : "-", sph::k_phase_name[g_sph_seq.phase], g_sph_last, g_sph_grabs, g_sph_done, g_sph_stopped, g_sph_refused, g_sph_hidden_frames);
+    return s;
+}
+
+// -- Carry (ABI 66; ffxvr_carry.h, unit-tested; managed carry.cs; the draw's side is beside ffxvr_on_draw) -------------------------
+// A game model drawn at a VR hand by changing its own draws' constant-buffer images (both eyes): no game write, nothing
+// re-drawn. Managed pushes each slot every frame at Present (the model's index-buffer keys, the transform, the flags); the
+// draws of the frame that follows are matched and moved (carry_draw). The first user is the Cloister of Trials sphere Tidus
+// carries (slot 2, F_SPHERE): the hand and the on / off come from the sphere-hands state here (carry::SphereGate), read only:
+// the head managed pushed (its gates, control, free play, the carried variable), the open text windows, the grab sequence.
+//   threads  the render thread (managed's push at Present, carry_draw in the draw hook).
+// Logs: "carry:" lines: a pick-up, a put-down with its frame counts, the first move after a pick-up (the buffer's layout as
+// found), and each run of frames in which the slot was on and nothing was moved (60 lines a session).
+constexpr int k_carry_sphere = 2;
+uint32_t g_carry_frames_on = 0, g_carry_frames_moved = 0, g_carry_frames_failed = 0, g_carry_pickups = 0, g_carry_lines = 0;
+uint32_t g_carry_run_moved = 0, g_carry_run_failed = 0;      // since the pick-up
+int      g_carry_fail[carry::k_slots] = {}; uint32_t g_carry_fail_n[carry::k_slots] = {};   // per slot, the failing run in progress: its reason (a Verdict), its frames
+int      g_carry_take_hand = -1; double g_carry_take_t = -1e9;
+char     g_carry_last[160] = "nothing carried yet";
+/// The hand's palm frame in render space as this frame's hands draw will place it (hands_draw_frame's chain on the tick's
+/// latch and the base the frame's main camera published): R (3 x 3, axes as columns), the origin, the world units per metre.
+/// False when the hands will not be drawn this frame (any hide rule, another view), the hand is not tracked or is put down.
+static bool carry_palm_now(int h, float* R9, float* o3, float* s) {
+    if (h < 0 || h > 1) return false;
+    if (g_carry_hands_frame != g_frames) {
+        g_carry_hands_frame = g_frames;
+        g_carry_hands_ok = g_hs.valid && g_hs.frame == g_frames && hands_hide_why() == H2_NONE && g_hb_valid && g_hb_mode == 1 && std::isfinite(g_hb_sc) && g_hb_sc > 1e-3f;
+    }
+    if (!g_carry_hands_ok) return false;
+    const XrHand& hd = g_hs.hand[h];
+    if (!hd.grip_valid || g_h2_fs[h].put_down) return false;
+    HvXform grip; hands_grip_ref(hd, g_hs.ref_q, g_hs.ref_p, &grip);
+    if (!g_xr_translate) for (int i = 0; i < 3; ++i) grip.t[i] -= g_hs.head_p[i];
+    HvXform G; hv_default_grip_to_hand(h, &G);
+    if (g_h2_cal_set[h]) memcpy(G.R, g_h2_cal[h], sizeof(G.R));
+    HvXform T; hv_trim(h, g_h2cfg.trim_rad, g_h2cfg.trim_off_m, &T);
+    HvXform GT; hv_xform_mul(G, T, &GT);
+    const H2Gpu* pk = g_h2_gpu;
+    if (pk != nullptr && (g_h2cfg.debug & 2) == 0) { HvXform PF; hv_trim(h, pk->req.rot, pk->req.off, &PF); hv_xform_mul(GT, PF, &GT); }
+    HvXform Hr; hv_xform_mul(grip, GT, &Hr);
+    HvBone b; hands_to_world(Hr, g_hb_P, g_hb_Rb, g_hb_sc, g_hb_mv, g_hb_dy, &b);
+    memcpy(R9, b.R, sizeof(b.R)); memcpy(o3, b.o, sizeof(b.o)); *s = b.s;
+    return true;
+}
+static void carry_line(const char* text) {
+    if (g_carry_lines >= 60) return;
+    g_carry_lines++;
+    diag("carry: %s%s", text, g_carry_lines == 60 ? " (no more carry: lines this session)" : "");
+}
+/// The frame that just ended, for a slot that was on: moved, or why not (the first frame of each failing run and its end).
+static void carry_frame_end(int i) {
+    carry::Slot& t = g_carry.s[i];
+    if (!t.have || !t.act || (t.flags & carry::F_ON) == 0) { g_carry_fail[i] = 0; g_carry_fail_n[i] = 0; return; }
+    g_carry_frames_on++;
+    const bool done = t.st.n[carry::V_MOVE] > 0 || t.st.n[carry::V_HIDE] > 0;
+    if (done) {
+        g_carry_frames_moved++; g_carry_run_moved++;
+        if (g_carry_fail[i] != 0) {
+            char m[160]; snprintf(m, sizeof(m), "slot %d: moved again after %u frames (%s)", i, g_carry_fail_n[i], carry::verdict_name(g_carry_fail[i]));
+            carry_line(m); g_carry_fail[i] = 0; g_carry_fail_n[i] = 0;
+        }
+        return;
+    }
+    g_carry_frames_failed++; g_carry_run_failed++;
+    int why = carry::R_NO_IMAGE;   // the most telling refusal of the frame
+    for (int v : { carry::R_LAYOUT, carry::R_NO_HAND, carry::R_FULL, carry::R_COUNT, carry::R_KEY, carry::R_OTHER, carry::R_FAR }) if (t.st.n[v] > 0) { why = v; break; }
+    if (why != g_carry_fail[i]) {
+        char m[240];
+        snprintf(m, sizeof(m), "slot %d: on, but no draw was moved at frame %u: %s (draws refused: layout %u, hand %u, count %u, key %u, another actor's %u, far %u, no image %u; the nearest image %.2f units from the root, tolerance %.1f; %d keys, %d other actors)",
+                 i, g_frames, carry::verdict_name(why), t.st.n[carry::R_LAYOUT], t.st.n[carry::R_NO_HAND], t.st.n[carry::R_COUNT], t.st.n[carry::R_KEY], t.st.n[carry::R_OTHER], t.st.n[carry::R_FAR], t.st.n[carry::R_NO_IMAGE],
+                 t.st.d_min, t.tol, t.nk, t.na);
+        carry_line(m); g_carry_fail[i] = why; g_carry_fail_n[i] = 0;
+    }
+    g_carry_fail_n[i]++;
+}
+/// One slot's push (managed, render thread, every frame at Present while it wants the slot; a slot not pushed for a frame is
+/// off). keys: 3 uint32 per segment (index buffer, byte offset, index count); avoid: 3 floats per other actor of the model
+/// (render space). Returns the draws moved (or hidden) in the frame that just ended, -1 for a description this DLL refuses.
+extern "C" __declspec(dllexport) int ffxvr_carry_set(const carry::Desc* d, const uint32_t* keys, const float* avoid) {
+    if (d == nullptr || d->bytes != static_cast<int32_t>(sizeof(carry::Desc)) || d->slot < 0 || d->slot >= carry::k_slots) {
+        static bool s_said = false;
+        if (d != nullptr && !s_said) { s_said = true; diag("carry: managed's description is %d bytes for slot %d, this DLL expects %d and slots 0..%d: the two DLLs do not match; nothing is carried", d->bytes, d->slot, static_cast<int>(sizeof(carry::Desc)), carry::k_slots - 1); }
+        return -1;
+    }
+    const int i = d->slot;
+    carry::Slot& t = g_carry.s[i];
+    carry_frame_end(i);
+    const int moved = static_cast<int>(t.st.n[carry::V_MOVE] + t.st.n[carry::V_HIDE]);
+    g_carry.roll(i);
+    const bool ok = g_carry.set(*d, keys, avoid, g_frames);
+    if ((d->flags & carry::F_SPHERE) == 0) {
+        if (i == k_carry_sphere) g_carry_gate = carry::SphereGate();   // the sphere's rule off: it starts again from what it then sees
+        t.act = ok && (t.flags & carry::F_ON) != 0; t.act_hand = t.hand;
+        return moved;
+    }
+    // the carried sphere: the hand and the on / off from the sphere-hands state (read only)
+    const double now = sph_now();
+    if (g_sph_seq.running() && g_sph_seq.action == sph::A_TAKE && (g_sph_seq.hand == 0 || g_sph_seq.hand == 1)) { g_carry_take_hand = g_sph_seq.hand; g_carry_take_t = now; }
+    carry::SphereIn in = {};
+    in.enabled = ok && (t.flags & carry::F_ON) != 0;
+    in.fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u;
+    in.gate = g_sph_head.on != 0 && vrpad_live() && g_fp_mode == 1;
+    in.control = g_sph_head.control != 0; in.free_play = g_sph_head.free_play != 0;
+    for (int k = 0; k < sph::k_wins; ++k) if (g_sph_w[k].open) in.window = true;
+    in.seq_running = g_sph_seq.running();
+    in.carried = g_sph_head.carried;
+    in.take_hand = now - g_carry_take_t < 2.0 ? g_carry_take_hand : -1;
+    const bool drawn = g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 1u;
+    for (int h = 0; h < 2; ++h) in.hand_ok[h] = drawn && ((g_h2_grips_last >> h) & 1) != 0;
+    const int ev = g_carry_gate.step(in);
+    if (ev == carry::EV_UP || ev == carry::EV_SEEN) {
+        g_carry_pickups++; g_carry_run_moved = g_carry_run_failed = 0; g_carry_log_move = true; g_carry_fail[i] = 0; g_carry_fail_n[i] = 0;
+        char m[200];
+        snprintf(m, sizeof(m), "%s '%s' (value %d): the %s hand (%s)", ev == carry::EV_UP ? "picked up" : "already carried:", g_sph_head.carried_name[0] ? g_sph_head.carried_name : "a sphere", in.carried,
+                 g_carry_gate.hand == 0 ? "left" : "right", ev == carry::EV_SEEN ? "the default" : in.take_hand >= 0 ? "its grip took it" : "taken with the button");
+        carry_line(m); strncpy_s(g_carry_last, sizeof(g_carry_last), m, _TRUNCATE);
+        g_carry_take_hand = -1;   // used: a later pick-up with the button is the right hand's
+    }
+    else if (ev == carry::EV_DOWN) {
+        char m[200];
+        snprintf(m, sizeof(m), "put down: in the hand for %u frames, on but not moved for %u", g_carry_run_moved, g_carry_run_failed);
+        carry_line(m); strncpy_s(g_carry_last, sizeof(g_carry_last), m, _TRUNCATE);
+    }
+    t.act = g_carry_gate.held; t.act_hand = g_carry_gate.hand;
+    return moved;
+}
+/// F8 (Developer) and the logs: slot `slot`'s state as 16 values (on this frame, its hand, the keys, the other actors, last
+/// frame's draws moved / hidden / refused (all reasons but far and no image), images moved by a translation only, the nearest
+/// image's distance from the root; then for the sphere's rule: the carried value, the quiet frames, held; the session's
+/// frames on / moved / failed and pick-ups) and a line.
+extern "C" __declspec(dllexport) const char* ffxvr_carry_status(int slot, float* out, int n) {
+    static char s[420];
+    if (slot < 0 || slot >= carry::k_slots) { s[0] = 0; return s; }
+    const carry::Slot& t = g_carry.s[slot];
+    const bool live = g_carry.live(slot, g_frames);
+    uint32_t refused = 0; for (int v : { carry::R_OTHER, carry::R_KEY, carry::R_COUNT, carry::R_FULL, carry::R_NO_HAND, carry::R_LAYOUT }) refused += t.last.n[v];
+    const float v[16] = { live ? 1.f : 0.f, static_cast<float>(t.act_hand), static_cast<float>(t.nk), static_cast<float>(t.na),
+                          static_cast<float>(t.last.n[carry::V_MOVE]), static_cast<float>(t.last.n[carry::V_HIDE]), static_cast<float>(refused), static_cast<float>(t.last.translated), t.last.d_min,
+                          static_cast<float>(g_carry_gate.carried), static_cast<float>(g_carry_gate.quiet), g_carry_gate.held ? 1.f : 0.f,
+                          static_cast<float>(g_carry_frames_on), static_cast<float>(g_carry_frames_moved), static_cast<float>(g_carry_frames_failed), static_cast<float>(g_carry_pickups) };
+    if (out) for (int k = 0; k < n && k < 16; ++k) out[k] = v[k];
+    snprintf(s, sizeof(s), "%s | hand %s | last frame: %u draws moved, %u hidden, %u refused%s%s | %s | session: %u pick-ups, frames on %u (moved %u, not moved %u)",
+             !t.have || g_frames - t.frame > 1u ? "no state from managed" : live ? ((t.flags & carry::F_HIDE) ? "ON (test: hidden)" : "ON (in the hand)") : (t.flags & carry::F_ON) ? "off (the game's own draw)" : "off (the setting, or nothing to carry)",
+             t.act_hand == 0 ? "left" : t.act_hand == 1 ? "right" : "-", t.last.n[carry::V_MOVE], t.last.n[carry::V_HIDE], refused,
+             g_carry_fail[slot] != 0 ? "; NOT MOVED: " : "", g_carry_fail[slot] != 0 ? carry::verdict_name(g_carry_fail[slot]) : "", g_carry_last,
+             g_carry_pickups, g_carry_frames_on, g_carry_frames_moved, g_carry_frames_failed);
     return s;
 }
 

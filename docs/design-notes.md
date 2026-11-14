@@ -6266,3 +6266,71 @@ ffxvr_diag.log (`weapon_log.cs`).
 - The pure parts are in `ffxvr_weapon.h` (the probe, the motion classes, the grip maths prototype), unit-tested in scratch
   (`wpn_chk`: 786 checks, 37 mutants killed).
 - ABI 64 is left for the sphere-hands branch.
+
+## Carry: a game model drawn at a VR hand; the carried cloister sphere in the palm (branch `carry`, 12 Nov 2026; ABI 66)
+
+**The owner's test of the sphere grab (Djose):** the sphere is taken with the hand, then "floats around Tidus's original hand
+position". The carried sphere is its own object actor riding Tidus's right-hand weapon joint (bone 50), and the body it rides
+is hidden in first person.
+
+**The component** (`ffxvr_carry.h`, pure; the glue "Carry" in ffxvr_native.cpp; `carry.cs`). It is general: a slot holds a
+model's index-buffer keys, a transform and flags. The battle weapons will use the same slots.
+- **Nothing is re-drawn and nothing is written to the game.** The game's own draw is moved: its constant buffer's bytes are
+  changed in the two eye images the mod already keeps, and eye 1's is uploaded again just before the draw.
+- **Which bytes** (the layout `write_camera` rewrites for the headset on every character-class upload). In a buffer of the
+  skinned layout (1872 bytes or more), relative to the view block:
+  - the world matrix W at +576;
+  - its products V·W (+640), W⁻¹ (+704), P·V·W (+768) and W⁻¹·V⁻¹ (+832);
+  - the bone palette (affine, in world space) at +1344 / +1360 / +1456 of the buffer. The blocks found there count as a palette
+    only when the buffer can hold a whole one from that offset (80 slots, 5120 bytes: review S2). In a smaller buffer (a
+    rigid variant) they may be a texture or light matrix: they are left alone, and the first-move line says so.
+- **A rigid move D** is W' = D·W, the products rebuilt from W' with the image's own camera, and every palette slot D·M. That
+  covers a rigid shader variant (which reads the products) and a skinned one (which reads the palette). A product block is
+  rewritten only when the image's block really is that product, which is `write_camera`'s own rule.
+- **Where to:** the hand's palm frame as this frame's hands draw will place it (the same latch and base), with the slot's
+  offset. The model's root frame is put there and keeps its own scale: D = target · unit(W)⁻¹, computed from the image's own W
+  at the draw. So the model sits still in the hand whatever the game's animation does, and a frame-old read cannot make it
+  lag.
+
+**Which draw is the carried sphere** (every Djose sphere is one mesh, so the key alone says only "a Djose sphere"). All of:
+1. the bound constant buffer has this frame's eye images with a world matrix, and is not a light camera's (a shadow caster);
+2. its world translation is within 4 units of the carried actor's drawn root (+0x200, read at Present), and nearer that root
+   than any other shown actor of the same model (their roots are sent too; a tie is the other actor's);
+3. the bound index buffer, byte offset and index count are a segment of the carried actor's model;
+4. the model has not already taken more buffers this frame than 4 passes of its segments (review S1: one pass's worth left a
+   second pass with fresh uploads, a second scene camera or a glow or depth pass, at the game's place; the bound only stops a
+   runaway, rules 2 and 3 are the identification).
+
+Anything else leaves the draw exactly as the game issued it.
+
+**A moved draw skips the first-person body hide** (review S3). Its image's recorded world position is still the game's place
+on Tidus's hand, inside his radius: judged there it could be hidden as one of his parts, or take one of his part indices and
+shift his head mask. A refused draw is judged by the body hide as before.
+
+**When it is in the hand** (`carry::SphereGate`):
+- the setting is on and the sphere-hands gates are open (first person, VR hands, the field, the headset);
+- the trial's carried variable is not 0;
+- the player has control in free play, no text window is open and no grab sequence is running, for 4 frames in a row;
+- the hand that took it was drawn on the last frame, and the hands will be drawn on this one.
+
+It is the game's own draw at once during the take and place animations, any event, a menu, or with the hands hidden. The hand
+is the one whose grip took it; the right hand for the A button and for a sphere already carried when the rule starts.
+
+**Settings:**
+- `sphere_carry` (Hands tab, "Carried sphere in your hand", on by default). It needs sphere hands on: that feature's
+  per-frame state is what the rule reads.
+- `sphere_carry_offset` (Developer, 0–0.30 m, default 0.10): how far the sphere's centre sits from the palm's centre, out of
+  the palm side.
+- A session-only Developer checkbox hides the matched draws instead of moving them, to test the identification alone.
+
+**Logs:** `carry:` lines in ffxvr_diag.log: a pick-up with its hand, the first move after it (the buffer's layout as found),
+each run of frames that were on with nothing moved (the reason and the counts), a put-down with its frame counts, and the
+carried model's keys and bounds. 60 native lines and 12 managed lines a session.
+
+**Not verified in the game:** whether the sphere's shader variant is the skinned or the rigid one (both are moved); the
+sphere's size (the offset is a guess); its shadow stays where the game casts it; if the game culls the sphere when its own
+camera does not see Tidus's hand, it will vanish from the VR hand, and the log will say "no draw near the carried root".
+
+**Tests** (scratch `carry_chk`): the pure header (the slots, the identification, the matrices, the anchor, the image move on
+synthetic buffers of both eyes, the sphere's rule), and the glue's two halves extracted verbatim from ffxvr_native.cpp and run
+against a fake D3D context and the real `ffxvr_sphere.h` types. Mutants for all three.
