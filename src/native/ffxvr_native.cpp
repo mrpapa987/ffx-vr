@@ -13340,6 +13340,7 @@ uint32_t    g_sph_set_frame = 0; bool g_sph_have = false;
 sph::Seq    g_sph_seq;
 sph::Pick   g_sph_pick;
 int         g_sph_pred = sph::k_pred_none, g_sph_reach[2] = { -1, -1 };
+sph::Still  g_sph_still; uint32_t g_sph_still_frame = 0; bool g_sph_still_now = false;   // round 3 S6: has Tidus stopped?
 bool        g_sph_hide_ui = false; uint32_t g_sph_hidden_frames = 0;
 char        g_sph_label[64] = "", g_sph_note[64] = "", g_sph_last[200] = "no grab yet";
 float       g_sph_label_a = 0.f, g_sph_label_p[3] = {}, g_sph_note_p[3] = {};
@@ -13490,13 +13491,15 @@ static void sph_grab(int h, int ti, float d_m) {
     else if (act == sph::A_EMPTY) no = "nothing to take (an empty socket, empty hands)";
     else if (act == sph::A_NONE) no = "the sphere state is not read";
     else if (g_sph_pred == sph::k_pred_unsure) no = "the game's choice cannot be predicted here (a facing rule)";
+    else if (g_sph_pred == sph::k_pred_edge) no = g_sph_still_now ? "step closer (on the edge of a target's zone: the game's choice could go either way)" : "step closer (still moving: the game's choice is not settled)";
     else if (g_sph_pred != t.widx) no = "step closer (the game would choose another target, or none)";
     else if (!g_sph_head.control || !g_sph_head.free_play) no = "an event is running (no control)";
     else if (open) no = "a text window is open";
     if (no) {
         g_sph_refused++;
         snprintf(g_sph_last, sizeof(g_sph_last), "grab refused: %s", no);
-        diag("sphere grab: %s hand at worker %d (%s, %.2f m; the game would choose %d): refused: %s", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_pred, no);
+        diag("sphere grab: %s hand at worker %d (%s, %.2f m; the game would choose %d; Tidus (%.2f,%.2f,%.2f) %s): refused: %s", h ? "right" : "left", t.widx, t.name[0] ? t.name : "?", d_m, g_sph_pred,
+             g_sph_head.tidus[0], g_sph_head.tidus[1], g_sph_head.tidus[2], g_sph_still_now ? "stopped" : "moving", no);
         xr_haptic(h, 0.6f, 0.03f);
         return;
     }
@@ -13575,7 +13578,11 @@ static void sph_tick() {
         palm[h][0] = -g_sph_palm[h][0]; palm[h][1] = -g_sph_palm[h][1]; palm[h][2] = g_sph_palm[h][2];   // render -> game space
     }
     const float upm = (g_hb_valid && g_hb_sc > 1e-3f) ? g_hb_sc : 11.4f;
-    g_sph_pred = on ? sph::predict(g_sph_z, g_sph_nz, g_sph_head.tidus, g_sph_head.player_radius, g_sph_head.player_widx) : sph::k_pred_none;
+    // round 3 S6: a box zone counts from k_edge_margin inside its sides, and only once Tidus has stopped (the log's sixth
+    // grab: on worker 50's side, 34 ms after a run; the game read him 0.02 units on and chose worker 51)
+    if (!fresh) g_sph_still.reset(); else if (g_sph_set_frame != g_sph_still_frame) { g_sph_still_frame = g_sph_set_frame; g_sph_still.feed(g_sph_head.tidus, sph_now()); }
+    g_sph_still_now = g_sph_still.stopped(sph_now());
+    g_sph_pred = on ? sph::predict(g_sph_z, g_sph_nz, g_sph_head.tidus, g_sph_head.player_radius, g_sph_head.player_widx, sph::k_edge_margin, g_sph_still_now) : sph::k_pred_none;
     // idle: the player could start an interaction now (review N3: no labels, no held-back grip in an event or at an open prompt)
     bool open = false; for (int k = 0; k < sph::k_wins; ++k) if (g_sph_w[k].open) open = true;
     const bool idle = on && g_sph_head.control != 0 && g_sph_head.free_play != 0 && !open && !g_sph_seq.running();
@@ -13642,7 +13649,7 @@ extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n)
                           static_cast<float>(g_sph_grabs), static_cast<float>(g_sph_done), static_cast<float>(g_sph_stopped), static_cast<float>(g_sph_refused),
                           static_cast<float>(g_sph_reach[0]), static_cast<float>(g_sph_reach[1]) };
     if (out) for (int k = 0; k < n && k < 16; ++k) out[k] = v[k];
-    char pred[32]; if (g_sph_pred == sph::k_pred_unsure) snprintf(pred, sizeof(pred), "? (a facing rule)"); else if (g_sph_pred == sph::k_pred_none) snprintf(pred, sizeof(pred), "nothing"); else snprintf(pred, sizeof(pred), "worker %d", g_sph_pred);
+    char pred[32]; if (g_sph_pred == sph::k_pred_unsure) snprintf(pred, sizeof(pred), "? (a facing rule)"); else if (g_sph_pred == sph::k_pred_edge) snprintf(pred, sizeof(pred), "? (%s)", g_sph_still_now ? "a zone's edge" : "moving"); else if (g_sph_pred == sph::k_pred_none) snprintf(pred, sizeof(pred), "nothing"); else snprintf(pred, sizeof(pred), "worker %d", g_sph_pred);
     snprintf(s, sizeof(s), "%s | the game would choose %s | label: %s | sequence: %s | last: %s | grabs %u (done %u, stopped %u, refused %u), prompt frames hidden %u",
              !fresh ? "no state from managed" : g_sph_head.on ? "on" : "off (a gate: see the Hands tab)", pred,
              g_sph_label[0] ? g_sph_label : "-", sph::k_phase_name[g_sph_seq.phase], g_sph_last, g_sph_grabs, g_sph_done, g_sph_stopped, g_sph_refused, g_sph_hidden_frames);

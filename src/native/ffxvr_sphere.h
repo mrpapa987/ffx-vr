@@ -91,7 +91,7 @@ constexpr int32_t k_sizes = static_cast<int32_t>(sizeof(Zone) | (sizeof(Target) 
 static_assert(sizeof(Zone) == 60 && sizeof(Target) == 60 && sizeof(Win) == 120 && sizeof(Head) == 112, "the layouts shared with sphere_hands.cs");
 
 // -- the game's choice, mirrored ----------------------------------------------------------------------------------------
-enum Cand { C_NO = 0, C_YES = 1, C_UNSURE = 2 };
+enum Cand { C_NO = 0, C_YES = 1, C_UNSURE = 2, C_EDGE = 3 };
 /// Is the player at p (game space) a talk candidate of zone z, and its "distance" (what the game compares)?
 inline int candidate(const Zone& z, const float p[3], float radius, float* metric) {
     const float dx = p[0] - z.c[0], dy = p[1] - z.c[1], dz = p[2] - z.c[2];
@@ -133,24 +133,77 @@ inline bool tested(const Zone& z, int player_widx) {
     if (z.kind == 1) return z.aa == 1 && !(f34 & 0x220u) && !(f36 & 0x08u);   // 0x866980
     return z.kind == 2 || z.kind == 3;
 }
-constexpr int k_pred_none = -1, k_pred_unsure = -2;
-/// The worker the game would choose for a confirm now (its widx), k_pred_none, or k_pred_unsure: a candidate with a facing
-/// rule (not mirrored) that could win, i.e. nearer than the best sure one, or equal and earlier, or with no sure one. A box
-/// zone's "distance" is (range + radius)^2, 0 in Djose, which no object can beat. zones in the game's order (ascending widx).
-inline int predict(const Zone* z, int n, const float p[3], float radius, int player_widx = -1) {
+/// Round 3 S6: how far inside the zone's candidate region the player is, in game units (negative: outside). A box zone
+/// only (kind 3; the others: 1e9, no margin is asked of them). The least of the distances to the box's four sides (the
+/// range's ring counts as inside) and, with a height rule, to its two height limits.
+inline float box_depth(const Zone& z, const float p[3], float radius) {
+    if (z.kind != 3) return 1e9f;
+    const float dx = p[0] - z.c[0], dy = p[1] - z.c[1], dz = p[2] - z.c[2];
+    const float c = cosf(z.rot), s = sinf(z.rot);
+    const float u = dx * c - dz * s, v = dx * s + dz * c;   // as candidate()
+    const float ex = z.hx - fabsf(u), ew = z.hz - fabsf(v), r = z.range + radius;
+    float d;
+    if (ex >= 0.f && ew >= 0.f) d = (ex < ew ? ex : ew) + r;                    // in the box: the nearer side
+    else { const float ox = ex < 0.f ? -ex : 0.f, ow = ew < 0.f ? -ew : 0.f; d = r - sqrtf(ox * ox + ow * ow); }
+    if (z.h > 0.f) { const float eh = z.h - fabsf(dy); if (eh < d) d = eh; }
+    return d;
+}
+constexpr float k_edge_margin = 0.5f;   // a box zone is a sure candidate from this far inside every side, and surely none from this far outside
+/// candidate() with the margin (round 3 S6; the owner's log, 22:18:20: Tidus at x = -1.0, on worker 50's side, read as
+/// -1.02 by the game on the press's frame, which chose worker 51): a box zone within `margin` of its region's border,
+/// inside or outside, is C_EDGE: the game may or may not count it a few frames later. margin 0: candidate() itself.
+inline int candidate_m(const Zone& z, const float p[3], float radius, float margin, float* metric) {
+    const int c = candidate(z, p, radius, metric);
+    if (z.kind != 3 || !(margin > 0.f)) return c;
+    const float d = box_depth(z, p, radius);
+    if (d >= margin) return c;
+    if (d <= -margin) return C_NO;
+    return C_EDGE;   // (its metric: the box's, set by candidate())
+}
+constexpr int k_pred_none = -1, k_pred_unsure = -2, k_pred_edge = -3;
+/// The worker the game would choose for a confirm now (its widx), k_pred_none, k_pred_unsure or k_pred_edge.
+/// k_pred_unsure: a candidate with a facing rule (not mirrored) that could win, i.e. nearer than the best sure one, or
+/// equal and earlier, or with no sure one. A box zone's "distance" is (range + radius)^2, 0 in Djose, which no object can
+/// beat. zones in the game's order (ascending widx).
+/// k_pred_edge (round 3 S6; no grab starts on it, the label says "Step closer"): the answer could change within a few
+/// frames. Either a box zone within `margin` of its border could win by the same rule (so a zone's edge matters only where
+/// it changes the choice: in the door pair's overlap the earlier worker wins whatever the later one's edge says), or
+/// there is a choice and the player has not stopped (`still` false; see Still).
+inline int predict(const Zone* z, int n, const float p[3], float radius, int player_widx = -1, float margin = 0.f, bool still = true) {
     int best = k_pred_none, bi = -1; float bestv = 0.f;
     for (int i = 0; i < n; ++i) {
         float m = 0.f;
         if (!tested(z[i], player_widx)) continue;
-        if (candidate(z[i], p, radius, &m) == C_YES && (best == k_pred_none || m < bestv)) { best = z[i].widx; bestv = m; bi = i; }
+        if (candidate_m(z[i], p, radius, margin, &m) == C_YES && (best == k_pred_none || m < bestv)) { best = z[i].widx; bestv = m; bi = i; }
     }
     for (int i = 0; i < n; ++i) {
         float m = 0.f;
         if (!tested(z[i], player_widx)) continue;
-        if (candidate(z[i], p, radius, &m) == C_UNSURE && (best == k_pred_none || m < bestv || (m == bestv && i < bi))) return k_pred_unsure;
+        if (candidate_m(z[i], p, radius, margin, &m) == C_UNSURE && (best == k_pred_none || m < bestv || (m == bestv && i < bi))) return k_pred_unsure;
     }
+    for (int i = 0; i < n; ++i) {
+        float m = 0.f;
+        if (!tested(z[i], player_widx)) continue;
+        if (candidate_m(z[i], p, radius, margin, &m) == C_EDGE && (best == k_pred_none || m < bestv || (m == bestv && i < bi))) return k_pred_edge;
+    }
+    if (best != k_pred_none && !still) return k_pred_edge;
     return best;
 }
+inline float dist3(const float a[3], const float b[3]) { const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return sqrtf(x * x + y * y + z * z); }
+/// Has the player stopped (round 3 S6)? His root has stayed within k_still_eps of one place for k_still_s. Timed, not
+/// counted in frames: the render thread reads the root more often than the game moves it. feed() once per fresh read;
+/// reset() when there was none.
+constexpr float  k_still_eps = 0.02f;   // game units (11.4 = 1 m); a run is about 0.7 a game frame, the log's settling 0.02 in 70 ms
+constexpr double k_still_s = 0.10;      // three game frames
+struct Still {
+    float a[3] = { 0.f, 0.f, 0.f }; double t0 = 0.0; bool have = false;
+    void reset() { have = false; }
+    void feed(const float p[3], double t) {
+        if (have && dist3(p, a) <= k_still_eps) return;
+        a[0] = p[0]; a[1] = p[1]; a[2] = p[2]; t0 = t; have = true;
+    }
+    bool stopped(double t) const { return have && t - t0 >= k_still_s; }
+};
 
 // -- the hand's target, the action and the label --------------------------------------------------------------------------
 enum Act { A_NONE = 0, A_TAKE, A_PLACE, A_FULL, A_EMPTY };
@@ -167,7 +220,6 @@ inline float fade(float d) {
 }
 /// strncpy without its warnings: at most cap - 1 characters, always terminated.
 inline void copy_str(char* out, const char* in, int cap) { if (cap <= 0) return; int i = 0; for (; in && in[i] && i < cap - 1; ++i) out[i] = in[i]; out[i] = 0; }
-inline float dist3(const float a[3], const float b[3]) { const float x = a[0] - b[0], y = a[1] - b[1], z = a[2] - b[2]; return sqrtf(x * x + y * y + z * z); }
 /// One hand's nearest target with a known action (its index, -1 none) and its distance in metres.
 inline int nearest(const Head& h, const Target* t, int nt, const float palm[3], float units_per_m, float* d_m) {
     int best = -1; float bd = 1e9f;
