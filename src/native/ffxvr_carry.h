@@ -27,6 +27,8 @@ constexpr int k_slots = 4;       // 0 a weapon, 1 an off-hand item, 2 the carrie
 constexpr int k_keys = 16;       // segments of one model
 constexpr int k_avoid = 24;      // other actors of the same model (their roots)
 constexpr float k_tol_max = 12.f;
+constexpr int k_passes = 4;      // passes of a model a frame, each with uploads of its own (a second scene camera, a reflection, a glow or depth pass)
+constexpr int k_pal_slots = 80;  // the skinned layout's bone palette: float4x4[80]
 
 enum : uint32_t {
     F_ON = 1,       // the caller wants the model carried
@@ -56,7 +58,7 @@ struct Key { uint32_t ib, off, count; };
 enum Verdict : int { V_NONE = 0, V_MOVE, V_HIDE, R_NO_IMAGE, R_FAR, R_OTHER, R_KEY, R_COUNT, R_FULL, R_NO_HAND, R_LAYOUT, V_N };
 inline const char* verdict_name(int v) {
     static const char* const k[V_N] = { "none", "moved", "hidden", "no constant-buffer image with a world matrix", "no draw near the carried root",
-                                        "nearer another actor of the model", "not the model's index buffer", "the index count differs", "more buffers than the model has segments",
+                                        "nearer another actor of the model", "not the model's index buffer", "the index count differs", "more buffers than 4 passes of the model's segments",
                                         "the hand is not drawn", "the buffer's layout or matrix was refused" };
     return v >= 0 && v < V_N ? k[v] : "?";
 }
@@ -68,7 +70,7 @@ struct Slot {
     Key k[k_keys] = {}; int nk = 0;
     float avoid[k_avoid][3] = {}; int na = 0;
     bool act = false; int act_hand = -1;   // the decision for the coming frame (the glue: F_ON, and the gate with F_SPHERE)
-    int images = 0;                        // constant-buffer images claimed this frame
+    int images = 0;                        // constant-buffer images claimed this frame (at most k_passes * nk)
     Stat st = {}, last = {};
 };
 
@@ -122,8 +124,10 @@ inline int prefilter(const Slot& t, bool image, const float* w) {
     return V_NONE;
 }
 /// Step 2: the bound index buffer. The buffer, the byte offset and the index count must all be a segment of the model.
-/// claimed: the constant-buffer images this slot already took this frame (a model has one per segment at most);
-/// same_image: this draw's image is one of them (a second pass of a segment).
+/// claimed: the constant-buffer images this slot already took this frame (a model has one per segment at most in a pass, and
+/// the game may draw it in several passes with fresh uploads: k_passes of them are taken, so a second pass's copy does not
+/// stay at the game's place; the bound only stops a runaway, the keys and F_NEAR's position are the identification);
+/// same_image: this draw's image is one of them (another segment or pass of that upload).
 inline int key_verdict(const Slot& t, uint32_t ib, uint32_t off, uint32_t count, int claimed, bool same_image) {
     bool key = false, cnt = false;
     for (int i = 0; i < t.nk; ++i) {
@@ -132,7 +136,7 @@ inline int key_verdict(const Slot& t, uint32_t ib, uint32_t off, uint32_t count,
     }
     if (!key) return R_KEY;
     if (!cnt) return R_COUNT;
-    if (!same_image && claimed >= t.nk) return R_FULL;
+    if (!same_image && claimed >= k_passes * t.nk) return R_FULL;
     return (t.flags & F_HIDE) != 0 ? V_HIDE : V_MOVE;
 }
 
@@ -219,11 +223,18 @@ inline bool anchor(const float* R, const float* o, const float* W, float* D, boo
     return true;
 }
 
+/// The palette slots move_image may multiply: the affine blocks found by content (ffxvr_native.cpp palette_slots) count as a
+/// bone palette only when the buffer can hold a whole one from pal_off on. A smaller buffer (a rigid variant) has other
+/// matrices there (a texture or light matrix, identities): none is touched, the world family alone moves the model.
+inline int palette_count(uint32_t size, uint32_t pal_off, int found) {
+    return found > 0 && static_cast<uint64_t>(pal_off) + static_cast<uint64_t>(k_pal_slots) * 64u <= size ? found : 0;
+}
 // Which blocks move_image rewrote.
 enum : unsigned { B_W = 1, B_VW = 2, B_WI = 4, B_PVW = 8, B_IVW = 16 };
 constexpr uint32_t k_world_off = 576, k_min_size = 1872;
 /// One eye's image of a skinned-layout constant buffer (the layout at the top), moved by D (affine, rotation times one scale).
-/// pal_off / pal_n: the palette's place and its affine slots (ffxvr_native.cpp palette_start / palette_slots; 0 slots: none).
+/// pal_off / pal_n: the palette's place and its affine slots (ffxvr_native.cpp palette_start / palette_slots through
+/// palette_count; 0 slots: none).
 /// Returns the blocks rewritten (0: refused, nothing written): refused when the buffer is too small for the world family,
 /// W is not affine, D cannot be inverted, or the palette does not fit.
 inline unsigned move_image(uint8_t* img, uint32_t size, uint32_t base, uint32_t pal_off, int pal_n, const float* D) {

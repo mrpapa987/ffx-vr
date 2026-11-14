@@ -8535,7 +8535,8 @@ static int carry_apply(carry::Slot& t, EyeImage* e) {
         if (!carry::hand_target(R, o, sc, t.m, TR, To) || !carry::anchor(TR, To, W, D, &translated)) return carry::R_LAYOUT;
     }
     else { memcpy(D, t.m, sizeof(float) * 12); D[12] = D[13] = D[14] = 0.f; D[15] = 1.f; }
-    const UINT po = palette_start(e->eye2.data(), e->size); const int pn = palette_slots(e->eye2.data(), e->size, po);
+    const UINT po = palette_start(e->eye2.data(), e->size); const int pf = palette_slots(e->eye2.data(), e->size, po);
+    const int pn = carry::palette_count(e->size, po, pf);   // a palette only in a buffer that can hold one (a rigid variant's other matrices are not multiplied)
     static std::vector<uint8_t> keep;   // render thread only: eye 2's image, put back if eye 1's is refused (they hold the same world block: not expected)
     keep.assign(e->eye2.begin(), e->eye2.end());
     const unsigned got2 = carry::move_image(e->eye2.data(), e->size, e->base, po, pn, D);
@@ -8547,15 +8548,18 @@ static int carry_apply(carry::Slot& t, EyeImage* e) {
     if (g_carry_log_move) {
         g_carry_log_move = false;
         bool rigid = false; const float ws = carry::m4_scale(W, &rigid);
-        diag("carry: slot %d first move: buffer %u B, view block at +%u, palette %d slots at +%u, blocks eye 1 0x%X / eye 2 0x%X (1 W, 2 VW, 4 W^-1, 8 PVW, 16 W^-1 V^-1); "
+        char pal[96] = "";
+        if (pf > 0 && pn == 0) snprintf(pal, sizeof(pal), " (%d affine blocks there left as they are: the buffer is too small for a palette)", pf);
+        diag("carry: slot %d first move: buffer %u B, view block at +%u, palette %d slots at +%u%s, blocks eye 1 0x%X / eye 2 0x%X (1 W, 2 VW, 4 W^-1, 8 PVW, 16 W^-1 V^-1); "
              "the game's W t (%.2f %.2f %.2f) scale %.3f%s -> the %s palm, target (%.2f %.2f %.2f) (render space)%s",
-             static_cast<int>(&t - g_carry.s), e->size, e->base, pn, po, got1, got2, W[3], W[7], W[11], ws, rigid ? "" : " (NOT a rotation times one scale)",
+             static_cast<int>(&t - g_carry.s), e->size, e->base, pn, po, pal, got1, got2, W[3], W[7], W[11], ws, rigid ? "" : " (NOT a rotation times one scale)",
              t.act_hand == 0 ? "left" : t.act_hand == 1 ? "right" : "-", To[0], To[1], To[2], translated ? "; moved by a translation only" : "");
     }
     return carry::V_MOVE;
 }
 /// ffxvr_on_draw, only while a slot is live: is this draw a carried model's? Its constant buffer's world translation first
-/// (plain compares), then the bound index buffer. -1: the draw is skipped (F_HIDE); 0: it goes on (moved, or left as it is).
+/// (plain compares), then the bound index buffer. -1: the draw is skipped (F_HIDE); 1: it goes on, moved to the hand (it is not
+/// one of the player's parts any more: the first-person body hide leaves it alone); 0: it goes on as the game issued it.
 static int carry_draw(const LightCb* lc) {
     if (g_ctx == nullptr || g_draw_kind != 1 || g_draw_start != 0) return 0;
     if (g_render_tid != 0 && GetCurrentThreadId() != g_render_tid) return 0;
@@ -8586,7 +8590,7 @@ static int carry_draw(const LightCb* lc) {
         }
         t.st.n[v]++;
         if (v == carry::V_HIDE) return -1;
-        if (v == carry::V_MOVE) return 0;
+        if (v == carry::V_MOVE) return 1;
     }
     return 0;
 }
@@ -8613,7 +8617,8 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     // (With shadow_cam 0 such a buffer also has its eye image, which the body hide below reads as before.)
     const LightCb* lc = (g_lc_tab_frame == g_frames) ? lightcam_find(g_slot0_cur) : nullptr;
     if (g_wpn.live(g_frames)) wpn_probe_draw(idx, lc);   // the weapon capture (log only; armed frames)
-    if (g_carry.any_live(g_frames) && carry_draw(lc) < 0) return -1;   // carry: a carried model's draw moved to the VR hand (or skipped: the test mode)
+    const int carried = g_carry.any_live(g_frames) ? carry_draw(lc) : 0;   // carry: a carried model's draw moved to the VR hand (1), or skipped (-1: the test mode)
+    if (carried < 0) return -1;
     if (lc != nullptr && g_eye2_cur == nullptr && g_shadow_cam == 1 && g_fp_self_shadow == 0 && fp_hiding && g_fp_solo < 0 && lc->has_world && g_cur_dsv == nullptr
         && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room) {
         // fp_self_shadow 0: the player's own shadow is hidden, in the whole-body modes only: fp_body_mode 0 without the VR hands
@@ -8631,7 +8636,9 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
         }
         if (whole && (who == 1 || (who == 2 && (g_ride_flags & 4)))) { g_lc_self_hidden++; return -1; }
     }
-    if ((fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
+    // (carry review S3: a draw carry moved to the hand is not judged here: its image's world_pos is still the game's place on
+    // the player's hand, inside his radius, so it could be hidden as one of his parts and shift his part indices)
+    if (carried == 0 && (fp_hiding || g_fp_solo >= 0) && g_fp_have_pos && g_xr_want && !g_ovr_suspend && !g_screen3d_now && !g_backdrop_room && g_eye2_cur != nullptr && g_eye2_cur->has_world) {
         fpown::Why why; int who = fp_part_of(g_eye2_cur->world_pos, &why);
         uintptr_t tex = 0;
         if (fp_hiding && (g_ride_flags & 1) == 0) {   // on foot: the body hide: line's counts

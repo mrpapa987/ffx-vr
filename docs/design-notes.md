@@ -6281,7 +6281,9 @@ model's index-buffer keys, a transform and flags. The battle weapons will use th
   skinned layout (1872 bytes or more), relative to the view block:
   - the world matrix W at +576;
   - its products V·W (+640), W⁻¹ (+704), P·V·W (+768) and W⁻¹·V⁻¹ (+832);
-  - the bone palette (affine, in world space) at +1344 / +1360 / +1456 of the buffer.
+  - the bone palette (affine, in world space) at +1344 / +1360 / +1456 of the buffer. The blocks found there count as a palette
+    only when the buffer can hold a whole one from that offset (80 slots, 5120 bytes: review S2). In a smaller buffer (a
+    rigid variant) they may be a texture or light matrix: they are left alone, and the first-move line says so.
 - **A rigid move D** is W' = D·W, the products rebuilt from W' with the image's own camera, and every palette slot D·M. That
   covers a rigid shader variant (which reads the products) and a skinned one (which reads the palette). A product block is
   rewritten only when the image's block really is that product, which is `write_camera`'s own rule.
@@ -6295,9 +6297,15 @@ model's index-buffer keys, a transform and flags. The battle weapons will use th
 2. its world translation is within 4 units of the carried actor's drawn root (+0x200, read at Present), and nearer that root
    than any other shown actor of the same model (their roots are sent too; a tie is the other actor's);
 3. the bound index buffer, byte offset and index count are a segment of the carried actor's model;
-4. the model has not already taken more buffers this frame than it has segments.
+4. the model has not already taken more buffers this frame than 4 passes of its segments (review S1: one pass's worth left a
+   second pass with fresh uploads, a second scene camera or a glow or depth pass, at the game's place; the bound only stops a
+   runaway, rules 2 and 3 are the identification).
 
 Anything else leaves the draw exactly as the game issued it.
+
+**A moved draw skips the first-person body hide** (review S3). Its image's recorded world position is still the game's place
+on Tidus's hand, inside his radius: judged there it could be hidden as one of his parts, or take one of his part indices and
+shift his head mask. A refused draw is judged by the body hide as before.
 
 **When it is in the hand** (`carry::SphereGate`):
 - the setting is on and the sphere-hands gates are open (first person, VR hands, the field, the headset);
