@@ -434,7 +434,7 @@ Source: `docs/research-2026-10-24/` (the verifier's corrections applied). Addres
 | 0x821656 | 0x421656 | `call 0xA44B30`: the **unconditional job join**, after the battle-UI draw. Then the scenario-flag change log (0x787360), `0x63DDC0` (just `ret`), return | H |
 | 0x82F881 | 0x42F881 | conditional join at the end of Ch_DrawMain (`if (DAT_01a85f54 < n*4 \|\| == 0)`) | H |
 | 0x832E10 | 0x432E10 | Ch_CalcMain dispatches the per-actor update **0x833530** to the JobWorkers (0xA44B90 → 0x71E720) and returns without waiting. Joined at the next Ch_CalcMain (0xA44B80), 0x82F881, 0x821656 and the renderer (0x71E810) | H |
-| 0xC496D4 | 0x8C96D4 | exec byte: 1 on logic invocations, 0 on FFX-60fps render-only ones | H/ext |
+| 0xC496D4 | 0x8496D4 | exec byte: 1 on logic invocations, 0 on FFX-60fps render-only ones | H/ext |
 
 Main-thread order per invocation (H):
 1. logic ticks (incl. battle 0x790C10, Ch_CalcMain)

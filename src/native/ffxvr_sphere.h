@@ -594,25 +594,47 @@ inline float note_alpha(double age) {
 // draw whatever the count; ffx-rust docs/formats/frame-timing.md). Nothing is written to the game: managed's detour on that
 // getter (sphere_fast.cs) asks ffxvr_sph_fast_exec, which multiplies an answer of exactly 1 and passes every other value
 // through (0 is a draw-only pass of FFX-60fps, which sets the game's byte to 1 or 0 before every pass and would overwrite a
-// written value). So there is no game value to restore, and "never left sped up" needs no restore to succeed:
-//   - Fast::step decides once a frame (ffxvr_native.cpp sfast_frame, called at every Present whatever the headset does) from
-//     that frame's state; anything but "a sequence of ours is past the interaction's start, control off, the gates open, the
-//     same scene, the state fresh, under the cap" answers 1;
-//   - the answer is published with a time stamp and is good for k_fast_lease_ms only (fast_answer): if the Presents stop (a
-//     load, a hang, the module going away), the game is back at its own speed 0.1 s later with nobody doing anything.
-// The press guard: the pad's press edges are made once per main-loop pass, so with several ticks in a pass every tick would
-// see the same new confirm. From the frame we ask for a press until k_fast_guard_s after the game first polled it, the
-// answer is 1: the pass that carries our press's edge runs one tick, as in normal play, and every timing rule of the press
-// sequence (the readiness mirror, the settle, the repeat, the withdrawal) holds as it was written. While a page waits for our
-// press nothing else in the script moves, so those frames cost nothing.
+// written value). So there is no game value to restore, and "never left sped up" needs no restore to succeed.
+// Two places decide, and the game gets the factor only when both agree:
+//   - the render thread, once a frame (Fast::step from ffxvr_native.cpp sfast_frame, at every Present whatever the headset
+//     does): is a sequence of ours past the interaction's start, control off, the gates open, the same scene, the state
+//     fresh, under the cap? It publishes the factor or 1, with a time stamp; a published answer is good for k_fast_lease_ms
+//     only (fast_answer): if the Presents stop, the game is back at its own speed 0.1 s later with nobody doing anything.
+//   - the game's own thread, at every ask (fast_ask from ffxvr_sph_fast_exec; review round 1: everything that is a race
+//     between the render, input and game threads is decided here, from what the input thread stamped at the instant it
+//     handed the game an input, and from what the game thread itself reads):
+//       our press     the pad's press edges are made once per pass, so with several ticks in a pass every tick would see the
+//                     same new confirm. From the instant a press of ours is set (the word the input thread reads) until it
+//                     is let go, and through the pass under way then and the next (k_fast_guard_passes; by time,
+//                     k_fast_guard_ms, only if the pass counter did not read), the answer is the game's own: the pass that
+//                     carries our press's edge runs one tick, as in normal play, and every timing rule of the press sequence
+//                     holds as it was written. A button let go is no edge, so nothing more is needed after. While a page
+//                     waits for our press nothing else in the script moves; what this costs is the hold's own 0.1 s a page.
+//       the player's  any button or stick push of the player's own (stamped by the input thread before the game gets the
+//                     state): the game's own answer for k_fast_player_ms or k_fast_player_passes (the later).
+//       control       the player actor is set (the game's own word, read at the ask): free play never runs at the factor,
+//                     from the very tick that hands control back.
+//       a slow pass   k_fast_pass_ms after a pass's first ask the answer is the game's own for the rest of that pass, and
+//                     the render thread then ends the run for good (FE_SLOW): N ticks never push a pass far enough to feed
+//                     the game's catch-up (a second Sg_MainLoop per frame from 66.7 ms of frame time) or FFX-60fps' backlog.
+// The stamps carry the game's main-loop pass counter as well as the time, so a stall between the input and the pass that
+// reads it (a hitch, a slow GPU frame) cannot age a guard away before its pass ran: the player's guard holds while EITHER
+// is young, our release's by passes.
 constexpr int      k_fast_min = 1, k_fast_max = 12, k_fast_def = 6;   // ini sphere_fast_factor (1 = off)
 constexpr double   k_fast_cap_s = 3.0;      // one sequence is sped up for at most this long (real time), then never again
-constexpr double   k_fast_guard_s = 0.07;   // two 30 Hz passes after the game first polled our press
 constexpr uint32_t k_fast_lease_ms = 100;   // a published answer's life
+constexpr uint32_t k_fast_guard_ms = 70, k_fast_guard_passes = 1;      // after our press was let go: the pass under way and the next; 70 ms (two 30 Hz passes) only without a pass counter
+constexpr uint32_t k_fast_player_ms = 150, k_fast_player_passes = 8;   // after the player's own input: 8 passes is one logic tick of FFX-60fps at 240 fps
+// The pass budget. A pass at the game's speed is one tick and the frame's draw inside 33.3 ms (16.7 ms with FFX-60fps at
+// 60). 25 ms of ticks leaves the draw 8 ms of a 30 Hz frame and keeps a frame far under the 66.7 ms at which Sg_FrameSync
+// adds a second pass (and FFX-60fps a backlog pass); at 60 fps it makes at most one late frame per pass, which neither
+// counts as a backlog. Past it the run ends: the scene is too heavy for this factor.
+constexpr double   k_fast_pass_ms = 25.0;
 inline int fast_clamp(int f) { return f < k_fast_min ? k_fast_min : f > k_fast_max ? k_fast_max : f; }
-enum FastEnd { FE_NONE = 0, FE_SEQ, FE_CONTROL, FE_CAP, FE_GATE, FE_GEN, FE_STALE, FE_SETTING, FE_SHUTDOWN, FE_N };
+enum FastEnd { FE_NONE = 0, FE_SEQ, FE_CONTROL, FE_CAP, FE_GATE, FE_GEN, FE_STALE, FE_SETTING, FE_SHUTDOWN, FE_SLOW, FE_N };
 static const char* const k_fast_end_name[FE_N] = { "-", "the sequence ended", "control came back", "the 3 s cap", "the feature's gates closed (a menu, a battle, the view, the headset)",
-    "the scene changed", "no fresh state (the headset's frame or managed's push stopped)", "the setting is off or the factor is 1", "the module is shutting down" };
+    "the scene changed", "no fresh state (the headset's frame or managed's push stopped)", "the setting is off or the factor is 1", "the module is shutting down",
+    "a main-loop pass took longer than 25 ms (the scene is too heavy for this factor)" };
 struct FastIn {
     double t;            // seconds
     bool   setting;      // ini sphere_fast, from a settings push that is not stale
@@ -625,13 +647,14 @@ struct FastIn {
     bool   gen_same;     // the scene is the one the sequence started in
     bool   control;      // the player has control
     bool   press_out;    // a press of ours is out (asked for and not yet let go)
-    int    press_polls;  // the game's polls that carried it
+    bool   player;       // the player's own input is recent (the input thread's stamp)
+    bool   slow;         // the game's thread saw a pass over the budget during this run
 };
 struct Fast {
     bool   active = false; int why = FE_NONE;
-    double t0 = 0.0, run_seq = -1.0, spent_t0 = -1.0, t_poll = -1.0;   // the run's start and its sequence; the sequence whose run hit the cap; since when the game has polled the press that is out
+    double t0 = 0.0, run_seq = -1.0, spent_t0 = -1.0;   // the run's start and its sequence; the sequence whose run hit the cap or the budget
     int    factor = 1, frames = 0, frames_fast = 0;    // of the run: the factor it started with, its frames, those answered with the factor
-    /// Why the game must run at its own speed now (FE_NONE: it may be sped up). The cap is step()'s.
+    /// Why the game must run at its own speed now (FE_NONE: it may be sped up). The cap and the budget are step()'s.
     static int blocked(const FastIn& in) {
         if (!in.setting || fast_clamp(in.factor) <= 1) return FE_SETTING;
         if (!in.fresh) return FE_STALE;
@@ -642,18 +665,21 @@ struct Fast {
         return FE_NONE;
     }
     /// One frame. Returns the multiplier in force until the next call: 1 (the game's own speed) or the factor.
+    /// The guard here is per press, not per channel (review B1): it holds on every frame a press is out, whichever press
+    /// it is. (The game's thread has the same rule and the release's tail from the input thread's own stamps, fast_ask:
+    /// this one keeps the published value and the log honest.)
     int step(const FastIn& in) {
-        if (!in.press_out) t_poll = -1.0; else if (in.press_polls > 0 && t_poll < 0.0) t_poll = in.t;
         const int b = blocked(in);
         if (active) {
             if (in.seq_t0 != run_seq) { active = false; why = FE_SEQ; }   // another sequence: a run of its own, with its own cap, from the next frame
             else if (b != FE_NONE) { active = false; why = b; }
+            else if (in.slow) { active = false; why = FE_SLOW; spent_t0 = in.seq_t0; }
             else if (!(in.t - t0 <= k_fast_cap_s) || in.t < t0) { active = false; why = FE_CAP; spent_t0 = in.seq_t0; }
         }
         else if (b == FE_NONE && in.seq_t0 != spent_t0) { active = true; why = FE_NONE; t0 = in.t; run_seq = in.seq_t0; factor = fast_clamp(in.factor); frames = 0; frames_fast = 0; }
         if (!active) return 1;
         ++frames;
-        if (in.press_out && (in.press_polls <= 0 || t_poll < 0.0 || in.t - t_poll < k_fast_guard_s)) return 1;   // the press guard
+        if (in.press_out || in.player) return 1;   // the press guard, the player's input
         ++frames_fast;
         return factor;
     }
@@ -669,5 +695,63 @@ inline int fast_answer(int mul, uint32_t now_ms, uint32_t stamp_ms, bool dead) {
 /// What the game's exec-frames getter returns: its own answer, multiplied only when that answer is exactly 1 (0: a draw-only
 /// pass or the debug pause; 2 and more: somebody else's speed-up; a negative: never).
 inline int fast_exec(int game, int mul) { return (game == 1 && mul > 1 && mul <= k_fast_max) ? mul : game; }
+
+/// An input the input thread handed the game: when (its tick count), and the game's main-loop pass counter then.
+struct EdgeStamp { bool have; uint32_t ms; bool pass_ok; uint32_t pass; };
+/// Is the stamp still young: within ms_max of now, or within pass_max passes of the pass under way (either: a stall cannot
+/// age it away before its pass ran)? A pass counter that did not read counts as young by time only.
+inline bool edge_young(const EdgeStamp& e, uint32_t now_ms, bool pass_ok, uint32_t pass, uint32_t ms_max, uint32_t pass_max) {
+    if (!e.have) return false;
+    if (static_cast<uint32_t>(now_ms - e.ms) < ms_max) return true;
+    return e.pass_ok && pass_ok && static_cast<uint32_t>(pass - e.pass) <= pass_max;
+}
+/// Our press was just let go: the pass under way at the release and the next one (the pass that carried its edge began
+/// while it was set, and is that pass or an earlier one). By time only when a pass counter did not read.
+inline bool release_young(const EdgeStamp& e, uint32_t now_ms, bool pass_ok, uint32_t pass) {
+    if (!e.have) return false;
+    if (e.pass_ok && pass_ok) return static_cast<uint32_t>(pass - e.pass) <= k_fast_guard_passes;
+    return static_cast<uint32_t>(now_ms - e.ms) < k_fast_guard_ms;
+}
+/// The pass budget, on the game's thread (its only user): the time since the first ask of the pass under way (the pass
+/// counter names the pass). over: this pass passed k_fast_pass_ms (stays set until the next pass's first ask).
+struct PassClock {
+    bool have = false, over = false; uint32_t pass = 0; double t0 = 0.0, worst_ms = 0.0;
+    /// One ask at time now (seconds). Returns true while the pass under way is over the budget.
+    bool ask(bool pass_ok, uint32_t p, double now) {
+        if (!pass_ok) { have = false; over = false; return false; }          // no counter: no budget (the lease and the cap still bound the run)
+        if (!have || p != pass) { have = true; pass = p; t0 = now; over = false; return false; }
+        const double ms = (now - t0) * 1e3;
+        if (ms > worst_ms) worst_ms = ms;
+        if (!(ms <= k_fast_pass_ms) || now < t0) over = true;
+        return over;
+    }
+};
+enum FastNo { FN_NONE = 0, FN_OFF, FN_GAME, FN_PRESS, FN_RELEASE, FN_PLAYER, FN_CONTROL, FN_SLOW, FN_N };   // why an ask got the game's own answer
+struct FastAsk {
+    int      game;        // the game's own answer
+    int      mul;         // the published multiplier
+    uint32_t now_ms, stamp_ms; bool dead;   // fast_answer's
+    bool     press_out;   // a press of ours is set now (the very word the input thread reads)
+    EdgeStamp rel;        // our last press was let go (the input thread, before it clears the word; the render thread's withdrawals too)
+    EdgeStamp phys;       // the player's own button or stick push (the input thread, before the game gets the state)
+    bool     pass_ok; uint32_t pass;   // the game's main-loop pass counter now
+    bool     control;     // the game's player actor is set: the player has control
+    bool     slow;        // PassClock: this pass is over the budget
+};
+/// The answer the game's exec-frames getter gives (the game's main thread, every ask). The factor only when the game's own
+/// answer is exactly 1, a fresh factor is published, and none of the game thread's own reasons holds; *why says which did.
+inline int fast_ask(const FastAsk& a, int* why = nullptr) {
+    int w = FN_NONE;
+    const int m = fast_answer(a.mul, a.now_ms, a.stamp_ms, a.dead);
+    if (m <= 1) w = FN_OFF;
+    else if (a.game != 1) w = FN_GAME;
+    else if (a.press_out) w = FN_PRESS;
+    else if (release_young(a.rel, a.now_ms, a.pass_ok, a.pass)) w = FN_RELEASE;
+    else if (edge_young(a.phys, a.now_ms, a.pass_ok, a.pass, k_fast_player_ms, k_fast_player_passes)) w = FN_PLAYER;
+    else if (a.control) w = FN_CONTROL;
+    else if (a.slow) w = FN_SLOW;
+    if (why) *why = w;
+    return w == FN_NONE ? fast_exec(a.game, m) : a.game;
+}
 
 }  // namespace sph

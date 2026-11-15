@@ -304,7 +304,8 @@ struct SphereGate {
         if (in.carried == 0) {
             const int ev = carried > 0 ? EV_DOWN : EV_NONE;
             carried = 0; hand = -1; held = false; quiet = 0; by_seq = false;
-            // our own take: the sphere the game has put on Tidus's hand, before the variable says so
+            // our own take: the sphere the game has put on Tidus's hand, before the variable says so. (Review N6: `enabled` is
+            // "a shown object rides Tidus": in Djose that is the sphere. Check it when a second trial is added.)
             if (in.seq_hold && in.seq_take && in.enabled && in.gate && (in.seq_hand == 0 || in.seq_hand == 1)) {
                 hand = in.seq_hand; by_seq = true; held = in.hand_ok[hand];
             }

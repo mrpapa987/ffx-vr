@@ -13,7 +13,9 @@ namespace FFXVR;
 //   The mechanism is the game's own "exec frames" count: Sg_MainLoop's update loop runs Sg_GetCurExecFrames() world ticks per
 //   pass and builds one draw (ffx-rust docs/formats/frame-timing.md; 0x82D7E0, cdecl int()). This file detours that getter
 //   with Fahrenheit's hooking and hands the game's own answer to native's ffxvr_sph_fast_exec, which turns an answer of
-//   exactly 1 into the factor while native's per-frame rule says so, and passes everything else through.
+//   exactly 1 into the factor while native's per-frame rule says so, and passes everything else through. Native also decides
+//   on the game's own thread, at that call (review round 1): never while a press of ours is out or just let go, never just
+//   after a button or stick push of the player's, never with player control, never in a pass that has run over 25 ms.
 //   Nothing is written to the game, so there is no value to restore: the game's byte (0xC496D4) is only read, for the log.
 //   Why not write the byte: FFX-60fps sets it before every main-loop pass (1 on a logic pass, 0 on a draw-only pass; its
 //   pacing.cpp), so a written value would be overwritten at once, or would turn draw-only passes into logic passes. An
@@ -35,7 +37,7 @@ public sealed unsafe partial class FFXVRModule {
     private d_sfast_get? _h_sfast, _o_sfast; private nint _a_sfast;
     private int _sfast_hook;                     // = native sfast_hook_name: 0 not tried, 1 inserted, 2 the bytes differ, 3 refused / failed, 4 FFX.exe not found, 5 no native helper
     private string _sfast_status = "not tried yet (it is inserted the first time the feature is wanted in a cloister)";
-    private long _sfast_calls, _sfast_faults;
+    private int _sfast_calls, _sfast_faults;      // (int: written on the game's thread, read on the render thread for F8; review N3)
 
     private bool sfast_parse(string k, string v) {
         switch (k) {
@@ -91,7 +93,7 @@ public sealed unsafe partial class FFXVRModule {
         if (ok) { try { o = d7_chain(_a_sfast, _h_sfast!); } catch { } }
         if (o != null) System.Threading.Volatile.Write(ref _o_sfast, o);
         _sfast_hook = ok ? 1 : 3;
-        _sfast_status = ok ? I($"inserted at 0x{_a_sfast:X8} (the exec-frames getter 0x82D7E0){(o == null ? "; its original resolves at its first call" : "")}")
+        _sfast_status = ok ? I($"inserted at 0x{_a_sfast:X8} (the exec-frames getter 0x82D7E0; the insertion stops the game's threads for a moment: one hitch, once a session, on this frame){(o == null ? "; its original resolves at its first call" : "")}")
                            : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x82D7E0? core.log)") + ": the game keeps its own speed";
         _logger.Info("sphere fast: " + _sfast_status); d7_log("sph: fast: the detour: " + _sfast_status);
     }
@@ -115,7 +117,7 @@ public sealed unsafe partial class FFXVRModule {
     /// F8 > Hands, under the sphere settings.
     private void sfast_ui() {
         ui_check("sphere_fast", "Fast sphere grab##sfast", ref _sphere_fast, UiTag.None,
-                 "In a Cloister of Trials, in first person, after a squeeze of your grip took or placed a sphere: the game runs several times faster until you have control again, so its take / place animation and its pauses pass in a fraction of the time. Only for a grab started with the grip (never for the A button), for 3 seconds at most, and the game is back at its own speed the moment the sequence ends or anything interrupts it (a menu, a battle, another map, leaving first person). Sounds of the sped-up moment may overlap. Djose only for now.");
+                 "In a Cloister of Trials, in first person, after a squeeze of your grip took or placed a sphere: the game runs several times faster until you have control again, so its take / place animation and its pauses pass in a fraction of the time. Only for a grab started with the grip (never for the A button), for 3 seconds at most, and the game is back at its own speed the moment the sequence ends or anything interrupts it (your own button or stick, a menu, a battle, another map, leaving first person), and it stays at its own speed if the scene is too heavy to run faster. Sounds of the sped-up moment may overlap. Djose only for now.");
         if (_sphere_fast) {
             ImGui.SameLine();
             ui_slider_int("sphere_fast_factor", "speed##sfast", ref _sphere_fast_factor, 1, 12, _sphere_fast_factor <= 1 ? "off" : "x%d", UiTag.None,

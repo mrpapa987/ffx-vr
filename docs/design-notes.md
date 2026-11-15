@@ -6401,7 +6401,8 @@ answer otherwise:
   first person); the scene the one the sequence started in; control off; and under 3 s of real time since the run began
   (`k_fast_cap_s`; a run that hits the cap is not started again for that sequence). The frame any of them fails, 1 is
   published. So the sequence's end, a stop, a timeout, a map change, a battle, leaving first person and a menu all end it
-  on their own frame (the last four also stop the sequence itself, as before).
+  on their own frame (the last four also stop the sequence itself, as before). What cannot wait for the next frame is
+  decided on the game's own thread at the ask (below): our press, the player's input, control, a slow pass.
 - The published factor carries a time stamp and is used only while it is younger than 100 ms (`sph::fast_answer`,
   `k_fast_lease_ms`). If the Presents stop (a load, a stall, a crashed render thread) the game is at its own speed 0.1 s
   later with nobody doing anything.
@@ -6420,14 +6421,15 @@ else is left alone and the F8 line says so. FFX-60fps' two rows that compare cal
 (LOOP-005, MAG-008) are unaffected: the address does not change. Its developer hot reload would re-scan and refuse; players
 do not have it.
 
-**The press sequence at N ticks per pass.** `sph::Seq` is unchanged. One rule was added, in `sph::Fast`, the **press guard**:
+**The press sequence at N ticks per pass.** `sph::Seq` is unchanged. One rule was added, the **press guard**:
 - The hazard: the pad's press edges are made once per main-loop pass, so with N ticks in a pass every tick sees the same new
   confirm. A press of ours could then answer a page, and in a later tick of the same pass a second one (the model in the
   tests shows 10 such ticks in one take at factor 6 without the guard).
-- The rule: from the frame we ask for a press until 70 ms (`k_fast_guard_s`, two 30 Hz passes) after the game first polled
-  it, or until it is withdrawn, the published answer is 1. The pass that carries our press's edge runs one tick, exactly as
-  in normal play. A held button is no edge, so the factor returns while the press is still down.
-- It costs nothing: while a page waits for our confirm, nothing else in the script moves.
+- The rule: from the instant a press of ours is set until it is let go, and through the main-loop pass under way then and
+  the next, the game gets its own answer. The pass that carries our press's edge runs one tick, exactly as in normal play.
+  A button let go is no edge.
+- It costs the hold's own 0.1 s a page: while a page waits for our confirm, nothing else in the script moves, but the
+  script's next wait starts while A is still down.
 - With that, every timing rule holds as it was written and tested:
   - the readiness mirror reads the script windows per frame: a line may now open and become ready inside one drawn frame;
     the settle (60 ms of "ready", real time) then runs as before, and the press goes out on a frame where the page waits;
@@ -6437,9 +6439,41 @@ do not have it.
   - "done if no result line within 1 s" and the step timeouts (1 / 3 / 6 / 5 s) are upper bounds in real time: the game
     reaches each step sooner, never later;
   - the outcome (the carried variable) and the scene check are read per frame as before.
-- What is left of a grab's time is mostly our own press pacing, about 0.2 s of real time a page (the settle, the poll, the
-  100 ms hold, the 150 ms gap between presses). The model of the owner's log gives 4.1 s to 1.2 s for a take and 2.7 s to
-  1.1 s for a place at factor 6, and 0.9 s / 1.0 s at 12. Tightening the press pacing is a separate, later step.
+- What is left of a grab's time is mostly our own press pacing, about 0.25 s of real time a page (the settle, the poll, the
+  hold at the game's speed, the 150 ms gap between presses). The model of the owner's log gives 4.1 s to 1.2-1.3 s for a
+  take and 2.7 s to 1.1-1.3 s for a place at factor 6, and 0.9-1.0 s / 1.0-1.2 s at 12. Tightening the press pacing is a
+  separate, later step.
+
+**What is decided on the game's own thread (review round 1: B1, B2, S1-S4).** The first version decided everything on the
+render thread, once a frame; the review found that every hole was a race between the render thread (which publishes), the
+input thread (which hands the game its pad state) and the game's main thread (which asks). Now the render thread still
+publishes "a factor may be used" (all the conditions above), and the game's thread decides at every ask (`sph::fast_ask`
+from `ffxvr_sph_fast_exec`), from words written at the instant an input is handed to the game:
+- **Our press (B1, S2, S3).** `g_sph_press` is the word the input thread reads to hand the game our A. The ask reads the
+  same word: set means the game's own answer. So there is no window between "the press is set" and "the factor is
+  withdrawn" (S2), nothing depends on a poll count or on which press it is (B1: the first version kept the previous
+  press's poll time when two presses followed each other without an idle frame, and published the factor on the frame
+  the second was first polled), and the guard lasts as long as the button is down (S3). The input thread stamps the
+  release before it clears the word (`g_sfast_rel`: the tick count and the game's main-loop pass counter), and the two
+  withdrawals on the render thread are stamped the same way (the input thread may hand the press over in that instant);
+  the ask holds the game's own answer through the pass under way at the stamp and the next one (70 ms only if the pass
+  counter does not read).
+- **The player's own input (B2).** Any newly pressed button and any stick push past 0.6 is stamped by the input thread
+  before the game gets the state (`g_sfast_phys`). The ask gives the game's own answer for 150 ms or 8 main-loop passes
+  after it, whichever is later (8 passes: one logic tick of FFX-60fps at 240 fps; counting passes as well as time means a
+  stall between the input and the pass that reads it cannot age the guard away). A button also stops the sequence, as
+  before; a stick does not, and the run goes on after the guard.
+- **Control (S1).** The ask reads the game's player actor (`[0x1300788]`, the word `Head.control` comes from). Not 0: the
+  game's own answer. Free play never runs at the factor, from the very tick that hands control back, instead of one to
+  three passes later when managed's read reached the render thread.
+- **A slow pass (S4).** The ask times the pass under way from its first ask (`sph::PassClock`; the pass counter names the
+  pass; QueryPerformanceCounter). Past 25 ms the rest of that pass gets the game's own answer, the render thread ends
+  the run (`a main-loop pass took longer than 25 ms`) and does not start another for that sequence. Why 25 ms: a pass at
+  the game's speed is one tick and the frame's draw inside 33.3 ms; 25 ms of ticks leaves the draw 8 ms of a 30 Hz frame
+  and keeps the frame far under the 66.7 ms at which `Sg_FrameSync` adds a second pass and FFX-60fps a backlog pass; at
+  60 fps it makes at most one late frame per pass. The longest pass of every run is in the log line, so the factor's top
+  of 12 can be judged from the owner's numbers.
+- The model test `interleave_test` runs the three threads' steps in every order (below).
 
 **The eye hold and the carry at N ticks per pass (checked, not changed).**
 - The "steady view" hold (`ej::EvHold`) takes one eye base per Present and counts its windows in Presents or seconds. With
@@ -6462,8 +6496,10 @@ do not have it.
 - a run (the numbers here are made up): `sph: fast: take at worker 51: factor x6 for 0.52 s of real time, ended by: the sequence ended | the game's
   exec-frames byte was 1 before ... | frames 31, of them 12 at the game's own speed around our presses | the game's main-loop
   passes meanwhile 31 | the exec-frames getter: asked 310 times while a factor was published, answered x6 95 times ... | the
-  exec byte at our Presents: 15 times 0 (a draw-only pass), 16 times 1, 0 other | managed's detour: inserted`. "answered x6
-  0 times" adds **NO EFFECT** (the detour is not in, or the game's answer was never 1). There is no world-tick counter in
+  exec byte at our Presents: 15 times 0 (a draw-only pass), 16 times 1, 0 other | the longest main-loop pass 9.4 ms from
+  its first ask to its last (the budget: 25 ms) | answered with the game's own value on its thread: 40 for a press of ours
+  out, 6 just after one, 0 for the player's own input, 2 for control, 0 for a pass over the budget | managed's detour:
+  inserted`. "answered x6 0 times" adds **NO EFFECT** (the detour is not in, or the game's answer was never 1). There is no world-tick counter in
   the game to read; the answered count and the grab's own duration in the `sphere grab:` line are the evidence.
 - no run: `sph: fast: not used for the last take (...)`, with the reason.
 - `sph: fast: the detour:` once, when it is inserted or refused.
@@ -6475,8 +6511,9 @@ during a take it floated at the hidden game model's hand until control returned,
 the sequence started.
 
 **Now, during a grab sequence of ours** (`carry::SeqHold`, fed by the glue in `ffxvr_carry_set`):
-- **A take:** from the first frame the game shows the carried actor on Tidus's hand (managed finds the shown object riding
-  him), which can be before the variable moves, it is drawn in the palm of the hand that squeezed; then through the rest
+- **A take:** from the frame after the Present that first sees the carried actor shown on Tidus's hand (managed finds the
+  shown object riding him; so one frame at the game's hand is expected, the arm hidden), which can be before the variable
+  moves, it is drawn in the palm of the hand that squeezed; then through the rest
   of the sequence; and with no frame at the game's place in between, on into the quiet rule when control is back.
 - **A place:** it stays in the palm it is in (the hand that took it, whichever hand squeezed at the socket), from the
   squeeze on, while the variable is not 0, whatever the game's animation does with it. From the variable's 0 it is the
@@ -6539,20 +6576,29 @@ Either would bring a grab down to the press pacing alone; with that tightened to
 
 ### Tests (scratch `sfast_chk`, `run_all.sh <repo>`)
 
-- `fast_test` (1514 checks): `sph::Fast` (every gate, every end on its own frame, the cap and no restart after it, a
-  sequence change, the press guard), `fast_answer` (the lease, the tick count's wrap, the shutdown flag), `fast_exec`.
-- `seq_sim_test` (300): the unchanged `sph::Seq` with `sph::Fast` against a model of the game's take and place scripts
-  timed from the owner's log, at factors 1, 2, 3, 6, 9, 12, with one pass per tick and with FFX-60fps' two; the same
-  presses as at the game's speed, no repeat, no tick that sees a stale press, nothing sped up after the end, the cap on a
-  script that never returns control, the lease when the Presents stop.
+- `fast_test` (1685 checks): `sph::Fast` (every gate, every end on its own frame, the cap and the pass budget and no
+  restart after them, a sequence change, the press guard with two presses back to back: the reviewer's probe),
+  `fast_answer` (the lease, the tick count's wrap, the shutdown flag), `fast_exec`, `fast_ask` (each reason, the stamps by
+  time and by passes, both wraps), `PassClock`.
+- `seq_sim_test` (300): the unchanged `sph::Seq` with `sph::Fast` and `fast_ask` against a model of the game's take and
+  place scripts timed from the owner's log, at factors 1, 2, 3, 6, 9, 12, with one pass per tick and with FFX-60fps' two;
+  the same presses as at the game's speed, no repeat, no tick that sees a stale press, nothing sped up after the end, the
+  cap on a script that never returns control, the lease when the Presents stop.
+- `interleave_test` (31 checks over 215 million orders): the render, input and game threads as single steps (a press
+  asked for, a poll, the player's button, a withdrawal and its race, a pass's start, an ask, control handed back), run
+  in every order of 7 steps from 6 starting states with the time between steps chosen too, and in 20,000 random orders
+  of 300 steps, against a render thread that keeps a fresh factor published the whole time. The invariant: a pass whose
+  pad word carried a new button, ours or the player's, runs one tick, and no tick is added once the player has control.
 - `carry_seq_test` (589): the sphere's rule through a take and a place of ours, the tail, the bounds; with no sequence of
   ours the rule equals the one before this branch on 400,000 random frames; the wider radius.
-- `glue_test` (482): `sfast_frame`, the two exports, `sfast_shutdown` and `ffxvr_carry_set`, verbatim from
-  ffxvr_native.cpp (`extract.py`), compiled against stand-ins: each interruption, the log lines, the detour not in,
-  FFX-60fps' byte pattern, shutdown, the carry through a sequence, the settings off, the A button's interaction.
-- `check.py` (text scans): the ABI numbers and histories, each export defined / bound / unbound with one type, each ini
+- `glue_test` (564): the stamps, `sfast_frame`, the two exports, `sfast_shutdown` and `ffxvr_carry_set`, verbatim from
+  ffxvr_native.cpp (`extract.py`), compiled against stand-ins: each interruption, the press and its release, the player's
+  input, control and a slow pass at the ask, the log lines, the detour not in, FFX-60fps' byte pattern, shutdown, the
+  carry through a sequence, the settings off, the A button's interaction.
+- `check.py` (72 text scans): the ABI numbers and histories, each export defined / bound / unbound with one type, each ini
   key in the parser, the defaults, the menu and the docs, the one writer of the published factor, the exec byte never
-  written. `mutants.py`: 59 mutants of the rules and the glue, all caught.
+  written, every stamp written before its input reaches the game. `mutants.py`: 91 mutants of the rules and the glue, all
+  caught.
 - Nothing here was compiled for Windows or run in the game: there is no C# compiler and there are no Windows headers on
   the machine this was written on.
 
@@ -6562,7 +6608,10 @@ Either would bring a grab down to the press pacing alone; with that tightened to
    debug pad and FFX-60fps use 0 and 1).
 2. That Fahrenheit accepts the late insertion on 0x82D7E0 and the detour's cost per call is negligible (it is called
    several times per pass, and by effect code).
-3. The press guard's 70 ms against the real pad path (where the game's poll, FFX-60fps' input fix and the pass meet).
+3. That the pad state the input thread hands over is read by the pass that starts next (the guards count from that
+   hand-over: our press's word, the stamps), and FFX-60fps' input handling keeps a new button for at most 8 passes.
+3b. That `[0x23CBBF0]` moves once per main-loop pass and `[0x1300788]` is the player actor on the game's thread at the ask
+   (both are read elsewhere in the mod, at Present).
 4. FFX-60fps' smoothing and PERF-002 with N-tick logic passes.
 5. Effects and sounds of the cloister at N ticks per pass (the effects' draw half runs N times per pass, by the game's own
    rule).
