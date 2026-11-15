@@ -5416,7 +5416,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 66;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm)
+constexpr int FFXVR_ABI = 67;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -5870,6 +5870,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
 // invokes inside its Present hook. That gives us a true frame boundary, so a
 // capture can span exactly one frame instead of whatever happened to come next.
 static void xr_tick();
+static void sfast_frame();   // the fast sphere sequence: the one place that decides the multiplier (defined after the sphere hands)
 static void sr_after_frame(const XrFrameOut& out);   // stickrep (the block near the end of this file)
 static void sr_present();
 static void sr_begin_frame_mark();
@@ -7710,6 +7711,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     const LONGLONG cq2 = cpu_q(); g_cpu_wait_acc = 0;
     xr_tick();                      // submit the frame just finished, locate the head for the next one
+    sfast_frame();                  // the fast sphere sequence: this frame's multiplier (every Present, whatever the headset does: after xr_tick's sph_tick)
     const LONGLONG cq3 = cpu_q(), cwait = g_cpu_wait_acc;
     {   // cursor stage C2: skip the game's cursors only while the headset shows our markers (a 3D frame with the UI pass, markers in 3D)
         // C2-8: sticky on the UI pass. A 3D frame without the pass un-skips only after k_c2_nopass of them in a row, so the first 3D
@@ -13443,6 +13445,21 @@ MkVertex    g_sphl_mk[12];
 ID3D11Texture2D* g_sphl_tex = nullptr; ID3D11ShaderResourceView* g_sphl_srv = nullptr;
 char        g_sphl_row[2][64] = {}; int g_sphl_row_w[2] = { 0, 0 };
 constexpr int k_sphl_w = 1024, k_sphl_rh = 64;
+// The fast sequence (ABI 67; ffxvr_sphere.h Fast; managed sphere_fast.cs): while a grab sequence of ours runs with control off,
+// managed's detour on the game's exec-frames getter (0x82D7E0, the game's main thread) asks ffxvr_sph_fast_exec, which turns an
+// answer of 1 into the factor. No game memory is written, so there is nothing to restore: the multiplier is decided in one
+// place (sfast_frame, every Present), published with a time stamp, and good for 100 ms only.
+//   threads  sfast_frame and ffxvr_sph_fast_set on the render thread; ffxvr_sph_fast_exec on the game's main thread (it reads
+//            g_sfast_mul / g_sfast_stamp / g_sfast_dead and counts in g_sfast_asked / g_sfast_answers: aligned LONGs).
+// Logs: one "sph: fast" line per sequence that the game took (the factor, the run's time, what the getter was asked and answered).
+sph::Fast   g_sfast;
+int         g_sfast_cfg_on = 0, g_sfast_cfg_factor = sph::k_fast_def, g_sfast_hook = 0;   // managed's settings push: ini sphere_fast, sphere_fast_factor; its detour's state
+bool        g_sph_carry_seq = false;          // ini sphere_carry_seq (the same push)
+uint32_t    g_sfast_cfg_frame = 0, g_sph_tick_frame = 0; bool g_sfast_cfg_have = false, g_sph_ticked = false;
+volatile LONG g_sfast_mul = 1, g_sfast_stamp = 0, g_sfast_dead = 0, g_sfast_asked = 0, g_sfast_answers = 0;
+double      g_sfast_run_seq = -1.0;           // the sequence (its t0) that has had a fast run
+int         g_sfast_block = sph::FE_NONE;     // why the running sequence is not sped up now (the "not used" line)
+char        g_sfast_last[200] = "no fast sequence yet";
 
 static double sph_now() {
     static LARGE_INTEGER s_f = {}; if (s_f.QuadPart == 0) QueryPerformanceFrequency(&s_f);
@@ -13658,6 +13675,7 @@ static void sph_finish() {
 }
 /// Once a frame (xr_tick, before gesture_tick): the reach, the grips, the sequence, the label.
 static void sph_tick() {
+    g_sph_tick_frame = g_frames; g_sph_ticked = true;   // (the fast sequence: only a sequence stepped this very frame is sped up)
     const bool fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u;
     const bool on = fresh && g_sph_head.on != 0 && vrpad_live() && g_fp_mode == 1;
     float palm[2][3]; bool ok[2];
@@ -13728,7 +13746,7 @@ static void sph_tick() {
 /// F8 (Developer) and managed's log: 16 values (on, the prediction, the label's target widx / hand / action / distance / opacity,
 /// the sequence's phase / why / presses, grabs, done, stopped, refused, the reach per hand) and a line.
 extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n) {
-    static char s[400];
+    static char s[640];
     const bool fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u;
     const int ti = g_sph_pick.target;
     const float v[16] = { fresh && g_sph_head.on ? 1.f : 0.f, static_cast<float>(g_sph_pred), ti >= 0 ? static_cast<float>(g_sph_t[ti].widx) : -1.f,
@@ -13738,10 +13756,108 @@ extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n)
                           static_cast<float>(g_sph_reach[0]), static_cast<float>(g_sph_reach[1]) };
     if (out) for (int k = 0; k < n && k < 16; ++k) out[k] = v[k];
     char pred[32]; if (g_sph_pred == sph::k_pred_unsure) snprintf(pred, sizeof(pred), "? (a facing rule)"); else if (g_sph_pred == sph::k_pred_edge) snprintf(pred, sizeof(pred), "? (%s)", g_sph_still_now ? "a zone's edge" : "moving"); else if (g_sph_pred == sph::k_pred_none) snprintf(pred, sizeof(pred), "nothing"); else snprintf(pred, sizeof(pred), "worker %d", g_sph_pred);
-    snprintf(s, sizeof(s), "%s | the game would choose %s | label: %s | sequence: %s | last: %s | grabs %u (done %u, stopped %u, refused %u), prompt frames hidden %u",
+    snprintf(s, sizeof(s), "%s | the game would choose %s | label: %s | sequence: %s | last: %s | grabs %u (done %u, stopped %u, refused %u), prompt frames hidden %u | fast: %s; last: %s",
              !fresh ? "no state from managed" : g_sph_head.on ? "on" : "off (a gate: see the Hands tab)", pred,
-             g_sph_label[0] ? g_sph_label : "-", sph::k_phase_name[g_sph_seq.phase], g_sph_last, g_sph_grabs, g_sph_done, g_sph_stopped, g_sph_refused, g_sph_hidden_frames);
+             g_sph_label[0] ? g_sph_label : "-", sph::k_phase_name[g_sph_seq.phase], g_sph_last, g_sph_grabs, g_sph_done, g_sph_stopped, g_sph_refused, g_sph_hidden_frames,
+             g_sfast.active ? (g_sfast_mul > 1 ? "RUNNING (sped up)" : "running (at the game's speed around our press)") : "idle", g_sfast_last);
     return s;
+}
+
+// -- The fast sequence (ABI 67; the notes are at its globals, the rules in ffxvr_sphere.h Fast) -----------------------------------
+static const char* sfast_hook_name(int h) {
+    static const char* const k[6] = { "not tried yet (needs a cloister with a socket table, first person, the VR hands, and the setting on)", "inserted", "NOT inserted: 0x82D7E0 does not read as the exec-frames getter (another mod's patch, or another exe)",
+                                      "NOT inserted: Fahrenheit refused or failed the insertion (core.log)", "NOT inserted: FFX.exe not found", "NOT inserted: the native helper did not load" };
+    return h >= 0 && h < 6 ? k[h] : "?";
+}
+/// One byte / one word of the game's data for the log (-1 / 0 when it does not read).
+static int sfast_exec_byte() {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    int8_t b = 0;
+    if (base == 0 || !ffxvr_safe_read(reinterpret_cast<const void*>(base + (0xC496D4u - 0x400000u)), &b, 1)) return -1;   // g_ExecFrames (i8): read only, never written
+    return static_cast<int>(b);
+}
+static uint32_t sfast_loop_count() {
+    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uint32_t n = 0;
+    if (base == 0 || !ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x23CBBF0u - 0x400000u)), &n, 4)) return 0;   // Sg_MainLoop's pass counter
+    return n;
+}
+/// Once a frame from ffxvr_begin_frame, after xr_tick (so after sph_tick when the headset runs), whatever the headset does: the
+/// ONE place that decides whether the game is sped up, from this frame's state alone. It writes nothing to the game: it
+/// publishes the multiplier ffxvr_sph_fast_exec answers with, stamped; an answer older than 100 ms is not used.
+static void sfast_frame() {
+    static double s_seq = -1.0; static int s_act = sph::A_NONE;   // the sequence being followed (seen past its wait for control to go off), its action
+    static int s_run_act = sph::A_NONE, s_run_widx = -1;          // the run's log: its sequence's action and worker,
+    static int s_exec0 = -1, s_ex[3] = { 0, 0, 0 };               // the game's exec byte at its start, the byte at each Present (0, 1, other),
+    static uint32_t s_loop0 = 0; static LONG s_asked0 = 0, s_answers0 = 0;   // the main-loop pass counter and the getter's counts at its start
+    sph::FastIn in = {};
+    in.t = sph_now();
+    const bool cfg = g_sfast_cfg_have && g_frames - g_sfast_cfg_frame <= 3u;   // managed's settings push (a stale one: off)
+    in.setting = cfg && g_sfast_cfg_on != 0; in.factor = g_sfast_cfg_factor;
+    in.fresh = g_sph_have && g_frames - g_sph_set_frame <= 3u && g_sph_ticked && g_sph_tick_frame == g_frames;
+    in.gate = g_sph_head.on != 0 && vrpad_live() && g_fp_mode == 1;
+    in.running = g_sph_seq.running(); in.phase = g_sph_seq.phase; in.seq_t0 = g_sph_seq.t0;
+    in.gen_same = g_sph_head.gen == g_sph_seq.gen;
+    in.control = g_sph_head.control != 0;
+    in.press_out = g_sph_press != 0; in.press_polls = static_cast<int>(g_sph_press_polls);
+    const bool was = g_sfast.active;
+    const bool dead = g_sfast_dead != 0;
+    if (dead) g_sfast.stop(sph::FE_SHUTDOWN);
+    const int mul = dead ? 1 : g_sfast.step(in);
+    InterlockedExchange(&g_sfast_stamp, static_cast<LONG>(GetTickCount()));   // the stamp first: a factor is never published with an old stamp
+    if (g_sfast_mul != mul) InterlockedExchange(&g_sfast_mul, mul);
+    // -- from here on only the log --
+    const bool taken = in.running && in.phase > sph::S_WAIT_OFF;
+    const bool over = s_seq >= 0.0 && (!in.running || in.seq_t0 != s_seq);   // the followed sequence ended (or another took its place)
+    const double seq_was = s_seq; const int act_was = s_act;
+    if (over) s_seq = -1.0;
+    if (taken && s_seq < 0.0) { s_seq = in.seq_t0; s_act = g_sph_seq.action; g_sfast_block = sph::FE_NONE; }
+    if (!was && g_sfast.active) {
+        g_sfast_run_seq = in.seq_t0; s_run_act = g_sph_seq.action; s_run_widx = g_sph_seq.widx;
+        s_exec0 = sfast_exec_byte(); s_loop0 = sfast_loop_count(); s_asked0 = g_sfast_asked; s_answers0 = g_sfast_answers; s_ex[0] = s_ex[1] = s_ex[2] = 0;
+    }
+    if (g_sfast.active) { const int e = sfast_exec_byte(); s_ex[e == 0 ? 0 : e == 1 ? 1 : 2]++; }
+    else if (taken) g_sfast_block = (in.seq_t0 == g_sfast.spent_t0) ? static_cast<int>(sph::FE_CAP) : sph::Fast::blocked(in);
+    if (was && !g_sfast.active) {
+        const long asked = static_cast<long>(g_sfast_asked - s_asked0), answers = static_cast<long>(g_sfast_answers - s_answers0);
+        snprintf(g_sfast_last, sizeof(g_sfast_last), "x%d for %.2f s, ended by: %s; the getter answered x%d %ld times%s", g_sfast.factor, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], g_sfast.factor, answers,
+                 answers == 0 ? " (NO EFFECT: see the log)" : "");
+        diag("sph: fast: %s at worker %d: factor x%d for %.2f s of real time, ended by: %s | the game's exec-frames byte was %d before (it is only read: nothing is written to the game) | frames %d, of them %d at the game's own speed around our presses | "
+             "the game's main-loop passes meanwhile %u | the exec-frames getter: asked %ld times while a factor was published, answered x%d %ld times (the game asks at every check of its tick loop and of its effect loop) | "
+             "the exec byte at our Presents: %d times 0 (a draw-only pass), %d times 1, %d other | managed's detour: %s%s",
+             s_run_act == sph::A_TAKE ? "take" : "place", s_run_widx, g_sfast.factor, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], s_exec0,
+             g_sfast.frames, g_sfast.frames - g_sfast.frames_fast, static_cast<unsigned>(sfast_loop_count() - s_loop0), asked, g_sfast.factor, answers, s_ex[0], s_ex[1], s_ex[2], sfast_hook_name(g_sfast_hook),
+             answers == 0 ? " | NO EFFECT: the getter never answered with the factor (the detour is not in, or the game's own answer was never 1)" : "");
+    }
+    if (over && g_sfast_run_seq != seq_was) {   // a sequence the game took that was never sped up: its line
+        const int b = g_sfast_block > sph::FE_NONE && g_sfast_block < sph::FE_N ? g_sfast_block : static_cast<int>(sph::FE_SEQ);
+        snprintf(g_sfast_last, sizeof(g_sfast_last), "not used: %s", sph::k_fast_end_name[b]);
+        diag("sph: fast: not used for the last %s (factor setting x%d, sphere_fast %d): %s | the game's exec-frames byte is %d | managed's detour: %s", act_was == sph::A_TAKE ? "take" : "place",
+             g_sfast_cfg_factor, g_sfast_cfg_on, sph::k_fast_end_name[b], sfast_exec_byte(), sfast_hook_name(g_sfast_hook));
+    }
+}
+/// ffxvr_shutdown (any thread): the game's own speed from here on, whatever the render thread publishes after.
+static void sfast_shutdown() {
+    InterlockedExchange(&g_sfast_dead, 1);
+    InterlockedExchange(&g_sfast_mul, 1);
+}
+/// ABI 67 (managed, render thread, every frame from push_all): ini sphere_fast / sphere_fast_factor / sphere_carry_seq, and the
+/// state of managed's detour on the exec-frames getter (sfast_hook_name), for the log. Not pushed for 3 frames: all off.
+extern "C" __declspec(dllexport) void ffxvr_sph_fast_set(int on, int factor, int carry_seq, int hook) {
+    g_sfast_cfg_on = on != 0 ? 1 : 0; g_sfast_cfg_factor = sph::fast_clamp(factor); g_sph_carry_seq = carry_seq != 0; g_sfast_hook = hook;
+    g_sfast_cfg_frame = g_frames; g_sfast_cfg_have = true;
+}
+/// ABI 67 (the game's main thread: managed's detour on Sg_GetCurExecFrames 0x82D7E0, with the game's own answer): the answer
+/// the game gets. The game's own, unless it is exactly 1 and a factor is published, fresh, and the module is not going away
+/// (sph::fast_exec / fast_answer). One aligned read in the common case.
+extern "C" __declspec(dllexport) int ffxvr_sph_fast_exec(int game) {
+    const LONG mul = g_sfast_mul;
+    if (mul <= 1) return game;
+    InterlockedIncrement(&g_sfast_asked);
+    const int m = sph::fast_answer(static_cast<int>(mul), static_cast<uint32_t>(GetTickCount()), static_cast<uint32_t>(g_sfast_stamp), g_sfast_dead != 0);
+    const int r = sph::fast_exec(game, m);
+    if (r != game) InterlockedIncrement(&g_sfast_answers);
+    return r;
 }
 
 // -- Carry (ABI 66; ffxvr_carry.h, unit-tested; managed carry.cs; the draw's side is beside ffxvr_on_draw) -------------------------
@@ -13750,12 +13866,15 @@ extern "C" __declspec(dllexport) const char* ffxvr_sph_status(float* out, int n)
 // draws of the frame that follows are matched and moved (carry_draw). The first user is the Cloister of Trials sphere Tidus
 // carries (slot 2, F_SPHERE): the hand and the on / off come from the sphere-hands state here (carry::SphereGate), read only:
 // the head managed pushed (its gates, control, free play, the carried variable), the open text windows, the grab sequence.
+// With sphere_carry_seq (branch sphere-fast) a grab sequence of ours keeps it in the palm through the game's take / place
+// animation too (carry::SeqHold; the A button's interaction is as before).
 //   threads  the render thread (managed's push at Present, carry_draw in the draw hook).
 // Logs: "carry:" lines: a pick-up, a put-down with its frame counts, the first move after a pick-up (the buffer's layout as
 // found), and each run of frames in which the slot was on and nothing was moved (60 lines a session).
 constexpr int k_carry_sphere = 2;
 uint32_t g_carry_frames_on = 0, g_carry_frames_moved = 0, g_carry_frames_failed = 0, g_carry_pickups = 0, g_carry_lines = 0;
 uint32_t g_carry_run_moved = 0, g_carry_run_failed = 0;      // since the pick-up
+carry::SeqHold g_carry_seq;                                  // sphere_carry_seq: a grab sequence of ours, as the sphere's rule sees it (branch sphere-fast)
 int      g_carry_fail[carry::k_slots] = {}; uint32_t g_carry_fail_n[carry::k_slots] = {};   // per slot, the failing run in progress: its reason (a Verdict), its frames
 int      g_carry_take_hand = -1; double g_carry_take_t = -1e9;
 char     g_carry_last[160] = "nothing carried yet";
@@ -13831,7 +13950,7 @@ extern "C" __declspec(dllexport) int ffxvr_carry_set(const carry::Desc* d, const
     g_carry.roll(i);
     const bool ok = g_carry.set(*d, keys, avoid, g_frames);
     if ((d->flags & carry::F_SPHERE) == 0) {
-        if (i == k_carry_sphere) g_carry_gate = carry::SphereGate();   // the sphere's rule off: it starts again from what it then sees
+        if (i == k_carry_sphere) { g_carry_gate = carry::SphereGate(); g_carry_seq = carry::SeqHold(); }   // the sphere's rule off: it starts again from what it then sees
         t.act = ok && (t.flags & carry::F_ON) != 0; t.act_hand = t.hand;
         return moved;
     }
@@ -13849,7 +13968,24 @@ extern "C" __declspec(dllexport) int ffxvr_carry_set(const carry::Desc* d, const
     in.take_hand = now - g_carry_take_t < 2.0 ? g_carry_take_hand : -1;
     const bool drawn = g_h2_drawn_frame != 0xFFFFFFFFu && g_frames - g_h2_drawn_frame <= 1u;
     for (int h = 0; h < 2; ++h) in.hand_ok[h] = drawn && ((g_h2_grips_last >> h) & 1) != 0;
+    // sphere_carry_seq (branch sphere-fast): through a grab sequence the mod itself started (a grip squeeze; the A button's
+    // interaction never starts g_sph_seq) the sphere is in the palm at once, not at the game model's hand
+    carry::SeqHoldIn sh = {};
+    sh.t = now;
+    sh.on = g_sph_carry_seq && g_sfast_cfg_have && g_frames - g_sfast_cfg_frame <= 3u && in.fresh && in.gate;
+    sh.running = g_sph_seq.running(); sh.started = sh.running;   // from the squeeze: a carried sphere does not leave the palm for the frames before the game takes the interaction
+    sh.quiet = in.control && in.free_play && !in.window; sh.gen = g_sph_head.gen;
+    in.seq_hold = g_carry_seq.step(sh);
+    in.seq_take = g_sph_seq.action == sph::A_TAKE; in.seq_hand = g_sph_seq.hand;
+    const bool seq_was = g_carry_gate.by_seq;
     const int ev = g_carry_gate.step(in);
+    if (g_carry_gate.by_seq) t.tol = carry::seq_tol(t.tol);   // the game's animation moves it between the root's read and its draw
+    if (g_carry_gate.by_seq && !seq_was) {
+        char m[200];
+        snprintf(m, sizeof(m), "in the %s palm through our %s sequence (sphere_carry_seq; carried value %d, the hand %s; the draw is looked for within %.1f units of its root)", g_carry_gate.hand == 0 ? "left" : "right",
+                 in.seq_take ? "take" : "place", in.carried, g_carry_gate.held ? "drawn" : "NOT drawn: the game's place", t.tol);
+        carry_line(m);
+    }
     if (ev == carry::EV_UP || ev == carry::EV_SEEN) {
         g_carry_pickups++; g_carry_run_moved = g_carry_run_failed = 0; g_carry_log_move = true; g_carry_fail[i] = 0; g_carry_fail_n[i] = 0;
         char m[200];
@@ -14912,6 +15048,7 @@ extern "C" __declspec(dllexport) void ffxvr_markers_3d(int on) { g_markers_3d = 
 extern "C" __declspec(dllexport) unsigned ffxvr_markers_game_art(int on) { g_ptr_reuse = on != 0; unsigned n = g_ptr_drawn; g_ptr_drawn = 0; return n; }
 extern "C" __declspec(dllexport) void ffxvr_dump_seq(int n) { g_seq_left = n; g_seq_index = 0; g_e2_begin_fail_prev = g_e2_begin_fail; }
 extern "C" __declspec(dllexport) void ffxvr_shutdown() {
+    sfast_shutdown();   // the fast sphere sequence: the game's own speed from here on (first: nothing below may delay it)
     InterlockedExchange(&g_sr_exiting, 1);   // stickrep: no extra frame from the render thread's ring wait from here on
     bt_exit_flush();   // BT-4 / BT-R-4: the kept bt: lines first, and the buffer is taken for good (the render thread may still present)
     pf_shutdown();     // load lock build: the profiler's watcher stops (its last block written); the lock release needs no teardown

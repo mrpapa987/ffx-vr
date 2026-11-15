@@ -6334,3 +6334,238 @@ camera does not see Tidus's hand, it will vanish from the VR hand, and the log w
 **Tests** (scratch `carry_chk`): the pure header (the slots, the identification, the matrices, the anchor, the image move on
 synthetic buffers of both eyes, the sphere's rule), and the glue's two halves extracted verbatim from ffxvr_native.cpp and run
 against a fake D3D context and the real `ffxvr_sphere.h` types. Mutants for all three.
+
+## Sphere grab: the fast sequence, and the sphere straight to and from the hand (branch `sphere-fast`, 15 Nov 2026; ABI 67)
+
+**The owner's request (14 Nov, after the Djose test of `hands-combo`):** the interaction is "still a little asynchronous"; speed
+up the prompts so a grab is nearly synchronous with the gesture, and skip the game's little take / place animation in first
+person, so the sphere goes straight to and from the hand.
+
+**His log (Djose, a grip grab in first person).** A take lasts 4.1 s from the squeeze to control: control off +0.04 s, the
+choice box +0.43, the carried variable +1.46, the "picked up" line +1.50, our press +1.71, control +4.10; the sphere in the palm
+only at +4.18 (the carry applied only with control on). A place lasts 3.0 s. Most of it is the game's animation and its
+script's waits, not the prompts.
+
+Both parts act only in first person, only during a grab sequence the mod itself started from a grip squeeze (`sph::Seq`), which
+exists only in a cloister with a socket table. The A button's interaction is untouched. No script is edited and no script
+instruction is skipped.
+
+### 1. The fast sequence (`sphere_fast`, `sphere_fast_factor`)
+
+**What it does.** From the frame the game has taken our interaction (control off with our worker chosen) until control is back
+or the sequence ends for any reason, the game's world runs `sphere_fast_factor` ticks per main-loop pass instead of one
+(default 6, range 1..12, 1 = off). The take / place animation, the text windows and the script's waits all count world ticks,
+so they pass in a fraction of the time.
+
+**The game's speed mechanisms** (ffx-rust `docs/formats/frame-timing.md`, static research of the same FFX.exe; FFX-60fps'
+source for what that mod does with them):
+
+| Mechanism | What it is | Verdict |
+|---|---|---|
+| Exec frames | `Sg_MainLoop`'s update loop runs `Sg_GetCurExecFrames()` (0x82D7E0) world ticks per pass, then ONE draw; the byte is at 0xC496D4, 1 in normal play; `Sg_MainCalcRate` forces the motion rate to 0x100 when the count is not 1 | **Used**, through the getter (below) |
+| The PC booster | `SpdCtrl_ScaleElapsedTime` (0x6F7340) scales the frame's dt; `Sg_FrameSync` turns it into a count of whole `Sg_MainLoop` passes (at most 9), each with its own draw section; the sound is muted | Not used |
+| `g_GameSpeed` | 0x1326BD8, a multiplier in `Script_Run`'s per-worker accumulator | Not used |
+
+- **Why exec frames.** One draw per pass, whatever the tick count: the mod builds the headset's two eyes from the pass's draws
+  (the eye images, the per-frame capture, the UI pass, the hands at the scene resolve), and none of that sees a difference. The
+  GPU does no extra work. And it is the game's own loop count, so a tick is a normal tick.
+- **Why not the booster.** It repeats the whole `Sg_MainLoop`, draw section included, once per tick: N times the draw calls
+  through our hooks in one Present (the game marks the repeats "skip render", but the passes still run), the frame counter and
+  the job joins N times, and FFX-60fps treats every such pass as a backlog pass of its own pacing. It also needs dt of N
+  thirtieths, which FFX-60fps' shorter frame period never gives (its README: the factor rounds down above 60 fps), it mutes
+  the sound through the game's sound state, it is refused by `Sg_CanSpeedUp` in several states, and it would need two or
+  three functions hooked that FFX-60fps already hooks (0x6F7340, 0x6F7330).
+- **Why not `g_GameSpeed`.** It does not speed anything up: below 1 a worker's run stops, at 1 or more it runs once per tick
+  as always ("This is not a rate control", frame-timing.md), and it would touch only the scripts, not the motions and text
+  windows they wait for.
+
+**How the count is changed: nothing is written to the game.** FFX-60fps (which the owner runs) sets the exec-frames byte
+itself before every main-loop pass: 1 on a logic pass, 0 on a draw-only pass (its `pacing.cpp`, `pacing_pre`; this mod's
+exe-analysis.md section 17 already notes it). A value written from our render thread would be overwritten at the next pass, or,
+landing inside a draw-only pass, would turn it into a logic pass. So the byte is only read (for the log). Instead managed
+detours the getter `Sg_GetCurExecFrames` (cdecl `int()`, Fahrenheit's hooking), and hands the game's own answer to native's
+`ffxvr_sph_fast_exec`, which returns the factor when that answer is exactly 1 and a factor is in force, and the game's own
+answer otherwise:
+- 0 (FFX-60fps' draw-only pass, or the debug pause) stays 0: FFX-60fps' pattern of logic and draw-only passes is unchanged, a
+  logic pass just runs N ticks;
+- 2 or more (somebody else's speed-up) is passed through.
+
+**Never left sped up, by construction** (the worst possible bug here):
+- There is no game value to restore. The game's byte keeps whatever the game or FFX-60fps wrote.
+- One function decides, once a frame: `sfast_frame` (ffxvr_native.cpp), called from `ffxvr_begin_frame` at every Present,
+  after `xr_tick`, whether or not the headset runs. It asks `sph::Fast::step` with this frame's state only. A factor is in
+  force only while ALL of these hold: the setting on and the factor above 1 (from a settings push not older than 3 frames);
+  managed's state fresh and the sequence stepped this very frame (`sph_tick` ran: the headset is up); a sequence of ours
+  running in a phase after the game took the interaction; the feature's gates open (`Head.on`: a trial map with a socket
+  table, the field, no battle, no field menu, no movie, no save screen, the F8 panel not shown; the VR controllers live;
+  first person); the scene the one the sequence started in; control off; and under 3 s of real time since the run began
+  (`k_fast_cap_s`; a run that hits the cap is not started again for that sequence). The frame any of them fails, 1 is
+  published. So the sequence's end, a stop, a timeout, a map change, a battle, leaving first person and a menu all end it
+  on their own frame (the last four also stop the sequence itself, as before).
+- The published factor carries a time stamp and is used only while it is younger than 100 ms (`sph::fast_answer`,
+  `k_fast_lease_ms`). If the Presents stop (a load, a stall, a crashed render thread) the game is at its own speed 0.1 s
+  later with nobody doing anything.
+- `ffxvr_shutdown` (the module's unload path, `h_exitprocess`) sets a flag the getter's answer checks first: 1 from then on,
+  whatever is published after.
+- The detour itself always calls the game's getter first and returns its answer on any doubt (a fault, native unbound, an
+  answer out of 1..12).
+
+**The detour's insertion.** `Sg_GetCurExecFrames` is a required signature of FFX-60fps' start-up scan: a hook that landed
+before that scan would make FFX-60fps install nothing (the same hazard exe-analysis.md records for `Sg_MainLoop`). So it is not
+queued at module init. It is inserted late, on the render thread (bracketed like the ImGui pad's late insertion), the first
+time the feature is wanted: in a cloister with a socket table, first person, VR hands and `sphere_fast` on. FFX-60fps scans
+within moments of the game's start. Before inserting, the function's opcode bytes are checked (`cmp byte [abs], 0; push esi;
+movsx esi, byte [abs]` ... `movsx esi, byte [abs]`) and its third operand must be the exec-frames byte's address; anything
+else is left alone and the F8 line says so. FFX-60fps' two rows that compare call targets with the getter's address
+(LOOP-005, MAG-008) are unaffected: the address does not change. Its developer hot reload would re-scan and refuse; players
+do not have it.
+
+**The press sequence at N ticks per pass.** `sph::Seq` is unchanged. One rule was added, in `sph::Fast`, the **press guard**:
+- The hazard: the pad's press edges are made once per main-loop pass, so with N ticks in a pass every tick sees the same new
+  confirm. A press of ours could then answer a page, and in a later tick of the same pass a second one (the model in the
+  tests shows 10 such ticks in one take at factor 6 without the guard).
+- The rule: from the frame we ask for a press until 70 ms (`k_fast_guard_s`, two 30 Hz passes) after the game first polled
+  it, or until it is withdrawn, the published answer is 1. The pass that carries our press's edge runs one tick, exactly as
+  in normal play. A held button is no edge, so the factor returns while the press is still down.
+- It costs nothing: while a page waits for our confirm, nothing else in the script moves.
+- With that, every timing rule holds as it was written and tested:
+  - the readiness mirror reads the script windows per frame: a line may now open and become ready inside one drawn frame;
+    the settle (60 ms of "ready", real time) then runs as before, and the press goes out on a frame where the page waits;
+  - the repeat (still ready 0.3 s after our press was let go, at most 3 presses a page), "stuck" (0.4 s), the 150 ms
+    withdrawal of a press the game has not polled, and the blind press after 1.5 s compare real time with a page that is
+    standing still: the game's speed does not enter;
+  - "done if no result line within 1 s" and the step timeouts (1 / 3 / 6 / 5 s) are upper bounds in real time: the game
+    reaches each step sooner, never later;
+  - the outcome (the carried variable) and the scene check are read per frame as before.
+- What is left of a grab's time is mostly our own press pacing, about 0.2 s of real time a page (the settle, the poll, the
+  100 ms hold, the 150 ms gap between presses). The model of the owner's log gives 4.1 s to 1.2 s for a take and 2.7 s to
+  1.1 s for a place at factor 6, and 0.9 s / 1.0 s at 12. Tightening the press pacing is a separate, later step.
+
+**The eye hold and the carry at N ticks per pass (checked, not changed).**
+- The "steady view" hold (`ej::EvHold`) takes one eye base per Present and counts its windows in Presents or seconds. With
+  N ticks in a pass the root moves N ticks' worth between two Presents. The Djose grab only snaps the root (3.9 units to the
+  socket, 2.5 back): single steps under the leash, in separate frames even at factor 12 (they are 1.8 s of game time apart).
+  A scripted WALK would differ: at 1.02 units a tick and factor 6 its steps are 6.1 units, which two in a row read as a
+  staging (the two-halves rule) and restart the hold at the walked-to place. No sphere interaction in Djose walks him; a
+  trial that does needs the hold told about the factor.
+- The carry reads the carried actor's root at Present and looks for its draw near that root in the next frame. The game's
+  animation moves the sphere on Tidus's hand in between, N times as far per frame. While the sequence's rule holds the
+  sphere (part 2) the search radius is 10 units instead of 4 (`carry::seq_tol`, under the cap of 12), still only for a draw
+  nearer that root than every other shown sphere. A frame that misses shows the sphere at the game's place for that frame
+  and logs "no draw near the carried root".
+- FFX-60fps' smoothing interpolates between the states of two logic passes; with N ticks in a pass those are N ticks apart.
+  The steps are larger for the fraction of a second, nothing else changes. Its PERF-002 averages frame times over 120
+  frames; a few logic passes with N ticks of CPU work do not move that mean (not measured).
+- Sounds triggered per tick play in real time: the take's sound may be cut short or overlap. Nothing is muted.
+
+**Logs** (ffxvr_diag.log), one `sph: fast` line per sequence the game took:
+- a run (the numbers here are made up): `sph: fast: take at worker 51: factor x6 for 0.52 s of real time, ended by: the sequence ended | the game's
+  exec-frames byte was 1 before ... | frames 31, of them 12 at the game's own speed around our presses | the game's main-loop
+  passes meanwhile 31 | the exec-frames getter: asked 310 times while a factor was published, answered x6 95 times ... | the
+  exec byte at our Presents: 15 times 0 (a draw-only pass), 16 times 1, 0 other | managed's detour: inserted`. "answered x6
+  0 times" adds **NO EFFECT** (the detour is not in, or the game's answer was never 1). There is no world-tick counter in
+  the game to read; the answered count and the grab's own duration in the `sphere grab:` line are the evidence.
+- no run: `sph: fast: not used for the last take (...)`, with the reason.
+- `sph: fast: the detour:` once, when it is inserted or refused.
+
+### 2. The sphere straight to and from the hand (`sphere_carry_seq`)
+
+**Before:** the carried sphere was in the palm only with control on in free play (`carry::SphereGate`'s quiet rule), so
+during a take it floated at the hidden game model's hand until control returned, and during a place it left the palm when
+the sequence started.
+
+**Now, during a grab sequence of ours** (`carry::SeqHold`, fed by the glue in `ffxvr_carry_set`):
+- **A take:** from the first frame the game shows the carried actor on Tidus's hand (managed finds the shown object riding
+  him), which can be before the variable moves, it is drawn in the palm of the hand that squeezed; then through the rest
+  of the sequence; and with no frame at the game's place in between, on into the quiet rule when control is back.
+- **A place:** it stays in the palm it is in (the hand that took it, whichever hand squeezed at the socket), from the
+  squeeze on, while the variable is not 0, whatever the game's animation does with it. From the variable's 0 it is the
+  socket's own sphere.
+- **The end of the hold.** The sequence's own end with control back; or, when the sequence ended before the game's event did
+  (a stop with the prompt shown, "done" at a timeout), the first frame the player has control in free play with no text
+  window, at most 8 s later; at once on a scene change, the setting, or the gates.
+- **Unchanged:** which draw is the carried sphere (the model's index-buffer keys, the root, nearer than every other shown
+  sphere, the cap of 4 passes of its segments), the body-hide exemption of a moved draw, the hand that must be drawn on the
+  last frame and on this one, and the game's own draw on any refusal. The A button's interaction never starts a sequence
+  of ours: it keeps the old rule.
+
+**What else of the game's animation shows in first person** (from the code, not seen in the headset):
+- Tidus's body, arm included, is hidden by the first-person body hide, so the reach itself does not show.
+- The socket's own sphere is the game's: in a take it disappears when the script hides it, which need not be the frame the
+  carried one appears in the palm (for a moment there may be both, or neither); in a place it appears when the script
+  shows it, at the variable's change or near it, after the palm's sphere is gone or a frame before. So **the socket's
+  sphere may pop**. Nothing more is hidden in this round.
+- The game's camera cut and Tidus's snap to the socket are the eye hold's business, as before.
+
+### Settings (F8 > Hands, under "Carried sphere in your hand")
+
+- `sphere_fast` (**Fast sphere grab**, on) with `sphere_fast_factor` (**speed**, 1..12, default 6; 1 = off).
+- `sphere_carry_seq` (**Sphere straight to and from your hand**, on). It needs `sphere_carry`.
+- Developer > Inspect: the "sphere hands:" line ends with the fast sequence's state and last run; a "sphere fast:" line
+  gives the detour's state, its call count and the game's exec-frames byte now.
+
+### Follow-up option: a true animation skip (not built)
+
+The fast sequence still plays the animation, N times as fast. Skipping it means the take / place handler of the trial's
+script must not wait. From ffx-rust's `docs/formats/script.md` (the natives; the Djose handlers themselves were not
+decompiled for this round, so which of these they use is to be read from the script first):
+- the motion: `Native_ChrPlayMotion` (0x501A, through `Native_PlayMotionCommon` 0xA7AAE0) starts it, and
+  `Native_ChrWaitMotion` (0x501E, poll 0xA793C0; 0x5003, poll 0xA788A0) holds the worker until it ends;
+- plain waits: `WaitFrames` (0x0000, poll 0x85C6B0);
+- the text: the message-window waits (0x860AA0 for a line, the choice's 0x860990), which the press sequence already
+  answers;
+- moves and turns of Tidus to the socket (`Atel_MoveUpdate`), and the camera's eased moves.
+
+Two ways, both beyond this round's "no script edits":
+1. **Poll hooks:** while our sequence runs, the polls of `ChrWaitMotion` and `WaitFrames` answer "done" for the workers of
+   the trial's script (the worker is the poll's argument). The motion is still started, so Tidus's pose jumps, which
+   first person does not show; the sound cues and the variable writes keep their order. Risk: a wait that guards a load
+   or another worker's step.
+2. **A patched handler:** the script's take / place functions rewritten without the motion and the waits (as a file
+   replacement through the External File Loader path, or patched in memory after the script loads). Exact, but it is a
+   game-derived file edit per trial and per language-independent script, to be made by a tool on the player's PC.
+
+Either would bring a grab down to the press pacing alone; with that tightened too, to a few frames.
+
+### Sources and credit
+
+- ffx-rust (yutamago; MIT / Apache-2.0; `docs/formats/frame-timing.md`, `script.md`, `symbols/ffx.sym`, commit bd49dc7):
+  the main loop's tick loop, `Sg_GetCurExecFrames` / `Sg_SetExecFrames` / the exec-frames byte and its two override bytes,
+  `Sg_MainCalcRate`, the booster, `g_GameSpeed`, what counts ticks and what counts real time, the motion and wait natives.
+  Facts and addresses only; its research is static ("the game was not run for it").
+- FFX-60fps (peternguyenst; Apache-2.0; `src/x/pacing.cpp`, `sigs.cpp`, `rows/BOOST-001.cpp`, `rows/DEV-TURBO.cpp`): that it
+  sets the exec-frames byte before every pass, that the getter is a required signature of its scan, the getter's shape, and
+  how the booster interacts with its pacing. No code taken.
+
+### Tests (scratch `sfast_chk`, `run_all.sh <repo>`)
+
+- `fast_test` (1514 checks): `sph::Fast` (every gate, every end on its own frame, the cap and no restart after it, a
+  sequence change, the press guard), `fast_answer` (the lease, the tick count's wrap, the shutdown flag), `fast_exec`.
+- `seq_sim_test` (300): the unchanged `sph::Seq` with `sph::Fast` against a model of the game's take and place scripts
+  timed from the owner's log, at factors 1, 2, 3, 6, 9, 12, with one pass per tick and with FFX-60fps' two; the same
+  presses as at the game's speed, no repeat, no tick that sees a stale press, nothing sped up after the end, the cap on a
+  script that never returns control, the lease when the Presents stop.
+- `carry_seq_test` (589): the sphere's rule through a take and a place of ours, the tail, the bounds; with no sequence of
+  ours the rule equals the one before this branch on 400,000 random frames; the wider radius.
+- `glue_test` (482): `sfast_frame`, the two exports, `sfast_shutdown` and `ffxvr_carry_set`, verbatim from
+  ffxvr_native.cpp (`extract.py`), compiled against stand-ins: each interruption, the log lines, the detour not in,
+  FFX-60fps' byte pattern, shutdown, the carry through a sequence, the settings off, the A button's interaction.
+- `check.py` (text scans): the ABI numbers and histories, each export defined / bound / unbound with one type, each ini
+  key in the parser, the defaults, the menu and the docs, the one writer of the published factor, the exec byte never
+  written. `mutants.py`: 59 mutants of the rules and the glue, all caught.
+- Nothing here was compiled for Windows or run in the game: there is no C# compiler and there are no Windows headers on
+  the machine this was written on.
+
+### Not verified in the game
+
+1. That FFX.exe's update loop honours a count above 1 from the getter in this build (static research; the game's own
+   debug pad and FFX-60fps use 0 and 1).
+2. That Fahrenheit accepts the late insertion on 0x82D7E0 and the detour's cost per call is negligible (it is called
+   several times per pass, and by effect code).
+3. The press guard's 70 ms against the real pad path (where the game's poll, FFX-60fps' input fix and the pass meet).
+4. FFX-60fps' smoothing and PERF-002 with N-tick logic passes.
+5. Effects and sounds of the cloister at N ticks per pass (the effects' draw half runs N times per pass, by the game's own
+   rule).
+6. When the game shows and hides the carried actor and the socket's sphere against the variable (the pop, and whether the
+   early hold of a take ever sees the actor before the variable).
+7. That 10 units of search radius are enough at factor 6 to 12 (else single frames at the game's place; the log says so).

@@ -36,7 +36,16 @@ third-party art, under FFX VR's MIT licence (LICENSE).
 - Dear ImGui / Hexa.NET.ImGui - used through Fahrenheit's copy (MIT).
 - FFX-60fps (peternguyenst) - the frame-rate mod used alongside; built
   from source on the user's machine by tools/build-fps60.ps1.
-  https://github.com/peternguyenst/FFX-60fps  Apache-2.0.
+  https://github.com/peternguyenst/FFX-60fps  Apache-2.0. Its source was
+  also read for how it paces the game's main loop (the exec-frames byte it
+  sets before every pass, the functions it checks at start), so that the
+  fast sphere sequence leaves its pacing alone; no code taken.
+- ffx-rust (yutamago) - consulted as a reference for FFX.exe's main loop
+  timing, script natives and function addresses (docs/formats/
+  frame-timing.md, script.md, symbols/ffx.sym; commit bd49dc7) for the
+  fast sphere sequence; facts and addresses only, no code, data or
+  resources taken.  https://github.com/yutamago/ffx-rust
+  MIT OR Apache-2.0.
 - Farplane (topher-au) - consulted as a reference for memory offsets and
   data layouts only; no code, data or resources taken. The repository has
   no licence file (checked Nov 2026, commit 943b2c7), so nothing of it may

@@ -588,4 +588,86 @@ inline float note_alpha(double age) {
     return static_cast<float>((k_note_s - age) / k_note_fade_s);
 }
 
+// -- the fast sequence (branch sphere-fast; ABI 67) -------------------------------------------------------------------------
+// While a grab sequence of ours runs with control off, the game's world runs `factor` ticks per main-loop pass instead of one
+// (its own "exec frames" count: Sg_MainLoop's update loop asks Sg_GetCurExecFrames 0x82D7E0 before every tick, and builds one
+// draw whatever the count; ffx-rust docs/formats/frame-timing.md). Nothing is written to the game: managed's detour on that
+// getter (sphere_fast.cs) asks ffxvr_sph_fast_exec, which multiplies an answer of exactly 1 and passes every other value
+// through (0 is a draw-only pass of FFX-60fps, which sets the game's byte to 1 or 0 before every pass and would overwrite a
+// written value). So there is no game value to restore, and "never left sped up" needs no restore to succeed:
+//   - Fast::step decides once a frame (ffxvr_native.cpp sfast_frame, called at every Present whatever the headset does) from
+//     that frame's state; anything but "a sequence of ours is past the interaction's start, control off, the gates open, the
+//     same scene, the state fresh, under the cap" answers 1;
+//   - the answer is published with a time stamp and is good for k_fast_lease_ms only (fast_answer): if the Presents stop (a
+//     load, a hang, the module going away), the game is back at its own speed 0.1 s later with nobody doing anything.
+// The press guard: the pad's press edges are made once per main-loop pass, so with several ticks in a pass every tick would
+// see the same new confirm. From the frame we ask for a press until k_fast_guard_s after the game first polled it, the
+// answer is 1: the pass that carries our press's edge runs one tick, as in normal play, and every timing rule of the press
+// sequence (the readiness mirror, the settle, the repeat, the withdrawal) holds as it was written. While a page waits for our
+// press nothing else in the script moves, so those frames cost nothing.
+constexpr int      k_fast_min = 1, k_fast_max = 12, k_fast_def = 6;   // ini sphere_fast_factor (1 = off)
+constexpr double   k_fast_cap_s = 3.0;      // one sequence is sped up for at most this long (real time), then never again
+constexpr double   k_fast_guard_s = 0.07;   // two 30 Hz passes after the game first polled our press
+constexpr uint32_t k_fast_lease_ms = 100;   // a published answer's life
+inline int fast_clamp(int f) { return f < k_fast_min ? k_fast_min : f > k_fast_max ? k_fast_max : f; }
+enum FastEnd { FE_NONE = 0, FE_SEQ, FE_CONTROL, FE_CAP, FE_GATE, FE_GEN, FE_STALE, FE_SETTING, FE_SHUTDOWN, FE_N };
+static const char* const k_fast_end_name[FE_N] = { "-", "the sequence ended", "control came back", "the 3 s cap", "the feature's gates closed (a menu, a battle, the view, the headset)",
+    "the scene changed", "no fresh state (the headset's frame or managed's push stopped)", "the setting is off or the factor is 1", "the module is shutting down" };
+struct FastIn {
+    double t;            // seconds
+    bool   setting;      // ini sphere_fast, from a settings push that is not stale
+    int    factor;       // ini sphere_fast_factor
+    bool   fresh;        // managed's state is fresh AND the sequence was stepped this very frame (sph_tick ran)
+    bool   gate;         // sph_tick's `on`: a trial with a socket table, first person, the VR hands, the field, the headset
+    bool   running;      // Seq::running()
+    int    phase;        // Seq::phase
+    double seq_t0;       // Seq::t0: which sequence this is
+    bool   gen_same;     // the scene is the one the sequence started in
+    bool   control;      // the player has control
+    bool   press_out;    // a press of ours is out (asked for and not yet let go)
+    int    press_polls;  // the game's polls that carried it
+};
+struct Fast {
+    bool   active = false; int why = FE_NONE;
+    double t0 = 0.0, run_seq = -1.0, spent_t0 = -1.0, t_poll = -1.0;   // the run's start and its sequence; the sequence whose run hit the cap; since when the game has polled the press that is out
+    int    factor = 1, frames = 0, frames_fast = 0;    // of the run: the factor it started with, its frames, those answered with the factor
+    /// Why the game must run at its own speed now (FE_NONE: it may be sped up). The cap is step()'s.
+    static int blocked(const FastIn& in) {
+        if (!in.setting || fast_clamp(in.factor) <= 1) return FE_SETTING;
+        if (!in.fresh) return FE_STALE;
+        if (!in.running || in.phase <= S_WAIT_OFF || in.phase > S_WAIT_CONTROL) return FE_SEQ;   // only once the game took our interaction
+        if (!in.gate) return FE_GATE;
+        if (!in.gen_same) return FE_GEN;
+        if (in.control) return FE_CONTROL;
+        return FE_NONE;
+    }
+    /// One frame. Returns the multiplier in force until the next call: 1 (the game's own speed) or the factor.
+    int step(const FastIn& in) {
+        if (!in.press_out) t_poll = -1.0; else if (in.press_polls > 0 && t_poll < 0.0) t_poll = in.t;
+        const int b = blocked(in);
+        if (active) {
+            if (in.seq_t0 != run_seq) { active = false; why = FE_SEQ; }   // another sequence: a run of its own, with its own cap, from the next frame
+            else if (b != FE_NONE) { active = false; why = b; }
+            else if (!(in.t - t0 <= k_fast_cap_s) || in.t < t0) { active = false; why = FE_CAP; spent_t0 = in.seq_t0; }
+        }
+        else if (b == FE_NONE && in.seq_t0 != spent_t0) { active = true; why = FE_NONE; t0 = in.t; run_seq = in.seq_t0; factor = fast_clamp(in.factor); frames = 0; frames_fast = 0; }
+        if (!active) return 1;
+        ++frames;
+        if (in.press_out && (in.press_polls <= 0 || t_poll < 0.0 || in.t - t_poll < k_fast_guard_s)) return 1;   // the press guard
+        ++frames_fast;
+        return factor;
+    }
+    void stop(int w) { if (active) { active = false; why = w; } }
+};
+/// The published answer as the game's main thread may use it now: 1 unless it is a factor, younger than the lease (the tick
+/// counts are unsigned milliseconds: the difference is right across a wrap), and the module is not going away.
+inline int fast_answer(int mul, uint32_t now_ms, uint32_t stamp_ms, bool dead) {
+    if (dead || mul <= 1 || mul > k_fast_max) return 1;
+    if (static_cast<uint32_t>(now_ms - stamp_ms) > k_fast_lease_ms) return 1;
+    return mul;
+}
+/// What the game's exec-frames getter returns: its own answer, multiplied only when that answer is exactly 1 (0: a draw-only
+/// pass or the debug pause; 2 and more: somebody else's speed-up; a negative: never).
+inline int fast_exec(int game, int mul) { return (game == 1 && mul > 1 && mul <= k_fast_max) ? mul : game; }
+
 }  // namespace sph

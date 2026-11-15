@@ -16,7 +16,8 @@ namespace FFXVR;
 // the carried actor's segment keys, its drawn root, the other shown actors of the same model and the palm offset. Native's
 // rule (carry::SphereGate) then decides: in the palm of the hand whose grip took it (the right hand for the A button) while
 // the player has control in free play with no text window and no grab sequence running; the game's own draw during the take
-// and place animations, any event, a menu, or whenever the hands are not drawn.
+// and place animations, any event, a menu, or whenever the hands are not drawn. With sphere_carry_seq (sphere_fast.cs; native
+// carry::SeqHold) a grab sequence the mod started from a grip squeeze keeps it in the palm through those animations too.
 // ini: sphere_carry 0/1 (default 1; Hands tab), sphere_carry_offset 0..0.30 m (default 0.10; Developer): how far the sphere's
 // centre sits from the palm's centre, out of the palm side.
 public sealed unsafe partial class FFXVRModule {
@@ -119,7 +120,7 @@ public sealed unsafe partial class FFXVRModule {
     /// F8 > Hands: the setting.
     private void carry_ui() {
         ui_check("sphere_carry", "Carried sphere in your hand##carry", ref _sphere_carry, UiTag.None,
-                 "In a Cloister of Trials, in first person with the VR hands: the sphere Tidus carries is drawn in the palm of the hand whose grip took it (the right hand if you took it with the A button). During the take and place animations, and whenever the hands are hidden, it is where the game draws it. Djose only for now.");
+                 "In a Cloister of Trials, in first person with the VR hands: the sphere Tidus carries is drawn in the palm of the hand whose grip took it (the right hand if you took it with the A button). During the game's own take and place animations it is where the game draws it (a grab started with your grip keeps it in your palm: \"Sphere straight to and from your hand\", below), and so it is whenever the hands are hidden. Djose only for now.");
         if (_sphere_carry && !_sphere_hands) { ImGui.SameLine(); ImGui.TextDisabled("(needs \"Grab spheres with your hands\" on)"); }
     }
     /// F8 > Developer > Inspect: the palm offset, the test mode and the native state.

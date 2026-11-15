@@ -379,6 +379,20 @@ Fahrenheit's soft reset, a game over in battle), `imgui_vrpad_strict` (0; 1 = do
 import resolves into ImGui's XInput DLL). The save screen's line in `ffxvr_diag.log` starts
 with `imgui pad:`; quick squeezes log `grips:` lines.
 
+### Cloister spheres with your hands (F8 > Hands)
+
+In a Cloister of Trials (Djose for now), in first person with the VR hands on: a label names the sphere or socket a hand
+comes near, and a squeeze of that hand's grip takes or places the sphere, the game's prompt answered for you.
+
+Keys: `sphere_hands` (1: the labels and the grip grab), `sphere_carry` (1: the carried sphere is drawn in your palm),
+`sphere_carry_seq` (1: during a grip-started grab the sphere is in your palm from the moment the game shows it, and stays
+there on a place until it is in the socket, instead of following the game's hand animation; 0 = in the palm only while you
+have control), `sphere_fast` (1: during a grip-started grab the game runs faster until you have control again, so its
+animation and pauses pass quickly; never for the A button, 3 s at most, and it ends the moment anything interrupts the
+grab), `sphere_fast_factor` (6, 1..12: how many times faster; 1 = off). `sphere_carry_offset` (Developer) is the sphere's
+distance from the palm. Each grab logs `sphere grab:` lines in `ffxvr_diag.log`, the fast part one `sph: fast` line (the
+factor, how long, and whether the game took it: "NO EFFECT" means it did not), the palm part `carry:` lines.
+
 ## Texture packs (External File Loader style) under Fahrenheit
 
 Loose-file texture packs for this game (e.g. HitokageWorshipper's

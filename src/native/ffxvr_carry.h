@@ -282,24 +282,79 @@ struct SphereIn {
     int  carried;        // the trial's carried variable: 0 none, > 0 a sphere, < 0 not read
     int  take_hand;      // the hand of a take sequence running now or just ended (0 / 1), else -1
     bool hand_ok[2];     // the hand was drawn on the last frame
+    // branch sphere-fast (sphere_carry_seq): a grab sequence the mod itself started is under way (SeqHold)
+    bool seq_hold;       // SeqHold's answer this frame
+    bool seq_take;       // that sequence is a take (else a place)
+    int  seq_hand;       // the hand whose grip started it (0 / 1)
 };
+// During a grab sequence of the mod's own (a grip squeeze: never the A button's interaction), in the palm at once
+// (sphere_carry_seq, branch sphere-fast):
+//   a take   from the first frame the carried actor is shown (managed finds it riding Tidus: `enabled`), which may be before
+//            the variable moves, in the hand that squeezed; then on through the rest of the sequence and, with no frame at the
+//            game's place in between, into the quiet rule above;
+//   a place  it stays in the palm it is in while the variable is not 0, whatever the game's animation does with it; from the
+//            variable's 0 the socket's own sphere shows it.
+// Everything else is as before: the gates, the hand drawn, the identification of the draw, and the game's own draw on any
+// doubt (the hold ends with the sequence's event: SeqHold).
 struct SphereGate {
     int carried = -1, hand = -1, quiet = 0; bool held = false;
+    bool by_seq = false;   // held (or would be, with the hand drawn) by the sequence's rule on the last step
     int step(const SphereIn& in) {
-        if (!in.fresh || in.carried < 0) { held = false; quiet = 0; return EV_NONE; }   // not read this frame: the value and the hand are kept
+        if (!in.fresh || in.carried < 0) { held = false; quiet = 0; by_seq = false; return EV_NONE; }   // not read this frame: the value and the hand are kept
         if (in.carried == 0) {
             const int ev = carried > 0 ? EV_DOWN : EV_NONE;
-            carried = 0; hand = -1; held = false; quiet = 0;
+            carried = 0; hand = -1; held = false; quiet = 0; by_seq = false;
+            // our own take: the sphere the game has put on Tidus's hand, before the variable says so
+            if (in.seq_hold && in.seq_take && in.enabled && in.gate && (in.seq_hand == 0 || in.seq_hand == 1)) {
+                hand = in.seq_hand; by_seq = true; held = in.hand_ok[hand];
+            }
             return ev;
         }
         int ev = EV_NONE;
         if (carried <= 0) { hand = (in.take_hand == 0 || in.take_hand == 1) ? in.take_hand : 1; ev = carried == 0 ? EV_UP : EV_SEEN; }
         carried = in.carried;
         const bool q = in.control && in.free_play && !in.window && !in.seq_running;
-        quiet = q ? (quiet < 1000000 ? quiet + 1 : quiet) : 0;
-        held = in.enabled && in.gate && quiet >= k_quiet && (hand == 0 || hand == 1) && in.hand_ok[hand];
+        if (q && by_seq) quiet = k_quiet;   // straight on from the sequence's hold
+        else quiet = q ? (quiet < 1000000 ? quiet + 1 : quiet) : 0;
+        by_seq = in.seq_hold && (hand == 0 || hand == 1);
+        held = in.enabled && in.gate && (quiet >= k_quiet || by_seq) && (hand == 0 || hand == 1) && in.hand_ok[hand];
         return ev;
     }
 };
+
+// A grab sequence of the mod's own, as the carry sees it: from its start (`started`: the glue passes the squeeze itself, so a
+// carried sphere does not leave the palm for the frames before the game takes the interaction) to the end of the event it
+// started: the sequence's own end with control back, or, when the sequence ended first (a stop with the prompt shown, "done"
+// before the game's last wait), the first frame the player has control in free play with no text window. Bounded: a scene
+// change, the setting or the gates going, or k_seq_tail_s after the sequence ended, end it at once.
+constexpr double k_seq_tail_s = 8.0;
+struct SeqHoldIn {
+    double   t;          // seconds
+    bool     on;         // ini sphere_carry_seq, the sphere-hands gates open, the state fresh
+    bool     running;    // a sequence runs (sph::Seq::running)
+    bool     started;    // ... and it counts from now (the glue: from its first frame)
+    bool     quiet;      // the player has control in free play and no text window is open
+    uint32_t gen;        // the scene
+};
+struct SeqHold {
+    bool active = false, tail = false; uint32_t gen = 0; double t_end = 0.0;
+    bool step(const SeqHoldIn& in) {
+        if (!in.on) { active = false; tail = false; return false; }
+        if (in.running && in.started) {
+            if (active && !tail && in.gen != gen) { active = false; return false; }   // (the sequence itself stops on a scene change)
+            active = true; tail = false; gen = in.gen; return true;
+        }
+        if (!active) return false;
+        if (in.running) { active = false; tail = false; return false; }   // a new sequence not yet taken by the game: the old event is over
+        if (!tail) { tail = true; t_end = in.t; }
+        if (in.quiet || in.gen != gen || !(in.t - t_end <= k_seq_tail_s) || in.t < t_end) { active = false; tail = false; return false; }
+        return true;
+    }
+};
+// While the sequence's rule holds the sphere, the game's animation moves it on Tidus's hand between the read of its root (at
+// Present) and its draw, and faster with the fast sequence: the draw is looked for within a wider radius of the root, still
+// under the cap, and still only when it is nearer that root than every other shown actor of the model.
+constexpr float k_seq_tol_mul = 2.5f;
+inline float seq_tol(float tol) { const float t = tol * k_seq_tol_mul; return t < k_tol_max ? t : k_tol_max; }
 
 }  // namespace carry

@@ -22,7 +22,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     private nint   _native_handle;
     private string _native_status = "not loaded";
     private bool   _native_init_done;
-    private const int k_abi = 66;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art; 56: ffxvr_odt_set + badge, ffxvr_odt_hide2d; 57: ffxvr_odt_row_patch, ffxvr_odt_row_stat, the Bushido row's call-site patch and its diagnostics; 58: ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place, vr-menu S2, the F8 window's own panel in the headset; 59: ffxvr_panel_pointer, vr-menu S3, the laser pointer; 60: ffxvr_panel_pointer(mode, in, nin, out, n), the S3 review's hand-back of ImGui's mouse; 61: ffxvr_menu_hold, vr-menu S4, the left menu button held opens / closes this window; 62: ffxvr_menu_hold -> ffxvr_menu_chord, the left grip + the left menu button instead (Virtual Desktop takes the long press); 63: ffxvr_sph_hands, the sphere-hands capture (sphere_log.cs); 64: ffxvr_sph_set, ffxvr_sph_status, sphere hands stages 1 + 2 (sphere_hands.cs); 65: ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase, the weapon-hands capture (weapon_log.cs); 66: ffxvr_carry_set, ffxvr_carry_status, carry: a game model's own draws at a VR hand, the carried cloister sphere (carry.cs))
+    private const int k_abi = 67;   // must equal FFXVR_ABI in ffxvr_native.cpp (bumped with any export change; 37: ffxvr_fp_self_set, ffxvr_fp_others_set; 38: ffxvr_cpu_report, ffxvr_hands2_set's and ffxvr_fp_self_set's returns, tap game bits 0x200 / 0x400; 39: ffxvr_fp_others_set(xyz, heads, n), npc-anchor; 40: ffxvr_fp_ib_set, npc-anchor round 2; 41: ffxvr_fmv3d_set, ffxvr_fmv3d_text, fmv-relief S3; 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth), the "3D movie" mapping; 43: + edge, the window rule; 44: ffxvr_eye_jump_set, ffxvr_eye_event, eye jumps; 45: ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find / _set, ffxvr_imgui_xstate / _xcaps, ffxvr_ctl_text, Quest-only controls, merged on top of 44; 46: ffxvr_bt_tag_step, ffxvr_bt_tag_hold, battle tag; 47: ffxvr_dmg_walk / _queue / _set / _cfg / _skip / _status, 3D damage numbers; 48: ffxvr_odg_set, ffxvr_odg_text, overdrive gestures, merged on top of 47; 49: ffxvr_odv_set, overdrive visuals; 50: ffxvr_dmg_anchor, the 0x794AB0 damage anchor; 51: ffxvr_fp_event, the first-person event hold, fix-eye, merged on top of 50; 52: ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32, ffxvr_odg_text 4 / 5, strike the targets and Practice targets; 53: ffxvr_odt_set + time_mult, od_targets_time; 54: ffxvr_odt_set + spread, od_targets_spread; 55: ffxvr_odt_set + art, ffxvr_odg_text 6, od_targets_art; 56: ffxvr_odt_set + badge, ffxvr_odt_hide2d; 57: ffxvr_odt_row_patch, ffxvr_odt_row_stat, the Bushido row's call-site patch and its diagnostics; 58: ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place, vr-menu S2, the F8 window's own panel in the headset; 59: ffxvr_panel_pointer, vr-menu S3, the laser pointer; 60: ffxvr_panel_pointer(mode, in, nin, out, n), the S3 review's hand-back of ImGui's mouse; 61: ffxvr_menu_hold, vr-menu S4, the left menu button held opens / closes this window; 62: ffxvr_menu_hold -> ffxvr_menu_chord, the left grip + the left menu button instead (Virtual Desktop takes the long press); 63: ffxvr_sph_hands, the sphere-hands capture (sphere_log.cs); 64: ffxvr_sph_set, ffxvr_sph_status, sphere hands stages 1 + 2 (sphere_hands.cs); 65: ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase, the weapon-hands capture (weapon_log.cs); 66: ffxvr_carry_set, ffxvr_carry_status, carry: a game model's own draws at a VR hand, the carried cloister sphere (carry.cs); 67: ffxvr_sph_fast_set, ffxvr_sph_fast_exec, the fast sphere sequence and the sphere in the palm through it (sphere_fast.cs))
     private bool   _native_ok;      // every export bound and the ABI matches: begin_frame may be called. Stays true after an init
                                     // failure: some vtable patches may be live, and begin_frame's heartbeat (vtable audit) is the diagnostic
     private bool   _native_ready;   // ffxvr_init returned 0: the hooks are in, the full UI and the per-frame pushes run
@@ -559,6 +559,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             wpn_bind(req);  // ABI 65: the weapon-hands capture's draw probe, hand frames and motion classes (weapon_log.cs)
             sphh_bind(req); // ABI 64: sphere hands stages 1 + 2 (sphere_hands.cs)
             carry_bind(req); // ABI 66: carry, the carried sphere in the hand (carry.cs)
+            sfast_bind(req); // ABI 67: the fast sphere sequence, the sphere in the palm through it (sphere_fast.cs)
             _fn_hands2_tap_set = (delegate* unmanaged[Cdecl]<VrTapCfg*, int, void>)req("ffxvr_hands2_tap_set"); _fn_hands2_tap_status = (delegate* unmanaged[Cdecl]<float*, int, byte*>)req("ffxvr_hands2_tap_status");   // ABI 30: the tap gesture (hands.cs)
             _fn_cursor_look = (delegate* unmanaged[Cdecl]<int, float, float, uint, uint, int, int>)req("ffxvr_cursor_look"); _fn_markers_kinds = (delegate* unmanaged[Cdecl]<int*, int, void>)req("ffxvr_markers_kinds"); _fn_cursor_atlas_dump = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_cursor_atlas_dump");
 
@@ -594,6 +595,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         _fn_sph_hands = null;   // ABI 63 (the sphere-hands capture)
         wpn_unbind();           // ABI 65 (the weapon-hands capture)
         carry_unbind();         // ABI 66 (carry)
+        sfast_unbind();         // ABI 67 (the fast sphere sequence)
         _fn_sph_set = null; _fn_sph_status = null;   // ABI 64 (sphere hands)
         _fn_dmg_walk = null; _fn_dmg_queue = null; _fn_dmg_set = null; _fn_dmg_cfg = null; _fn_dmg_skip = null; _fn_dmg_status = null; _fn_dmg_anchor = null;   // ABI 47 / 50 (3D damage numbers)
         _fn_turn_set = null; _fn_turn_count = null; _fn_perf_status = null; _fn_noimg_set = null; _fn_noimg_draws = null;
@@ -1167,7 +1169,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                     string fs = v.Trim().ToLowerInvariant();
                     if (fs == "low") _fp_self_marker = 0; else if (fs == "hide") _fp_self_marker = 1; else if (fs == "normal") _fp_self_marker = 2; else _ini_bad.Add($"{k}='{v}'");
                 } break;
-                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v) && !odg_parse(k, v) && !vrp_parse(k, v) && !sph_parse(k, v) && !wpn_parse(k, v) && !sphh_parse(k, v) && !carry_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs); od_gest* (od_gest.cs)
+                default:                  if (!hands2_parse(k, v) && !ride_parse(k, v) && !qc_parse(k, v) && !odg_parse(k, v) && !vrp_parse(k, v) && !sph_parse(k, v) && !wpn_parse(k, v) && !sphh_parse(k, v) && !carry_parse(k, v) && !sfast_parse(k, v)) known--; break;   // VR hands v2: the vr_hands_* keys (hands.cs); riding: ride_* (ride.cs); Quest-only controls (quest_ctl.cs); od_gest* (od_gest.cs)
             }
         }
         if (!float.IsNaN(ws)) { if (life_size(_fp_mode)) _scale_before_fp = ws; else _xr_scale = ws; }   // R28
@@ -1527,6 +1529,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"diag_weapon={(_diag_weapon ? 1 : 0)}\n" +   // the weapon research log (weapon_log.cs)
             $"sphere_hands={(_sphere_hands ? 1 : 0)}\n" +   // sphere hands (sphere_hands.cs)
             carry_ini_text() +   // the carried sphere in the hand (carry.cs)
+            sfast_ini_text() +   // the fast sphere sequence, the sphere in the palm through it (sphere_fast.cs)
             $"hd_cluster_cache={(_hd_cluster_cache ? 1 : 0)}\n" +
             $"diag_cluster_bytes={(_diag_cluster_bytes ? 1 : 0)}\n" +
             $"diag_va_log={(_diag_va_log ? 1 : 0)}\n" +
@@ -1864,6 +1867,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             sph_ui();   // the sphere research log (sphere_log.cs)
             wpn_ui();   // the weapon research log (weapon_log.cs)
             carry_dev_ui();   // carry: the carried sphere's palm offset, test mode and state (carry.cs)
+            sfast_dev_ui();   // the fast sphere sequence: its detour's state (sphere_fast.cs)
 
             if (ImGui.TreeNode("Pick a UI element (flat mode: hover it with the mouse, press F9)")) {
                 ImGui.TextWrapped("F9 logs every 2D UI draw under the mouse to ffxvr_diag.log (texture, index count, rectangle, constant buffer) and lists them here. F10 toggles slow motion so things that flash by (damage numbers) can be hovered.");
@@ -2054,6 +2058,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
         sph_tick();  // the sphere research log (log only; sphere_log.cs)
         wpn_tick();  // the weapon research log (log only; weapon_log.cs)
         carry_tick();  // carry: the carried sphere to native (after sph_tick: its push is the state the rule reads; carry.cs)
+        sfast_push();  // the fast sphere sequence: its settings to native, its detour the first time it is wanted (sphere_fast.cs)
         if (_fn_tp_set != null) _fn_tp_set(_tp_dist, _tp_h, _tp_pitch * 0.0174533f, _tp_follow_rate);
         if (_fn_view_smooth_set != null) _fn_view_smooth_set(_anchor_smooth_ms, _battle_anchor_smooth_ms);
         if (_fn_xr_debug != null) { _fn_xr_debug(_xr_drop_image ? 1 : 0, _xr_sim_timeouts_req); _xr_sim_timeouts_req = 0; }
