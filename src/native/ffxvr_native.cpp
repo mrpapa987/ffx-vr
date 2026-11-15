@@ -1474,10 +1474,20 @@ struct SfastStamp { volatile LONG ms, pass, pass_ok, have; };
 SfastStamp g_sfast_rel = {}, g_sfast_phys = {};
 /// The game's main-loop pass counter ([0x23CBBF0]: Sg_MainLoop adds 1 near the end of every pass) and the player actor
 /// ([0x1300788]: not 0 = the player has control; Head.control's source): plain aligned reads of FFX.exe's own data (the image
-/// is never unloaded), from any thread. False when the image is not found.
+/// is never unloaded), from any thread. Not through ffxvr_safe_read as sfast_exec_byte's (review round 2, N1): off the
+/// render thread that asks the system about the page at every call (ot_readable), and this runs on the game's thread at
+/// every ask of a fast pass. Instead the image's size is read once from its header, and a word outside it is never read.
+/// False when the image is not found or does not hold the word.
 static bool sfast_game_word(uint32_t va, uint32_t* out) {
-    static uintptr_t base = 0; if (base == 0) base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    if (base == 0) return false;
+    static uintptr_t base = 0; static uint32_t size = 0;
+    if (base == 0) {
+        const uintptr_t b = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        if (b == 0) return false;
+        const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+        const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(b + dos->e_lfanew);
+        size = static_cast<uint32_t>(nt->OptionalHeader.SizeOfImage); base = b;   // (the size first: another thread that sees the base sees the size; ffxvr_game_callers' own read)
+    }
+    if (!sph::image_has(va, size)) return false;
     *out = *reinterpret_cast<const volatile uint32_t*>(base + (va - 0x400000u));
     return true;
 }
@@ -13488,7 +13498,7 @@ bool        g_sph_carry_seq = false;          // ini sphere_carry_seq (the same 
 uint32_t    g_sfast_cfg_frame = 0, g_sph_tick_frame = 0; bool g_sfast_cfg_have = false, g_sph_ticked = false;
 volatile LONG g_sfast_mul = 1, g_sfast_stamp = 0, g_sfast_dead = 0, g_sfast_asked = 0, g_sfast_answers = 0;
 volatile LONG g_sfast_no[sph::FN_N] = {};     // the game's thread: asks that got the game's own answer, by reason (sph::FastNo)
-volatile LONG g_sfast_slow = 0, g_sfast_worst_us = 0;   // the game's thread: a pass went over the budget (the render thread ends the run and clears it at the next run's start); the longest pass, microseconds
+volatile LONG g_sfast_slow = 0, g_sfast_worst_us = 0;   // the game's thread: the passes of this run whose ticks went over the budget (the render thread sets 0 at a run's start, halves the factor every 3); the longest ticks of a pass, microseconds
 volatile LONG g_sfast_epoch = 0;              // the render thread: + 1 at every run's start (the game's thread starts its longest-pass count over)
 sph::PassClock g_sfast_clock;                 // the game's thread only
 double      g_sfast_run_seq = -1.0;           // the sequence (its t0) that has had a fast run
@@ -13840,17 +13850,21 @@ static void sfast_frame() {
         uint32_t pass = 0; const bool pok = sfast_game_word(0x23CBBF0u, &pass);
         in.player = sph::edge_young(sfast_read(g_sfast_phys), static_cast<uint32_t>(GetTickCount()), pok, pass, sph::k_fast_player_ms, sph::k_fast_player_passes);
     }
-    in.slow = g_sfast.active && g_sfast_slow != 0;
+    in.slow_passes = g_sfast.active ? static_cast<int>(g_sfast_slow) : 0;
+    const int downs_was = g_sfast.downs, factor_was = g_sfast.factor;
     const bool was = g_sfast.active;
     const bool dead = g_sfast_dead != 0;
     if (dead) g_sfast.stop(sph::FE_SHUTDOWN);
     const int mul = dead ? 1 : g_sfast.step(in);
-    if (!was && g_sfast.active) {   // a run starts: its own budget flag and longest pass (review S4), before the factor is published
+    if (!was && g_sfast.active) {   // a run starts: its own count of passes over the budget and its longest pass (review S4), before the factor is published
         InterlockedIncrement(&g_sfast_epoch); InterlockedExchange(&g_sfast_slow, 0); InterlockedExchange(&g_sfast_worst_us, 0);
     }
     InterlockedExchange(&g_sfast_stamp, static_cast<LONG>(GetTickCount()));   // the stamp first: a factor is never published with an old stamp
     if (g_sfast_mul != mul) InterlockedExchange(&g_sfast_mul, mul);
     // -- from here on only the log --
+    if (g_sfast.active && g_sfast.downs != downs_was)
+        diag("sph: fast: the factor x%d -> x%d: the ticks of %d main-loop passes took longer than %.0f ms (the longest so far %.1f ms)", factor_was, g_sfast.factor, sph::k_fast_slow_passes, sph::k_fast_pass_ms,
+             static_cast<double>(g_sfast_worst_us) * 1e-3);
     const bool taken = in.running && in.phase > sph::S_WAIT_OFF;
     const bool over = s_seq >= 0.0 && (!in.running || in.seq_t0 != s_seq);   // the followed sequence ended (or another took its place)
     const double seq_was = s_seq; const int act_was = s_act;
@@ -13865,16 +13879,16 @@ static void sfast_frame() {
     else if (taken) g_sfast_block = (in.seq_t0 == g_sfast.spent_t0) ? ((g_sfast.why == sph::FE_SLOW) ? static_cast<int>(sph::FE_SLOW) : static_cast<int>(sph::FE_CAP)) : sph::Fast::blocked(in);
     if (was && !g_sfast.active) {
         const long asked = static_cast<long>(g_sfast_asked - s_asked0), answers = static_cast<long>(g_sfast_answers - s_answers0);
-        snprintf(g_sfast_last, sizeof(g_sfast_last), "x%d for %.2f s, ended by: %s; the getter answered x%d %ld times%s", g_sfast.factor, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], g_sfast.factor, answers,
+        snprintf(g_sfast_last, sizeof(g_sfast_last), "x%d (x%d at the end) for %.2f s, ended by: %s; the getter answered with the factor %ld times%s", g_sfast.factor0, g_sfast.factor, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], answers,
                  answers == 0 ? " (NO EFFECT: see the log)" : "");
         diag("sph: fast: %s at worker %d: factor x%d for %.2f s of real time, ended by: %s | the game's exec-frames byte was %d before (it is only read: nothing is written to the game) | frames %d, of them %d at the game's own speed around our presses | "
-             "the game's main-loop passes meanwhile %u | the exec-frames getter: asked %ld times while a factor was published, answered x%d %ld times (the game asks at every check of its tick loop and of its effect loop) | "
+             "the game's main-loop passes meanwhile %u | the exec-frames getter: asked %ld times while a factor was published, answered with the factor %ld times (the game asks at every check of its tick loop and of its effect loop) | "
              "the exec byte at our Presents: %d times 0 (a draw-only pass), %d times 1, %d other | "
-             "the longest main-loop pass %.1f ms from its first ask to its last (the budget: %.0f ms) | answered with the game's own value on its thread: %ld for a press of ours out, %ld just after one, %ld for the player's own input, "
-             "%ld for control, %ld for a pass over the budget | managed's detour: %s%s",
-             s_run_act == sph::A_TAKE ? "take" : "place", s_run_widx, g_sfast.factor, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], s_exec0,
-             g_sfast.frames, g_sfast.frames - g_sfast.frames_fast, static_cast<unsigned>(sfast_loop_count() - s_loop0), asked, g_sfast.factor, answers, s_ex[0], s_ex[1], s_ex[2],
-             static_cast<double>(g_sfast_worst_us) * 1e-3, sph::k_fast_pass_ms,
+             "the ticks of the longest main-loop pass %.1f ms (the budget: %.0f ms), %ld passes over it, the factor at the end x%d after %d step%s down | answered with the game's own value on its thread: %ld for a press of ours out, %ld just after one, %ld for the player's own input, "
+             "%ld for control, %ld in a pass over the budget | managed's detour: %s%s",
+             s_run_act == sph::A_TAKE ? "take" : "place", s_run_widx, g_sfast.factor0, in.t - g_sfast.t0, sph::k_fast_end_name[g_sfast.why], s_exec0,
+             g_sfast.frames, g_sfast.frames - g_sfast.frames_fast, static_cast<unsigned>(sfast_loop_count() - s_loop0), asked, answers, s_ex[0], s_ex[1], s_ex[2],
+             static_cast<double>(g_sfast_worst_us) * 1e-3, sph::k_fast_pass_ms, static_cast<long>(g_sfast_slow), g_sfast.factor, g_sfast.downs, g_sfast.downs == 1 ? "" : "s",
              static_cast<long>(g_sfast_no[sph::FN_PRESS] - s_no0[sph::FN_PRESS]), static_cast<long>(g_sfast_no[sph::FN_RELEASE] - s_no0[sph::FN_RELEASE]), static_cast<long>(g_sfast_no[sph::FN_PLAYER] - s_no0[sph::FN_PLAYER]),
              static_cast<long>(g_sfast_no[sph::FN_CONTROL] - s_no0[sph::FN_CONTROL]), static_cast<long>(g_sfast_no[sph::FN_SLOW] - s_no0[sph::FN_SLOW]), sfast_hook_name(g_sfast_hook),
              answers == 0 ? " | NO EFFECT: the getter never answered with the factor (the detour is not in, or the game's own answer was never 1)" : "");
@@ -13914,7 +13928,7 @@ extern "C" __declspec(dllexport) int ffxvr_sph_fast_exec(int game) {
     a.pass_ok = sfast_game_word(0x23CBBF0u, &a.pass);
     uint32_t player = 0;
     a.control = !sfast_game_word(0x1300788u, &player) || player != 0;   // review S1: free play is never sped up (not read: as if in control)
-    {   // review S4: the pass's time since its first ask (this thread's own clock)
+    {   // review S4: the time of the pass's ticks since its first ask (this thread's own clock)
         static LARGE_INTEGER s_f = {}; if (s_f.QuadPart == 0) QueryPerformanceFrequency(&s_f);
         static LONG s_epoch = 0;
         const LONG ep = g_sfast_epoch; if (ep != s_epoch) { s_epoch = ep; g_sfast_clock.worst_ms = 0.0; }   // a new run: its longest pass starts over
@@ -13923,10 +13937,11 @@ extern "C" __declspec(dllexport) int ffxvr_sph_fast_exec(int game) {
         a.slow = g_sfast_clock.ask(a.pass_ok, a.pass, now);
         const LONG us = static_cast<LONG>(g_sfast_clock.worst_ms * 1e3);
         if (us > g_sfast_worst_us) InterlockedExchange(&g_sfast_worst_us, us);
-        if (a.slow && g_sfast_slow == 0) InterlockedExchange(&g_sfast_slow, 1);
+        if (g_sfast_clock.went_over) InterlockedIncrement(&g_sfast_slow);   // one more pass of this run over the budget (review round 2, S1)
     }
     int why = sph::FN_NONE;
     const int r = sph::fast_ask(a, &why);
+    g_sfast_clock.answered(r);   // an answer that is not above the ask's index ends the tick loop: what follows in this pass is not timed
     if (why > sph::FN_NONE && why < sph::FN_N) InterlockedIncrement(&g_sfast_no[why]);
     if (r != game) InterlockedIncrement(&g_sfast_answers);
     return r;

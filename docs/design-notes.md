@@ -6466,13 +6466,26 @@ from `ffxvr_sph_fast_exec`), from words written at the instant an input is hande
 - **Control (S1).** The ask reads the game's player actor (`[0x1300788]`, the word `Head.control` comes from). Not 0: the
   game's own answer. Free play never runs at the factor, from the very tick that hands control back, instead of one to
   three passes later when managed's read reached the render thread.
-- **A slow pass (S4).** The ask times the pass under way from its first ask (`sph::PassClock`; the pass counter names the
-  pass; QueryPerformanceCounter). Past 25 ms the rest of that pass gets the game's own answer, the render thread ends
-  the run (`a main-loop pass took longer than 25 ms`) and does not start another for that sequence. Why 25 ms: a pass at
-  the game's speed is one tick and the frame's draw inside 33.3 ms; 25 ms of ticks leaves the draw 8 ms of a 30 Hz frame
-  and keeps the frame far under the 66.7 ms at which `Sg_FrameSync` adds a second pass and FFX-60fps a backlog pass; at
-  60 fps it makes at most one late frame per pass. The longest pass of every run is in the log line, so the factor's top
-  of 12 can be judged from the owner's numbers.
+- **A slow pass (S4; round 2, S1).** The ask times the TICKS of the pass under way (`sph::PassClock`; the pass counter
+  names the pass; QueryPerformanceCounter): from the pass's first ask, the tick loop's entry check, to each ask that
+  follows a tick. The loop asks once before the first tick and once after every tick, and the first answer that is not
+  above the ticks run ends it; every later ask of the pass is the draw's (the effects' loop), which is not timed (the
+  first version timed it too, and at factor 12 the stereo draw's share alone could pass the budget).
+  - Past 25 ms of ticks, the rest of that pass gets the game's own answer: the tick loop ends there.
+  - One such pass ends nothing: it may be a hitch (a streamed asset, a GC pause in the managed detour). The first version
+    ended the run for the whole grab at the first one.
+  - Every third such pass of a run, the render thread halves the factor (12, 6, 3, 2; never under 2) and logs
+    `sph: fast: the factor x12 -> x6: ...`; three more at 2 end the run (`the ticks of a main-loop pass took longer than
+    25 ms three times at factor x2`), and no other is started for that sequence. The next grab starts at the setting again.
+  - Why 25 ms: a pass at the game's speed is one tick and the frame's draw inside 33.3 ms; 25 ms of ticks leaves the draw
+    8 ms of a 30 Hz frame and keeps the frame far under the 66.7 ms at which `Sg_FrameSync` adds a second pass and
+    FFX-60fps a backlog pass; at 60 fps it makes at most one late frame per pass.
+  - The log line has the longest ticks of a pass, the passes over the budget, and the factor at the end, so the
+    factor's top of 12 can be judged from the owner's numbers.
+- **The two words of the game the ask reads** (`[0x23CBBF0]`, `[0x1300788]`) are read plainly, not through
+  `ffxvr_safe_read` as the log's reads on the render thread are (round 2, N1): off the render thread that helper asks
+  the system about the page at every call, and the ask runs several times per tick. Instead the image's size is read
+  once from its header and a word outside it is never read (then: no pass counter, and "as if in control").
 - The model test `interleave_test` runs the three threads' steps in every order (below).
 
 **The eye hold and the carry at N ticks per pass (checked, not changed).**
@@ -6496,10 +6509,10 @@ from `ffxvr_sph_fast_exec`), from words written at the instant an input is hande
 - a run (the numbers here are made up): `sph: fast: take at worker 51: factor x6 for 0.52 s of real time, ended by: the sequence ended | the game's
   exec-frames byte was 1 before ... | frames 31, of them 12 at the game's own speed around our presses | the game's main-loop
   passes meanwhile 31 | the exec-frames getter: asked 310 times while a factor was published, answered x6 95 times ... | the
-  exec byte at our Presents: 15 times 0 (a draw-only pass), 16 times 1, 0 other | the longest main-loop pass 9.4 ms from
-  its first ask to its last (the budget: 25 ms) | answered with the game's own value on its thread: 40 for a press of ours
-  out, 6 just after one, 0 for the player's own input, 2 for control, 0 for a pass over the budget | managed's detour:
-  inserted`. "answered x6 0 times" adds **NO EFFECT** (the detour is not in, or the game's answer was never 1). There is no world-tick counter in
+  exec byte at our Presents: 15 times 0 (a draw-only pass), 16 times 1, 0 other | the ticks of the longest main-loop pass
+  9.4 ms (the budget: 25 ms), 0 passes over it, the factor at the end x6 after 0 steps down | answered with the game's own
+  value on its thread: 40 for a press of ours out, 6 just after one, 0 for the player's own input, 2 for control, 0 in a
+  pass over the budget | managed's detour: inserted`. "answered x6 0 times" adds **NO EFFECT** (the detour is not in, or the game's answer was never 1). There is no world-tick counter in
   the game to read; the answered count and the grab's own duration in the `sphere grab:` line are the evidence.
 - no run: `sph: fast: not used for the last take (...)`, with the reason.
 - `sph: fast: the detour:` once, when it is inserted or refused.
@@ -6576,10 +6589,10 @@ Either would bring a grab down to the press pacing alone; with that tightened to
 
 ### Tests (scratch `sfast_chk`, `run_all.sh <repo>`)
 
-- `fast_test` (1685 checks): `sph::Fast` (every gate, every end on its own frame, the cap and the pass budget and no
-  restart after them, a sequence change, the press guard with two presses back to back: the reviewer's probe),
+- `fast_test` (1734 checks): `sph::Fast` (every gate, every end on its own frame, the cap, the step down every third
+  pass over the budget and the end at factor 2, no restart after them, a sequence change, the press guard with two presses back to back: the reviewer's probe),
   `fast_answer` (the lease, the tick count's wrap, the shutdown flag), `fast_exec`, `fast_ask` (each reason, the stamps by
-  time and by passes, both wraps), `PassClock`.
+  time and by passes, both wraps), `PassClock` (ticks only: the draw's asks are not timed), the image check.
 - `seq_sim_test` (300): the unchanged `sph::Seq` with `sph::Fast` and `fast_ask` against a model of the game's take and
   place scripts timed from the owner's log, at factors 1, 2, 3, 6, 9, 12, with one pass per tick and with FFX-60fps' two;
   the same presses as at the game's speed, no repeat, no tick that sees a stale press, nothing sped up after the end, the
@@ -6591,13 +6604,13 @@ Either would bring a grab down to the press pacing alone; with that tightened to
   pad word carried a new button, ours or the player's, runs one tick, and no tick is added once the player has control.
 - `carry_seq_test` (589): the sphere's rule through a take and a place of ours, the tail, the bounds; with no sequence of
   ours the rule equals the one before this branch on 400,000 random frames; the wider radius.
-- `glue_test` (564): the stamps, `sfast_frame`, the two exports, `sfast_shutdown` and `ffxvr_carry_set`, verbatim from
+- `glue_test` (584): the stamps, `sfast_frame`, the two exports, `sfast_shutdown` and `ffxvr_carry_set`, verbatim from
   ffxvr_native.cpp (`extract.py`), compiled against stand-ins: each interruption, the press and its release, the player's
-  input, control and a slow pass at the ask, the log lines, the detour not in, FFX-60fps' byte pattern, shutdown, the
+  input, control and slow passes at the ask (12 to 6 to 3 to 2 to the end), the log lines, the detour not in, FFX-60fps' byte pattern, shutdown, the
   carry through a sequence, the settings off, the A button's interaction.
-- `check.py` (72 text scans): the ABI numbers and histories, each export defined / bound / unbound with one type, each ini
+- `check.py` (74 text scans): the ABI numbers and histories, each export defined / bound / unbound with one type, each ini
   key in the parser, the defaults, the menu and the docs, the one writer of the published factor, the exec byte never
-  written, every stamp written before its input reaches the game. `mutants.py`: 91 mutants of the rules and the glue, all
+  written, every stamp written before its input reaches the game. `mutants.py`: 107 mutants of the rules and the glue, all
   caught.
 - Nothing here was compiled for Windows or run in the game: there is no C# compiler and there are no Windows headers on
   the machine this was written on.

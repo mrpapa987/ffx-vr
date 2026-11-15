@@ -614,9 +614,13 @@ inline float note_alpha(double age) {
 //                     state): the game's own answer for k_fast_player_ms or k_fast_player_passes (the later).
 //       control       the player actor is set (the game's own word, read at the ask): free play never runs at the factor,
 //                     from the very tick that hands control back.
-//       a slow pass   k_fast_pass_ms after a pass's first ask the answer is the game's own for the rest of that pass, and
-//                     the render thread then ends the run for good (FE_SLOW): N ticks never push a pass far enough to feed
-//                     the game's catch-up (a second Sg_MainLoop per frame from 66.7 ms of frame time) or FFX-60fps' backlog.
+//       a slow pass   once a pass's ticks have taken k_fast_pass_ms (from its first ask to the ask after a tick: the draw
+//                     that follows is not counted) the answer is the game's own for the rest of that pass: N ticks never
+//                     push a pass far enough to feed the game's catch-up (a second Sg_MainLoop per frame from 66.7 ms of
+//                     frame time) or FFX-60fps' backlog. One such pass ends nothing (a hitch). After k_fast_slow_passes of
+//                     them the render thread halves the factor (never under 2) and counts anew; at 2 it ends the run for
+//                     that sequence (FE_SLOW). (Review round 2, S1: the first version ended the run at the first such pass
+//                     and timed the draw too.)
 // The stamps carry the game's main-loop pass counter as well as the time, so a stall between the input and the pass that
 // reads it (a hitch, a slow GPU frame) cannot age a guard away before its pass ran: the player's guard holds while EITHER
 // is young, our release's by passes.
@@ -628,13 +632,15 @@ constexpr uint32_t k_fast_player_ms = 150, k_fast_player_passes = 8;   // after 
 // The pass budget. A pass at the game's speed is one tick and the frame's draw inside 33.3 ms (16.7 ms with FFX-60fps at
 // 60). 25 ms of ticks leaves the draw 8 ms of a 30 Hz frame and keeps a frame far under the 66.7 ms at which Sg_FrameSync
 // adds a second pass (and FFX-60fps a backlog pass); at 60 fps it makes at most one late frame per pass, which neither
-// counts as a backlog. Past it the run ends: the scene is too heavy for this factor.
+// counts as a backlog. Past it the pass's remaining ticks are not run; three such passes halve the factor.
 constexpr double   k_fast_pass_ms = 25.0;
+constexpr int      k_fast_slow_passes = 3;  // passes over the budget before the factor is halved (at 2: before the run ends)
+constexpr int      k_fast_floor = 2;        // the factor is never stepped down under this
 inline int fast_clamp(int f) { return f < k_fast_min ? k_fast_min : f > k_fast_max ? k_fast_max : f; }
 enum FastEnd { FE_NONE = 0, FE_SEQ, FE_CONTROL, FE_CAP, FE_GATE, FE_GEN, FE_STALE, FE_SETTING, FE_SHUTDOWN, FE_SLOW, FE_N };
 static const char* const k_fast_end_name[FE_N] = { "-", "the sequence ended", "control came back", "the 3 s cap", "the feature's gates closed (a menu, a battle, the view, the headset)",
     "the scene changed", "no fresh state (the headset's frame or managed's push stopped)", "the setting is off or the factor is 1", "the module is shutting down",
-    "a main-loop pass took longer than 25 ms (the scene is too heavy for this factor)" };
+    "the ticks of a main-loop pass took longer than 25 ms three times at factor x2 (the scene is too heavy to speed up)" };
 struct FastIn {
     double t;            // seconds
     bool   setting;      // ini sphere_fast, from a settings push that is not stale
@@ -648,13 +654,16 @@ struct FastIn {
     bool   control;      // the player has control
     bool   press_out;    // a press of ours is out (asked for and not yet let go)
     bool   player;       // the player's own input is recent (the input thread's stamp)
-    bool   slow;         // the game's thread saw a pass over the budget during this run
+    int    slow_passes;  // the passes whose ticks went over the budget during this run (counted by the game's thread; 0 at a run's start)
 };
+/// The factor after a step down: half, never under k_fast_floor (12 -> 6 -> 3 -> 2).
+inline int fast_half(int f) { const int h = f / 2; return h < k_fast_floor ? k_fast_floor : h; }
 struct Fast {
     bool   active = false; int why = FE_NONE;
     double t0 = 0.0, run_seq = -1.0, spent_t0 = -1.0;   // the run's start and its sequence; the sequence whose run hit the cap or the budget
-    int    factor = 1, frames = 0, frames_fast = 0;    // of the run: the factor it started with, its frames, those answered with the factor
-    /// Why the game must run at its own speed now (FE_NONE: it may be sped up). The cap and the budget are step()'s.
+    int    factor = 1, factor0 = 1, frames = 0, frames_fast = 0;   // of the run: the factor now and the one it started with, its frames, those answered with a factor
+    int    slow_base = 0, downs = 0;                   // the over-budget passes already answered by a step down; the step downs
+    /// Why the game must run at its own speed now (FE_NONE: it may be sped up). The cap and the step down are step()'s.
     static int blocked(const FastIn& in) {
         if (!in.setting || fast_clamp(in.factor) <= 1) return FE_SETTING;
         if (!in.fresh) return FE_STALE;
@@ -673,10 +682,16 @@ struct Fast {
         if (active) {
             if (in.seq_t0 != run_seq) { active = false; why = FE_SEQ; }   // another sequence: a run of its own, with its own cap, from the next frame
             else if (b != FE_NONE) { active = false; why = b; }
-            else if (in.slow) { active = false; why = FE_SLOW; spent_t0 = in.seq_t0; }
+            else if (in.slow_passes - slow_base >= k_fast_slow_passes) {   // too heavy at this factor: half of it, or at the floor the end
+                if (factor > k_fast_floor) { factor = fast_half(factor); slow_base = in.slow_passes; ++downs; }
+                else { active = false; why = FE_SLOW; spent_t0 = in.seq_t0; }
+            }
             else if (!(in.t - t0 <= k_fast_cap_s) || in.t < t0) { active = false; why = FE_CAP; spent_t0 = in.seq_t0; }
         }
-        else if (b == FE_NONE && in.seq_t0 != spent_t0) { active = true; why = FE_NONE; t0 = in.t; run_seq = in.seq_t0; factor = fast_clamp(in.factor); frames = 0; frames_fast = 0; }
+        else if (b == FE_NONE && in.seq_t0 != spent_t0) {
+            active = true; why = FE_NONE; t0 = in.t; run_seq = in.seq_t0; factor = factor0 = fast_clamp(in.factor); frames = 0; frames_fast = 0;
+            slow_base = 0; downs = 0;   // (the glue starts the game thread's count at 0 with the run)
+        }
         if (!active) return 1;
         ++frames;
         if (in.press_out || in.player) return 1;   // the press guard, the player's input
@@ -712,20 +727,33 @@ inline bool release_young(const EdgeStamp& e, uint32_t now_ms, bool pass_ok, uin
     if (e.pass_ok && pass_ok) return static_cast<uint32_t>(pass - e.pass) <= k_fast_guard_passes;
     return static_cast<uint32_t>(now_ms - e.ms) < k_fast_guard_ms;
 }
-/// The pass budget, on the game's thread (its only user): the time since the first ask of the pass under way (the pass
-/// counter names the pass). over: this pass passed k_fast_pass_ms (stays set until the next pass's first ask).
+/// The pass budget, on the game's thread (its only user). It times a pass's TICKS: from the pass's first ask (the tick
+/// loop's entry check) to each ask that follows a tick. The loop asks once before the first tick and once after every tick,
+/// and goes on while the answer is above the ticks run; so the ask with index j (0 the entry) is still the tick loop's as
+/// long as every answer before it kept the loop going, and the first answer that is not above its own index ends the loop
+/// (answered()). Every later ask of the pass is the draw's (the effects' loop) or another caller's: not timed, and it gets
+/// the verdict the ticks left (review round 2, S1). The pass counter names the pass.
 struct PassClock {
-    bool have = false, over = false; uint32_t pass = 0; double t0 = 0.0, worst_ms = 0.0;
-    /// One ask at time now (seconds). Returns true while the pass under way is over the budget.
+    bool have = false, over = false, went_over = false, ticking = false;
+    uint32_t pass = 0; int idx = 0; double t0 = 0.0, worst_ms = 0.0;
+    /// One ask at time now (seconds). Returns true while the pass under way is over the budget; went_over: this ask found it.
     bool ask(bool pass_ok, uint32_t p, double now) {
-        if (!pass_ok) { have = false; over = false; return false; }          // no counter: no budget (the lease and the cap still bound the run)
-        if (!have || p != pass) { have = true; pass = p; t0 = now; over = false; return false; }
+        went_over = false;
+        if (!pass_ok) { have = false; over = false; ticking = false; return false; }   // no counter: no budget (the lease and the cap still bound the run)
+        if (!have || p != pass) { have = true; pass = p; t0 = now; over = false; ticking = true; idx = 0; return false; }
+        if (idx < 1000000) ++idx;
+        if (!ticking) return over;
         const double ms = (now - t0) * 1e3;
         if (ms > worst_ms) worst_ms = ms;
-        if (!(ms <= k_fast_pass_ms) || now < t0) over = true;
+        if (!over && (!(ms <= k_fast_pass_ms) || now < t0)) { over = true; went_over = true; }
         return over;
     }
+    /// The answer the ask just made got: one that is not above the ask's index ends the tick loop.
+    void answered(int r) { if (r <= idx) ticking = false; }
 };
+/// Is the 4-byte word at va (image base 0x400000) inside an image of image_size bytes (review round 2, N1: the game
+/// thread's two words are read plainly; this is checked once)?
+inline bool image_has(uint32_t va, uint32_t image_size) { return va >= 0x400000u && image_size >= 4u && va - 0x400000u <= image_size - 4u; }
 enum FastNo { FN_NONE = 0, FN_OFF, FN_GAME, FN_PRESS, FN_RELEASE, FN_PLAYER, FN_CONTROL, FN_SLOW, FN_N };   // why an ask got the game's own answer
 struct FastAsk {
     int      game;        // the game's own answer
