@@ -220,7 +220,7 @@ tab is not: a launch with it saved opens View):
 | --- | --- |
 | View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, your body in battle, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
 | Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Menu panel (in the headset: on / off, distance, height, size, **Bring it here**, the pointer's hand and ticks); Help (hover it: every key and chord) |
-| Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
+| Battle | Battle view (incl. when characters swap, face the enemies); Characters and effects (the battle camera's hides, spell effects aimed at your eyes); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
 | Hands | VR hands (experimental), with a **Fix it** button when the hands cannot show because your body is shown |
@@ -336,6 +336,24 @@ never installed by developer mode alone or by `tools\set-logging.ps1 -Profile Ve
 is; `-Profile Release` turns it off). **Log the command table** beside it writes every command, item and
 monster-command id with its name once (`cmdtab:` lines). To record a case for a bug report: tick it, play the action
 (once in first person, once in the diorama), untick it, send `ffxvr_diag.log`.
+
+**Characters the game's battle camera hides** (Battle > Characters and effects, `battle_cam_hide`, default 0): the
+game's battle camera hides one character for about a second during some actions (the target of Armor Break, the party
+member beside an attacker: the one its camera would sit in). `0`, "keep them shown": while a battle is drawn in the
+headset in first person or the diorama those hides are skipped, so every character stays visible; anything else the game
+hides stays hidden (a spell's fade such as Holy's, a defeated enemy, party members off the field), and in first person
+your own body is hidden by the mod as before. `1`, "hide them, as the game does": the game's own behaviour (also what the
+seat view and third person always get). With `0` one detour is inserted on the game's visibility setter the first time a
+battle is drawn that way; `ffxvr_diag.log` gets a `vis:` line per skipped hide while the battle research log is on.
+
+**Aim spell effects at your eyes** (Battle > Characters and effects, `fx_face_eyes`, default 0, experimental): the game
+builds its effect sprites (glows, sparks, beams) facing its own battle camera, which in the headset usually looks
+somewhere else, so they can look flat or squashed. Ticked: in a battle drawn in the headset in first person or the
+diorama they are built facing your head instead (the same for both eyes, level). To compare, cast the same spell with the
+box unticked and ticked. If an effect looks wrong or sits in the wrong place with it ticked, untick it and send
+`ffxvr_diag.log` (with the battle research log on it has an `fx:` line per effect saying how many of its parts were
+re-aimed). With the battle research log on, the first effect that has scene draws without an eye image (Holy) also writes
+one frame census to `ffxvr_frame_auto.log`.
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in

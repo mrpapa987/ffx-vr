@@ -479,6 +479,8 @@ public sealed unsafe partial class FFXVRModule {
         ui_slider("battle_anchor_smooth_ms", "Battle follow smoothing (ms)##basm", ref _battle_anchor_smooth_ms, 0f, 1000f, "%.0f", UiTag.None, "The battle diorama follows its centre with this lag (0 = snap; 325 to try).", 160f);
         ej_face_ui();   // face the enemies (eye_jump.cs)
 
+        bv2_ui();   // characters the battle camera hides, effect sprites aimed at the eyes (battle_vis2.cs)
+
         ImGui.SeparatorText("Battle start");
         bt_ui();   // the battle start effect (battle_transition.cs)
 
