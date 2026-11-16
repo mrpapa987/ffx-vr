@@ -55,6 +55,7 @@ public sealed unsafe partial class FFXVRModule {
         _fph_others_n = n;
         _fph_kept = _fn_fp_others_set(n > 0 ? buf : null, n > 0 ? heads : null, n);
         if (ib_used) body_hide_ib(actors, tbl_snap(actors), pick, root_kind != 0 ? root : centre);   // after the roots: native's order of use
+        else bh_battle_push(actors, pick, field, used, root_kind != 0 ? root : centre);   // battle-vis (ABI 68): a first-person battle's key table (battle_vis.cs); returns at once in the field
     }
 
     // -- npc-anchor round 3: the eye on a body drawn away from its root --------------------------------------------------

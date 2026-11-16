@@ -218,7 +218,7 @@ tab is not: a launch with it saved opens View):
 
 | Tab | Sections |
 | --- | --- |
-| View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
+| View | Starting (start in the headset, start in, open this menu at start); View (seat / first person / third person / diorama, world size, lean, seat view, field of view, the camera's tilt, seat height / forward); Third person & diorama; First person (your body, your body in battle, eye height, your own shadow, steady view during scripted moves, riding); Comfort (camera cuts, pans, blink when the view jumps); Panels (the floating panel and its distance / size, in front of nearby objects, darken behind it, the flashback filter, painted rooms, mod menus in the headset, the save screen on the big screen, menu text size); Graphics & performance (collapsed: shadows, culling, anti-aliasing, water trails, heat shimmer) |
 | Controls | Controllers (the gamepad, rumble with test buttons, quick grip squeeze, Virtual Desktop's chord, the save screen); Turning (with extra-smooth turning); Moving; Grab the world; Menu panel (in the headset: on / off, distance, height, size, **Bring it here**, the pointer's hand and ticks); Help (hover it: every key and chord) |
 | Battle | Battle view (incl. when characters swap, face the enemies); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
@@ -316,6 +316,25 @@ default layout and size), then comes back; if that would be more than 60 degrees
   first use logs `menu pointer:` lines (the hand, and how the mouse is fed). The panel's 1536 x 1536 swapchain is made the first time it
   opens in a session (`xr: menu panel 6 swapchain`), and the session start logs
   the runtime's layer limit.
+
+**Your body in a first-person battle** (View > First person > "Your body in battle", `fp_battle_hide`): `1`, the
+default, hides only the draws of your own character's model (found by the model's index buffers, as on the field), so
+an aeon or a party member who comes close is never hidden with you; while the model cannot be read yet, or until one of
+its draws has been seen, the distance rule is used. `0` is the old rule: every character draw at the eyes' anchor is
+hidden. Nothing is hidden in the diorama or in third person either way. During a summon the eyes are the summoner's, so
+the aeon is always another character.
+
+**The battle research log** (Developer > Inspect > "Battle research log", `diag_battle`, default 0): in battles,
+`ffxvr_diag.log` gets a `cmd:` line per executed command (who, the command's id and name, its kind, its targets; a swap
+and a summon too, and a line when the field roster changes), a `vis:` line for every change of a character's visibility
+(the game's visible flag and its four votes, the character's hide byte, with who is acting), `fx:` lines per spell effect
+(the magic id, the game's effect matrices beside the eyes' views, draw counts) and, in a first-person battle, `body
+hide: BATTLE` lines (the rule in use, the keys, what matched). It reads only. While it is on, one detour sits on the
+game's command parser (it always runs the game's own function); it is inserted the first frame the key is on and is
+never installed by developer mode alone or by `tools\set-logging.ps1 -Profile Verbose` (which leaves `diag_battle` as it
+is; `-Profile Release` turns it off). **Log the command table** beside it writes every command, item and
+monster-command id with its name once (`cmdtab:` lines). To record a case for a bug report: tick it, play the action
+(once in first person, once in the diorama), untick it, send `ffxvr_diag.log`.
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in

@@ -58,6 +58,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_diag_actors) on.Add("diag_actors");
         if (_diag_sphere) on.Add("diag_sphere");
         if (_diag_weapon) on.Add("diag_weapon");
+        if (_diag_battle) on.Add("diag_battle");
         if (_diag_cluster_bytes) on.Add("diag_cluster_bytes");
         if (_diag_va_log) on.Add("diag_va_log");
         if (_diag_transition) on.Add("diag_transition");
@@ -78,7 +79,7 @@ public sealed unsafe partial class FFXVRModule {
     private int log_cap_mb() => diag_any() ? k_log_cap_verbose_mb : k_log_cap_mb;
     /// <summary>cpu-lean: diag_on().Count > 0 without the list and the interpolated string (log_push runs every frame). The same
     /// keys as diag_on, in the same order: keep the two in step.</summary>
-    private bool diag_any() => _diag_verbose || _diag7 || _diag_load || _diag_load_lines || _diag_actors || _diag_sphere || _diag_weapon || _diag_cluster_bytes || _diag_va_log || _diag_transition
+    private bool diag_any() => _diag_verbose || _diag7 || _diag_load || _diag_load_lines || _diag_actors || _diag_sphere || _diag_weapon || _diag_battle || _diag_cluster_bytes || _diag_va_log || _diag_transition
                                || _diag_load_prof != 0;
 
     /// <summary>From push_all, every frame: diag_verbose and the cap, sent only when they change. The cap is never lowered during
