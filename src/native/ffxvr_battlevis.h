@@ -446,13 +446,14 @@ struct HideStats {
     uint32_t near_self = 0, near_other = 0, near_none = 0, near_unread = 0;
     uint32_t near_his = 0;      // near draws of an actor attached to him (his weapon): left to the distance rule
     uint32_t od[k_owners] = {}; // draws by owner (0 his own, hidden or not; k another actor's), only while attribution is on
+    uint32_t judged = 0;        // draws looked up in the key table at all (not the shadow pass): 0 = nothing was judged this frame
     uint32_t kept = 0;          // near draws the identity rule left visible (another actor's, or in no table)
     uint32_t tie_hidden = 0, tie_shown = 0;   // draws with a key he shares with another actor, by the nearest root
     uint32_t caster = 0;        // his own shadow's draws judged by his keys (the light-camera pass)
     void add(const HideStats& o) {
         frames += o.frames; hidden += o.hidden; seen_self += o.seen_self; near_total += o.near_total; near_self += o.near_self; near_other += o.near_other;
         near_none += o.near_none; near_unread += o.near_unread; kept += o.kept; tie_hidden += o.tie_hidden; tie_shown += o.tie_shown; caster += o.caster;
-        near_his += o.near_his;
+        near_his += o.near_his; judged += o.judged;
         for (int k = 0; k < k_owners; ++k) od[k] += o.od[k];
     }
 };
@@ -480,6 +481,7 @@ struct Ident {
         const bool nearest = cls == C_SHARED ? self_nearest(w, roots, n_roots, owners) : true;
         const int v = verdict(mode, cls, nearest, nearby, partial);
         if (caster) { if (v == 1) f.caster++; return v; }
+        f.judged++;
         if (cls == C_SELF || cls == C_SHARED) f.seen_self++;
         if (attrib) {   // S3: who drew (his own count includes the draws this rule hides)
             if (cls == C_SELF || cls == C_SHARED) f.od[0]++;
@@ -524,8 +526,9 @@ struct Rebuild {
     }
     /// S1: the identity rule lost its keys (Ident::lost): the next ask rebuilds, whatever the cadence.
     void lost() { force = true; }
-    /// What the build gave (from the push that follows it).
-    void result(bool have_self, bool all_read) { have = have_self; complete = all_read; }
+    /// What the build gave (from the push that follows it). fixed (N-R2-1): there is no table because his model is larger
+    /// than the walk reads, which a retry 4 frames on cannot change: the slow cadence.
+    void result(bool have_self, bool all_read, bool fixed = false) { have = have_self || fixed; complete = all_read; }
 };
 
 /// The "body hide: BATTLE" lines: one per run of first-person battle frames (k_hl_delay frames in, so its counts mean
@@ -636,9 +639,16 @@ inline const char* mat_name(int k) {
 }
 // The fx: samples (S2): the first on the first frame the effect is on screen (the frame's product-only or no-image scene draws
 // rise k_fx_rise above the frame before the file loaded), or k_fx_s1_late frames after the load if they never do; the second
-// k_fx_gap frames after the first. Two samples of two lines per magic file, whatever happens.
-constexpr uint32_t k_fx_rise = 2, k_fx_s1_late = 30, k_fx_gap = 20;
+// k_fx_gap frames after the first. Review round 2 (S2-R2): a rise of 2 is also what a charge glow gives, so after the first
+// sample one more is taken whenever the frame's product-only draws exceed the highest count sampled so far by half and by at
+// least k_fx_peak_add (the effect's own sprites arriving), up to k_fx_samples samples per magic file in all; the end line
+// gives the product-only peak, its frame, and the highest count a sample caught.
+constexpr uint32_t k_fx_rise = 2, k_fx_s1_late = 30, k_fx_gap = 20, k_fx_peak_add = 8;
+constexpr int k_fx_samples = 6;
 constexpr uint32_t k_nodraw = 30;   // S3: frames with no draw of an actor the game shows before the line
+constexpr uint8_t k_hide_cull = 0x28;   // the character hide byte's per-frame cull bits (frustum 0x08, distance 0x20)
+/// Has the frame's product-only count passed the highest sampled one by half and by k_fx_peak_add?
+inline bool fx_peak_due(uint32_t prod, uint32_t sampled) { return prod >= sampled + k_fx_peak_add && 2u * prod >= 3u * sampled; }
 /// S3: last frame's draws by actor-table slot, from the key table (first person only; the native glue fills it).
 struct Attrib { bool has[k_owners] = {}; uint32_t draws[k_owners] = {}; };
 
@@ -654,8 +664,14 @@ struct Log {
     bool act_on = false; int act_seq = 0, act_actor = -1; uint16_t act_id = 0; uint32_t act_frame = 0; char act_name[k_cname] = {}; int act_vis = 0;
     // the magic file in play
     bool fx_on = false; int32_t fx_id = -1; uint32_t fx_req_frame = 0, fx_load_frame = 0, fx_s1_frame = 0; int fx_samples = 0;
+    bool fx_gap_done = false; uint32_t fx_sampled = 0, fx_peak_frame = 0;   // S2-R2: the "20 frames after the first" sample taken; the highest product-only count a sample caught; the peak's frame
+    float cam_prev[12] = {}; bool cam_prev_ok = false; uint32_t cam_prev_frame = 0;   // the game's main camera of the frame before (N-R2-2)
     float mats_prev[k_mats * 16] = {}, mats_s1[k_mats * 16] = {}; bool mats_prev_ok = false; uint32_t mats_prev_frame = 0;
-    uint32_t nd[k_actors] = {}; bool nd_said[k_actors] = {}; bool attrib_seen = false;   // S3: frames without a draw, the line written
+    // S3: per actor, the run of attributed frames without a draw (nd), those of them with a cull bit (nd_cull), the run's
+    // last frames without one (nd_clear), the lines written for the run (nd_said: 1 the cull line, 2 the NO DRAWS line);
+    // at_gap: frames in a row without attribution (the windows wait; a long gap forgets them)
+    uint32_t nd[k_actors] = {}, nd_cull[k_actors] = {}, nd_clear[k_actors] = {}; uint8_t nd_said[k_actors] = {}; bool attrib_seen = false; uint32_t at_gap = 0;
+    void nd_reset(int i) { nd[i] = 0; nd_cull[i] = 0; nd_clear[i] = 0; nd_said[i] = 0; }
     DrawCounts fx_base, fx_max, dc_prev;
     int32_t magic_prev = -1; uint32_t magic_req_frame = 0;
     char buf[4096];
@@ -674,8 +690,9 @@ struct Log {
         b.add(" | acting: #%d ", act_seq); actor_text(b, act_actor, names); b.add(" 0x%04X '%s' (%u frames ago)", act_id, act_name, frame_now - act_frame);
     }
     /// The next frame() with matrices may write an fx: sample (a file about to be seen loaded, or loaded with a sample still to
-    /// come): the glue then fills Views. At most about 50 frames per magic file.
-    bool wants_views() const { return active && (!fx_on || fx_samples < 2); }
+    /// come): the glue then fills Views. While a magic file is loaded and has samples left, that is every frame (S2-R2: a
+    /// peak sample can come at any frame).
+    bool wants_views() const { return active && (!fx_on || fx_samples < k_fx_samples); }
 
     void end_battle(LineFn fn, void* ctx, const char* why) {
         if (!active) return;
@@ -699,8 +716,11 @@ struct Log {
         const int tk = b_fx.take(0);
         if (tk) {
             Buf b(buf, static_cast<int>(sizeof(buf)));
-            b.add("fx: battle %d frame %u | magic 0x%04X (%d) ended (%s) after %u frames loaded | scene-pass draws a frame while it was loaded, at most: with a camera eye image %u, product-only (the PS2 effect family) %u, with no eye image %u (the frame before it loaded: %u, %u, %u) | samples written %d | visibility changes logged since the command %d",
-                  battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_id, why, frame_now - fx_load_frame, fx_max.cam, fx_max.prod, fx_max.noimg, fx_base.cam, fx_base.prod, fx_base.noimg, fx_samples, act_vis);
+            b.add("fx: battle %d frame %u | magic 0x%04X (%d) ended (%s) after %u frames loaded | scene-pass draws a frame while it was loaded, at most: with a camera eye image %u, product-only (the PS2 effect family) %u, with no eye image %u (the frame before it loaded: %u, %u, %u) | the product-only peak: %u at frame %u (%u frames after the load); the highest product-only count a sample caught: %u%s | samples written %d | visibility changes logged since the command %d",
+                  battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_id, why, frame_now - fx_load_frame, fx_max.cam, fx_max.prod, fx_max.noimg, fx_base.cam, fx_base.prod, fx_base.noimg,
+                  fx_max.prod, fx_peak_frame, fx_peak_frame - fx_load_frame, fx_sampled,
+                  fx_samples == 0 ? " (NO sample was taken)" : fx_peak_due(fx_max.prod, fx_sampled) ? " (the peak was NOT sampled: no sample left, or no matrices that frame)" : " (a sample is at or near the peak)",
+                  fx_samples, act_vis);
             acting_text(b);
             emit(fn, ctx, b, tk); lines_fx++;
         }
@@ -746,13 +766,17 @@ struct Log {
             active = true; baseline = true; battle++; start_frame = frame;
             b_cmd.battle_start(); b_vis.battle_start(); b_fx.battle_start(); vt.reset(); dd.reset();
             lines_cmd = lines_vis = lines_fx = polled = hooked = 0; act_on = false; fx_on = false; g_have = false; magic_prev = -1;
-            mats_prev_ok = false; attrib_seen = false;
-            for (int i = 0; i < k_actors; ++i) { nd[i] = 0; nd_said[i] = false; }
+            mats_prev_ok = false; cam_prev_ok = false; attrib_seen = false; at_gap = 0;
+            for (int i = 0; i < k_actors; ++i) nd_reset(i);
         }
         // (a record without a character keeps its name when it has one: a party member on the bench, an aeon not yet called)
         for (int i = 0; i < k_actors; ++i) { if (i < n && a[i].name[0]) copy_name(names[i], k_name, a[i].name); else if (baseline) names[i][0] = 0; }
         if (baseline) start_lines(a, n, g, fn, ctx);
 
+        // S3-R2: a frame without attribution (no draw was judged: a battle tag's hold, the diorama, a frame not drawn) is not a
+        // frame without draws: the windows wait; after k_nodraw such frames in a row they are forgotten
+        if (at != nullptr) at_gap = 0;
+        else if (at_gap < k_nodraw && ++at_gap == k_nodraw) { for (int i = 0; i < k_actors; ++i) nd_reset(i); }
         // the actors
         int nout = 0;
         for (int i = 0; i < n; ++i) {
@@ -798,6 +822,7 @@ struct Log {
         if (fx_on && (!loaded || mid != fx_id)) fx_end(fn, ctx, !loaded ? "the game unloaded it" : "another magic id took its place");
         if (!fx_on && loaded) {
             fx_on = true; fx_id = mid; fx_load_frame = frame; fx_req_frame = magic_req_frame; fx_samples = 0; fx_s1_frame = 0; fx_base = dc_prev; fx_max = DrawCounts{};
+            fx_gap_done = false; fx_sampled = 0; fx_peak_frame = frame;
             const int tk = b_fx.take(0);
             if (tk) {
                 Buf b(buf, static_cast<int>(sizeof(buf)));
@@ -809,17 +834,24 @@ struct Log {
         }
         if (fx_on) {
             if (dc.cam > fx_max.cam) fx_max.cam = dc.cam;
-            if (dc.prod > fx_max.prod) fx_max.prod = dc.prod;
+            if (dc.prod > fx_max.prod) { fx_max.prod = dc.prod; fx_peak_frame = frame; }
             if (dc.noimg > fx_max.noimg) fx_max.noimg = dc.noimg;
             const uint32_t age = frame - fx_load_frame;
             const bool risen = dc.prod >= fx_base.prod + k_fx_rise || dc.noimg >= fx_base.noimg + k_fx_rise;   // the effect's own draws are on screen
             if (mats != nullptr && fx_samples == 0 && (risen || age >= k_fx_s1_late)) {
                 fx_samples = 1; fx_s1_frame = frame;
-                fx_sample(mats, vw, age, dc, risen ? "the effect's draws appeared" : "its draws never rose: taken anyway", fn, ctx);
-                memcpy(mats_s1, mats, sizeof(mats_s1));
+                fx_sample(mats, vw, age, dc, risen ? "the first rise of the effect draws: this may be a charge glow, not the effect itself" : "its draws never rose: taken anyway", fn, ctx);
             }
-            else if (mats != nullptr && fx_samples == 1 && frame - fx_s1_frame >= k_fx_gap) { fx_samples = 2; fx_sample(mats, vw, age, dc, "20 frames after the first", fn, ctx); }
+            else if (mats != nullptr && fx_samples >= 1 && fx_samples < k_fx_samples && fx_peak_due(dc.prod, fx_sampled)) {   // S2-R2: the effect's own sprites
+                fx_samples++;
+                fx_sample(mats, vw, age, dc, "a new product-only peak: half again above the highest sampled so far", fn, ctx);
+            }
+            else if (mats != nullptr && fx_samples >= 1 && fx_samples < k_fx_samples && !fx_gap_done && frame - fx_s1_frame >= k_fx_gap) {
+                fx_samples++; fx_gap_done = true;
+                fx_sample(mats, vw, age, dc, "20 frames after the first", fn, ctx);
+            }
         }
+        if (vw != nullptr && vw->ok) { memcpy(cam_prev, vw->game, sizeof(cam_prev)); cam_prev_ok = true; cam_prev_frame = frame; } else cam_prev_ok = false;
         if (mats != nullptr) { memcpy(mats_prev, mats, sizeof(mats_prev)); mats_prev_ok = true; mats_prev_frame = frame; } else mats_prev_ok = false;
         if (at != nullptr) attrib_seen = true;
         for (int k = 0; k < G_COUNT; ++k) g_prev[k] = g[k];
@@ -871,47 +903,72 @@ struct Log {
         acting_text(b); b.add(" | command actor now %d", g[G_CMD_ACTOR]);
         emit(fn, ctx, b, tk); lines_vis++; act_vis++;
     }
-    /// S3: an actor the game shows whose model's keys no draw has carried for k_nodraw frames: one line; one more when its
-    /// draws are back. Only while the key table attributes draws (a first-person battle with the identity rule's table in use).
+    /// S3: an actor the game shows whose model's keys no draw has carried for k_nodraw attributed frames: one line; one more
+    /// when its draws are back. Only while the key table attributes draws (a first-person battle with the identity rule's
+    /// table in use, and a frame in which draws were judged: at == nullptr leaves the windows as they are, S3-R2).
+    /// S3-R2: the game's own camera culls characters (hide byte 0x08 / 0x20: common in first person, behind the game's
+    /// camera). A run with a cull bit in it gets the "culled by the game's camera" line; the NO DRAWS line is kept for
+    /// k_nodraw frames in a row with no draw and no cull bit.
     void nodraw(int i, const ActorIn& a, const Attrib* at, const int32_t* g, LineFn fn, void* ctx) {
-        const bool can = at != nullptr && a.live && a.slot < k_owners && at->has[a.slot] && shown(state_of(a));
-        if (!can) { nd[i] = 0; nd_said[i] = false; return; }
+        if (at == nullptr) return;
+        const bool can = a.live && a.slot < k_owners && at->has[a.slot] && shown(state_of(a));
+        if (!can) { nd_reset(i); return; }
         const uint32_t d = at->draws[a.slot];
-        if (d == 0) {
-            if (++nd[i] != k_nodraw || nd_said[i]) return;
-            nd_said[i] = true;
-        }
-        else {
-            const uint32_t gone = nd[i]; nd[i] = 0;
-            if (!nd_said[i]) return;
-            nd_said[i] = false;
+        if (d != 0) {
+            const uint32_t gone = nd[i], culled = nd_cull[i]; const uint8_t said = nd_said[i];
+            nd_reset(i);
+            if (said == 0) return;
             const int tk = b_vis.take(i);
             if (!tk) return;
             Buf b(buf, static_cast<int>(sizeof(buf)));
             b.add("vis: battle %d frame %u | ", battle, frame_now); actor_text(b, i, names);
-            b.add(" (slot %u) | DRAWS AGAIN: %u draws with its model's keys this frame, after %u frames with none", a.slot, d, gone);
+            b.add(" (slot %u) | DRAWS AGAIN: %u draws with its model's keys this frame, after %u frames with none (the game's camera culled it in %u of them)", a.slot, d, gone, culled);
             acting_text(b); emit(fn, ctx, b, tk); lines_vis++;
             return;
         }
+        nd[i]++;
+        if ((a.hide & k_hide_cull) != 0) { nd_cull[i]++; nd_clear[i] = 0; } else nd_clear[i]++;
+        const bool alarm = nd_clear[i] == k_nodraw && (nd_said[i] & 2) == 0;
+        const bool cull = !alarm && nd[i] == k_nodraw && nd_cull[i] > 0 && nd_said[i] == 0;
+        if (!alarm && !cull) return;
+        nd_said[i] |= alarm ? 2 : 1;
         const int tk = b_vis.take(i);
         if (!tk) return;
         Buf b(buf, static_cast<int>(sizeof(buf)));
         b.add("vis: battle %d frame %u | ", battle, frame_now); actor_text(b, i, names);
-        b.add(" (slot %u) | NO DRAWS: the game shows it (", a.slot); votes_text(b, a.vis, nullptr); b.add(" | chr hide "); hide_text(b, a.hide);
-        b.add("), but no draw has carried its model's keys for %u frames (first person; only draws with an eye image and a world position are counted: not the game's hide, so the draws are missing, culled, or have no eye image)", k_nodraw);
+        if (cull) {
+            b.add(" (slot %u) | NOT DRAWN, culled by the game's camera: no draw has carried its model's keys for %u frames, and in %u of them the game's own cull had it (chr hide now ", a.slot, k_nodraw, nd_cull[i]);
+            hide_text(b, a.hide);
+            b.add("): the game's camera does not see it; not a hide by a script and not the mod (first person; a NO DRAWS line follows if it stays undrawn %u frames with no cull bit)", k_nodraw);
+        }
+        else {
+            b.add(" (slot %u) | NO DRAWS: the game shows it (", a.slot); votes_text(b, a.vis, nullptr); b.add(" | chr hide "); hide_text(b, a.hide);
+            b.add("), with no cull bit, but no draw has carried its model's keys for %u frames", k_nodraw);
+            if (nd[i] > k_nodraw) b.add(" (%u frames in all, %u of them culled by the game's camera before)", nd[i], nd_cull[i]);
+            b.add(" (first person; only draws with an eye image and a world position are counted: not the game's hide and not its cull, so the draws are missing or have no eye image)");
+        }
         acting_text(b); b.add(" | command actor now %d", g[G_CMD_ACTOR]);
         emit(fn, ctx, b, tk); lines_vis++; act_vis++;
     }
+    /// One sample (fx_samples is already its number): its lines, then what the next sample compares with.
     void fx_sample(const float* mats, const Views* vw, uint32_t age, const DrawCounts& dc, const char* trigger, LineFn fn, void* ctx) {
+        fx_sample_lines(mats, vw, age, dc, trigger, fn, ctx);
+        memcpy(mats_s1, mats, sizeof(mats_s1));
+        if (dc.prod > fx_sampled) fx_sampled = dc.prod;
+    }
+    void fx_sample_lines(const float* mats, const Views* vw, uint32_t age, const DrawCounts& dc, const char* trigger, LineFn fn, void* ctx) {
         int tk = b_fx.take(0);
         if (tk) {
             Buf b(buf, static_cast<int>(sizeof(buf)));
-            b.add("fx: battle %d frame %u | magic 0x%04X sample %d (%u frames after it loaded; %s) | this frame's scene-pass draws: camera eye image %u, product-only %u, no eye image %u (before the load: %u, %u, %u)",
-                  battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_samples, age, trigger, dc.cam, dc.prod, dc.noimg, fx_base.cam, fx_base.prod, fx_base.noimg);
+            b.add("fx: battle %d frame %u | magic 0x%04X sample %d (%u frames after it loaded; %s) | this frame's scene-pass draws: camera eye image %u, product-only %u, no eye image %u (before the load: %u, %u, %u; the highest product-only count sampled before: %u)",
+                  battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_samples, age, trigger, dc.cam, dc.prod, dc.noimg, fx_base.cam, fx_base.prod, fx_base.noimg, fx_sampled);
             if (mats_prev_ok && mats_prev_frame + 1 == frame_now) b.add(" | g_pppCameraMatrix changed since the frame before: %s", memcmp(mats_prev, mats, 16 * sizeof(float)) != 0 ? "yes (the effect code is copying the camera)" : "NO (it may be stale: not written this frame)");
             else b.add(" | g_pppCameraMatrix changed since the frame before: not known (no copy of the frame before)");
-            if (fx_samples == 2) {
-                b.add(" | changed since sample 1:");
+            // N-R2-2: a camera standing still gives "NO" too: say whether the game's main camera moved in the same frame
+            if (vw != nullptr && vw->ok && cam_prev_ok && cam_prev_frame + 1 == frame_now) b.add("; the game's main camera moved since the frame before: %s", memcmp(cam_prev, vw->game, sizeof(cam_prev)) != 0 ? "yes" : "no (a still camera: \"NO\" above then says nothing)");
+            else b.add("; the game's main camera moved since the frame before: not known");
+            if (fx_samples >= 2) {
+                b.add(" | changed since sample %d:", fx_samples - 1);
                 bool any = false;
                 for (int k = 0; k < k_mats; ++k) if (memcmp(mats_s1 + 16 * k, mats + 16 * k, 16 * sizeof(float)) != 0) { b.add(" %s,", mat_name(k)); any = true; }
                 if (!any) b.add(" none of the six (they are not being written)");

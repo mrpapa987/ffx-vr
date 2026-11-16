@@ -86,7 +86,7 @@ public sealed unsafe partial class FFXVRModule {
     // the battle body hide's key table
     private const int k_bh_max = 768, k_bh_segs = 96, k_bh_owners = 48;   // = native bvis::k_keys, k_owners
     private uint* _bh_q; private byte* _bh_seg, _bh_who, _bh_own; private float* _bh_roots;   // _bh_own: two bytes per owner (its table slot; bit 0 = attached to the followed actor)
-    private int _bh_n, _bh_self_n, _bh_owners, _bh_mode, _bh_hidden, _bh_dumps; private uint _bh_gen; private bool _bh_incomplete; private nint _bh_who_key; private ulong _bh_logged;
+    private int _bh_n, _bh_self_n, _bh_owners, _bh_mode, _bh_hidden, _bh_dumps; private uint _bh_gen; private bool _bh_incomplete, _bh_big; private nint _bh_who_key; private ulong _bh_logged;
     private readonly int[] _bh_owner_slot = new int[k_bh_owners];
 
     private bool bv_parse(string k, string v) {
@@ -472,7 +472,7 @@ public sealed unsafe partial class FFXVRModule {
             bool ok = finite(r) && MathF.Abs(r.X) + MathF.Abs(r.Y) + MathF.Abs(r.Z) >= 0.01f;   // (not built: a fresh slot, a parked model)
             _bh_roots[3 * k] = ok ? -r.X : float.NaN; _bh_roots[3 * k + 1] = ok ? -r.Y : float.NaN; _bh_roots[3 * k + 2] = ok ? r.Z : float.NaN;
         }
-        int ret = _fn_fp_battle_set(_bh_n > 0 ? _bh_q : null, _bh_n, _bh_gen, flags | (_bh_incomplete ? 8 : 0), _bh_roots, _bh_own, _bh_n > 0 ? _bh_owners : 0, pick, _bh_who);
+        int ret = _fn_fp_battle_set(_bh_n > 0 ? _bh_q : null, _bh_n, _bh_gen, flags | (_bh_incomplete ? 8 : 0) | (_bh_big ? 16 : 0), _bh_roots, _bh_own, _bh_n > 0 ? _bh_owners : 0, pick, _bh_who);
         _bh_mode = ret & 0xFF; _bh_hidden = ret >> 8;
     }
     /// The key table: the followed actor's segments as owner 0, then every other live actor's with a model, one owner number
@@ -482,13 +482,14 @@ public sealed unsafe partial class FFXVRModule {
     /// rule meanwhile; it asks for the next build 4 frames on). An actor attached to the followed one (+0x19C, his weapon)
     /// is flagged: native leaves its draws to the distance rule, as before.
     private void bh_build(Actor* actors, Actor* snap, int pick) {
-        _bh_gen++; _bh_n = 0; _bh_self_n = 0; _bh_owners = 1; _bh_incomplete = false; _bh_owner_slot[0] = pick;
+        _bh_gen++; _bh_n = 0; _bh_self_n = 0; _bh_owners = 1; _bh_incomplete = false; _bh_big = false; _bh_owner_slot[0] = pick;
         _bh_own[0] = (byte)pick; _bh_own[1] = 0;
         byte* a = (byte*)(snap + pick);
         uint res0 = *(uint*)(a + 0x1C4); int same = 0;
         string why = bh_chain_big(*(nint*)(a + 0x830));
         IbChain.Walk(*(nint*)(a + 0x830), 0u, _bh_q, ref _bh_n, k_bh_max, _bh_seg, k_bh_segs, _fn_safe_read, out bool fail);
         if (why.Length == 0 && _bh_n >= k_bh_max) why = "his model alone fills the key table";
+        _bh_big = why.Length > 0;   // (review N-R2-1: a size the walk cannot read does not change 4 frames on: native retries at the slow cadence)
         if (why.Length == 0 && fail) why = "a read of his chain failed";
         if (why.Length == 0 && _bh_n == 0) why = "his model gave no keys yet";
         if (why.Length > 0) { _bh_n = 0; bh_build_log(snap, pick, why, 0); return; }

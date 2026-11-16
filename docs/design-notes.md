@@ -6705,8 +6705,9 @@ written on the game's thread, so a hide shorter than a frame can be missed, but 
     vis: battle 3 frame 51246 | actor 0 'Tidus (c001)' (slot 5) | visible 1 -> 0 | votes: main 1, appear 1, effect 1 -> 0 (HIDES), camera 1 | chr hide 0x00 -> 0x10 (battle) | now HIDDEN | acting: #12 actor 2 'Auron (c003)' 0x30AB 'Armor Break' (12 frames ago) | command actor now 2
     vis: battle 3 frame 51246 | g_BtlCameraHides 0x112C9FE 0 -> 1 (a battle camera hid characters: MsSetChrVisibleCamera; unconfirmed) | magic 0xFFFF | acting: #12 ... | command actor now 2
     vis: battle 3 frame 51300 | g_MagicHiddenBtlChr 0xC64CDC -1 -> 1 (actor 1 'Yuna (c002)': hidden by the magic's effect script without a vote of its own; unconfirmed) | magic 0x0094 | ...
-    vis: battle 3 frame 51900 | actor 8 'Valefor (s001)' (slot 12) | NO DRAWS: the game shows it (votes: main 1, appear 1, effect 1, camera 1 | chr hide 0x00), but no draw has carried its model's keys for 30 frames (first person; only draws with an eye image and a world position are counted: not the game's hide, so the draws are missing, culled, or have no eye image) | acting: #14 ... | command actor now 1
-    vis: battle 3 frame 51960 | actor 8 'Valefor (s001)' (slot 12) | DRAWS AGAIN: 22 draws with its model's keys this frame, after 90 frames with none | acting: #14 ...
+    vis: battle 3 frame 51900 | actor 8 'Valefor (s001)' (slot 12) | NO DRAWS: the game shows it (visible 1 | votes: main 1, appear 1, effect 1, camera 1 | chr hide 0x00), with no cull bit, but no draw has carried its model's keys for 30 frames (first person; only draws with an eye image and a world position are counted: not the game's hide and not its cull, so the draws are missing or have no eye image) | acting: #14 ... | command actor now 1
+    vis: battle 3 frame 51960 | actor 8 'Valefor (s001)' (slot 12) | DRAWS AGAIN: 22 draws with its model's keys this frame, after 90 frames with none (the game's camera culled it in 0 of them) | acting: #14 ...
+    vis: battle 3 frame 52100 | actor 2 'Auron (c003)' (slot 7) | NOT DRAWN, culled by the game's camera: no draw has carried its model's keys for 30 frames, and in 30 of them the game's own cull had it (chr hide now 0x08 (frustum cull)): the game's camera does not see it; not a hide by a script and not the mod (first person; a NO DRAWS line follows if it stays undrawn 30 frames with no cull bit) | acting: ...
     vis: === battle 3 ended (the game left the battle, or the log was turned off; frame 53000, 2000 frames) | lines: cmd 9 (hook 8, polled 1), vis 14, fx 12 | not written (the budget): cmd 0, vis 0, fx 0
 
 - **The state** (a change of any of these writes a line): the visible flag (+0x15) and the four request votes +0x16..+0x19
@@ -6729,9 +6730,15 @@ written on the game's thread, so a hide shorter than a frame can be missed, but 
   skinned scene-pass draw with a world position is looked up in the key table and counted per actor (the followed
   character's count includes the draws the mod hides, so he never gets this line). An actor that is in the table, that the
   game shows (flag set, all four votes, hide byte and alpha clear) and whose keys no draw has carried for 30 frames gets
-  one `NO DRAWS` line, and one `DRAWS AGAIN` line when they are back. This is what separates "the game hid the aeon"
-  (a `vis:` change line with the vote) from "the game shows it and it is still not on screen" (culled by the game's own
-  camera, drawn with no eye image, or not submitted): the second cannot be seen in the votes at all. Not available in the
+  one `NO DRAWS` line, and one `DRAWS AGAIN` line when they are back. **Two ordinary cases are kept out of it (review round
+  2):** (a) a frame in which no draw was judged at all (a battle tag's hold during a swap, when the body hide's draw test
+  is skipped; a frame not drawn) is "no attribution", not "no draws": the 30-frame windows wait, and after 30 such
+  frames in a row they start over; (b) the game's own camera culls characters it does not see (hide byte 0x08 frustum /
+  0x20 distance), which in first person is common for a party member behind the game's camera: a window with a cull bit
+  in it gets the `NOT DRAWN, culled by the game's camera` line (how many of the 30 frames), and `NO DRAWS` is written
+  only after 30 frames in a row with no draw and no cull bit. This is what separates "the game hid the aeon"
+  (a `vis:` change line with the vote) from "the game shows it and it is still not on screen" (drawn with
+  no eye image, or not submitted): the second cannot be seen in the votes at all. Not available in the
   diorama or third person (no key table is built there: each battle's first line says "first person only"), nor with
   `fp_battle_hide=0`. The `body hide: BATTLE` line carries the same counts as a per-actor average.
 - **Who is acting:** every `vis:` and `fx:` line ends with the last `cmd:` (its number, actor, id, name, how many frames
@@ -6745,21 +6752,28 @@ written on the game's thread, so a hide shorter than a frame can be missed, but 
 **`fx:` per magic file** (a spell, a skill's effect, an aeon's arrival: whatever loads a `magic_NNNN.dll`):
 
     fx: battle 3 frame 52010 | magic 0x0241 (577) loaded, handle 5, file magic_0577.dll (the game's name pattern per ffx-rust: unconfirmed), id set 3 frames before | acting: #16 actor 1 'Yuna (c002)' 0x3032 'Holy' (40 frames ago)
-    fx: battle 3 frame 52031 | magic 0x0241 sample 1 (21 frames after it loaded; the effect's draws appeared) | this frame's scene-pass draws: camera eye image 150, product-only 40, no eye image 6 (before the load: 120, 4, 2) | g_pppCameraMatrix changed since the frame before: yes (the effect code is copying the camera) | the game's effect matrices, 4 rows of 4 as stored (game space) | g_pppCameraMatrix 0x230FF60 [...][...][...][...] | g_pppViewMatrix 0x230FF20 [...] | g_pppScreenMatrix 0x230FE60 [...] | g_pppFpWoodMatrix 0x230FEA0 [...] | g_pppWoodMatrixWork 0x230FEE0 [...] | g_pppWoodMatrix 0x230FDE0 [...]
+    fx: battle 3 frame 52031 | magic 0x0241 sample 1 (21 frames after it loaded; the first rise of the effect draws: this may be a charge glow, not the effect itself) | this frame's scene-pass draws: camera eye image 150, product-only 8, no eye image 6 (before the load: 120, 4, 2; the highest product-only count sampled before: 0) | g_pppCameraMatrix changed since the frame before: yes (the effect code is copying the camera); the game's main camera moved since the frame before: yes | the game's effect matrices, 4 rows of 4 as stored (game space) | g_pppCameraMatrix 0x230FF60 [...][...][...][...] | g_pppViewMatrix 0x230FF20 [...] | g_pppScreenMatrix 0x230FE60 [...] | g_pppFpWoodMatrix 0x230FEA0 [...] | g_pppWoodMatrixWork 0x230FEE0 [...] | g_pppWoodMatrix 0x230FDE0 [...]
     fx: battle 3 frame 52031 | magic 0x0241 sample 1: the views of the same frame (render space: game space with x and y negated) | the game's main camera (what its effect code aims sprites at): position (...) forward (...) up (...) | eye 1: position (...) forward (...) up (...) | eye 2: ... | eye 1 looks 34.2 deg off the game's camera, its up is 3.1 deg off | the game's projection: P0 1.3032 P5 2.3168 (width : height 1.778) | eye 1 tangents l -1.040 r 0.870 u 0.980 d -1.100 (P0 1.0471 P5 0.9615, width : height 0.918) | eye 2 tangents ...
-    fx: battle 3 frame 52051 | magic 0x0241 sample 2 (41 frames after it loaded; 20 frames after the first) | this frame's scene-pass draws: ... | g_pppCameraMatrix changed since the frame before: yes ... | changed since sample 1: g_pppCameraMatrix, g_pppViewMatrix, | the game's effect matrices ...
-    fx: battle 3 frame 52250 | magic 0x0241 (577) ended (the game unloaded it) after 240 frames loaded | scene-pass draws a frame while it was loaded, at most: with a camera eye image 180, product-only (the PS2 effect family) 64, with no eye image 9 (the frame before it loaded: 120, 4, 2) | samples written 2 | visibility changes logged since the command 3 | acting: ...
+    fx: battle 3 frame 52051 | magic 0x0241 sample 2 (41 frames after it loaded; 20 frames after the first) | this frame's scene-pass draws: ... | g_pppCameraMatrix changed since the frame before: yes ... | changed since sample 1: g_pppCameraMatrix 0x230FF60, g_pppViewMatrix 0x230FF20, | the game's effect matrices ...
+    fx: battle 3 frame 52120 | magic 0x0241 sample 3 (110 frames after it loaded; a new product-only peak: half again above the highest sampled so far) | this frame's scene-pass draws: camera eye image 150, product-only 64, no eye image 9 (before the load: 120, 4, 2; the highest product-only count sampled before: 10) | ... | changed since sample 2: ... | the game's effect matrices ...
+    fx: battle 3 frame 52250 | magic 0x0241 (577) ended (the game unloaded it) after 240 frames loaded | scene-pass draws a frame while it was loaded, at most: with a camera eye image 180, product-only (the PS2 effect family) 64, with no eye image 9 (the frame before it loaded: 120, 4, 2) | the product-only peak: 64 at frame 52120 (110 frames after the load); the highest product-only count a sample caught: 64 (a sample is at or near the peak) | samples written 3 | visibility changes logged since the command 3 | acting: ...
 
 - The magic id is `g_MagicFile_MagicId` (0xC64CA0, what `MagicFile_GetMagicId` 0x9DA3B0 returns), loaded when
   `g_MagicFile_Handle` (0xC64CAC) is not -1.
-- Two samples per magic file, each two lines. **When (review S2):** a magic file is loaded well before its effect is on
+- Up to six samples per magic file, each two lines. **When (review S2):** a magic file is loaded well before its effect is on
   screen (the cast animation comes first), and nothing says the game rewrites the six matrices every frame, so a sample at a
   fixed 2 frames could print what the *previous* effect left there. The first sample is now taken the first frame the
   frame's product-only or no-eye-image scene draws are 2 or more above the frame before the load (the effect's own draws are
   being submitted), or 30 frames after the load if they never rise (said in the line); the second 20 frames after the
   first. Each sample line carries that frame's draw counts, whether `g_pppCameraMatrix` differs from the frame before
-  ("NO" = it may be stale), and the second which of the six changed since the first. A sample whose matrices did not
-  change is not evidence about the effect. The lines are: the game's six effect matrices as stored,
+  ("NO" = it may be stale; beside it whether the game's main camera moved that frame, since a still camera gives "NO"
+  too), and each later sample which of the six changed since the one before. A sample whose matrices did not change is
+  not evidence about the effect. **Peak samples (review round 2):** a rise of 2 draws is also what the caster's charge
+  glow or a status effect gives, so the first two samples can both land before the spell's own sprites. After the first
+  sample one more is taken whenever the frame's product-only draws are at least half again above, and at least 8 above,
+  the highest count any sample has caught, up to 6 samples per magic file; the end line gives the product-only peak, the
+  frame it came, the highest count a sample caught, and says when the peak was not sampled. The sample to read for
+  "what does the effect do" is the one with the highest product-only count. The lines are: the game's six effect matrices as stored,
   and the same frame's views as the mod has them: the game's main camera as its shaders get it (before the override), the
   two eyes' views (`build_override_view`, read-only, as the markers use it), the angle between the game camera's forward /
   up and eye 1's, the game's projection and each eye's field of view.
@@ -6911,27 +6925,28 @@ Ours, not tested in play:
   (the cull bits are not a change), the tracker's first seen / changed / gone.
 - `budget_test` (8279): the fair share (one flapping source ends at guarantee + cap; the others keep their guarantee; the pool goes
   round), a new battle, the session cap and its note, random asks.
-- `ident_test` (1428): the key table, the classes, the shared-model tie-break (nearest root, unknown roots), every verdict, the
+- `ident_test` (1496): the key table, the classes, the shared-model tie-break (nearest root, unknown roots), every verdict, the
   frame-to-frame rule (no keys, probing, identity, a swap, lost keys, keys never seen, the pushes stopping, the setting),
   the rebuild cadence (4 / 30 / 60 frames, a new signature, a gap, the counter's wrap, the forced rebuild), the line's
   schedule and caps; the review round's rules: the lost latch and when it must not fire, the partial table, the weapon
   class, no lookup among the others' keys unless asked, the per-actor counts, the line's new parts.
-- `dedup_test` (681): the polled-against-hooked de-duplication (the hold, the busy detour, a late or unrelated hook event, the
+- `dedup_test` (721): the polled-against-hooked de-duplication (the hold, the busy detour, a late or unrelated hook event, the
   count's cap, a cleared record), and whole battles through `bvis::Log`: a skill with hides by a vote, by the camera global
   and by an effect bit, a polled monster command, a swap with the roster line, a summon, Holy with its two samples and the
-  end line (the samples wait for the draws to rise; the late sample; the changed markers), an actor shown with no draws
-  and its draws coming back, a second battle, no hook at all, a flapping actor, the session budget, lines that cannot
+  end line (the samples wait for the draws to rise; the late sample; the changed markers; a charge glow then the peaks,
+  six samples at most, the peak in the end line), an actor shown with no draws and its draws coming back, a battle tag's
+  hold (short and long), an actor culled by the game's camera (all the window, part of it, then not culled), a second battle, no hook at all, a flapping actor, the session budget, lines that cannot
   overrun.
-- `glue_test` (206): the glue of `ffxvr_native.cpp` verbatim (`extract.py`) against stand-ins for Direct3D and the camera: the
+- `glue_test` (288): the glue of `ffxvr_native.cpp` verbatim (`extract.py`) against stand-ins for Direct3D and the camera: the
   draw's verdicts through a battle, when the index buffer is read at all, the retry, the diorama, a swap, the same model,
   the setting, the log switch, lost keys and the rebuild asked at once, the weapon, the partial table and its line, the
   draws per actor reaching the research log, and the three log exports (sizes checked, names terminated, the polled out
   array, the views built only for a sample). The header is compiled there with Windows' `near` / `far` macros defined.
-- `check.py` (373 text scans): the ABI numbers and histories, every export defined / bound / unbound with one type, the two records' sizes
+- `check.py` (377 text scans): the ABI numbers and histories, every export defined / bound / unbound with one type, the two records' sizes
   and offsets against the managed constants, every address constant against its absolute address, the ini keys in the
   parser, the defaults, the menu and the docs, the hook's install condition, the field path's call unchanged, no bare
   `std::min` / `std::max`, balanced brackets in the managed files this build touched, the review round's managed lines.
-  `mutants.py`: 178 mutants of the header, the glue and the managed file, all caught. The header's format strings are
+  `mutants.py`: 215 mutants of the header, the glue and the managed file, all caught. The header's format strings are
   checked against their arguments by the tests' compiler (a printf attribute under g++).
 
 ### The review round (16 Nov 2026, before 68 was delivered)
@@ -6956,6 +6971,14 @@ Left, with the reason:
   is still printed.
 - **N11, the roster line's accounting** (it draws on the `vis:` budget and is counted under `cmd:` in the summary): a counter's
   label; changing it moves numbers in three tests for no information.
+
+**Round 2 of the review** (0 blockers, 2 should-fix, 4 notes on the round above). Fixed: **S3-R2** (`NO DRAWS` false alarms:
+a frame with no judged draw is no attribution; the game's cull has its own line; section 1), **S2-R2** (the peak samples;
+section 1), **N-R2-1** (a followed model too large for the walk is no longer re-walked every 4 frames: managed sets flag
+16 of `ffxvr_fp_battle_set` and native asks at the 60-frame cadence; a swap still rebuilds at once), **N-R2-2** (the
+sample says whether the game's main camera moved in the same frame). Left: **N-R2-3** (`bh_chain_big` does not check the
+walk's limit of 4 index buffers a segment: it would have to read every segment a second time, and the walk's own count
+reaching the table's size already gives no table; not expected in practice), **N-R2-4** (round 1's N2, N4, N9: as above).
 
 ### Next (not built)
 
