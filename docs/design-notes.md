@@ -7115,7 +7115,7 @@ skipping; wanted but the detour is not in; not in effect now). F8 > Developer > 
 
 **The design: substitute around one `pppRunPart` call, and put everything back** (`ffxvr_fxface.h`, `fxf::substitute`).
 With F = `g_pppFillMatrix` as it is at that moment and S = a level camera on the line from the head to the part, looking
-at the part from the game camera's own distance:
+at the part from as far away as the part is deep in the game's own view:
 
     G = F x S
     camera, view, view copy  ->  each x G
@@ -7133,21 +7133,29 @@ at the part from the game camera's own distance:
   route (`MsCopyCameraMatrix`, which the magic files import: 784 call sites) and builds a view-space position from that
   copy hands it to a fill request that now carries inverse(S): it lands **DISPLACED** by the difference between the two
   cameras, and the run still counts as "re-aimed". So with the box ticked an effect can sit in the wrong place. To see
-  it, a counting detour is put on `MsCopyCameraMatrix` together with the one on `pppRunPart` (only while the box has been
-  ticked in a VR battle): it always runs the game's function and returns its result, and native counts the calls that
+  it, a counting detour is put on `MsCopyCameraMatrix`, **only when the box is ticked in a VR battle AND the battle
+  research log (`diag_battle`) is on** (round 2 of the review, S-R2-1: the function is small and the main loop calls it
+  every frame in every scene; the exe is built with whole-program optimisation, so a caller inside it may rely on ECX /
+  EDX surviving the call, which ffx-rust's own hook keeps and a managed detour does not; that exposure is not measured,
+  so play with the box ticked does not carry this detour, only a recording session does, and once in it stays until the
+  game closes and counts only while the log is on): it always runs the game's function and returns its result, and native counts the calls that
   come while a re-aimed run is open (`ffxvr_fxf_camcopy`). The count is in each magic file's end line. **It is only
   counted, not answered:** answering with camera x G is the same algebra as for the global, but it is right only if the
   copy is used to build view-space positions for a fill request, which the count alone does not show; the next
   recording decides.
-- **The pose: one centre eye's direction, the game camera's distance, level.** The head is the middle of the two eyes
+- **The pose: one centre eye's direction, the game's view depth, level.** The head is the middle of the two eyes
   (the same quads for both eyes, as a flat sprite has to be). Direction: from the head
   to the part's place (the view's origin brought back by F), not the head's own forward: the sprites do not turn when the
   head turns, only when it moves, and a part at the edge of the view is not skewed. **Roll removed:** the view's Y axis is
   the world's down as far as the forward allows, so a vertical beam stays vertical when the head tilts (the game's own
   battle cameras are level too: the recorded matrix has a zero in its X axis's Y). Two fallbacks: a part within 2 units of
   the head uses the head's own forward; a forward within about 6 degrees of the vertical uses the head's own up for the
-  roll. **Distance (review S1):** S is not at the head but on the head-to-part line at the game camera's own distance
-  from the part (the fill matrix's row 3 is the game camera's place). The first version sat at the head, which changed
+  roll. **Distance (review S1, and N-R2-1 of round 2):** S is not at the head but on the head-to-part line, as far from the
+  part as the part is deep in the game's own view (the view's translation z, `view[14]`: what the programs see, also
+  with a stale fill matrix or a parent in the camera). S looks straight at the part, so that distance is the part's depth
+  under S: exactly the game's. (The review round first used the straight-line distance to the game camera, which is
+  larger for a part off the camera's axis: 40.0 against 36.4 in the recording's first sample.) A part at or behind the
+  game camera's plane has no such depth: the straight-line distance then. The first version sat at the head, which changed
   every value a program derives from view depth by the ratio of the two distances (in the recording's first sample about
   40 units against 64; far more in the diorama): sprites sized on the screen, the shape fill's depth fade, lens flares.
   Now the part's view depth is what the game computed and only the direction is the head's.
@@ -7171,10 +7179,12 @@ effect had.
 
 **The log** (with `diag_battle` on), per magic file:
 
-    fx: battle 3 frame 52031 | magic 0x0092 | fx_face_eyes: this effect's parts are being aimed at the eyes (game space; a re-aimed run of the last frame) | the part at (0.0 -10.0 0.0), the game's effect camera at (40.0 -20.0 -60.0) looking (-0.549 0.137 0.824) | substituted for that run: a camera on the line from the head (the centre of the two eyes) (-10.0 -20.0 30.0) to the part, at the game camera's own distance from the part (72.8): at (-22.0 -32.0 65.9) looking (0.302 0.302 -0.905): at the part, level (no roll); it looks 150.4 deg off the game's | so far for this magic file: 3 part runs, 2 re-aimed | acting: ...
+    fx: battle 3 frame 52031 | magic 0x0092 | fx_face_eyes: this effect's parts are being aimed at the eyes (game space; a re-aimed run of the last frame) | the part at (0.0 -10.0 0.0), the game's effect camera at (40.0 -20.0 -60.0) looking (-0.549 0.137 0.824) | substituted for that run: a camera on the line from the head (the centre of the two eyes) (-10.0 -20.0 30.0) to the part, as far from it as the part is deep in the game's own view (72.8): at (-22.0 -32.0 65.9) looking (0.302 0.302 -0.905): at the part, level (no roll); it looks 150.4 deg off the game's | so far for this magic file: 3 part runs, 2 re-aimed | acting: ...
     fx: ... magic 0x0092 (146) ended ... | fx_face_eyes: 412 part runs (pppRunPart) while it was loaded, 410 re-aimed at the eyes, 2 left as the game's (no head pose 0, the view's copy is not a copy of the view 2, a matrix did not invert 0, no level basis 0, nested in a re-aimed run 0); MsCopyCameraMatrix was called 36 times INSIDE those runs: that code took the game's own camera, and what it built from it in view space is DISPLACED (only counted, not answered) | acting: ...
 
-(or `MsCopyCameraMatrix was not called inside those runs`, or `not counted (its detour is not in)`.)
+(or `MsCopyCameraMatrix was not called inside those runs`, or `not counted: the battle research log was off (the counting
+detour is inserted only with this box ticked and the battle research log on)`, or `not counted: the counting detour was
+refused`.)
 
 With the setting off the end line says `fx_face_eyes: off, ...`. A sample taken while parts are re-aimed says that the two
 matrices it prints may be the substituted ones (they are read on the render thread). F8 > Developer > Inspect has an
@@ -7255,7 +7265,11 @@ From ffx-rust (static research of the same FFX.exe, ports checked against the ex
     the map effects' task call it). The end line's "part runs" count answers it per effect.
 15. That Holy's no-eye-image draws are draw events of the effect pass (above): a reading of the code notes, not seen.
 16. `MsCopyCameraMatrix` (0x7C0070) is cdecl with one argument and returns a word (ffx-rust's hook table, run in the
-    game through that hook; 0xB0 bytes long, so not a thunk). Its detour is inserted only once the box has been ticked.
+    game through that hook; 0xB0 bytes long, so not a thunk). **That its callers inside the exe do not rely on ECX / EDX
+    surviving the call is not known** (ffx-rust's hook keeps both; ours, a managed detour, does not; their clobber check
+    needs the exe). So the detour is inserted only with the box ticked AND the battle research log on. If a recording
+    session with both on crashes or shows a wrong camera anywhere, this is the first suspect: turn the log off (the
+    detour is then not inserted at the next launch).
 17. `g_BtlEffectCameraMode` (0x112C9D7) is not 0 exactly while an effect camera runs (ffx-rust's name for it).
 Ours, not tested in play:
 18. That the late insertions on 0x797080, 0x712250 and 0x7C0070 are accepted by Fahrenheit and cost one hitch each.
@@ -7268,7 +7282,7 @@ Ours, not tested in play:
 
 ### Tests (scratch `bvis_chk`, `run_all.sh <repo>`; build 1's suite still passes)
 
-- `fxface_test` (122202 checks): the matrix algebra; the centre eye; the substituted camera (orthonormal, the game's
+- `fxface_test` (128194 checks): the matrix algebra; the centre eye; the substituted camera (orthonormal, the game's
   handedness, level, at the head, looking at the part; the two fallbacks); **the game's axis convention against the camera
   matrix the owner's recording logged** (its position and forward as the same log line gives them, and `camera_for` at
   that place gives the game's own matrix back); the substitution for 3000 random parts, cameras and head positions all
@@ -7277,7 +7291,7 @@ Ours, not tested in play:
   origin stays within 6 degrees, the clip matrices give the same clip-space points, the six are restored bit for bit; the
   head's own direction does not matter; a stale fill matrix; a camera that carries a parent; everything the rule refuses
   changes nothing.
-- `glue2_test` (3831): build 2's glue of `ffxvr_native.cpp` verbatim against stand-ins, with a model of the game's
+- `glue2_test` (3832): build 2's glue of `ffxvr_native.cpp` verbatim against stand-ins, with a model of the game's
   setter, its three camera callers and managed's two detours: the rule's whole truth table (never another vote, never a
   show, the queue), the state's, the ring; the hide skipped only in a VR battle in first person or the diorama with the
   detour in; the actor untouched; the game's flag and its "show all" exactly the game's; a bound actor; a record without
@@ -7287,8 +7301,8 @@ Ours, not tested in play:
 - `check.py`: both ABI numbers and histories, build 2's exports defined / bound / unbound with one type each, the two
   settings in the defaults, the parser, the ini text, the menu and the docs, the addresses against the reference symbol
   map, the two detours' shapes (the game's function on every path, with the game's arguments), where they are installed
-  from, no write to the exe from managed, no bare `std::min` / `std::max` (672 scans in all). `mutants.py`: 357 mutants (build 1's 215 and 142 of build 2's rules, glue and managed
-  lines, the review round's among them), all caught.
+  from, no write to the exe from managed, no bare `std::min` / `std::max` (674 scans in all). `mutants.py`: 365 mutants (build 1's 215 and 150 of build 2's rules, glue and managed
+  lines, the two review rounds' among them), all caught.
 
 ### The review round (16 Nov 2026, before 69 was delivered)
 
@@ -7316,3 +7330,11 @@ Left, with the reason:
   the hitch is one frame at a battle's first frame. For the owner to decide once the detour has held in play.
 - **N6** (a run nested in a re-aimed run inherits the outer fill matrix): no known case; the `nested` counter in every
   end line says whether it ever happens, and a correct answer needs to know what such a host does with the view.
+
+**Round 2 of the review** (on the round above: 0 blockers, 1 should-fix, 2 notes). Fixed: **S-R2-1** (the counting detour
+on `MsCopyCameraMatrix` is inserted only with the box ticked AND the battle research log on, and counts only while the log
+is on; the end line tells "the battle research log was off" from "refused"; the ECX / EDX exposure is unconfirmed fact 16),
+**N-R2-1** (the substituted camera's distance is the part's depth in the game's view, the straight-line distance only as
+the fallback: section 2, "Distance"). **N-R2-2** (ABI 69 kept although two exports changed after the first 69): nothing
+to change; no build with the first 69 was ever made on the owner's PC (nothing of this branch has been compiled), so no
+stale `ffxvr_native.dll` with that number exists.

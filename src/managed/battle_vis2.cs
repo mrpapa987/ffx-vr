@@ -110,9 +110,11 @@ public sealed unsafe partial class FFXVRModule {
         if (state == 2 && _bch_hook == 0 && _native_ready) bch_install();   // 2 = native bvis::CHS_NOHOOK: wanted now, and the detour is not in
         bool fx = _fx_face_eyes && _btl_was && _xr_on && (_fp_mode == 1 || _fp_mode == 2);
         if (fx && _fxf_hook == 0 && _native_ready) fxf_install();
+        // review round 2 (S-R2-1): the counting detour only for a recording: the box ticked AND the battle research log on
+        if (fx && _diag_battle && _fxf_hook == 1 && _fxcc_hook == 0 && _native_ready) fxcc_install();
         System.Threading.Volatile.Write(ref _fxf_live, fx && _fxf_hook == 1 ? 1 : 0);
         for (int i = 0; i < 10; i++) st[i] = 0;
-        _fn_fxf_frame(fx ? 1 : 0, _fxf_hook | (_fxcc_hook == 1 ? 16 : 0), st, 10);
+        _fn_fxf_frame(fx ? 1 : 0, _fxf_hook | (_fxcc_hook == 1 ? 16 : _fxcc_hook > 1 ? 32 : 0), st, 10);
         for (int i = 0; i < 10; i++) _fxf_st[i] = st[i];
     }
 
@@ -209,11 +211,15 @@ public sealed unsafe partial class FFXVRModule {
         _fxf_status = ok ? I($"inserted at 0x{_a_fxf:X8} (pppRunPart 0x712250, its first bytes before the insertion: {first}; the insertion stops the game's threads for a moment: one hitch, once a session){(o == null ? "; its original resolves at its first call" : "")}")
                          : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x712250? core.log)") + ": the effects are drawn as the game builds them (its first bytes: " + first + ")";
         _logger.Info("fx face eyes: the pppRunPart detour: " + _fxf_status); d7_log("fx: the pppRunPart detour: " + _fxf_status);
-        if (ok) fxcc_install();
     }
-    /// Render thread, once, right after the pppRunPart detour went in (review S2): a counting detour on the game's
+    /// Render thread, once (from bv2_tick), the first frame the box is ticked in a VR battle with the pppRunPart detour in
+    /// AND the battle research log (diag_battle) on (review S2, and round 2's S-R2-1): a counting detour on the game's
     /// MsCopyCameraMatrix. It always runs the game's function and returns its result; a refusal only means the count is
     /// not available (the log says so). Fahrenheit and its bundled modules do not hook this function (alpha12's sources).
+    /// Why only with the research log on: the function is small and the main loop calls it every frame in every scene; a
+    /// caller inside the exe may rely on ECX / EDX surviving the call (the exe is built with whole-program optimisation;
+    /// ffx-rust's own hook keeps both for that reason), and a managed detour does not keep them. Not measured: so play
+    /// with the box ticked does not carry this detour, only a recording session does (it stays in until the game closes).
     private void fxcc_install() {
         if (_fxcc_hook != 0 || _fn_fxf_camcopy == null) return;
         _h_fxcc = h_fxf_cc;
@@ -240,7 +246,7 @@ public sealed unsafe partial class FFXVRModule {
     private uint h_fxf_cc(uint dst) {
         d_fxf_cc o = System.Threading.Volatile.Read(ref _o_fxcc) ?? d7_resolve_main(ref _o_fxcc, _a_fxcc, _h_fxcc!);
         uint r = o(dst);
-        if (System.Threading.Volatile.Read(ref _fxf_live) == 0) return r;
+        if (System.Threading.Volatile.Read(ref _fxf_live) == 0 || !_diag_battle) return r;
         try { var f = _fn_fxf_camcopy; if (f != null) f(); } catch { _fxf_faults++; }
         return r;
     }
@@ -266,7 +272,7 @@ public sealed unsafe partial class FFXVRModule {
     // -- F8 ------------------------------------------------------------------------------------------------------------------
 
     private const string k_bch_tip = "The game's battle camera hides a character for about a second during some actions (the one its camera would sit in or pass through: the target of Armor Break, the party member beside an attacker). In the headset your eyes are not that camera. Keep them shown: while a battle is drawn in VR in first person or the diorama (not on a screen in the headset), those hides are skipped; everything else the game hides (a spell's fade, a defeated enemy, party members off the field) stays the game's. Hide them: the game's own behaviour.";
-    private const string k_fxf_tip = "The game builds spell sprites (glows, sparks, beams) facing its own battle camera, which in the headset looks somewhere else, so they can look flat or squashed. On: in a battle drawn in VR in first person or the diorama they are built facing your head instead (level, the same for both eyes). Experimental: if an effect looks wrong or sits in the wrong place with it on, untick it and send ffxvr_diag.log.";
+    private const string k_fxf_tip = "The game builds spell sprites (glows, sparks, beams) facing its own battle camera, which in the headset looks somewhere else, so they can look flat or squashed. On: in a battle drawn in VR in first person or the diorama they are built facing your head instead (level, the same for both eyes). Experimental: if an effect looks wrong or sits in the wrong place with it on, untick it and send ffxvr_diag.log. With the battle research log (Developer > Inspect) also on, one more game hook counts how often an effect takes the game's camera by a route this box does not cover; without the log that hook is not installed.";
     /// F8 > Battle.
     private void bv2_ui() {
         ImGui.SeparatorText("Characters and effects");

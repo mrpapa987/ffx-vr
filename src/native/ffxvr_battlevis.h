@@ -731,6 +731,7 @@ struct FxFace {
     uint32_t runs = 0, applied = 0, no_pose = 0, copy_differs = 0, singular = 0, no_basis = 0, nested = 0;
     uint32_t cam_copies = 0;   // MsCopyCameraMatrix calls inside a re-aimed run (review S2: counted, not answered)
     bool cc_hook = false;      // managed's detour on MsCopyCameraMatrix is in (without it cam_copies says nothing)
+    bool cc_refused = false;   // ... it was tried and is not in (refused); else it was not wanted: the battle research log was off
     float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}, eye[3] = {};
     float off_deg = 0.f, dist = 0.f; int how = 0;
 };
@@ -830,7 +831,7 @@ struct Log {
         b.add(" | fx_face_eyes: %u part runs (pppRunPart) while it was loaded, %u re-aimed at the eyes, %u left as the game's (no head pose %u, the view's copy is not a copy of the view %u, a matrix did not invert %u, no level basis %u, nested in a re-aimed run %u)",
               runs, done, runs - done, ff.no_pose - ff_base.no_pose, ff.copy_differs - ff_base.copy_differs, ff.singular - ff_base.singular, ff.no_basis - ff_base.no_basis, ff.nested - ff_base.nested);
         // S2: "re-aimed" says the matrices were substituted, not that everything the part built followed them
-        if (!ff.cc_hook) b.add("; MsCopyCameraMatrix calls inside those runs: not counted (its detour is not in)");
+        if (!ff.cc_hook) b.add("; MsCopyCameraMatrix calls inside those runs: %s", ff.cc_refused ? "not counted: the counting detour was refused" : "not counted: the battle research log was off (the counting detour is inserted only with this box ticked and the battle research log on)");
         else if (ff.cam_copies == ff_base.cam_copies) b.add("; MsCopyCameraMatrix was not called inside those runs (no part took the game's camera by that route)");
         else b.add("; MsCopyCameraMatrix was called %u times INSIDE those runs: that code took the game's own camera, and what it built from it in view space is DISPLACED (only counted, not answered)", ff.cam_copies - ff_base.cam_copies);
     }
@@ -846,7 +847,7 @@ struct Log {
         Buf b(buf, static_cast<int>(sizeof(buf)));
         b.add("fx: battle %d frame %u | magic 0x%04X | fx_face_eyes: this effect's parts are being aimed at the eyes (game space; a re-aimed run of the last frame) | the part at (%.1f %.1f %.1f), the game's effect camera at (%.1f %.1f %.1f) looking (%.3f %.3f %.3f)",
               battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, f.part[0], f.part[1], f.part[2], f.cam_pos[0], f.cam_pos[1], f.cam_pos[2], f.cam_fwd[0], f.cam_fwd[1], f.cam_fwd[2]);
-        b.add(" | substituted for that run: a camera on the line from the head (the centre of the two eyes) (%.1f %.1f %.1f) to the part, at the game camera's own distance from the part (%.1f): at (%.1f %.1f %.1f) looking (%.3f %.3f %.3f): %s; it looks %.1f deg off the game's",
+        b.add(" | substituted for that run: a camera on the line from the head (the centre of the two eyes) (%.1f %.1f %.1f) to the part, as far from it as the part is deep in the game's own view (%.1f): at (%.1f %.1f %.1f) looking (%.3f %.3f %.3f): %s; it looks %.1f deg off the game's",
               f.head[0], f.head[1], f.head[2], f.dist, f.eye[0], f.eye[1], f.eye[2], f.look[0], f.look[1], f.look[2],
               f.how == 0 ? "at the part, level (no roll)" : f.how == 1 ? "along the head's own forward, level (the part is at the head)" : "at the part, from straight above or below (the head's own up for the roll)", f.off_deg);
         b.add(" | so far for this magic file: %u part runs, %u re-aimed", f.runs - ff_base.runs, f.applied - ff_base.applied);

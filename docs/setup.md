@@ -354,7 +354,9 @@ diorama they are built facing your head instead (the same for both eyes, level).
 box unticked and ticked. If an effect looks wrong or sits in the wrong place with it ticked, untick it and send
 `ffxvr_diag.log` (with the battle research log on it has an `fx:` line per effect saying how many of its parts were
 re-aimed, and whether the effect took the game's camera by a route the box does not cover: such an effect can sit in
-the wrong place). With the battle research log on, the first effect that has scene draws without an eye image (Holy) also writes
+the wrong place; that count needs one more hook, on the game's camera-copy function, which is installed only while both
+this box and the battle research log are on, and then stays until the game closes: normal play with the box ticked does
+not carry it). With the battle research log on, the first effect that has scene draws without an eye image (Holy) also writes
 one frame census to `ffxvr_frame_auto.log`.
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the

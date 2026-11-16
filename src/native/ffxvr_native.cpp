@@ -15320,7 +15320,7 @@ extern "C" __declspec(dllexport) void ffxvr_fxf_camcopy() {
 }
 /// fx_face_eyes, once a frame (render thread, from push_all before the battle research log's frame). on = the setting is on
 /// and this is a battle drawn in VR in first person or the diorama; hook = managed's detour state (1 inserted), + 16 when
-/// its counting detour on MsCopyCameraMatrix is in too. With on and
+/// its counting detour on MsCopyCameraMatrix is in too, + 32 when that one was tried and refused. With on and
 /// the headset showing the 3D view, the head's pose (the centre of the two eyes, from read-only uses of build_override_view,
 /// as the fx: sample's views) is published for the detour; otherwise no pose (the detour then changes nothing). The counters
 /// go to the battle research log, which may ask for a frame census here. out (may be null): [0] a pose is published, [1] part
@@ -15343,7 +15343,7 @@ extern "C" __declspec(dllexport) int ffxvr_fxf_frame(int on, int hook, int* out,
         g_fxf_pose = pose; g_fxf_pose_ok = ok;
         st = g_fxf_stats; last = g_fxf_last; ff.have_last = g_fxf_have_last;
     }
-    ff.on = on != 0; ff.hook = (hook & 15) == 1; ff.cc_hook = (hook & 16) != 0;
+    ff.on = on != 0; ff.hook = (hook & 15) == 1; ff.cc_hook = (hook & 16) != 0; ff.cc_refused = (hook & 32) != 0;
     ff.cam_copies = g_fxf_cam_copies.load(std::memory_order_relaxed);
     ff.runs = st.runs; ff.applied = st.applied; ff.no_pose = st.no_pose; ff.copy_differs = st.copy_differs; ff.singular = st.singular; ff.no_basis = st.no_basis; ff.nested = st.nested;
     for (int q = 0; q < 3; ++q) { ff.part[q] = last.part[q]; ff.cam_pos[q] = last.cam_pos[q]; ff.cam_fwd[q] = last.cam_fwd[q]; ff.head[q] = last.head[q]; ff.look[q] = last.look[q]; ff.eye[q] = last.eye[q]; }

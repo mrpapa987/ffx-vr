@@ -18,8 +18,8 @@
 //   space has +Y down too (the mod's render space is game space with x and y negated).
 //
 // The rule (substitute): around one pppRunPart call, with F = g_pppFillMatrix as it is at that moment and S = a level camera
-// on the line from the head (the centre of the two eyes) to the part, looking at the part from the game camera's own
-// distance:
+// on the line from the head (the centre of the two eyes) to the part, looking at the part from as far away as the part is
+// deep in the game's own view:
 //     G = F x S
 //     camera, view, view copy  ->  each x G        (what the programs read)
 //     fill                     ->  the inverse of S
@@ -34,8 +34,8 @@
 // inverse(S), and lands displaced. The glue counts those calls; they are not answered.
 // S looks from the head's side at the part (not along the head's own forward): the sprites then do not turn when the head
 // turns, only when it moves, and both eyes get the same quads. Its roll is removed (its Y axis is the world's down as far
-// as its forward allows): a vertical beam stays vertical when the head tilts. Its distance to the part is the game
-// camera's, not the head's (review S1): what a program derives from view depth (a sprite sized on the screen, a depth
+// as its forward allows): a vertical beam stays vertical when the head tilts. Its distance to the part is the part's
+// depth in the game's own view (the view's translation z, which is what the programs see), not the head's (review S1): what a program derives from view depth (a sprite sized on the screen, a depth
 // fade, a lens flare) then keeps the value the game computed; only the direction is the head's.
 #pragma once
 #include <cmath>
@@ -46,6 +46,7 @@ namespace fxf {
 
 constexpr int k_save = 6 * 16;      // floats: the six matrices as they were (camera, view, view copy, fill, fill2, fill3)
 constexpr float k_close = 2.f;      // game units: a part nearer the head than this has no direction to look along
+constexpr float k_depth = 0.01f;    // game units: a view depth of the part below this is not used as S's distance (the part is at or behind the camera's plane)
 constexpr float k_level = 0.1f;     // the sine of the smallest angle between the forward and the vertical that still gives a level basis
 
 /// out = a x b (row vectors: a point goes through a, then b). out may be a or b.
@@ -169,7 +170,7 @@ enum { R_OK = 1,
        R_NESTED = -4,     // inside a re-aimed run already (the outer run's matrices are in place)
        R_NULL = -5 };
 /// What one substitution did, for the log (game space).
-struct Last { float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}, eye[3] = {}; float off_deg = 0.f, dist = 0.f; int how = 0; };   // eye: where S sits; dist: its (and the game camera's) distance to the part
+struct Last { float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}, eye[3] = {}; float off_deg = 0.f, dist = 0.f; int how = 0; };   // eye: where S sits; dist: its distance to the part = the part's depth in the game's view
 
 /// Before one pppRunPart call (the game's thread): the six matrices in place (the game's own statics), as the rule above.
 /// save gets them as they were (k_save floats) when R_OK is returned; any other result changed nothing.
@@ -185,9 +186,13 @@ inline int substitute(float* cam, float* view, float* copy, float* fill, float* 
                          view[12] * fill[2] + view[13] * fill[6] + view[14] * fill[10] + fill[14] };
     float S[16], Sinv[16]; int how = 0;
     if (!camera_for(h, c, S, &how)) return R_BASIS;
-    // S1: the head's direction, the game camera's distance (the fill matrix's row 3 is the game camera's place)
+    // S1: the head's direction, the game's depth. S looks straight at the part, so the part's depth under S is S's distance
+    // to it: that distance is the part's depth in the game's own view (view[14]: what the programs see, also with a stale
+    // fill matrix or a parent folded into the camera), so every value derived from view depth stays the game's. A part at
+    // or behind the game camera's plane has no such depth: the straight-line distance to the game camera then (the fill
+    // matrix's row 3 is its place).
     const float gd[3] = { c[0] - fill[12], c[1] - fill[13], c[2] - fill[14] };
-    const float back = std::sqrt(dot3(gd, gd));
+    const float back = view[14] > k_depth ? view[14] : std::sqrt(dot3(gd, gd));
     if (!place_behind(S, c, back)) return R_BASIS;
     if (!inverse_affine(Sinv, S)) return R_BASIS;
     float G[16], Ginv[16];
