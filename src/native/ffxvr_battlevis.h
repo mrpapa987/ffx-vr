@@ -216,10 +216,12 @@ constexpr uint32_t k_vote_camera = 3;   // msSetChrVisibleReq's k of the camera'
 enum { CHS_GAME = 0,     // battle_cam_hide 1: the game's own behaviour
        CHS_ON,           // battle_cam_hide 0, a VR battle in first person or the diorama, the detour is in: hides are skipped
        CHS_NOHOOK,       // ... the same, but the detour is not in (not inserted yet, or refused): nothing is skipped
-       CHS_IDLE };       // battle_cam_hide 0, not in effect now (no battle, not in the headset, another view)
+       CHS_IDLE };       // battle_cam_hide 0, not in effect now (no battle, not in the headset, another view, or the headset shows the game's own camera on a screen)
 /// The views in which the mod replaces the game's camera for a battle: 1 first person, 2 the diorama.
 inline bool cam_hide_view(int view) { return view == 1 || view == 2; }
-/// setting = ini battle_cam_hide; hook = managed's detour state (1 = inserted).
+/// setting = ini battle_cam_hide; xr = the headset shows the mod's own camera this frame (the session is on and the frame is
+/// not going to a screen: review B1, on a screen the player looks through the game's camera, whose hides then matter);
+/// hook = managed's detour state (1 = inserted).
 inline int cam_hide_state(int setting, bool battle, bool xr, int view, int hook) {
     if (setting != 0) return CHS_GAME;
     if (!battle || !xr || !cam_hide_view(view)) return CHS_IDLE;
@@ -236,23 +238,24 @@ inline const char* cam_hide_text(int state) {
         case CHS_GAME:   return "1: the game's own behaviour (its battle camera hides characters)";
         case CHS_ON:     return "0: the mod skips the battle camera's hides while it draws this battle in VR (first person or the diorama); the detour on msSetChrVisibleReq is in";
         case CHS_NOHOOK: return "0, but the detour on msSetChrVisibleReq is NOT in (not inserted yet, or refused): the camera's hides happen as in the game";
-        case CHS_IDLE:   return "0, not in effect now (not a battle drawn in VR in first person or the diorama): the camera's hides happen as in the game";
+        case CHS_IDLE:   return "0, not in effect now (not a battle drawn in VR in first person or the diorama, or the headset shows the game's own camera on a screen): the camera's hides happen as in the game";
         default:         return "?";
     }
 }
 /// The skipped hides, from the detour (the game's thread, the one writer) to the log (the render thread, the one reader):
-/// the actor of each. Full: the event is counted as lost, the hide is skipped all the same.
+/// the actor of each in the low byte, the game's effect-camera mode byte at that moment in the high one (review S3).
+/// Full: the event is counted as lost, the hide is skipped all the same.
 struct SkipRing {
     static constexpr uint32_t k_cap = 64;   // a power of two (the counters wrap)
     std::atomic<uint32_t> w{ 0 }, r{ 0 }, lost{ 0 };
-    uint8_t e[k_cap] = {};
-    void push(uint8_t actor) {
+    uint16_t e[k_cap] = {};
+    void push(uint16_t actor) {
         const uint32_t ww = w.load(std::memory_order_relaxed);
         if (ww - r.load(std::memory_order_acquire) >= k_cap) { lost.fetch_add(1u, std::memory_order_relaxed); return; }
         e[ww % k_cap] = actor;
         w.store(ww + 1u, std::memory_order_release);
     }
-    bool pop(uint8_t* actor) {
+    bool pop(uint16_t* actor) {
         const uint32_t rr = r.load(std::memory_order_relaxed);
         if (rr == w.load(std::memory_order_acquire)) return false;
         if (actor != nullptr) *actor = e[rr % k_cap];
@@ -726,8 +729,10 @@ struct Attrib { bool has[k_owners] = {}; uint32_t draws[k_owners] = {}; };
 struct FxFace {
     bool on = false, hook = false, have_last = false;
     uint32_t runs = 0, applied = 0, no_pose = 0, copy_differs = 0, singular = 0, no_basis = 0, nested = 0;
-    float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {};
-    float off_deg = 0.f; int how = 0;
+    uint32_t cam_copies = 0;   // MsCopyCameraMatrix calls inside a re-aimed run (review S2: counted, not answered)
+    bool cc_hook = false;      // managed's detour on MsCopyCameraMatrix is in (without it cam_copies says nothing)
+    float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}, eye[3] = {};
+    float off_deg = 0.f, dist = 0.f; int how = 0;
 };
 // Build 2: Holy is the one effect with scene draws that have no eye image (up to 202 a frame in the owner's recording, 0 in
 // the others). What they are cannot be told from the counts: the first frame a magic file's no-eye-image scene draws are
@@ -824,6 +829,10 @@ struct Log {
         if (runs == 0) { b.add(" | fx_face_eyes: %s", !ff.on ? "off, or not a battle drawn in VR in first person or the diorama (no part run was looked at)" : !ff.hook ? "on, but the detour on pppRunPart is NOT in: nothing was re-aimed" : "on, but the effect code ran no part through pppRunPart while it was loaded: nothing was re-aimed"); return; }
         b.add(" | fx_face_eyes: %u part runs (pppRunPart) while it was loaded, %u re-aimed at the eyes, %u left as the game's (no head pose %u, the view's copy is not a copy of the view %u, a matrix did not invert %u, no level basis %u, nested in a re-aimed run %u)",
               runs, done, runs - done, ff.no_pose - ff_base.no_pose, ff.copy_differs - ff_base.copy_differs, ff.singular - ff_base.singular, ff.no_basis - ff_base.no_basis, ff.nested - ff_base.nested);
+        // S2: "re-aimed" says the matrices were substituted, not that everything the part built followed them
+        if (!ff.cc_hook) b.add("; MsCopyCameraMatrix calls inside those runs: not counted (its detour is not in)");
+        else if (ff.cam_copies == ff_base.cam_copies) b.add("; MsCopyCameraMatrix was not called inside those runs (no part took the game's camera by that route)");
+        else b.add("; MsCopyCameraMatrix was called %u times INSIDE those runs: that code took the game's own camera, and what it built from it in view space is DISPLACED (only counted, not answered)", ff.cam_copies - ff_base.cam_copies);
     }
     /// Build 2, once a frame before frame() (the render thread): the session's fx_face_eyes counters. A magic file's first
     /// re-aimed part run gets one fx: line (what was substituted).
@@ -837,8 +846,8 @@ struct Log {
         Buf b(buf, static_cast<int>(sizeof(buf)));
         b.add("fx: battle %d frame %u | magic 0x%04X | fx_face_eyes: this effect's parts are being aimed at the eyes (game space; a re-aimed run of the last frame) | the part at (%.1f %.1f %.1f), the game's effect camera at (%.1f %.1f %.1f) looking (%.3f %.3f %.3f)",
               battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, f.part[0], f.part[1], f.part[2], f.cam_pos[0], f.cam_pos[1], f.cam_pos[2], f.cam_fwd[0], f.cam_fwd[1], f.cam_fwd[2]);
-        b.add(" | substituted for that run: a camera at the head (the centre of the two eyes) (%.1f %.1f %.1f) looking (%.3f %.3f %.3f): %s; it looks %.1f deg off the game's",
-              f.head[0], f.head[1], f.head[2], f.look[0], f.look[1], f.look[2],
+        b.add(" | substituted for that run: a camera on the line from the head (the centre of the two eyes) (%.1f %.1f %.1f) to the part, at the game camera's own distance from the part (%.1f): at (%.1f %.1f %.1f) looking (%.3f %.3f %.3f): %s; it looks %.1f deg off the game's",
+              f.head[0], f.head[1], f.head[2], f.dist, f.eye[0], f.eye[1], f.eye[2], f.look[0], f.look[1], f.look[2],
               f.how == 0 ? "at the part, level (no roll)" : f.how == 1 ? "along the head's own forward, level (the part is at the head)" : "at the part, from straight above or below (the head's own up for the roll)", f.off_deg);
         b.add(" | so far for this magic file: %u part runs, %u re-aimed", f.runs - ff_base.runs, f.applied - ff_base.applied);
         acting_text(b);
@@ -856,8 +865,11 @@ struct Log {
         b.add("vis: battle %d frame %u | battle_cam_hide %s", battle, frame_now, cam_hide_text(state));
         emit(fn, ctx, b, tk); lines_vis++;
     }
-    /// Build 2: the detour skipped one camera hide of this actor (drained from the ring, before frame()).
-    void cam_skip(int actor, LineFn fn, void* ctx) {
+    /// Build 2: the detour skipped one camera hide of this actor (drained from the ring, before frame()). fx_cam = the
+    /// game's effect-camera mode byte (0x112C9D7) when the hide was asked; n_frame = how many hides were skipped since the
+    /// last frame (review S3: several at once, or an effect camera running, is a staged shot rather than one character in
+    /// the camera's way).
+    void cam_skip(int actor, int fx_cam, int n_frame, LineFn fn, void* ctx) {
         if (!active) return;
         cam_skips_flag++; cam_skips_battle++;
         const int tk = b_vis.take(actor >= 0 && actor < k_actors ? actor : k_src_cam_hides);
@@ -865,6 +877,7 @@ struct Log {
         Buf b(buf, static_cast<int>(sizeof(buf)));
         b.add("vis: battle %d frame %u | ", battle, frame_now); actor_text(b, actor, names);
         b.add(" | camera hide SKIPPED by the mod (battle_cam_hide 0): the game's battle camera asked to hide it (msSetChrVisibleReq(%d, 3 = camera, 0)); the call was not passed on: no vote changed, it stays drawn", actor);
+        b.add(" | %d hide(s) skipped since the last frame%s, effect-camera mode 0x%02X%s", n_frame, n_frame > 1 ? " (several at once: a staged shot?)" : "", static_cast<unsigned>(fx_cam) & 0xFFu, (fx_cam & 0xFF) != 0 ? " (an effect camera is running)" : "");
         acting_text(b);
         if (g_have) b.add(" | command actor now %d", g_prev[G_CMD_ACTOR]);
         emit(fn, ctx, b, tk); lines_vis++; act_vis++;
@@ -1057,7 +1070,7 @@ struct Log {
             const int32_t who = now != -1 ? now : was;
             if (who >= 0 && who < k_actors) { b.add(" ("); actor_text(b, who, names); b.add(now != -1 ? ": hidden by the magic's effect script without a vote of its own" : ": shown again by MagicFile_Update"); b.add("; unconfirmed)"); }
         }
-        else if (now != 0 && cam_state_now == CHS_ON) b.add(" (a battle camera asked to hide characters: MsSetChrVisibleCamera; battle_cam_hide 0: the mod skipped %u hide(s) since this flag was last 0, so no actor's camera vote changes)", cam_skips_flag);
+        else if (now != 0 && cam_state_now == CHS_ON) b.add(" (a battle camera asked to hide characters: MsSetChrVisibleCamera; battle_cam_hide 0: the mod skipped %u hide(s) so far this battle, so no actor's camera vote changes; the flag stays 1 from here on, as in the game)", cam_skips_battle);
         else b.add(now != 0 ? " (a battle camera hid characters: MsSetChrVisibleCamera; unconfirmed)" : " (the camera's hides were taken back)");
         if (src == k_src_cam_hides && now == 0 && cam_skips_flag > 0) b.add(" (the mod had skipped %u hide(s) meanwhile: the camera hid nothing)", cam_skips_flag);   // build 2
         b.add(" | magic 0x%04X", static_cast<unsigned>(g[G_MAGIC]) & 0xFFFFu);

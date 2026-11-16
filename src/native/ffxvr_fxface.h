@@ -17,8 +17,9 @@
 //   Matrices are 4 x 4 floats, row vectors: a point p goes to p x M. View space: +Z forward, +Y down, X = Y cross Z. Game
 //   space has +Y down too (the mod's render space is game space with x and y negated).
 //
-// The rule (substitute): around one pppRunPart call, with F = g_pppFillMatrix as it is at that moment and S = a camera at
-// the head (the centre of the two eyes) looking at the part, level:
+// The rule (substitute): around one pppRunPart call, with F = g_pppFillMatrix as it is at that moment and S = a level camera
+// on the line from the head (the centre of the two eyes) to the part, looking at the part from the game camera's own
+// distance:
 //     G = F x S
 //     camera, view, view copy  ->  each x G        (what the programs read)
 //     fill                     ->  the inverse of S
@@ -26,11 +27,16 @@
 // and all six are put back after the call. Everything the programs compute linearly through the view comes out where the game
 // puts it (view x G x inverse(S) = view x F, whatever F is: no assumption that F is exactly the inverse of the camera in
 // use), so nothing moves; only what is built in view space (a sprite's corners, a ribbon's width) is now built in the
-// head's view space, and so faces the head. Nothing outside the call sees a substituted matrix: the game's other effect
-// systems, which share g_pppFillMatrix but keep their own copies of the camera, are not touched.
-// S looks from the head at the part (not along the head's own forward): the sprites then do not turn when the head turns,
-// only when it moves, and both eyes get the same quads. Its roll is removed (its Y axis is the world's down as far as its
-// forward allows): a vertical beam stays vertical when the head tilts.
+// substituted view space, and so faces the head. Nothing outside the call sees a substituted matrix: the game's other
+// effect systems, which share g_pppFillMatrix but keep their own copies of the camera, are not touched. Inside the call
+// one thing is not covered (review S2): code of the part that takes the game's camera by another route (MsCopyCameraMatrix,
+// which the magic files import) and builds a view-space position from it hands that to a fill request that now carries
+// inverse(S), and lands displaced. The glue counts those calls; they are not answered.
+// S looks from the head's side at the part (not along the head's own forward): the sprites then do not turn when the head
+// turns, only when it moves, and both eyes get the same quads. Its roll is removed (its Y axis is the world's down as far
+// as its forward allows): a vertical beam stays vertical when the head tilts. Its distance to the part is the game
+// camera's, not the head's (review S1): what a program derives from view depth (a sprite sized on the screen, a depth
+// fade, a lens flare) then keeps the value the game computed; only the direction is the head's.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -118,8 +124,9 @@ inline bool centre_eye(const float* e1, const float* e2, Pose* o) {
     return true;
 }
 
-/// The substituted camera S (the game's form: row vectors, columns X, Y = down, Z = forward; a point p is p x S in view
-/// space) at the head, looking at c (game space), level. *how: 0 at the part, level; 1 the part is at the head (within
+/// The substituted camera's axes and a first place: S (the game's form: row vectors, columns X, Y = down, Z = forward; a
+/// point p is p x S in view space) at the head, looking at c (game space), level. substitute() then moves it along its
+/// forward to the game camera's distance (place_behind). *how: 0 at the part, level; 1 the part is at the head (within
 /// k_close): the head's own forward, level; 2 the forward is within about 6 degrees of the vertical: the head's own up
 /// decides the roll. false: no basis (the forward and the head's up are parallel, or a value is not finite).
 inline bool camera_for(const Pose& h, const float* c, float* S, int* how) {
@@ -144,6 +151,16 @@ inline bool camera_for(const Pose& h, const float* c, float* S, int* how) {
     return finite16(S);
 }
 
+/// S moved along its own forward so that c (game space) is straight ahead of it, `back` units away; its axes stay.
+/// false: back is negative or not finite.
+inline bool place_behind(float* S, const float* c, float back) {
+    if (!std::isfinite(back) || !(back >= 0.f)) return false;
+    const float x[3] = { S[0], S[4], S[8] }, y[3] = { S[1], S[5], S[9] }, f[3] = { S[2], S[6], S[10] };
+    const float p[3] = { c[0] - f[0] * back, c[1] - f[1] * back, c[2] - f[2] * back };
+    S[12] = -dot3(p, x); S[13] = -dot3(p, y); S[14] = -dot3(p, f);
+    return finite16(S);
+}
+
 enum { R_OK = 1,
        R_NOPOSE = 0,      // no head pose is published (not a battle drawn in VR, the setting is off)
        R_COPY = -1,       // the view's copy is not a copy of the view: this host uses it for something else, left alone
@@ -152,7 +169,7 @@ enum { R_OK = 1,
        R_NESTED = -4,     // inside a re-aimed run already (the outer run's matrices are in place)
        R_NULL = -5 };
 /// What one substitution did, for the log (game space).
-struct Last { float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}; float off_deg = 0.f; int how = 0; };
+struct Last { float part[3] = {}, cam_pos[3] = {}, cam_fwd[3] = {}, head[3] = {}, look[3] = {}, eye[3] = {}; float off_deg = 0.f, dist = 0.f; int how = 0; };   // eye: where S sits; dist: its (and the game camera's) distance to the part
 
 /// Before one pppRunPart call (the game's thread): the six matrices in place (the game's own statics), as the rule above.
 /// save gets them as they were (k_save floats) when R_OK is returned; any other result changed nothing.
@@ -168,6 +185,10 @@ inline int substitute(float* cam, float* view, float* copy, float* fill, float* 
                          view[12] * fill[2] + view[13] * fill[6] + view[14] * fill[10] + fill[14] };
     float S[16], Sinv[16]; int how = 0;
     if (!camera_for(h, c, S, &how)) return R_BASIS;
+    // S1: the head's direction, the game camera's distance (the fill matrix's row 3 is the game camera's place)
+    const float gd[3] = { c[0] - fill[12], c[1] - fill[13], c[2] - fill[14] };
+    const float back = std::sqrt(dot3(gd, gd));
+    if (!place_behind(S, c, back)) return R_BASIS;
     if (!inverse_affine(Sinv, S)) return R_BASIS;
     float G[16], Ginv[16];
     mul(G, fill, S); mul(Ginv, Sinv, Finv);
@@ -177,7 +198,8 @@ inline int substitute(float* cam, float* view, float* copy, float* fill, float* 
     if (last != nullptr) {
         for (int i = 0; i < 3; ++i) { last->part[i] = c[i]; last->cam_pos[i] = fill[12 + i]; last->cam_fwd[i] = fill[8 + i]; last->head[i] = h.pos[i]; last->look[i] = S[i * 4 + 2]; }
         norm3(last->cam_fwd);
-        last->off_deg = angle_deg3(last->cam_fwd, last->look); last->how = how;
+        for (int i = 0; i < 3; ++i) last->eye[i] = Sinv[12 + i];
+        last->off_deg = angle_deg3(last->cam_fwd, last->look); last->how = how; last->dist = back;
     }
     mul(cam, cam, G);
     mul(view, view, G);

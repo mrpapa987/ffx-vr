@@ -32,7 +32,10 @@ namespace FFXVR;
 //     0xD8), MsSetChrVisibleCameraAll (0x7967C0), MsReturnCameraVisible (0x795C70: clears the flag and shows all 31 again).
 //   0x11363B8 / 0x1136B58 g_ActorPropertyLatch / g_BtlHideMask: while they share a bit the game queues a hide instead of
 //     hiding (one battle scene's fix); such a call is passed on.
+//   0x112C9D7 g_BtlEffectCameraMode (u8; not 0 while an effect camera runs): read for the skip line only.
 //   0x712250 pppRunPart(part, flags): cdecl, two arguments, returns a count (Fahrenheit's own call table: _pppRunPart).
+//   0x7C0070 MsCopyCameraMatrix(out): cdecl, one argument (ffx-rust's hook table, run in the game through that hook). The
+//     magic files import it; a call inside a re-aimed part run is counted (review S2), nothing is answered or changed.
 //   The effect code's matrices (4 x 4 floats): 0x230FF60 g_pppCameraMatrix, 0x230FF20 g_pppViewMatrix, 0x230FE20
 //     g_pppViewMatrixCopy, 0x230FCA0 g_pppFillMatrix, 0x230FC20 g_pppFillMatrix2, 0x230FBE0 g_pppFillMatrix3.
 public sealed unsafe partial class FFXVRModule {
@@ -40,13 +43,16 @@ public sealed unsafe partial class FFXVRModule {
     private int  _battle_cam_hide;        // ini battle_cam_hide: 0 (default) the battle camera's hides are skipped in VR battles, 1 the game's behaviour
     private bool _fx_face_eyes;           // ini fx_face_eyes (default 0): effect sprites aimed at the eyes
     private delegate* unmanaged[Cdecl]<int, int, int, int, int, int*, int, int> _fn_bch_frame;                       // ABI 69
-    private delegate* unmanaged[Cdecl]<uint, uint, uint, uint, int> _fn_bch_decide;                                  // ABI 69
+    private delegate* unmanaged[Cdecl]<uint, uint, uint, uint, uint, int> _fn_bch_decide;                            // ABI 69
+    private delegate* unmanaged[Cdecl]<void> _fn_fxf_camcopy;                                                        // ABI 69
     private delegate* unmanaged[Cdecl]<int, int, int*, int, int> _fn_fxf_frame;                                      // ABI 69
     private delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, int> _fn_fxf_begin;   // ABI 69
     private delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, void> _fn_fxf_end;    // ABI 69
 
     private const int k_bch_req = 0x397080;                            // VA 0x797080 msSetChrVisibleReq
     private const int k_bch_latch = 0xD363B8, k_bch_mask = 0xD36B58;   // VA 0x11363B8, 0x1136B58
+    private const int k_bch_fxcam = 0xD2C9D7;                          // VA 0x112C9D7 g_BtlEffectCameraMode (u8)
+    private const int k_fxf_camcopy = 0x3C0070;                        // VA 0x7C0070 MsCopyCameraMatrix
     private const int k_fxf_run = 0x312250;                            // VA 0x712250 pppRunPart
     private const int k_fxf_cam = 0x1F0FF60, k_fxf_view = 0x1F0FF20, k_fxf_copy = 0x1F0FE20;     // VA 0x230FF60, 0x230FF20, 0x230FE20
     private const int k_fxf_fill = 0x1F0FCA0, k_fxf_fill2 = 0x1F0FC20, k_fxf_fill3 = 0x1F0FBE0;  // VA 0x230FCA0, 0x230FC20, 0x230FBE0
@@ -67,7 +73,12 @@ public sealed unsafe partial class FFXVRModule {
     private string _fxf_status = "not inserted (it is inserted the first frame fx_face_eyes is on in a battle drawn in VR in first person or the diorama)";
     private int _fxf_live, _fxf_faults, _fxf_calls;    // _fxf_live: 1 while the render thread wants part runs re-aimed (read on the game's thread)
     private float* _fxf_cam, _fxf_view, _fxf_copy, _fxf_fill, _fxf_fill2, _fxf_fill3;   // the game's statics, set once before the insertion
-    private readonly int[] _fxf_st = new int[9];
+    private readonly int[] _fxf_st = new int[10];
+    // fx_face_eyes: the counting detour on MsCopyCameraMatrix (review S2), inserted with the one above
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate uint d_fxf_cc(uint dst);
+    private d_fxf_cc? _h_fxcc, _o_fxcc; private nint _a_fxcc;
+    private int _fxcc_hook;   // 0 not tried, 1 inserted, 3 refused / failed, 4 FFX.exe not found
+    private string _fxcc_status = "not inserted";
 
     private bool bv2_parse(string k, string v) {
         switch (k) {
@@ -79,29 +90,30 @@ public sealed unsafe partial class FFXVRModule {
     private string bv2_ini_text() => $"battle_cam_hide={_battle_cam_hide.ToString(CI)}\nfx_face_eyes={(_fx_face_eyes ? 1 : 0)}\n";
     private void bv2_bind(Func<string, nint> req) {
         _fn_bch_frame = (delegate* unmanaged[Cdecl]<int, int, int, int, int, int*, int, int>)req("ffxvr_bch_frame");
-        _fn_bch_decide = (delegate* unmanaged[Cdecl]<uint, uint, uint, uint, int>)req("ffxvr_bch_decide");
+        _fn_bch_decide = (delegate* unmanaged[Cdecl]<uint, uint, uint, uint, uint, int>)req("ffxvr_bch_decide");
+        _fn_fxf_camcopy = (delegate* unmanaged[Cdecl]<void>)req("ffxvr_fxf_camcopy");
         _fn_fxf_frame = (delegate* unmanaged[Cdecl]<int, int, int*, int, int>)req("ffxvr_fxf_frame");
         _fn_fxf_begin = (delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, int>)req("ffxvr_fxf_begin");
         _fn_fxf_end = (delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, void>)req("ffxvr_fxf_end");
     }
-    private void bv2_unbind() { _fn_bch_frame = null; _fn_bch_decide = null; _fn_fxf_frame = null; _fn_fxf_begin = null; _fn_fxf_end = null; }
+    private void bv2_unbind() { _fn_bch_frame = null; _fn_bch_decide = null; _fn_fxf_frame = null; _fn_fxf_begin = null; _fn_fxf_end = null; _fn_fxf_camcopy = null; }
 
     /// From push_all, every frame, before bv_tick (render thread; after push_player: the battle state and the view are this
     /// frame's). The battle camera hide's state to native (which hands the skipped hides to the battle research log), its
     /// detour the first frame it is needed; fx_face_eyes' head pose to native, its detour the first frame it is needed.
     private void bv2_tick() {
         if (_fn_bch_frame == null || _fn_fxf_frame == null) return;
-        int* st = stackalloc int[9];
-        for (int i = 0; i < 9; i++) st[i] = 0;
+        int* st = stackalloc int[10];
+        for (int i = 0; i < 10; i++) st[i] = 0;
         int state = _fn_bch_frame(_battle_cam_hide, _btl_was ? 1 : 0, _xr_on ? 1 : 0, _fp_mode, _bch_hook, st, 4);
         for (int i = 0; i < 4; i++) _bch_st[i] = st[i];
         if (state == 2 && _bch_hook == 0 && _native_ready) bch_install();   // 2 = native bvis::CHS_NOHOOK: wanted now, and the detour is not in
         bool fx = _fx_face_eyes && _btl_was && _xr_on && (_fp_mode == 1 || _fp_mode == 2);
         if (fx && _fxf_hook == 0 && _native_ready) fxf_install();
         System.Threading.Volatile.Write(ref _fxf_live, fx && _fxf_hook == 1 ? 1 : 0);
-        for (int i = 0; i < 9; i++) st[i] = 0;
-        _fn_fxf_frame(fx ? 1 : 0, _fxf_hook, st, 9);
-        for (int i = 0; i < 9; i++) _fxf_st[i] = st[i];
+        for (int i = 0; i < 10; i++) st[i] = 0;
+        _fn_fxf_frame(fx ? 1 : 0, _fxf_hook | (_fxcc_hook == 1 ? 16 : 0), st, 10);
+        for (int i = 0; i < 10; i++) _fxf_st[i] = st[i];
     }
 
     // -- the battle camera's hide --------------------------------------------------------------------------------------------
@@ -142,30 +154,32 @@ public sealed unsafe partial class FFXVRModule {
     private uint h_bch_req(uint i, uint k, uint v) {
         d_bch_req o = System.Threading.Volatile.Read(ref _o_bch) ?? d7_resolve_main(ref _o_bch, _a_bch, _h_bch!);
         if (k != 3 || (v & 0xFF) != 0) return o(i, k, v);
-        int skip = 0; uint has = 0;
+        int skip = 0;
         try {
             var f = _fn_bch_decide;
             if (f != null) {
-                has = bch_has_chr(i);
                 uint queue = FhUtil.get_at<uint>(k_bch_latch) & FhUtil.get_at<uint>(k_bch_mask);
-                skip = f(i, k, v, queue);
+                skip = f(i, k, v, queue, FhUtil.get_at<byte>(k_bch_fxcam));
             }
         }
         catch { _bch_faults++; skip = 0; }
-        if (skip != 0) return has;
+        if (skip != 0) return bch_has_chr(i);
         return o(i, k, v);
     }
     /// What the game's function returns: 1 when battle actor i & 0xFF has a character (its record's first word), else 0
-    /// (one guarded read; the records 0..0x1E are one array, as build 1's log found).
+    /// (one guarded read; the records 0..0x1E are one array, as build 1's log found). Only for a skipped call. Never throws.
     private uint bch_has_chr(uint i) {
-        var rd = _fn_safe_read;
-        int idx = (int)(i & 0xFF);
-        if (rd == null || idx >= k_bv_actors) return 0;
-        nint chrs = FhUtil.get_at<nint>(k_bv_chrs);
-        if (chrs == 0) return 0;
-        uint chr = 0;
-        if (rd((byte*)chrs + idx * k_bv_chr_size, &chr, 4) == 0) return 0;
-        return chr != 0 ? 1u : 0u;
+        try {
+            var rd = _fn_safe_read;
+            int idx = (int)(i & 0xFF);
+            if (rd == null || idx >= k_bv_actors) return 0;
+            nint chrs = FhUtil.get_at<nint>(k_bv_chrs);
+            if (chrs == 0) return 0;
+            uint chr = 0;
+            if (rd((byte*)chrs + idx * k_bv_chr_size, &chr, 4) == 0) return 0;
+            return chr != 0 ? 1u : 0u;
+        }
+        catch { _bch_faults++; return 0; }
     }
 
     // -- fx_face_eyes --------------------------------------------------------------------------------------------------------
@@ -195,6 +209,40 @@ public sealed unsafe partial class FFXVRModule {
         _fxf_status = ok ? I($"inserted at 0x{_a_fxf:X8} (pppRunPart 0x712250, its first bytes before the insertion: {first}; the insertion stops the game's threads for a moment: one hitch, once a session){(o == null ? "; its original resolves at its first call" : "")}")
                          : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x712250? core.log)") + ": the effects are drawn as the game builds them (its first bytes: " + first + ")";
         _logger.Info("fx face eyes: the pppRunPart detour: " + _fxf_status); d7_log("fx: the pppRunPart detour: " + _fxf_status);
+        if (ok) fxcc_install();
+    }
+    /// Render thread, once, right after the pppRunPart detour went in (review S2): a counting detour on the game's
+    /// MsCopyCameraMatrix. It always runs the game's function and returns its result; a refusal only means the count is
+    /// not available (the log says so). Fahrenheit and its bundled modules do not hook this function (alpha12's sources).
+    private void fxcc_install() {
+        if (_fxcc_hook != 0 || _fn_fxf_camcopy == null) return;
+        _h_fxcc = h_fxf_cc;
+        new FhCallLocation("FFX.exe", k_fxf_camcopy).try_resolve(out _a_fxcc);
+        if (_a_fxcc == 0) { _fxcc_hook = 4; _fxcc_status = "not inserted: FFX.exe not found"; return; }
+        string first = "";
+        try { for (int i = 0; i < 8; i++) first += FhUtil.get_at<byte>(k_fxf_camcopy + i).ToString("X2", CI) + (i < 7 ? " " : ""); } catch { first = "not read"; }
+        bool ok = false; string why = "";
+        diag7_insert_begin();   // no main-thread detour resolves its original while this writes Fahrenheit's table (B7-1)
+        try { ok = new FhCallHandle<d_fxf_cc>(new FhCallLocation((void*)_a_fxcc)).hook(this, _h_fxcc!); }
+        catch (Exception e) { why = e.GetType().Name; _logger.Error($"fx face eyes: the counting detour: {e}"); }
+        finally { diag7_insert_end(); }
+        d_fxf_cc? o = null;
+        if (ok) { try { o = d7_chain(_a_fxcc, _h_fxcc!); } catch { } }
+        if (o != null) System.Threading.Volatile.Write(ref _o_fxcc, o);
+        _fxcc_hook = ok ? 1 : 3;
+        _fxcc_status = ok ? I($"inserted at 0x{_a_fxcc:X8} (MsCopyCameraMatrix 0x7C0070, its first bytes before the insertion: {first}){(o == null ? "; its original resolves at its first call" : "")}")
+                          : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x7C0070? core.log)") + ": the calls inside re-aimed runs are not counted (its first bytes: " + first + ")";
+        _logger.Info("fx face eyes: the MsCopyCameraMatrix counting detour: " + _fxcc_status); d7_log("fx: the MsCopyCameraMatrix counting detour: " + _fxcc_status);
+    }
+    /// The game's MsCopyCameraMatrix (0x7C0070; the game's main thread, a few times a frame and from the magic files). The
+    /// game's own function always runs first, with the game's own argument, and its result is returned unchanged; while
+    /// part runs are being re-aimed native is told of the call (it counts the ones inside a run). Never throws into the caller.
+    private uint h_fxf_cc(uint dst) {
+        d_fxf_cc o = System.Threading.Volatile.Read(ref _o_fxcc) ?? d7_resolve_main(ref _o_fxcc, _a_fxcc, _h_fxcc!);
+        uint r = o(dst);
+        if (System.Threading.Volatile.Read(ref _fxf_live) == 0) return r;
+        try { var f = _fn_fxf_camcopy; if (f != null) f(); } catch { _fxf_faults++; }
+        return r;
     }
 
     /// The game's pppRunPart (0x712250; the game's main thread, once per effect part per frame). The game's own function
@@ -217,7 +265,7 @@ public sealed unsafe partial class FFXVRModule {
 
     // -- F8 ------------------------------------------------------------------------------------------------------------------
 
-    private const string k_bch_tip = "The game's battle camera hides a character for about a second during some actions (the one its camera would sit in or pass through: the target of Armor Break, the party member beside an attacker). In the headset your eyes are not that camera. Keep them shown: while a battle is drawn in VR in first person or the diorama, those hides are skipped; everything else the game hides (a spell's fade, a defeated enemy, party members off the field) stays the game's. Hide them: the game's own behaviour.";
+    private const string k_bch_tip = "The game's battle camera hides a character for about a second during some actions (the one its camera would sit in or pass through: the target of Armor Break, the party member beside an attacker). In the headset your eyes are not that camera. Keep them shown: while a battle is drawn in VR in first person or the diorama (not on a screen in the headset), those hides are skipped; everything else the game hides (a spell's fade, a defeated enemy, party members off the field) stays the game's. Hide them: the game's own behaviour.";
     private const string k_fxf_tip = "The game builds spell sprites (glows, sparks, beams) facing its own battle camera, which in the headset looks somewhere else, so they can look flat or squashed. On: in a battle drawn in VR in first person or the diorama they are built facing your head instead (level, the same for both eyes). Experimental: if an effect looks wrong or sits in the wrong place with it on, untick it and send ffxvr_diag.log.";
     /// F8 > Battle.
     private void bv2_ui() {
@@ -229,11 +277,11 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("fx_face_eyes", "Aim spell effects at your eyes##fxf", ref _fx_face_eyes, UiTag.Experimental, k_fxf_tip);
         if (_fx_face_eyes && _fxf_hook > 1) { ImGui.SameLine(); ImGui.TextDisabled("(no effect: see Developer > Inspect)"); }
     }
-    private static readonly string[] k_bch_state = { "the game's behaviour (battle_cam_hide 1)", "skipping the camera's hides", "wanted, the detour is not in", "not in effect now (not a VR battle in first person or the diorama)" };   // = native bvis::CHS_*
+    private static readonly string[] k_bch_state = { "the game's behaviour (battle_cam_hide 1)", "skipping the camera's hides", "wanted, the detour is not in", "not in effect now (not a VR battle in first person or the diorama, or the headset shows a screen)" };   // = native bvis::CHS_*
     /// F8 > Developer > Inspect.
     private void bv2_dev_ui() {
         int s = _bch_st[0];
         ImGui.TextDisabled(esc(I($"battle camera hide: {(s >= 0 && s < k_bch_state.Length ? k_bch_state[s] : "?")} | hides skipped this session {_bch_st[1]}, camera hides asked {_bch_st[2]}, events lost {_bch_st[3]}, faults {_bch_faults} | msSetChrVisibleReq detour: {_bch_status}")));
-        ImGui.TextDisabled(esc(I($"fx face eyes: {(_fx_face_eyes ? (_fxf_st[0] != 0 ? "on, a head pose is published" : "on, no head pose now (not a VR battle in first person or the diorama, or the headset shows a screen)") : "off")} | part runs seen {_fxf_st[1]}, re-aimed {_fxf_st[2]}, not: no pose {_fxf_st[3]}, the view's copy differs {_fxf_st[4]}, a matrix did not invert {_fxf_st[5]}, no basis {_fxf_st[6]}, nested {_fxf_st[7]} | frame censuses asked {_fxf_st[8]} | detour calls {_fxf_calls}, faults {_fxf_faults} | pppRunPart detour: {_fxf_status}")));
+        ImGui.TextDisabled(esc(I($"fx face eyes: {(_fx_face_eyes ? (_fxf_st[0] != 0 ? "on, a head pose is published" : "on, no head pose now (not a VR battle in first person or the diorama, or the headset shows a screen)") : "off")} | part runs seen {_fxf_st[1]}, re-aimed {_fxf_st[2]}, not: no pose {_fxf_st[3]}, the view's copy differs {_fxf_st[4]}, a matrix did not invert {_fxf_st[5]}, no basis {_fxf_st[6]}, nested {_fxf_st[7]} | MsCopyCameraMatrix calls inside re-aimed runs {_fxf_st[9]} | frame censuses asked {_fxf_st[8]} | detour calls {_fxf_calls}, faults {_fxf_faults} | pppRunPart detour: {_fxf_status} | MsCopyCameraMatrix counting detour: {_fxcc_status}")));
     }
 }
