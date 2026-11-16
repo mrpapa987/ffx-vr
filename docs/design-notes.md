@@ -6701,10 +6701,12 @@ Once inserted it cannot be taken out before the game closes: with `diag_battle` 
 **`vis:` every change of a battle actor's visibility state**, polled once per rendered frame (at Present; the flags are
 written on the game's thread, so a hide shorter than a frame can be missed, but then it is not drawn either):
 
-    vis: === battle 3 start (frame 51000, battle state 0x13, view 1, following chr 0) | hook in (cmd: lines from MsParseCommand) | records: 0..0x1E, one array (the monsters' pointer agrees) | 5 actors with a character (v = visible, then the four votes main appear effect camera, h = chr hide): 0 'Tidus (c001)' v1 1111 h00; 1 'Yuna (c002)' v1 1111 h00; ...
+    vis: === battle 3 start (frame 51000, battle state 0x13, view 1, following chr 0) | hook in (cmd: lines from MsParseCommand) | records: 0..0x1E, one array (the monsters' pointer agrees) | draw attribution (NO DRAWS lines): first person only | 5 actors with a character (v = visible, then the four votes main appear effect camera, h = chr hide): 0 'Tidus (c001)' v1 1111 h00; 1 'Yuna (c002)' v1 1111 h00; ...
     vis: battle 3 frame 51246 | actor 0 'Tidus (c001)' (slot 5) | visible 1 -> 0 | votes: main 1, appear 1, effect 1 -> 0 (HIDES), camera 1 | chr hide 0x00 -> 0x10 (battle) | now HIDDEN | acting: #12 actor 2 'Auron (c003)' 0x30AB 'Armor Break' (12 frames ago) | command actor now 2
     vis: battle 3 frame 51246 | g_BtlCameraHides 0x112C9FE 0 -> 1 (a battle camera hid characters: MsSetChrVisibleCamera; unconfirmed) | magic 0xFFFF | acting: #12 ... | command actor now 2
     vis: battle 3 frame 51300 | g_MagicHiddenBtlChr 0xC64CDC -1 -> 1 (actor 1 'Yuna (c002)': hidden by the magic's effect script without a vote of its own; unconfirmed) | magic 0x0094 | ...
+    vis: battle 3 frame 51900 | actor 8 'Valefor (s001)' (slot 12) | NO DRAWS: the game shows it (votes: main 1, appear 1, effect 1, camera 1 | chr hide 0x00), but no draw has carried its model's keys for 30 frames (first person; only draws with an eye image and a world position are counted: not the game's hide, so the draws are missing, culled, or have no eye image) | acting: #14 ... | command actor now 1
+    vis: battle 3 frame 51960 | actor 8 'Valefor (s001)' (slot 12) | DRAWS AGAIN: 22 draws with its model's keys this frame, after 90 frames with none | acting: #14 ...
     vis: === battle 3 ended (the game left the battle, or the log was turned off; frame 53000, 2000 frames) | lines: cmd 9 (hook 8, polled 1), vis 14, fx 12 | not written (the budget): cmd 0, vis 0, fx 0
 
 - **The state** (a change of any of these writes a line): the visible flag (+0x15) and the four request votes +0x16..+0x19
@@ -6722,6 +6724,16 @@ written on the game's thread, so a hide shorter than a frame can be missed, but 
   0x253 hide a character in one battle scene and `MagicFile_Update` 0x9DAC60 shows it again) and **`g_BtlCameraHides`**
   (0x112C9FE: set by `MsSetChrVisibleCamera`) are polled and logged on change. `opu_en_on`'s nibble 0xB ("hide the unmarked
   characters") and its other nibbles act through the calls above, so they show in the votes or the hide byte.
+- **`NO DRAWS` (review S3): an actor the game shows, that nothing draws.** The votes and the hide byte only say what the
+  game *asked* for. In a first-person battle with the identity rule's key table in use (section 2) and this log on, every
+  skinned scene-pass draw with a world position is looked up in the key table and counted per actor (the followed
+  character's count includes the draws the mod hides, so he never gets this line). An actor that is in the table, that the
+  game shows (flag set, all four votes, hide byte and alpha clear) and whose keys no draw has carried for 30 frames gets
+  one `NO DRAWS` line, and one `DRAWS AGAIN` line when they are back. This is what separates "the game hid the aeon"
+  (a `vis:` change line with the vote) from "the game shows it and it is still not on screen" (culled by the game's own
+  camera, drawn with no eye image, or not submitted): the second cannot be seen in the votes at all. Not available in the
+  diorama or third person (no key table is built there: each battle's first line says "first person only"), nor with
+  `fp_battle_hide=0`. The `body hide: BATTLE` line carries the same counts as a per-actor average.
 - **Who is acting:** every `vis:` and `fx:` line ends with the last `cmd:` (its number, actor, id, name, how many frames
   ago) and the game's command actor now (`g_BtlCommandActor` 0x112C9E0). This is what answers "is the game hiding the
   others while Auron charges, and through which vote".
@@ -6733,13 +6745,21 @@ written on the game's thread, so a hide shorter than a frame can be missed, but 
 **`fx:` per magic file** (a spell, a skill's effect, an aeon's arrival: whatever loads a `magic_NNNN.dll`):
 
     fx: battle 3 frame 52010 | magic 0x0241 (577) loaded, handle 5, file magic_0577.dll (the game's name pattern per ffx-rust: unconfirmed), id set 3 frames before | acting: #16 actor 1 'Yuna (c002)' 0x3032 'Holy' (40 frames ago)
-    fx: battle 3 frame 52012 | magic 0x0241 sample 1 (2 frames after it loaded): the game's effect matrices, 4 rows of 4 as stored (game space) | g_pppCameraMatrix 0x230FF60 [...][...][...][...] | g_pppViewMatrix 0x230FF20 [...] | g_pppScreenMatrix 0x230FE60 [...] | g_pppFpWoodMatrix 0x230FEA0 [...] | g_pppWoodMatrixWork 0x230FEE0 [...] | g_pppWoodMatrix 0x230FDE0 [...]
-    fx: battle 3 frame 52012 | magic 0x0241 sample 1: the views of the same frame (render space: game space with x and y negated) | the game's main camera (what its effect code aims sprites at): position (...) forward (...) up (...) | eye 1: position (...) forward (...) up (...) | eye 2: ... | eye 1 looks 34.2 deg off the game's camera, its up is 3.1 deg off | the game's projection: P0 1.3032 P5 2.3168 (width : height 1.778) | eye 1 tangents l -1.040 r 0.870 u 0.980 d -1.100 (P0 1.0471 P5 0.9615, width : height 0.918) | eye 2 tangents ...
+    fx: battle 3 frame 52031 | magic 0x0241 sample 1 (21 frames after it loaded; the effect's draws appeared) | this frame's scene-pass draws: camera eye image 150, product-only 40, no eye image 6 (before the load: 120, 4, 2) | g_pppCameraMatrix changed since the frame before: yes (the effect code is copying the camera) | the game's effect matrices, 4 rows of 4 as stored (game space) | g_pppCameraMatrix 0x230FF60 [...][...][...][...] | g_pppViewMatrix 0x230FF20 [...] | g_pppScreenMatrix 0x230FE60 [...] | g_pppFpWoodMatrix 0x230FEA0 [...] | g_pppWoodMatrixWork 0x230FEE0 [...] | g_pppWoodMatrix 0x230FDE0 [...]
+    fx: battle 3 frame 52031 | magic 0x0241 sample 1: the views of the same frame (render space: game space with x and y negated) | the game's main camera (what its effect code aims sprites at): position (...) forward (...) up (...) | eye 1: position (...) forward (...) up (...) | eye 2: ... | eye 1 looks 34.2 deg off the game's camera, its up is 3.1 deg off | the game's projection: P0 1.3032 P5 2.3168 (width : height 1.778) | eye 1 tangents l -1.040 r 0.870 u 0.980 d -1.100 (P0 1.0471 P5 0.9615, width : height 0.918) | eye 2 tangents ...
+    fx: battle 3 frame 52051 | magic 0x0241 sample 2 (41 frames after it loaded; 20 frames after the first) | this frame's scene-pass draws: ... | g_pppCameraMatrix changed since the frame before: yes ... | changed since sample 1: g_pppCameraMatrix, g_pppViewMatrix, | the game's effect matrices ...
     fx: battle 3 frame 52250 | magic 0x0241 (577) ended (the game unloaded it) after 240 frames loaded | scene-pass draws a frame while it was loaded, at most: with a camera eye image 180, product-only (the PS2 effect family) 64, with no eye image 9 (the frame before it loaded: 120, 4, 2) | samples written 2 | visibility changes logged since the command 3 | acting: ...
 
 - The magic id is `g_MagicFile_MagicId` (0xC64CA0, what `MagicFile_GetMagicId` 0x9DA3B0 returns), loaded when
   `g_MagicFile_Handle` (0xC64CAC) is not -1.
-- Two samples per magic file (2 and 30 frames after it loaded), each two lines: the game's six effect matrices as stored,
+- Two samples per magic file, each two lines. **When (review S2):** a magic file is loaded well before its effect is on
+  screen (the cast animation comes first), and nothing says the game rewrites the six matrices every frame, so a sample at a
+  fixed 2 frames could print what the *previous* effect left there. The first sample is now taken the first frame the
+  frame's product-only or no-eye-image scene draws are 2 or more above the frame before the load (the effect's own draws are
+  being submitted), or 30 frames after the load if they never rise (said in the line); the second 20 frames after the
+  first. Each sample line carries that frame's draw counts, whether `g_pppCameraMatrix` differs from the frame before
+  ("NO" = it may be stale), and the second which of the six changed since the first. A sample whose matrices did not
+  change is not evidence about the effect. The lines are: the game's six effect matrices as stored,
   and the same frame's views as the mod has them: the game's main camera as its shaders get it (before the override), the
   two eyes' views (`build_override_view`, read-only, as the markers use it), the angle between the game camera's forward /
   up and eye 1's, the game's projection and each eye's field of view.
@@ -6776,17 +6796,36 @@ The rule, state by state (the F8 Inspect line and the log name it):
 | distance (the setting) | `fp_battle_hide=0` | the old rule |
 | distance meanwhile, no keys | the followed model gave no keys (not built yet, a chain read failed) | the old rule; managed rebuilds **4 frames** on (not 60) |
 | distance meanwhile, probing | keys built, but no draw has carried one yet | the old rule; the keys are read and counted |
-| identity | a draw carried one of his keys | his keys = hidden, wherever it is drawn; another actor's keys or no actor's = left alone, however near |
+| identity | a draw carried one of his keys | his keys = hidden, wherever it is drawn; another actor's keys or no actor's = left alone, however near; an actor attached to him (his weapon) = the old rule |
 
 - **Why "probing":** the keys are trusted only once a draw has carried one. If a battle model's draws do not use its chain's
   keys, the rule never leaves the distance rule, instead of showing his whole body from inside. One frame of the old rule
-  per new key set is the cost.
+  per new key set is the cost, if he is drawn that frame (otherwise the old rule until he is).
+- **The keys can go stale or be incomplete (review S1); three guards.** (a) *Lost:* an identity frame in which none of his
+  keys was seen while a draw whose key is in no actor's table sat inside the hide radius drops the proof: the distance rule
+  is back from the next frame, and managed is asked for a rebuild at the next push instead of up to 60 frames later (his
+  buffers replaced under an unchanged +0x830 / +0x1C4 would otherwise leave his body in his face for a second). (b)
+  *Truncated:* `IbChain.Walk` reads 16 mesh instances and 96 segments a mesh, and the table holds 768 keys; a followed
+  model larger than that, or one whose chain did not read whole, gives **no table** (the distance rule, retried every 4
+  frames; the module log's `table build` line says why), rather than a table that knows part of him. (c) *Partial:* when
+  another actor's chain did not read whole, or the table or the 48 owner numbers ran out, an actor on his model may be
+  missing from the table, so his keys then hide only draws that are also near the camera (the line says `PARTIAL`).
+  What stays open: a part of his own model drawn with a key its chain does not list, while other parts match. Then the
+  proof holds and that part shows; the line's `NOTE: n draws on his spot with keys in no actor's table were left visible`
+  is how it is seen in a log, and `fp_battle_hide=0` is the way back.
+- **His weapon (review N8) is another actor's model** (a separate actor record whose +0x19C points at him). It is not in
+  his own keys. Decision: **exactly as before this rule**: the weapon's draws are left to the distance rule (hidden when
+  drawn within the hide radius of the eyes' anchor, shown otherwise; in practice the weapon is drawn at the hand and
+  shows). Managed flags each actor attached to the followed one; native classes its keys "his weapon's" (counted apart in
+  the line, never as "another actor's"), so a weapon near the anchor no longer reads as the aeon case.
 - **Another live actor on the same model** (the same keys): the keys are kept (an earlier version dropped them and showed
   his whole body). A draw with a shared key is his when his drawn root is the nearest of the sharing actors' roots (a tie
   is his); a sharing actor whose root is not known is left out; his own not known: the keys are his. Logged in the line.
 - **A swap, a KO, the first frames:** the table is rebuilt the frame the signature changes (the followed actor, any live
   actor's +0x830 / +0x1C4, the scene), after any gap in the pushes, and every 60 frames (30 while another actor's chain did
-  not read whole). New keys of his mean one probing frame, then identity. An old table is never re-armed after a gap.
+  not read whole), and at once when the keys were lost. New keys of his mean one probing frame, then identity. An old
+  table is never re-armed after a gap. (The table of the last push is still used for one frame after the pushes stop, as
+  the field's is: the view switch itself turns the body hide off.)
 - **During a summon the followed character is the summoner** (the battle follow's rule since October, unchanged): the aeon is
   another actor, so its draws are never hidden by this rule. When the aeon is dismissed the eyes go back to whoever had them.
 - **Nothing is hidden in the diorama** (or third person, or on the virtual screen): managed pushes only in first person with
@@ -6795,17 +6834,21 @@ The rule, state by state (the F8 Inspect line and the log name it):
   followed actor, runs in) the distance rule decides as before, so he shows until he is near the spot.
 - **His own shadow** (the light-camera pass with `shadow_cam=1`, `fp_self_shadow=0`): by the same keys.
 - The index buffer is read (one `IAGetIndexBuffer`) only for skinned draws with a world position while a key table is in
-  use; in the other states nothing is read.
+  use; in the other states nothing is read. A draw that is not his and not near the camera is not looked up among the
+  other actors' keys (review N1: that was a scan of the whole table per draw), unless the battle log is on (it counts
+  draws per actor then).
 
 **The log** (only with `diag_battle` on): one `body hide: BATTLE` line 30 frames into each run of first-person battle
 frames, one 30 frames after each change of the rule, the keys or the followed actor, and one at the run's end (12 a run,
 300 a session):
 
-    body hide: BATTLE (a first-person battle): rule IDENTITY (his own model's index-buffer keys) | following actor slot 5 'c003' | his keys 14 (2A3F1B40+0/1242 2A3F1B40+2484/600 ...), 198 keys of 9 other actors, build 7 | the last 31 frames: draws hidden by his keys 434 (14.0 a frame, at most 14), draws carrying his keys 434 | near the camera (the old distance rule's matches) 465 (15.0 a frame): his own 434, another actor's 31, in no actor's table 0, index buffer not read 0; kept visible by the identity rule 31 | same model as another live actor: no
+    body hide: BATTLE (a first-person battle): rule IDENTITY (his own model's index-buffer keys) | following actor slot 5 'c003' | his keys 14 (2A3F1B40+0/1242 2A3F1B40+2484/600 ...), 198 keys of 9 other actors, build 7 | the last 31 frames: draws hidden by his keys 434 (14.0 a frame, at most 14), draws carrying his keys 434 | near the camera (the old distance rule's matches) 465 (15.0 a frame): his own 434, his weapon's or another model's attached to him 0 (left to the distance rule, as before), another actor's 31, in no actor's table 0, index buffer not read 0; kept visible by the identity rule 31 | same model as another live actor: no | draws by actor (table slot: a frame): 5 (his) 14.0, 9 3.0, 12 22.0,
 
 One test answers whether battle models carry their chain's keys: "draws carrying his keys" above 0 and "in no actor's
 table" at 0 = yes. "another actor's" above 0 is exactly the case the owner reported (a draw the old rule would have
-hidden). A `NOTE:` is added when 30 frames pass with draws near the camera and none with his keys. The module log also
+hidden). A `NOTE:` is added when 30 frames pass with draws near the camera and none with his keys, and another in identity
+when draws of no actor's table were left visible on his spot; `his keys were LOST n times` and `the table is PARTIAL` are
+said when they happened. The module log also
 gets one `body hide: BATTLE table build` line per new key set (30 a session).
 
 ### Settings
@@ -6817,7 +6860,7 @@ gets one `body hide: BATTLE table build` line per new key set (30 a session).
 
 ### ABI 68
 
-`ffxvr_fp_battle_due(sig)`, `ffxvr_fp_battle_set(q, n, gen, flags, roots, n_roots, pick, who)`, `ffxvr_bvis_frame(actors, n,
+`ffxvr_fp_battle_due(sig)`, `ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who)` (owners: two bytes an owner, its actor-table slot and bit 0 "attached to the followed actor"; flags 1 identity wanted, 2 the log on, 8 partial; changed in the review round, before 68 was ever delivered), `ffxvr_bvis_frame(actors, n,
 g, ng, mats, polled, polled_cap)`, `ffxvr_bvis_cmd(ev, size)`, `ffxvr_bvis_status(out, n)`. The two records managed fills by
 offset (`bvis::ActorIn` 48 bytes, `bvis::CmdEv` 104 bytes) have static_asserts on their sizes and offsets.
 
@@ -6848,10 +6891,19 @@ Ours, not tested in play:
 13. That the late insertion on 0x7AE370 is accepted by Fahrenheit and costs one hitch.
 14. That a hide shorter than a rendered frame does not matter (the poll is per Present).
 15. That nothing else of the followed character was hidden only by the distance rule: a separate model that sits exactly on
-    his root (not his weapon: that is drawn at the hand) would now show. In a plain fight the line's "another actor's"
+    his root and is not attached to him through +0x19C would now show. In a plain fight the line's "another actor's"
     count near the camera should be 0; if it is not, that model is what it counts, and `fp_battle_hide=0` is the way back.
-16. `MsParseCommand`'s first bytes are not checked before the insertion (they are not known here), unlike the fast sphere
-    getter's: another mod's patch on it is left to Fahrenheit's own chaining.
+16. `MsParseCommand`'s first bytes are not checked before the insertion (they are not known here, and no game bytes are
+    kept in the repository), unlike the fast sphere getter's: another mod's patch on it is left to Fahrenheit's own
+    chaining. They are read and written into the hook's status line (F8 Inspect and the log), so a first recording gives
+    the bytes a later build can check.
+17. That a weapon's actor record points at its wielder in +0x19C (the field code's attach pointer) in a battle too. If it
+    does not, the weapon is "another actor's" and is never hidden: the same as the distance rule gives when it is drawn at
+    the hand.
+18. That the fx sample's trigger (product-only or no-eye-image draws rising by 2) marks the effect's draws: an effect drawn
+    only with camera eye images takes its first sample 30 frames after the load, and the line says so.
+19. That "lost" does not fire in normal play: it needs a frame where he is not drawn at all with his keys while an
+    unknown draw sits in the hide radius. If it flaps, the line counts it (`LOST n times`) and the cost is the old rule.
 
 ### Tests (scratch `bvis_chk`, `run_all.sh <repo>`)
 
@@ -6859,23 +6911,51 @@ Ours, not tested in play:
   (the cull bits are not a change), the tracker's first seen / changed / gone.
 - `budget_test` (8279): the fair share (one flapping source ends at guarantee + cap; the others keep their guarantee; the pool goes
   round), a new battle, the session cap and its note, random asks.
-- `ident_test` (1380): the key table, the classes, the shared-model tie-break (nearest root, unknown roots), every verdict, the
+- `ident_test` (1428): the key table, the classes, the shared-model tie-break (nearest root, unknown roots), every verdict, the
   frame-to-frame rule (no keys, probing, identity, a swap, lost keys, keys never seen, the pushes stopping, the setting),
-  the rebuild cadence (4 / 30 / 60 frames, a new signature, a gap, the counter's wrap), the line's schedule and caps.
-- `dedup_test` (654): the polled-against-hooked de-duplication (the hold, the busy detour, a late or unrelated hook event, the
+  the rebuild cadence (4 / 30 / 60 frames, a new signature, a gap, the counter's wrap, the forced rebuild), the line's
+  schedule and caps; the review round's rules: the lost latch and when it must not fire, the partial table, the weapon
+  class, no lookup among the others' keys unless asked, the per-actor counts, the line's new parts.
+- `dedup_test` (681): the polled-against-hooked de-duplication (the hold, the busy detour, a late or unrelated hook event, the
   count's cap, a cleared record), and whole battles through `bvis::Log`: a skill with hides by a vote, by the camera global
   and by an effect bit, a polled monster command, a swap with the roster line, a summon, Holy with its two samples and the
-  end line, a second battle, no hook at all, a flapping actor, the session budget, lines that cannot overrun.
-- `glue_test` (172): the glue of `ffxvr_native.cpp` verbatim (`extract.py`) against stand-ins for Direct3D and the camera: the
+  end line (the samples wait for the draws to rise; the late sample; the changed markers), an actor shown with no draws
+  and its draws coming back, a second battle, no hook at all, a flapping actor, the session budget, lines that cannot
+  overrun.
+- `glue_test` (206): the glue of `ffxvr_native.cpp` verbatim (`extract.py`) against stand-ins for Direct3D and the camera: the
   draw's verdicts through a battle, when the index buffer is read at all, the retry, the diorama, a swap, the same model,
-  the setting, the log switch, and the three log exports (sizes checked, names terminated, the polled out array, the views
-  built only for a sample). The header is compiled there with Windows' `near` / `far` macros defined.
-- `check.py` (350 text scans): the ABI numbers and histories, every export defined / bound / unbound with one type, the two records' sizes
+  the setting, the log switch, lost keys and the rebuild asked at once, the weapon, the partial table and its line, the
+  draws per actor reaching the research log, and the three log exports (sizes checked, names terminated, the polled out
+  array, the views built only for a sample). The header is compiled there with Windows' `near` / `far` macros defined.
+- `check.py` (373 text scans): the ABI numbers and histories, every export defined / bound / unbound with one type, the two records' sizes
   and offsets against the managed constants, every address constant against its absolute address, the ini keys in the
   parser, the defaults, the menu and the docs, the hook's install condition, the field path's call unchanged, no bare
-  `std::min` / `std::max`, balanced brackets in the managed files this build touched. `mutants.py`: 137 mutants of the header,
-  the glue and the managed file, all caught. The header's format strings are checked against their arguments by the
-  tests' compiler (a printf attribute under g++).
+  `std::min` / `std::max`, balanced brackets in the managed files this build touched, the review round's managed lines.
+  `mutants.py`: 178 mutants of the header, the glue and the managed file, all caught. The header's format strings are
+  checked against their arguments by the tests' compiler (a printf attribute under g++).
+
+### The review round (16 Nov 2026, before 68 was delivered)
+
+An independent review found no blocker, three should-fix items and thirteen notes. Fixed: **S1** (stale or truncated keys:
+the lost latch, no table for a model larger than the walk, the partial flag; above), **S2** (the fx samples' timing and the
+stale-matrix markers), **S3** (draw attribution: `NO DRAWS` / `DRAWS AGAIN`, per-actor counts), **N1** (no scan of the others'
+keys for a draw that is not his and not near), **N3** (`V_NONE` collided in name with an `oleauto.h` macro: the tracker's
+results are `VS_*`), **N5** (the kernel table's pointer is tested before `MsGetComData` is called in the detour), **N6**
+(the function's first bytes are logged; not checked: unconfirmed 16), **N7** (a table with more than four segments is said
+to be read short), **N8** (the weapon; above), **N10** in part (a frame whose actor snapshot did not read sends no states,
+instead of every character "hidden" then "shown"), **N11** in part (events left in the ring when the key goes off are
+dropped), **N12** (the table button's tooltip says it stutters), **N9 / N13** (wording, above).
+Left, with the reason:
+- **N2** (the periodic rebuild walks every live actor's chain, about once a second): correct as it is; splitting it into "his
+  chain periodically, the others on a signature change" changes when the same-model test and the partial flag are fresh,
+  which this round's S1 guards lean on. Worth doing once a recording shows the cost.
+- **N4** (the hook takes the id from the parsed-command static, the poll from the actor's +0xF5C): the fix changes the
+  `CmdEv` record's layout and the de-duplication key; the worst case today is a duplicate line marked `polled`, which a
+  reader can see. Left until a recording shows whether it happens.
+- **N10, the name cache** (a model name missing when the slot did not read the first time): cosmetic; the record's own name
+  is still printed.
+- **N11, the roster line's accounting** (it draws on the `vis:` budget and is counted under `cmd:` in the summary): a counter's
+  label; changing it moves numbers in three tests for no information.
 
 ### Next (not built)
 

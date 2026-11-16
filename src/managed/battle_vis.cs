@@ -48,7 +48,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool _diag_battle;            // ini diag_battle (default 0; Developer > Inspect): the battle research log
     private int  _fp_battle_hide = 1;     // ini fp_battle_hide: 1 by the followed model's keys (default), 0 the old distance rule
     private delegate* unmanaged[Cdecl]<uint, int> _fn_fp_battle_due;                                             // ABI 68
-    private delegate* unmanaged[Cdecl]<uint*, int, uint, int, float*, int, int, byte*, int> _fn_fp_battle_set;   // ABI 68
+    private delegate* unmanaged[Cdecl]<uint*, int, uint, int, float*, byte*, int, int, byte*, int> _fn_fp_battle_set;   // ABI 68
     private delegate* unmanaged[Cdecl]<byte*, int, int*, int, float*, uint*, int, int> _fn_bvis_frame;           // ABI 68
     private delegate* unmanaged[Cdecl]<byte*, int, void> _fn_bvis_cmd;                                           // ABI 68
     private delegate* unmanaged[Cdecl]<int*, int, int> _fn_bvis_status;                                          // ABI 68
@@ -78,14 +78,14 @@ public sealed unsafe partial class FFXVRModule {
     private string _bv_hook_status = "not inserted (it is inserted the first frame diag_battle is on)";
 
     // the render thread's state
-    private bool _bv_active; private byte* _bv_buf, _bv_in; private float* _bv_mats; private int _bv_tick_faults;
+    private bool _bv_active; private byte* _bv_buf, _bv_in; private float* _bv_mats; private int _bv_tick_faults, _bv_snap_miss;
     private readonly long[] _bv_name_key = new long[k_bv_actors]; private readonly byte[] _bv_names = new byte[k_bv_actors * 32];
     private int _bv_dump_t = -1, _bv_dump_id, _bv_dump_lines;
     private readonly int[] _bv_st = new int[14];
 
     // the battle body hide's key table
     private const int k_bh_max = 768, k_bh_segs = 96, k_bh_owners = 48;   // = native bvis::k_keys, k_owners
-    private uint* _bh_q; private byte* _bh_seg, _bh_who; private float* _bh_roots;
+    private uint* _bh_q; private byte* _bh_seg, _bh_who, _bh_own; private float* _bh_roots;   // _bh_own: two bytes per owner (its table slot; bit 0 = attached to the followed actor)
     private int _bh_n, _bh_self_n, _bh_owners, _bh_mode, _bh_hidden, _bh_dumps; private uint _bh_gen; private bool _bh_incomplete; private nint _bh_who_key; private ulong _bh_logged;
     private readonly int[] _bh_owner_slot = new int[k_bh_owners];
 
@@ -99,7 +99,7 @@ public sealed unsafe partial class FFXVRModule {
     private string bv_ini_text() => $"diag_battle={(_diag_battle ? 1 : 0)}\nfp_battle_hide={_fp_battle_hide.ToString(CI)}\n";
     private void bv_bind(Func<string, nint> req) {
         _fn_fp_battle_due = (delegate* unmanaged[Cdecl]<uint, int>)req("ffxvr_fp_battle_due");
-        _fn_fp_battle_set = (delegate* unmanaged[Cdecl]<uint*, int, uint, int, float*, int, int, byte*, int>)req("ffxvr_fp_battle_set");
+        _fn_fp_battle_set = (delegate* unmanaged[Cdecl]<uint*, int, uint, int, float*, byte*, int, int, byte*, int>)req("ffxvr_fp_battle_set");
         _fn_bvis_frame = (delegate* unmanaged[Cdecl]<byte*, int, int*, int, float*, uint*, int, int>)req("ffxvr_bvis_frame");
         _fn_bvis_cmd = (delegate* unmanaged[Cdecl]<byte*, int, void>)req("ffxvr_bvis_cmd");
         _fn_bvis_status = (delegate* unmanaged[Cdecl]<int*, int, int>)req("ffxvr_bvis_status");
@@ -121,6 +121,10 @@ public sealed unsafe partial class FFXVRModule {
         new FhCallLocation("FFX.exe", k_bv_parse).try_resolve(out _a_bv_parse);
         new FhCallLocation("FFX.exe", k_bv_comdata).try_resolve(out _a_bv_comdata);
         if (_a_bv_parse == 0) { _bv_hook = 4; _bv_hook_status = "not inserted: FFX.exe not found"; _logger.Warning("battle log: " + _bv_hook_status); return; }
+        // review N6: the function's first bytes, read before the insertion and logged (they are not known from the notes, so
+        // nothing is compared yet: the next build can check them, as the damage-number and fast-sphere detours do)
+        string first = "";
+        try { for (int i = 0; i < 8; i++) first += FhUtil.get_at<byte>(k_bv_parse + i).ToString("X2", CI) + (i < 7 ? " " : ""); } catch { first = "not read"; }
         bool ok = false; string why = "";
         diag7_insert_begin();   // no main-thread detour resolves its original while this writes Fahrenheit's table (B7-1)
         try { ok = new FhCallHandle<d_bv_parse>(new FhCallLocation((void*)_a_bv_parse)).hook(this, _h_bv_parse!); }
@@ -130,8 +134,8 @@ public sealed unsafe partial class FFXVRModule {
         if (ok) { try { o = d7_chain(_a_bv_parse, _h_bv_parse!); } catch { } }
         if (o != null) System.Threading.Volatile.Write(ref _o_bv_parse, o);
         _bv_hook = ok ? 1 : 3;
-        _bv_hook_status = ok ? I($"inserted at 0x{_a_bv_parse:X8} (MsParseCommand 0x7AE370; the insertion stops the game's threads for a moment: one hitch, once a session){(o == null ? "; its original resolves at its first call" : "")}")
-                             : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x7AE370? core.log)") + ": the cmd: lines are polled only";
+        _bv_hook_status = ok ? I($"inserted at 0x{_a_bv_parse:X8} (MsParseCommand 0x7AE370, its first bytes before the insertion: {first}; the insertion stops the game's threads for a moment: one hitch, once a session){(o == null ? "; its original resolves at its first call" : "")}")
+                             : "NOT inserted: Fahrenheit refused the insertion" + (why.Length > 0 ? " (" + why + ")" : " (another hook on 0x7AE370? core.log)") + ": the cmd: lines are polled only (its first bytes: " + first + ")";
         _logger.Info("battle log: the MsParseCommand detour: " + _bv_hook_status); d7_log("cmd: the MsParseCommand detour: " + _bv_hook_status);
     }
 
@@ -197,6 +201,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool bv_comdata(delegate* unmanaged[Cdecl]<int, byte**, byte*> f, int id, byte* rec, byte* name) {
         int kind = id >> 12;
         if (kind != 2 && kind != 3 && kind != 4 && kind != 6) return false;
+        if (FhUtil.get_at<nint>(k_bv_tables[kind == 3 ? 0 : kind == 2 ? 1 : kind == 4 ? 2 : 3]) == 0) return false;   // (review N5: that kind's kernel table is loaded)
         byte* strings = null;
         byte* r = f(id, &strings);
         return bv_rec_copy(r, strings, rec, name);
@@ -310,7 +315,11 @@ public sealed unsafe partial class FFXVRModule {
     /// static read. In battle: one guarded read of the battle actor records (122 KB), the frame's actor-table snapshot, a
     /// handful of the exe's statics; native writes the lines.
     private void bv_tick() {
-        if (!_diag_battle) { if (_bv_active) bv_stop(); return; }
+        if (!_diag_battle) {
+            if (_bv_active) bv_stop();
+            System.Threading.Volatile.Write(ref _bv_r, System.Threading.Volatile.Read(ref _bv_w));   // (review N11: events left in the ring are not the next logged battle's)
+            return;
+        }
         if (_fn_bvis_frame == null || _fn_bvis_cmd == null || _fn_safe_read == null || _fn_diag_line == null) return;
         if (_bv_hook == 0 && _native_ready) bv_install();
         try { bv_dump_step(); bv_frame(); }
@@ -336,6 +345,7 @@ public sealed unsafe partial class FFXVRModule {
         }
         if (mons != 0 && chrs != 0) gflags |= mons == chrs + 0x14 * k_bv_chr_size ? 4 : 8;
         Actor* actors = Globals.actors; Actor* snap = tbl_snap(actors);
+        if (snap == null) { _bv_snap_miss++; bv_drain(); return; }   // (review N10: the actor table did not read this frame: no states are sent, rather than every character "not in the table")
         for (int i = 0; i < k_bv_actors * k_bv_rec; i++) _bv_in[i] = 0;
         for (int i = 0; i < n; i++) {
             byte* c = _bv_buf + i * k_bv_chr_size; byte* o = _bv_in + i * k_bv_rec;
@@ -403,8 +413,8 @@ public sealed unsafe partial class FFXVRModule {
         byte* h = stackalloc byte[56]; byte* rec = stackalloc byte[0x30]; byte* nm = stackalloc byte[40]; byte* txt = stackalloc byte[40];
         if (tbl == 0 || _fn_safe_read((void*)tbl, h, 56) == 0) { d7_log(I($"cmdtab: table {k_bv_table_name[t]}: not loaded (pointer 0x{(ulong)tbl:X})")); _bv_dump_t++; _bv_dump_id = 0; return; }
         int segs = *(short*)h, done = 0; bool more = false;
+        if (_bv_dump_id == 0) d7_log(I($"cmdtab: table {k_bv_table_name[t]}: {segs} segment(s){(segs > 4 ? " (only the first 4 are read: the list is SHORT)" : "")}"));
         if (segs > 4) segs = 4;
-        if (_bv_dump_id == 0) d7_log(I($"cmdtab: table {k_bv_table_name[t]}: {segs} segment(s)"));
         for (int s = 0; s < segs && !more; s++) {
             byte* d = h + 8 + 12 * s;
             int first = *(ushort*)d, last = *(ushort*)(d + 2), size = *(ushort*)(d + 4), len = *(ushort*)(d + 6); uint off = *(uint*)(d + 8);
@@ -433,6 +443,7 @@ public sealed unsafe partial class FFXVRModule {
         if (_bh_q == null) {   // kept for the session
             _bh_q = (uint*)Marshal.AllocHGlobal(k_bh_max * 16); _bh_seg = (byte*)Marshal.AllocHGlobal(k_bh_segs * 0x6C);
             _bh_roots = (float*)Marshal.AllocHGlobal(k_bh_owners * 3 * sizeof(float)); _bh_who = (byte*)Marshal.AllocHGlobal(32);
+            _bh_own = (byte*)Marshal.AllocHGlobal(k_bh_owners * 2);
             _bh_who[0] = 0;
         }
         int flags = (_fp_battle_hide == 1 ? 1 : 0) | (_diag_battle ? 2 : 0);
@@ -443,7 +454,7 @@ public sealed unsafe partial class FFXVRModule {
             for (int k = 0; k < 32; k++) { char ch = k < s.Length && k < 31 ? s[k] : '\0'; _bh_who[k] = ch >= 32 && ch < 127 ? (byte)ch : (byte)0; }
         }
         if (_fp_battle_hide != 1 || snap == null) {   // the distance rule by choice; or the table did not read: no keys this frame
-            int r0 = _fn_fp_battle_set(null, 0, _bh_gen, flags, null, 0, pick, _bh_who);
+            int r0 = _fn_fp_battle_set(null, 0, _bh_gen, flags, null, null, 0, pick, _bh_who);
             _bh_mode = r0 & 0xFF; _bh_hidden = r0 >> 8; _bh_n = 0; _bh_self_n = 0; _bh_owners = 0;
             return;
         }
@@ -454,49 +465,79 @@ public sealed unsafe partial class FFXVRModule {
             byte* a = (byte*)(snap + i);
             sig = (sig ^ (ulong)i) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x830)) * 1099511628211UL; sig = (sig ^ (ulong)*(uint*)(a + 0x1C4)) * 1099511628211UL;
         }
-        if (_fn_fp_battle_due((uint)(sig ^ (sig >> 32))) != 0) bh_build(snap, pick);
+        if (_fn_fp_battle_due((uint)(sig ^ (sig >> 32))) != 0) bh_build(actors, snap, pick);
         _bh_roots[0] = -c.X; _bh_roots[1] = -c.Y; _bh_roots[2] = c.Z;   // render space negates X and Y
         for (int k = 1; k < _bh_owners; k++) {
             Vector3 r = *(Vector3*)((byte*)(snap + _bh_owner_slot[k]) + 0x200);
             bool ok = finite(r) && MathF.Abs(r.X) + MathF.Abs(r.Y) + MathF.Abs(r.Z) >= 0.01f;   // (not built: a fresh slot, a parked model)
             _bh_roots[3 * k] = ok ? -r.X : float.NaN; _bh_roots[3 * k + 1] = ok ? -r.Y : float.NaN; _bh_roots[3 * k + 2] = ok ? r.Z : float.NaN;
         }
-        int ret = _fn_fp_battle_set(_bh_n > 0 ? _bh_q : null, _bh_n, _bh_gen, flags | (_bh_incomplete ? 8 : 0), _bh_roots, _bh_n > 0 ? _bh_owners : 0, pick, _bh_who);
+        int ret = _fn_fp_battle_set(_bh_n > 0 ? _bh_q : null, _bh_n, _bh_gen, flags | (_bh_incomplete ? 8 : 0), _bh_roots, _bh_own, _bh_n > 0 ? _bh_owners : 0, pick, _bh_who);
         _bh_mode = ret & 0xFF; _bh_hidden = ret >> 8;
     }
     /// The key table: the followed actor's segments as owner 0, then every other live actor's with a model, one owner number
-    /// each (IbChain.Walk, the field path's walk). No keys from the followed model (not built yet, a read failed): no table
-    /// at all (native: the distance rule meanwhile; it asks for the next build 4 frames on).
-    private void bh_build(Actor* snap, int pick) {
+    /// each (IbChain.Walk, the field path's walk). No keys from the followed model (not built yet, a read failed), or a model
+    /// larger than the walk reads (review S1: IbChain.Walk stops at 16 mesh instances and at k_bh_segs segments a mesh, and
+    /// the table at k_bh_max keys: a part of him would be missing from his own keys): no table at all (native: the distance
+    /// rule meanwhile; it asks for the next build 4 frames on). An actor attached to the followed one (+0x19C, his weapon)
+    /// is flagged: native leaves its draws to the distance rule, as before.
+    private void bh_build(Actor* actors, Actor* snap, int pick) {
         _bh_gen++; _bh_n = 0; _bh_self_n = 0; _bh_owners = 1; _bh_incomplete = false; _bh_owner_slot[0] = pick;
+        _bh_own[0] = (byte)pick; _bh_own[1] = 0;
         byte* a = (byte*)(snap + pick);
         uint res0 = *(uint*)(a + 0x1C4); int same = 0;
+        string why = bh_chain_big(*(nint*)(a + 0x830));
         IbChain.Walk(*(nint*)(a + 0x830), 0u, _bh_q, ref _bh_n, k_bh_max, _bh_seg, k_bh_segs, _fn_safe_read, out bool fail);
-        if (fail || _bh_n == 0) { _bh_n = 0; bh_build_log(snap, pick, fail, 0); return; }
+        if (why.Length == 0 && _bh_n >= k_bh_max) why = "his model alone fills the key table";
+        if (why.Length == 0 && fail) why = "a read of his chain failed";
+        if (why.Length == 0 && _bh_n == 0) why = "his model gave no keys yet";
+        if (why.Length > 0) { _bh_n = 0; bh_build_log(snap, pick, why, 0); return; }
         _bh_self_n = _bh_n;
-        for (int i = 0; i < 48 && _bh_owners < k_bh_owners; i++) {
+        for (int i = 0; i < 48; i++) {
             if (i == pick || !FphWalk.Live(snap[i].chr_enabled, (nint)snap[i].chr_name)) continue;
             byte* b = (byte*)(snap + i);
             if (*(uint*)(b + 0x830) == 0) continue;
+            if (_bh_owners >= k_bh_owners || _bh_n >= k_bh_max) { _bh_incomplete = true; break; }   // no room: an actor is missing from the table (native: partial)
             int n0 = _bh_n;
             IbChain.Walk(*(nint*)(b + 0x830), (uint)_bh_owners, _bh_q, ref _bh_n, k_bh_max, _bh_seg, k_bh_segs, _fn_safe_read, out bool f2);
-            if (f2) _bh_incomplete = true;
+            if (f2 || _bh_n >= k_bh_max) _bh_incomplete = true;
             if (_bh_n == n0) continue;   // no keys: no owner number spent
             if (*(uint*)(b + 0x1C4) == res0) same++;
-            _bh_owner_slot[_bh_owners] = i; _bh_owners++;
+            _bh_owner_slot[_bh_owners] = i;
+            _bh_own[2 * _bh_owners] = (byte)i; _bh_own[2 * _bh_owners + 1] = (byte)(*(nint*)(b + 0x19C) == (nint)(actors + pick) ? 1 : 0);
+            _bh_owners++;
         }
-        bh_build_log(snap, pick, false, same);
+        bh_build_log(snap, pick, "", same);
     }
-    /// The module log's line per new key set (only with the battle log on; 30 a session).
-    private void bh_build_log(Actor* snap, int pick, bool fail, int same) {
+    /// Review S1: is the model object larger than IbChain.Walk reads (more than 16 mesh instances, or a mesh of more than
+    /// k_bh_segs segments)? The reason, or "" (also when it does not read: the walk reports that itself).
+    private string bh_chain_big(nint h) {
+        var rd = _fn_safe_read;
+        if (h == 0 || rd == null) return "";
+        uint hc = 0; nint arr = 0;
+        if (rd((void*)h, &hc, 4) == 0 || rd((byte*)h + 4, &arr, (uint)sizeof(nint)) == 0 || arr == 0) return "";
+        int ni = (int)(hc & 0x7FFFFFFF);
+        if (ni > 16) return I($"his model has {ni} mesh instances (the walk reads 16)");
+        for (int i = 0; i < ni; i++) {
+            nint inst = 0, mesh = 0; uint sc = 0;
+            if (rd((byte*)arr + i * sizeof(nint), &inst, (uint)sizeof(nint)) == 0 || inst == 0 || rd((void*)inst, &mesh, (uint)sizeof(nint)) == 0 || mesh == 0 || rd((void*)mesh, &sc, 4) == 0) continue;
+            int ns = (int)(sc & 0x7FFFFFFF);
+            if (ns > k_bh_segs) return I($"a mesh of his model has {ns} segments (the walk reads {k_bh_segs})");
+        }
+        return "";
+    }
+    /// The module log's line per new key set (only with the battle log on; 30 a session). why = why there is no table ("": there is one).
+    private void bh_build_log(Actor* snap, int pick, string why, int same) {
         if (!_diag_battle || _bh_dumps >= 30) return;
         ulong ks = 1469598103934665603UL ^ (ulong)pick;
         for (int e = 0; e < _bh_self_n * 4; e++) ks = (ks ^ _bh_q[e]) * 1099511628211UL;
-        ks = (ks ^ (ulong)_bh_owners) * 1099511628211UL;
+        ks = (ks ^ (ulong)_bh_owners) * 1099511628211UL; ks = (ks ^ (ulong)why.Length) * 1099511628211UL;
         if (ks == _bh_logged) return;
         _bh_logged = ks; _bh_dumps++;
         byte* a = (byte*)(snap + pick);
-        _logger.Info(I($"body hide: BATTLE table build {_bh_gen} on map {map_name()}: following actor {pick} '{actor_name(snap[pick].chr_name)}' (+0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{*(uint*)(a + 0x1C4):X}): {_bh_self_n} keys of his own{(fail ? " (a read of his chain failed: no table, retried)" : _bh_self_n == 0 ? " (his model gave none yet: no table, retried)" : "")}, {_bh_n - _bh_self_n} keys of {_bh_owners - 1} other actors{(_bh_incomplete ? " (another actor's chain did not read whole)" : "")}{(same > 0 ? I($"; {same} other actor(s) on the SAME MODEL resource (the nearest root decides their shared keys)") : "")}") + (_bh_dumps == 30 ? " (no more of these lines this session)" : ""));
+        int his = 0;
+        for (int k = 1; k < _bh_owners; k++) if ((_bh_own[2 * k + 1] & 1) != 0) his++;
+        _logger.Info(I($"body hide: BATTLE table build {_bh_gen} on map {map_name()}: following actor {pick} '{actor_name(snap[pick].chr_name)}' (+0x830 0x{*(uint*)(a + 0x830):X}, +0x1C4 0x{*(uint*)(a + 0x1C4):X}): {_bh_self_n} keys of his own{(why.Length > 0 ? " (NO TABLE: " + why + "; the distance rule meanwhile, retried)" : "")}, {_bh_n - _bh_self_n} keys of {_bh_owners - 1} other actors, {his} of them attached to him (his weapon: left to the distance rule){(_bh_incomplete ? " (PARTIAL: another actor's chain did not read whole, or the table is full: his keys hide only draws near the camera)" : "")}{(same > 0 ? I($"; {same} other actor(s) on the SAME MODEL resource (the nearest root decides their shared keys)") : "")}") + (_bh_dumps == 30 ? " (no more of these lines this session)" : ""));
     }
 
     // -- F8 ------------------------------------------------------------------------------------------------------------------
@@ -514,7 +555,7 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("diag_battle", "Battle research log (diag_battle): in ffxvr_diag.log, in battles: every executed command (\"cmd:\"), every change of a character's visibility (\"vis:\"), the spell effects' matrices (\"fx:\"); installs one game hook while it is on", ref _diag_battle, UiTag.None,
                  "Read-only research log. While it is on, a detour sits on the game's command parser (MsParseCommand); it always runs the game's own function and changes nothing. Developer mode alone does not install it.");
         if (ImGui.Button("Log the command table##bv") && _bv_dump_t < 0) { _bv_dump_t = 0; _bv_dump_id = 0; _bv_dump_lines = 0; d7_log("cmdtab: === the game's command tables: id, name, record fields (the tables' layout per ffx-rust's kernel.md: not confirmed by us)"); }
-        ui_tip("Writes every command, item and monster-command id with its name to ffxvr_diag.log, once (\"cmdtab:\" lines). Needs the battle research log on; the names are there once a save is loaded.");
+        ui_tip("Writes every command, item and monster-command id with its name to ffxvr_diag.log, once (\"cmdtab:\" lines). Needs the battle research log on; the names are there once a save is loaded. The game stutters for a second or two while it writes.");
         if (_bv_dump_t >= 0) { ImGui.SameLine(); ImGui.TextDisabled(esc(I($"writing... {_bv_dump_lines} records"))); }
         else if (!_diag_battle) { ImGui.SameLine(); ImGui.TextDisabled("(needs the battle research log on)"); }
         int n = 0;
@@ -523,7 +564,7 @@ public sealed unsafe partial class FFXVRModule {
             string[] rule = k_bh_rule;
             int m = _bv_st[8];
             ImGui.TextDisabled(esc(I($"battle log: {(_bv_st[0] != 0 ? I($"logging battle {_bv_st[1]}") : _diag_battle ? "waiting for a battle" : "off")} | lines this session: cmd {_bv_st[2]}, vis {_bv_st[3]}, fx {_bv_st[4]}, not written (the budgets) {_bv_st[5]} | this battle's commands: from the hook {_bv_st[6]}, polled {_bv_st[7]} | magic id {_bv_st[13]}")));
-            ImGui.TextDisabled(esc(I($"battle log: MsParseCommand detour: {_bv_hook_status} | calls {_bv_calls}, faults {_bv_faults}, dropped {_bv_dropped}, text faults {_bv_text_faults}, frame faults {_bv_tick_faults}")));
+            ImGui.TextDisabled(esc(I($"battle log: MsParseCommand detour: {_bv_hook_status} | calls {_bv_calls}, faults {_bv_faults}, dropped {_bv_dropped}, text faults {_bv_text_faults}, frame faults {_bv_tick_faults}, frames without the actor table {_bv_snap_miss}")));
             ImGui.TextDisabled(esc(I($"battle body hide: rule {(m >= 0 && m < rule.Length ? rule[m] : "?")} | his keys {_bv_st[9]}, table {_bv_st[10]} keys (build {_bh_gen}, {Math.Max(_bh_owners - 1, 0)} other actors) | draws hidden by his keys last frame {_bv_st[11]} | body hide: BATTLE lines {_bv_st[12]} | at the last push: rule {_bh_mode}, hidden {_bh_hidden}, his keys {_bh_self_n}")));
         }
     }

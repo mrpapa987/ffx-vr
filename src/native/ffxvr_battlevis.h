@@ -170,26 +170,26 @@ inline bool same(const ActorState& x, const ActorState& y) { return memcmp(x.b, 
 /// not counted: its effect on the draw is not known).
 inline bool shown(const ActorState& s) { return s.b[0] != 0 && s.b[1] && s.b[2] && s.b[3] && s.b[4] && s.b[5] == 0 && (s.b[6] & (F_ALPHA0 | F_RELEASED | F_NOCHAR)) == 0; }
 
-enum { V_NONE = 0, V_FIRST, V_CHANGED, V_GONE };
+enum { VS_NONE = 0, VS_FIRST, VS_CHANGED, VS_GONE };   // (not V_*: oleauto.h has function-like macros of those names)
 struct VisTrack {
     bool have[k_actors]; ActorState st[k_actors];
     VisTrack() { reset(); }
     void reset() { for (int i = 0; i < k_actors; ++i) { have[i] = false; memset(st[i].b, 0, sizeof(st[i].b)); } }
     /// One actor, once a frame. baseline = the battle's first frame (states are taken, nothing is a change). *was gets the
-    /// state before (V_CHANGED, V_GONE).
+    /// state before (VS_CHANGED, VS_GONE).
     int step(int i, const ActorIn& a, bool baseline, ActorState* was) {
-        if (i < 0 || i >= k_actors) return V_NONE;
+        if (i < 0 || i >= k_actors) return VS_NONE;
         if (!a.live) {
-            if (!have[i]) return V_NONE;
+            if (!have[i]) return VS_NONE;
             have[i] = false; if (was) *was = st[i];
-            return baseline ? V_NONE : V_GONE;
+            return baseline ? VS_NONE : VS_GONE;
         }
         const ActorState s = state_of(a);
-        if (!have[i]) { have[i] = true; st[i] = s; return baseline ? V_NONE : V_FIRST; }
-        if (same(st[i], s)) return V_NONE;
+        if (!have[i]) { have[i] = true; st[i] = s; return baseline ? VS_NONE : VS_FIRST; }
+        if (same(st[i], s)) return VS_NONE;
         if (was) *was = st[i];
         st[i] = s;
-        return V_CHANGED;
+        return VS_CHANGED;
     }
 };
 
@@ -380,7 +380,8 @@ enum { M_OFF = 0,       // no push for this frame (not a first-person battle): n
        M_NOKEYS,        // no keys for the followed model: the distance rule meanwhile
        M_PROBE,         // keys built, none seen on a draw yet: the distance rule meanwhile
        M_IDENT };       // the identity rule
-enum { C_NONE = 0, C_SELF, C_OTHER, C_SHARED, C_UNREAD };
+enum { C_NONE = 0, C_SELF, C_OTHER, C_SHARED, C_UNREAD,
+       C_HIS };         // another actor's key, and every such actor is attached to the followed one (his weapon, something he holds)
 inline const char* mode_name(int m) {
     switch (m) {
         case M_SETTING: return "DISTANCE (fp_battle_hide 0)";
@@ -390,12 +391,14 @@ inline const char* mode_name(int m) {
         default:        return "off";
     }
 }
-/// A draw's class from its key. owners (may be null) gets the other owners of the key.
-inline int classify(const KeyTable& t, bool read, uint32_t ib, uint32_t off, uint64_t* owners) {
+/// A draw's class from its key. owners (may be null) gets the other owners of the key. want_others false: a key that is not
+/// his is not looked up among the other actors' (the whole table is not walked for a draw nobody asks about) and is C_NONE.
+inline int classify(const KeyTable& t, bool read, uint32_t ib, uint32_t off, bool want_others, uint64_t* owners) {
     if (owners) *owners = 0;
     if (!read) return C_UNREAD;
     const bool s = t.self(ib, off);
     if (s && !t.any_shared) return C_SELF;
+    if (!s && !want_others) return C_NONE;
     const uint64_t o = t.others(ib, off);
     if (owners) *owners = o;
     return s ? (o ? C_SHARED : C_SELF) : (o ? C_OTHER : C_NONE);
@@ -418,11 +421,21 @@ inline bool self_nearest(const float* w, const float* roots, int n_roots, uint64
     return true;
 }
 /// 1: hide it as the followed character's part; 0: it is not his; -1: the distance rule's answer stands.
-inline int verdict(int mode, int cls, bool nearest) {
-    if (mode != M_IDENT || cls == C_UNREAD) return -1;
-    if (cls == C_SELF) return 1;
+/// C_HIS (his weapon, something attached to him): the distance rule, exactly as before this rule existed (the weapon is drawn
+/// at the hand, outside the radius: shown; a draw of it inside the radius is hidden, as it always was).
+/// partial (another actor's chain did not read, or the table is full: a twin of his model may be missing from it): his keys
+/// hide only a draw that is also near; one that is not near is left to the distance rule (which shows it).
+inline int verdict(int mode, int cls, bool nearest, bool nearby = true, bool partial = false) {
+    if (mode != M_IDENT || cls == C_UNREAD || cls == C_HIS) return -1;
+    if (cls == C_SELF) return (partial && !nearby) ? -1 : 1;
     if (cls == C_SHARED) return nearest ? 1 : 0;
     return 0;
+}
+/// Are all the owners in the mask attached to the followed actor (flags bit 0, from managed)? An empty mask: no.
+inline bool all_his(uint64_t owners, const uint8_t* owner_flags, int n_owners) {
+    if (owners == 0 || owner_flags == nullptr) return false;
+    for (int k = 1; k < k_owners; ++k) if (((owners >> k) & 1ull) && (k >= n_owners || !(owner_flags[k] & 1))) return false;
+    return true;
 }
 
 struct HideStats {
@@ -431,16 +444,23 @@ struct HideStats {
     uint32_t seen_self = 0;     // draws that carried one of his keys (any mode that reads keys)
     uint32_t near_total = 0;    // draws the old distance rule matched ("near the camera")
     uint32_t near_self = 0, near_other = 0, near_none = 0, near_unread = 0;
+    uint32_t near_his = 0;      // near draws of an actor attached to him (his weapon): left to the distance rule
+    uint32_t od[k_owners] = {}; // draws by owner (0 his own, hidden or not; k another actor's), only while attribution is on
     uint32_t kept = 0;          // near draws the identity rule left visible (another actor's, or in no table)
     uint32_t tie_hidden = 0, tie_shown = 0;   // draws with a key he shares with another actor, by the nearest root
     uint32_t caster = 0;        // his own shadow's draws judged by his keys (the light-camera pass)
     void add(const HideStats& o) {
         frames += o.frames; hidden += o.hidden; seen_self += o.seen_self; near_total += o.near_total; near_self += o.near_self; near_other += o.near_other;
         near_none += o.near_none; near_unread += o.near_unread; kept += o.kept; tie_hidden += o.tie_hidden; tie_shown += o.tie_shown; caster += o.caster;
+        near_his += o.near_his;
+        for (int k = 0; k < k_owners; ++k) od[k] += o.od[k];
     }
 };
 struct Ident {
     int mode = M_OFF; bool proven = false; uint32_t proven_hash = 0;
+    bool lost = false;   // the last frame_end dropped the latch: his keys matched nothing while unknown draws sat on his root
+    bool partial = false, attrib = false;   // from the push: the table may miss an actor; count the draws per owner (the log is on)
+    const uint8_t* owner_flags = nullptr; int n_owners = 0;   // from the push: bit 0 = the owner is attached to the followed actor
     HideStats f;   // the frame being drawn
     /// The mode for the draws to come. live: managed pushed for this frame; wanted: fp_battle_hide 1.
     void decide(bool live, bool wanted, const KeyTable& t) {
@@ -455,14 +475,19 @@ struct Ident {
     int draw(const KeyTable& t, bool nearby, bool read, uint32_t ib, uint32_t off, const float* w, const float* roots, int n_roots, bool caster) {
         if (mode != M_PROBE && mode != M_IDENT) { if (nearby && !caster) f.near_total++; return -1; }
         uint64_t owners = 0;
-        const int cls = classify(t, read, ib, off, &owners);
+        int cls = classify(t, read, ib, off, nearby || (attrib && !caster), &owners);
+        if (cls == C_OTHER && all_his(owners, owner_flags, n_owners)) cls = C_HIS;
         const bool nearest = cls == C_SHARED ? self_nearest(w, roots, n_roots, owners) : true;
-        const int v = verdict(mode, cls, nearest);
+        const int v = verdict(mode, cls, nearest, nearby, partial);
         if (caster) { if (v == 1) f.caster++; return v; }
         if (cls == C_SELF || cls == C_SHARED) f.seen_self++;
+        if (attrib) {   // S3: who drew (his own count includes the draws this rule hides)
+            if (cls == C_SELF || cls == C_SHARED) f.od[0]++;
+            for (int k = 1; owners != 0 && k < k_owners; ++k) if ((owners >> k) & 1ull) f.od[k]++;
+        }
         if (nearby) {
             f.near_total++;
-            if (cls == C_SELF || cls == C_SHARED) f.near_self++; else if (cls == C_OTHER) f.near_other++; else if (cls == C_NONE) f.near_none++; else f.near_unread++;
+            if (cls == C_SELF || cls == C_SHARED) f.near_self++; else if (cls == C_OTHER) f.near_other++; else if (cls == C_HIS) f.near_his++; else if (cls == C_NONE) f.near_none++; else f.near_unread++;
             if (v == 0) f.kept++;
         }
         if (cls == C_SHARED && mode == M_IDENT) { if (v == 1) f.tie_hidden++; else f.tie_shown++; }
@@ -470,8 +495,13 @@ struct Ident {
         return v;
     }
     /// Present: the frame's counts are returned (and cleared); a frame in which a draw carried one of his keys proves them.
+    /// S1: in identity, a frame in which none of his keys was seen while draws of no actor's table sat on his root drops the
+    /// latch (lost: the caller asks for a rebuild at once): the distance rule is back for the next frame, so a table that
+    /// has gone stale (his buffers replaced under the same model handle) cannot leave his body in his face.
     HideStats frame_end(bool live, bool wanted, const KeyTable& t) {
-        if (live && wanted && t.nf > 0 && f.seen_self > 0) { proven = true; proven_hash = t.hash; }
+        lost = mode == M_IDENT && f.seen_self == 0 && f.near_none > 0;
+        if (lost) proven = false;
+        else if (live && wanted && t.nf > 0 && f.seen_self > 0) { proven = true; proven_hash = t.hash; }
         HideStats r = f; r.frames = 1; f = HideStats{};
         decide(live, wanted, t);
         return r;
@@ -480,18 +510,20 @@ struct Ident {
 
 /// Managed asks once a frame, before walking the model chains: rebuild the key table now? Yes on the first ask, on a new
 /// signature (the followed actor, any actor's model, the scene), after a gap in the asks (a menu, another view: buffers may
-/// have been freed and reused), and periodically: every k_retry frames while the followed model gave no keys, k_rebuild_partial
+/// have been freed and reused), at once after the rule lost its keys (lost()), and periodically: every k_retry frames while the followed model gave no keys, k_rebuild_partial
 /// while another actor's chain did not read whole, else k_rebuild.
 struct Rebuild {
-    uint32_t sig = 0, built = 0, last_ask = 0; bool any = false, have = false, complete = false;
+    uint32_t sig = 0, built = 0, last_ask = 0; bool any = false, have = false, complete = false, force = false;
     bool due(uint32_t s, uint32_t frame) {
         const bool gap = !any || frame - last_ask > 1u;
         last_ask = frame;
         const uint32_t every = !have ? k_retry : !complete ? k_rebuild_partial : k_rebuild;
-        const bool d = gap || s != sig || frame - built >= every;
-        if (d) { sig = s; built = frame; any = true; }
+        const bool d = gap || force || s != sig || frame - built >= every;
+        if (d) { sig = s; built = frame; any = true; force = false; }
         return d;
     }
+    /// S1: the identity rule lost its keys (Ident::lost): the next ask rebuilds, whatever the cadence.
+    void lost() { force = true; }
     /// What the build gave (from the push that follows it).
     void result(bool have_self, bool all_read) { have = have_self; complete = all_read; }
 };
@@ -503,14 +535,15 @@ struct HideLog {
     bool running = false; int run_lines = 0, session_lines = 0;
     int mode = -1, pick = -2; uint32_t hash = 0; bool shared = false;
     bool pending = false; uint32_t due = 0; const char* why = "";
-    HideStats acc; uint32_t max_hidden = 0;
+    HideStats acc; uint32_t max_hidden = 0, lost_n = 0;
     /// Once a frame at Present, after Ident::frame_end. live: managed pushed for the frame just drawn. Returns 1 when a line is
     /// due (the caller writes line() and calls wrote()), 2 for the run's last line; 0 none.
-    int step(bool live, bool log_on, int mode_now, int pick_now, const KeyTable& t, const HideStats& fs, uint32_t frame) {
+    int step(bool live, bool log_on, int mode_now, int pick_now, const KeyTable& t, const HideStats& fs, uint32_t frame, bool lost_now = false) {
+        if (lost_now) lost_n++;
         if (!live) {
             const bool was = running; running = false; pending = false;
             if (was && acc.frames > 0 && log_on && can()) { why = "the first-person battle frames ended"; return 2; }
-            acc = HideStats{}; max_hidden = 0; mode = -1; pick = -2; hash = 0;
+            acc = HideStats{}; max_hidden = 0; lost_n = 0; mode = -1; pick = -2; hash = 0;
             return 0;
         }
         if (!running) { running = true; run_lines = 0; acc = HideStats{}; max_hidden = 0; mode = mode_now; pick = pick_now; hash = t.hash; shared = t.any_shared; pending = true; due = frame + k_hl_delay; why = "a first-person battle"; }
@@ -524,20 +557,35 @@ struct HideLog {
         return 0;
     }
     bool can() const { return run_lines < k_hl_per_run && session_lines < k_hl_per_session; }
-    void wrote() { run_lines++; session_lines++; acc = HideStats{}; max_hidden = 0; if (!running) { mode = -1; pick = -2; hash = 0; } }
+    void wrote() { run_lines++; session_lines++; acc = HideStats{}; max_hidden = 0; lost_n = 0; if (!running) { mode = -1; pick = -2; hash = 0; } }
     /// The line (after step() returned 1 or 2). who = the followed actor's model name; mode_now = the rule in effect.
-    void line(Buf& b, int mode_now, const KeyTable& t, const char* who, uint32_t gen, int n_roots) const {
+    /// owner_slot (may be null) = each owner's actor-table slot, for the per-actor draw counts; partial = the push's flag 8.
+    void line(Buf& b, int mode_now, const KeyTable& t, const char* who, uint32_t gen, int n_roots, const uint8_t* owner_slot = nullptr, bool partial = false) const {
         const float fr = acc.frames > 0 ? static_cast<float>(acc.frames) : 1.f;
         b.add("body hide: BATTLE (%s): rule %s | following actor slot %d '%s' | his keys %d", why, mode_name(mode_now), pick, who != nullptr ? who : "?", t.nf);
         for (int i = 0; i < t.nf && i < 4; ++i) b.add("%s%08X+%u/%u", i ? " " : " (", t.e[i].ib, t.e[i].off, t.e[i].count);
         if (t.nf > 0) b.add("%s)", t.nf > 4 ? " ..." : "");
         b.add(", %d keys of %d other actors, build %u", t.n - t.nf, n_roots > 0 ? n_roots - 1 : 0, gen);
         b.add(" | the last %u frames: draws hidden by his keys %u (%.1f a frame, at most %u), draws carrying his keys %u", acc.frames, acc.hidden, acc.hidden / fr, max_hidden, acc.seen_self);
-        b.add(" | near the camera (the old distance rule's matches) %u (%.1f a frame): his own %u, another actor's %u, in no actor's table %u, index buffer not read %u; kept visible by the identity rule %u",
-              acc.near_total, acc.near_total / fr, acc.near_self, acc.near_other, acc.near_none, acc.near_unread, acc.kept);
+        b.add(" | near the camera (the old distance rule's matches) %u (%.1f a frame): his own %u, his weapon's or another model's attached to him %u (left to the distance rule, as before), another actor's %u, in no actor's table %u, index buffer not read %u; kept visible by the identity rule %u",
+              acc.near_total, acc.near_total / fr, acc.near_self, acc.near_his, acc.near_other, acc.near_none, acc.near_unread, acc.kept);
         if (acc.caster > 0) b.add(" | his shadow's draws hidden by his keys %u", acc.caster);
         if (t.any_shared) b.add(" | SAME MODEL as another live actor: a draw with a shared key is his when his root is the nearest: hidden %u, shown %u", acc.tie_hidden, acc.tie_shown);
         else b.add(" | same model as another live actor: no");
+        if (partial) b.add(" | the table is PARTIAL (another actor's chain did not read whole, or it is full): his keys hide only draws near the camera");
+        if (lost_n > 0) b.add(" | his keys were LOST %u times (none matched while draws of no actor's table sat on his spot: the distance rule again, and a rebuild at once)", lost_n);
+        if (mode_now == M_IDENT && acc.near_none > 0)
+            b.add(" | NOTE: %u draws on his spot with keys in no actor's table were left visible: if a part of your own body shows, his model has draws its chain does not list", acc.near_none);
+        bool any_od = false;
+        for (int k = 0; k < k_owners && !any_od; ++k) any_od = acc.od[k] != 0;
+        if (any_od) {   // S3: who drew, by the key table (a frame's average; his own count includes the hidden draws)
+            b.add(" | draws by actor (table slot: a frame):"); int shown_n = 0;
+            for (int k = 0; k < k_owners && shown_n < 16; ++k) {
+                if (acc.od[k] == 0) continue;
+                if (owner_slot != nullptr) b.add(" %u%s %.1f,", owner_slot[k], k == 0 ? " (his)" : "", acc.od[k] / fr); else b.add(" owner %d %.1f,", k, acc.od[k] / fr);
+                shown_n++;
+            }
+        }
         if (mode_now == M_PROBE && acc.frames >= k_hl_delay && acc.seen_self == 0 && acc.near_total > 0)
             b.add(" | NOTE: draws near the camera, none with his keys: this battle model's draws do not carry its chain's keys (the identity rule cannot work here; the distance rule stays)");
         if (run_lines + 1 >= k_hl_per_run) b.add(" (no more of these lines for this battle)");
@@ -586,7 +634,13 @@ inline const char* mat_name(int k) {
         default: return "?";
     }
 }
-constexpr uint32_t k_fx_s1 = 2, k_fx_s2 = 30;   // frames after the magic file loaded: the two samples
+// The fx: samples (S2): the first on the first frame the effect is on screen (the frame's product-only or no-image scene draws
+// rise k_fx_rise above the frame before the file loaded), or k_fx_s1_late frames after the load if they never do; the second
+// k_fx_gap frames after the first. Two samples of two lines per magic file, whatever happens.
+constexpr uint32_t k_fx_rise = 2, k_fx_s1_late = 30, k_fx_gap = 20;
+constexpr uint32_t k_nodraw = 30;   // S3: frames with no draw of an actor the game shows before the line
+/// S3: last frame's draws by actor-table slot, from the key table (first person only; the native glue fills it).
+struct Attrib { bool has[k_owners] = {}; uint32_t draws[k_owners] = {}; };
 
 struct Log {
     bool active = false; int battle = 0; uint32_t start_frame = 0, frame_now = 0;
@@ -599,7 +653,9 @@ struct Log {
     // the last command (who is acting)
     bool act_on = false; int act_seq = 0, act_actor = -1; uint16_t act_id = 0; uint32_t act_frame = 0; char act_name[k_cname] = {}; int act_vis = 0;
     // the magic file in play
-    bool fx_on = false; int32_t fx_id = -1; uint32_t fx_req_frame = 0, fx_load_frame = 0; int fx_samples = 0;
+    bool fx_on = false; int32_t fx_id = -1; uint32_t fx_req_frame = 0, fx_load_frame = 0, fx_s1_frame = 0; int fx_samples = 0;
+    float mats_prev[k_mats * 16] = {}, mats_s1[k_mats * 16] = {}; bool mats_prev_ok = false; uint32_t mats_prev_frame = 0;
+    uint32_t nd[k_actors] = {}; bool nd_said[k_actors] = {}; bool attrib_seen = false;   // S3: frames without a draw, the line written
     DrawCounts fx_base, fx_max, dc_prev;
     int32_t magic_prev = -1; uint32_t magic_req_frame = 0;
     char buf[4096];
@@ -617,15 +673,17 @@ struct Log {
         if (!act_on) { b.add(" | acting: nobody yet (no command seen this battle)"); return; }
         b.add(" | acting: #%d ", act_seq); actor_text(b, act_actor, names); b.add(" 0x%04X '%s' (%u frames ago)", act_id, act_name, frame_now - act_frame);
     }
-    /// The next frame() with matrices writes an fx: sample: the glue then fills Views.
-    bool wants_views() const { return active && fx_on && fx_samples < 2; }
+    /// The next frame() with matrices may write an fx: sample (a file about to be seen loaded, or loaded with a sample still to
+    /// come): the glue then fills Views. At most about 50 frames per magic file.
+    bool wants_views() const { return active && (!fx_on || fx_samples < 2); }
 
     void end_battle(LineFn fn, void* ctx, const char* why) {
         if (!active) return;
         if (fx_on) fx_end(fn, ctx, "the battle ended");
         Buf b(buf, static_cast<int>(sizeof(buf)));
-        b.add("vis: === battle %d ended (%s; frame %u, %u frames) | lines: cmd %d (hook %d, polled %d), vis %d, fx %d | not written (the budget): cmd %d, vis %d, fx %d",
-              battle, why, frame_now, frame_now - start_frame, lines_cmd, hooked, polled, lines_vis, lines_fx, b_cmd.skipped_battle, b_vis.skipped_battle, b_fx.skipped_battle);
+        b.add("vis: === battle %d ended (%s; frame %u, %u frames) | lines: cmd %d (hook %d, polled %d), vis %d, fx %d | not written (the budget): cmd %d, vis %d, fx %d | draw attribution: %s",
+              battle, why, frame_now, frame_now - start_frame, lines_cmd, hooked, polled, lines_vis, lines_fx, b_cmd.skipped_battle, b_vis.skipped_battle, b_fx.skipped_battle,
+              attrib_seen ? "on for some frames (first person)" : "never on (no first-person frame with a key table)");
         if (b_vis.skipped_battle > 0) {
             b.add(" | vis lines not written, by source:");
             for (int i = 0; i < k_src; ++i) {
@@ -678,7 +736,7 @@ struct Log {
     /// Once per Present while the log is on. n = 0 (or state 0): not in a battle. Returns the number of polled commands
     /// written to out (managed looks each up and sends it back through cmd()).
     int frame(const ActorIn* a, int n, const int32_t* g, int ng, const float* mats, const Views* vw, const DrawCounts& dc, uint32_t frame,
-              PolledReq* out, int out_cap, LineFn fn, void* ctx) {
+              PolledReq* out, int out_cap, LineFn fn, void* ctx, const Attrib* at = nullptr) {
         frame_now = frame;
         const bool in_battle = a != nullptr && n > 0 && g != nullptr && ng >= G_COUNT && g[G_STATE] != 0;
         if (!in_battle) { end_battle(fn, ctx, "the game left the battle, or the log was turned off"); dc_prev = dc; return 0; }
@@ -688,6 +746,8 @@ struct Log {
             active = true; baseline = true; battle++; start_frame = frame;
             b_cmd.battle_start(); b_vis.battle_start(); b_fx.battle_start(); vt.reset(); dd.reset();
             lines_cmd = lines_vis = lines_fx = polled = hooked = 0; act_on = false; fx_on = false; g_have = false; magic_prev = -1;
+            mats_prev_ok = false; attrib_seen = false;
+            for (int i = 0; i < k_actors; ++i) { nd[i] = 0; nd_said[i] = false; }
         }
         // (a record without a character keeps its name when it has one: a party member on the bench, an aeon not yet called)
         for (int i = 0; i < k_actors; ++i) { if (i < n && a[i].name[0]) copy_name(names[i], k_name, a[i].name); else if (baseline) names[i][0] = 0; }
@@ -698,19 +758,20 @@ struct Log {
         for (int i = 0; i < n; ++i) {
             ActorState was{};
             const int ch = vt.step(i, a[i], baseline, &was);
-            if (ch != V_NONE) {
+            if (ch != VS_NONE) {
                 const int tk = b_vis.take(i);
                 if (tk) {
                     Buf b(buf, static_cast<int>(sizeof(buf)));
                     b.add("vis: battle %d frame %u | ", battle, frame); actor_text(b, i, names);
-                    if (ch == V_GONE) { b.add(" | its record lost its character (freed, or left the battle); it was: "); state_text(b, was, nullptr, was.b[5]); }
-                    else if (ch == V_FIRST) { b.add(" (slot %u) | first seen: ", a[i].slot); state_text(b, state_of(a[i]), nullptr, a[i].hide); }
+                    if (ch == VS_GONE) { b.add(" | its record lost its character (freed, or left the battle); it was: "); state_text(b, was, nullptr, was.b[5]); }
+                    else if (ch == VS_FIRST) { b.add(" (slot %u) | first seen: ", a[i].slot); state_text(b, state_of(a[i]), nullptr, a[i].hide); }
                     else { b.add(" (slot %u) | ", a[i].slot); state_text(b, state_of(a[i]), &was, a[i].hide); }
-                    if (ch != V_GONE) b.add(" | now %s", shown(state_of(a[i])) ? "SHOWN" : "HIDDEN");
+                    if (ch != VS_GONE) b.add(" | now %s", shown(state_of(a[i])) ? "SHOWN" : "HIDDEN");
                     acting_text(b); b.add(" | command actor now %d", g[G_CMD_ACTOR]);
                     emit(fn, ctx, b, tk); lines_vis++; act_vis++;
                 }
             }
+            nodraw(i, a[i], at, g, fn, ctx);
             PolledReq pr{};
             if (dd.poll(i, a[i].live != 0, a[i].exe_count, a[i].cmd, a[i].targets, frame, (g[G_FLAGS] & GF_HOOK_BUSY) != 0, &pr) && out != nullptr && nout < out_cap) out[nout++] = pr;
         }
@@ -736,7 +797,7 @@ struct Log {
         const bool loaded = mid != -1 && mh != -1;
         if (fx_on && (!loaded || mid != fx_id)) fx_end(fn, ctx, !loaded ? "the game unloaded it" : "another magic id took its place");
         if (!fx_on && loaded) {
-            fx_on = true; fx_id = mid; fx_load_frame = frame; fx_req_frame = magic_req_frame; fx_samples = 0; fx_base = dc_prev; fx_max = DrawCounts{};
+            fx_on = true; fx_id = mid; fx_load_frame = frame; fx_req_frame = magic_req_frame; fx_samples = 0; fx_s1_frame = 0; fx_base = dc_prev; fx_max = DrawCounts{};
             const int tk = b_fx.take(0);
             if (tk) {
                 Buf b(buf, static_cast<int>(sizeof(buf)));
@@ -751,8 +812,16 @@ struct Log {
             if (dc.prod > fx_max.prod) fx_max.prod = dc.prod;
             if (dc.noimg > fx_max.noimg) fx_max.noimg = dc.noimg;
             const uint32_t age = frame - fx_load_frame;
-            if (mats != nullptr && ((fx_samples == 0 && age >= k_fx_s1) || (fx_samples == 1 && age >= k_fx_s2))) { fx_samples++; fx_sample(mats, vw, age, fn, ctx); }
+            const bool risen = dc.prod >= fx_base.prod + k_fx_rise || dc.noimg >= fx_base.noimg + k_fx_rise;   // the effect's own draws are on screen
+            if (mats != nullptr && fx_samples == 0 && (risen || age >= k_fx_s1_late)) {
+                fx_samples = 1; fx_s1_frame = frame;
+                fx_sample(mats, vw, age, dc, risen ? "the effect's draws appeared" : "its draws never rose: taken anyway", fn, ctx);
+                memcpy(mats_s1, mats, sizeof(mats_s1));
+            }
+            else if (mats != nullptr && fx_samples == 1 && frame - fx_s1_frame >= k_fx_gap) { fx_samples = 2; fx_sample(mats, vw, age, dc, "20 frames after the first", fn, ctx); }
         }
+        if (mats != nullptr) { memcpy(mats_prev, mats, sizeof(mats_prev)); mats_prev_ok = true; mats_prev_frame = frame; } else mats_prev_ok = false;
+        if (at != nullptr) attrib_seen = true;
         for (int k = 0; k < G_COUNT; ++k) g_prev[k] = g[k];
         g_have = true; dc_prev = dc;
         return nout;
@@ -773,7 +842,7 @@ struct Log {
     void start_lines(const ActorIn* a, int n, const int32_t* g, LineFn fn, void* ctx) {
         Buf b(buf, static_cast<int>(sizeof(buf)));
         int live = 0; for (int i = 0; i < n; ++i) if (a[i].live) live++;
-        b.add("vis: === battle %d start (frame %u, battle state 0x%02X, view %d, following chr %d) | hook %s | records: %s | %d actors with a character (v = visible, then the four votes main appear effect camera, h = chr hide):",
+        b.add("vis: === battle %d start (frame %u, battle state 0x%02X, view %d, following chr %d) | hook %s | records: %s | draw attribution (NO DRAWS lines): first person only | %d actors with a character (v = visible, then the four votes main appear effect camera, h = chr hide):",
               battle, frame_now, static_cast<unsigned>(g[G_STATE]) & 0xFFu, g[G_VIEW], g[G_FOLLOW],
               (g[G_FLAGS] & GF_HOOK) ? "in (cmd: lines from MsParseCommand)" : "NOT in (cmd: lines polled only)",
               (g[G_FLAGS] & GF_SHORT) ? "only 0..0x13 read (the monsters' block did not read)" : (g[G_FLAGS] & GF_MON_BAD) ? "0..0x1E read as one array, but the monsters' pointer is NOT the party's + 0x14 records (actors 0x14.. may be wrong: unconfirmed layout)"
@@ -802,11 +871,52 @@ struct Log {
         acting_text(b); b.add(" | command actor now %d", g[G_CMD_ACTOR]);
         emit(fn, ctx, b, tk); lines_vis++; act_vis++;
     }
-    void fx_sample(const float* mats, const Views* vw, uint32_t age, LineFn fn, void* ctx) {
+    /// S3: an actor the game shows whose model's keys no draw has carried for k_nodraw frames: one line; one more when its
+    /// draws are back. Only while the key table attributes draws (a first-person battle with the identity rule's table in use).
+    void nodraw(int i, const ActorIn& a, const Attrib* at, const int32_t* g, LineFn fn, void* ctx) {
+        const bool can = at != nullptr && a.live && a.slot < k_owners && at->has[a.slot] && shown(state_of(a));
+        if (!can) { nd[i] = 0; nd_said[i] = false; return; }
+        const uint32_t d = at->draws[a.slot];
+        if (d == 0) {
+            if (++nd[i] != k_nodraw || nd_said[i]) return;
+            nd_said[i] = true;
+        }
+        else {
+            const uint32_t gone = nd[i]; nd[i] = 0;
+            if (!nd_said[i]) return;
+            nd_said[i] = false;
+            const int tk = b_vis.take(i);
+            if (!tk) return;
+            Buf b(buf, static_cast<int>(sizeof(buf)));
+            b.add("vis: battle %d frame %u | ", battle, frame_now); actor_text(b, i, names);
+            b.add(" (slot %u) | DRAWS AGAIN: %u draws with its model's keys this frame, after %u frames with none", a.slot, d, gone);
+            acting_text(b); emit(fn, ctx, b, tk); lines_vis++;
+            return;
+        }
+        const int tk = b_vis.take(i);
+        if (!tk) return;
+        Buf b(buf, static_cast<int>(sizeof(buf)));
+        b.add("vis: battle %d frame %u | ", battle, frame_now); actor_text(b, i, names);
+        b.add(" (slot %u) | NO DRAWS: the game shows it (", a.slot); votes_text(b, a.vis, nullptr); b.add(" | chr hide "); hide_text(b, a.hide);
+        b.add("), but no draw has carried its model's keys for %u frames (first person; only draws with an eye image and a world position are counted: not the game's hide, so the draws are missing, culled, or have no eye image)", k_nodraw);
+        acting_text(b); b.add(" | command actor now %d", g[G_CMD_ACTOR]);
+        emit(fn, ctx, b, tk); lines_vis++; act_vis++;
+    }
+    void fx_sample(const float* mats, const Views* vw, uint32_t age, const DrawCounts& dc, const char* trigger, LineFn fn, void* ctx) {
         int tk = b_fx.take(0);
         if (tk) {
             Buf b(buf, static_cast<int>(sizeof(buf)));
-            b.add("fx: battle %d frame %u | magic 0x%04X sample %d (%u frames after it loaded): the game's effect matrices, 4 rows of 4 as stored (game space)", battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_samples, age);
+            b.add("fx: battle %d frame %u | magic 0x%04X sample %d (%u frames after it loaded; %s) | this frame's scene-pass draws: camera eye image %u, product-only %u, no eye image %u (before the load: %u, %u, %u)",
+                  battle, frame_now, static_cast<unsigned>(fx_id) & 0xFFFFu, fx_samples, age, trigger, dc.cam, dc.prod, dc.noimg, fx_base.cam, fx_base.prod, fx_base.noimg);
+            if (mats_prev_ok && mats_prev_frame + 1 == frame_now) b.add(" | g_pppCameraMatrix changed since the frame before: %s", memcmp(mats_prev, mats, 16 * sizeof(float)) != 0 ? "yes (the effect code is copying the camera)" : "NO (it may be stale: not written this frame)");
+            else b.add(" | g_pppCameraMatrix changed since the frame before: not known (no copy of the frame before)");
+            if (fx_samples == 2) {
+                b.add(" | changed since sample 1:");
+                bool any = false;
+                for (int k = 0; k < k_mats; ++k) if (memcmp(mats_s1 + 16 * k, mats + 16 * k, 16 * sizeof(float)) != 0) { b.add(" %s,", mat_name(k)); any = true; }
+                if (!any) b.add(" none of the six (they are not being written)");
+            }
+            b.add(" | the game's effect matrices, 4 rows of 4 as stored (game space)");
             for (int k = 0; k < k_mats; ++k) mat_text(b, mat_name(k), mats + 16 * k);
             emit(fn, ctx, b, tk); lines_fx++;
         }

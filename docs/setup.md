@@ -320,15 +320,16 @@ default layout and size), then comes back; if that would be more than 60 degrees
 **Your body in a first-person battle** (View > First person > "Your body in battle", `fp_battle_hide`): `1`, the
 default, hides only the draws of your own character's model (found by the model's index buffers, as on the field), so
 an aeon or a party member who comes close is never hidden with you; while the model cannot be read yet, or until one of
-its draws has been seen, the distance rule is used. `0` is the old rule: every character draw at the eyes' anchor is
+its draws has been seen, the distance rule is used (your weapon is treated as before either way). `0` is the old rule: every character draw at the eyes' anchor is
 hidden. Nothing is hidden in the diorama or in third person either way. During a summon the eyes are the summoner's, so
 the aeon is always another character.
 
 **The battle research log** (Developer > Inspect > "Battle research log", `diag_battle`, default 0): in battles,
 `ffxvr_diag.log` gets a `cmd:` line per executed command (who, the command's id and name, its kind, its targets; a swap
 and a summon too, and a line when the field roster changes), a `vis:` line for every change of a character's visibility
-(the game's visible flag and its four votes, the character's hide byte, with who is acting), `fx:` lines per spell effect
-(the magic id, the game's effect matrices beside the eyes' views, draw counts) and, in a first-person battle, `body
+(the game's visible flag and its four votes, the character's hide byte, with who is acting; in a first-person battle also
+a `NO DRAWS` line for a character the game shows but nothing draws), `fx:` lines per spell effect
+(the magic id, the game's effect matrices beside the eyes' views once the effect's draws are on screen, draw counts) and, in a first-person battle, `body
 hide: BATTLE` lines (the rule in use, the keys, what matched). It reads only. While it is on, one detour sits on the
 game's command parser (it always runs the game's own function); it is inserted the first frame the key is on and is
 never installed by developer mode alone or by `tools\set-logging.ps1 -Profile Verbose` (which leaves `diag_battle` as it
