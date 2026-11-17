@@ -885,6 +885,17 @@ struct Log {
     }
     /// Build 2: true once per request: the glue arms the automatic frame census (ffxvr_frame_auto.log).
     bool take_census() { const bool r = census_req; census_req = false; return r; }
+    /// Branch late3d (ABI 70; ffxvr_late3d.h): a late 3D layer's line as an fx: line of the logged battle. The glue passes
+    /// the magic id's text and the line's body (the render thread, once a frame before frame()).
+    void late3d(const char* magic, const char* what, LineFn fn, void* ctx) {
+        if (!active) return;
+        const int l3_tk = b_fx.take(0);
+        if (!l3_tk) return;
+        Buf b(buf, static_cast<int>(sizeof(buf)));
+        b.add("fx: battle %d frame %u | %s | %s", battle, frame_now, magic, what);
+        acting_text(b);
+        emit(fn, ctx, b, l3_tk); lines_fx++;
+    }
 
     /// One executed command (from the detour, or the poll's request answered by managed).
     void cmd(const CmdEv& e, uint32_t frame, LineFn fn, void* ctx) {

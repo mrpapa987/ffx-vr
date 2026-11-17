@@ -7192,7 +7192,9 @@ matrices it prints may be the substituted ones (they are read on the render thre
 
 ### Holy's draws with no eye image
 
-Not fixed in this round; what the research says and what the next recording will show.
+Not fixed in this round; what the research says and what the next recording will show. (The recording of 17 Nov 2026
+answered it, and the reading below was wrong: those draws are the battle HUD, counted as scene draws because the mod's UI
+pass had already closed. See "Late 3D layers: Holy" at the end of these notes.)
 - A draw has no eye image when its vertex-shader constant buffer was not written through an upload the mod recognises as
   a camera or a product: the mod then draws it with the same bytes in both eyes, i.e. from the game's camera, at the wrong
   place and with no depth between the eyes.
@@ -7338,3 +7340,136 @@ is on; the end line tells "the battle research log was off" from "refused"; the 
 the fallback: section 2, "Distance"). **N-R2-2** (ABI 69 kept although two exports changed after the first 69): nothing
 to change; no build with the first 69 was ever made on the owner's PC (nothing of this branch has been compiled), so no
 stale `ffxvr_native.dll` with that number exists.
+
+## Late 3D layers: Holy's target is not the UI pass (branch `late3d`, 17 Nov 2026; ABI 70)
+
+The owner's report after build 2, with "Aim spell effects at your eyes" ticked: "we still get the squished/flatted enemy
+at a weird angle and we really don't see the spell effects". His recording (the battle research log on, two casts of Holy,
+magic 0x0092) has two frame censuses of the spell's second phase and two of ordinary battle frames.
+
+### The diagnosis
+
+It is not a camera problem. The mod knows the game's 2D UI pass by its frame structure: a resolve of the scene target,
+a depth-only clear on it, draws, a resolve. In Holy's second phase (about 220 frames a cast) the game does exactly that
+for 3D, after its post-processing:
+
+| In the frame | What the census shows |
+|---|---|
+| the main scene pass | 85 draws, 84 of them the map, **no skinned draw at all** (an ordinary frame has 63): everyone is faded out |
+| the glow chain | as in every frame |
+| **a depth-only clear on the scene target** | the mod opened its UI pass here (its adaptive-panel depth read is the next line) |
+| **3 (4 in the second cast) skinned draws** | 6992-byte buffers with the scene camera, the same shaders, index counts and buffer as that enemy's ordinary draws in the frame before the spell: the spell's target, alone |
+| a resolve | the mod closed its UI pass: "3 UI draws" |
+| 39 effect draws | product-only buffers: they have eye images and were drawn in stereo into the scene target |
+| the game's second chain | |
+| a second depth-only clear | the real UI opener: ignored, the pass was already done |
+| 69 draws | 224 and 240-byte buffers, the HUD's textures in the HUD's order: the battle HUD, counted as scene draws with no eye image |
+
+So for the whole phase: the eye images were the copies taken at the first clear (the map only); the target's draws were
+re-issued into the UI texture, once, with eye 1's head-pose view and the headset's asymmetric projection, into a 16:9
+texture shown on the UI panel (squished, flat, the same in both eyes, off-centre); and everything drawn after the pass
+closed (the effects, the HUD) went into targets the headset was no longer given. The 10 s `ui:` line agrees: `depth clears
+on the scene target` 1.3 and 1.1 a frame in those windows, `ui draws last` 3 and 4 instead of about 200. The 69 to 202
+"no eye image" draws build 2's log found are the HUD (202 is the HUD's own count with the command menu open), a symptom,
+not Holy's geometry. "Aim spell effects at your eyes" worked as built and showed nothing because none of that phase's
+draws reached the headset.
+
+How the game does it (ffx-rust's static reading, not seen by us at run time for Holy): effects queue "draw events" among
+their sprites (`PhyreScene_processVFXDrawEvent` 0x666E40; kind 5 "draw a character", kind 0 "characters with the event
+camera"), each ending with the scene's resolve; `graphicVFXAddDrawCharacterEvent` 0x644CA0 queues them and 16 spell
+overlays call it. Other spells, overdrives and aeon attacks that draw a character this way failed the same way.
+
+### The rule (`ffxvr_late3d.h`, `l3d::verdict`; in `ffxvr_on_draw` right before the UI classification)
+
+While the UI pass is open, is not the Blitzball early one and has taken no draw yet, a draw into the scene target whose
+slot-0 constant buffer has **an eye image of a real scene camera** (kind 1 with a view block: the override found a view,
+its inverse and a perspective projection in it) means the depth clear was not the UI's. With `late_3d_layer` 1 and a
+battle running, the pass's state goes back to idle and nothing else is done: the draw, and the ones after it, go the
+normal stereo way. What follows was already there:
+
+- the game's next resolve of the scene target is the new base (`ffxvr_on_resolve`'s last branch: `UI_RESOLVED`, the
+  resolve destination kept), so the eye images now include the target and, after the effects' resolve, the effects;
+- the HUD's own depth clear opens the pass again (`ffxvr_on_clear_twin`): `ui_pass_begin` copies the eye images again and
+  clears the UI texture again;
+- idle, not resolved: if no resolve follows before the next depth clear the pass does not open, and the frame is shown
+  through the path for frames without a UI pass, with everything in it. Nothing can be lost.
+
+What was checked for a pass that opens twice in a frame (none needed a change):
+
+- the adaptive panel's depth read (`uid_depth_pass`) runs once a frame, by its own guard: it keeps the first reading, the
+  scene's depth before the game's first clear (the second opener would find only the late layer's depth);
+- `ui_pass_begin` twice costs one more pair of full-size copies and a clear in such a frame; the first copy is replaced;
+- the game's depth clear was already mirrored onto eye 2's depth twin, and every resolve onto the resolve twin, so the
+  late draws' eye-2 pass has the same targets as any scene draw;
+- the hands are drawn once a frame at the first scene resolve; the cursor, damage-number and Bushido-target layers are
+  drawn into the eye images at Present and key off "the last frame had a UI pass", which stays true (the HUD's pass);
+  the F8 window and the laser pointer use the ImGui layer, which has nothing to do with this pass;
+- the per-frame counters (`ui draws last`, the scene draw index, the battle log's draw counts) now count the HUD as the
+  UI and the target as scene draws; build 2's "no eye image" census trigger stays and no longer fires for Holy.
+
+**Why a real UI pass can never match.** A camera needs 368 bytes in the buffer (a view at +48 or +64, its inverse 256
+bytes on, a projection); the HUD's buffers are 224 and 240 bytes. In the recording the HUD's draws have no eye image
+of any kind: all 69 of them in both censused frames, and the log's "no eye image" peak of the first cast, 202, is the
+HUD's own draw count with the command menu open (`ui draws last 202`); before the spell that count is 0. The 2D
+layers' dummy camera (kind 1 without a view block) is excluded by name. Outside a battle (the field, menus, the sphere
+grid, cutscene subtitles, the world map, Blitzball) the rule changes nothing whatever a pass's first draw is: it counts.
+Frames that go to a screen in the headset (FMVs, the main menu, the save screen, the big screen) never open the pass.
+`late3d_test` runs 4000 random frame scripts through the rule's lines and through the same lines of the commit before
+it: with the setting 0, outside a battle, and in a battle whenever the rule does not fire, the results are identical.
+
+### Setting, export, log
+
+- `late_3d_layer` (1): F8 > Battle > Characters and effects > **Characters a spell draws by itself:** "in 3D" (1) / "on
+  the menu panel, as before" (0). Not a Developer key.
+- A third value, "show that phase on the mod's screen through the game's camera", is **not built**. On a screen frame
+  the override is suspended, so no eye image exists and the rule cannot see the layer: it would need its own signal (a
+  second depth clear on the scene target in a battle), a new reason in the screen-mode chain, a hold and a release with
+  hysteresis, and two view changes per cast. Not small enough to write uncompiled; to be built only if a spell looks
+  poor in place.
+- ABI 70: `ffxvr_late3d_set(mode, battle, magic)`, once a frame from `battle_vis2.cs` (`bv2_tick`): the setting, the
+  battle state, the game's magic file id (read only in a battle, for the lines). It writes the line the frame just drawn
+  left and asks for its frame census; returns the session's frames with a late layer. No export of 69 changed.
+- The `ui:` line (every 10 s, `diag_verbose`) ends with `late 3D layers (late_3d_layer 1, in a battle): N frames, N
+  layers, N draws left in the 3D view; the same shape not acted on: N outside a battle, N with the setting off; UI passes
+  whose first draw had another eye image N; scene-camera draws later in a UI pass N; this session ...`.
+- One line per magic id per battle: an `fx:` line while the battle research log logs the battle (`fx: battle 2 frame
+  10812 | magic 0x0092 | late 3D layer at frame 10811: ... (a 6992 B buffer, 5226 indices): left in the 3D view
+  (late_3d_layer 1) ...`), else a `late3d:` line. With the setting 0 the line says `NOT acted on`. Outside a battle: one
+  `late3d:` line a session.
+- A frame census (`ffxvr_frame_auto.log`) for the session's first late layer, and one for the first match outside a
+  battle; the census has a `LATE 3D LAYER from frame draw N` line where the layer starts.
+
+### Not confirmed in the game
+
+1. That the target's buffer has a scene camera's eye image at those draws. Not logged directly (the census names the image
+   kind only for scene draws, and these were UI draws): inferred from the same buffer, shader and index counts being
+   "camera" draws in the ordinary frame, and from the bytes the census dumped (a view, a perspective projection). If it
+   has none, nothing changes and the `ui:` line shows no late layer.
+2. How Holy looks in place: the target in stereo where it stands, drawn over the post-processed picture as in the flat
+   game, the effects around it. The game's camera for that phase is a fixed point far behind the target; the player's
+   eyes are elsewhere, so the sprites may be seen from behind or the side ("Aim spell effects at your eyes" may matter
+   here; it stays off by default).
+3. That the HUD comes back on the panel in that phase (it follows from the code path; the old result was no HUD).
+4. Which other spells, overdrives and aeon attacks have a late layer, and whether any opens with an effect draw instead
+   of a character (the rule does not act then; `UI passes whose first draw had another eye image` counts them).
+5. A late layer that draws the followed character in first person with "VR hands" on: his head parts are told from the
+   rest by their index in the main pass, so a second drawing of him is not head-hidden (before, it landed on the panel).
+6. The late layer is drawn after the game's depth clear, so it draws over the VR hands where they overlap, as it draws
+   over everything in the flat game.
+7. The game's mechanism (draw events) is ffx-rust's static reading; the fix does not depend on which path queues the draw.
+
+### Tests (scratch `bvis_chk`, `run_all.sh <repo>`; builds 1 and 2's suites still pass)
+
+- `late3d_test`: the UI-pass state machine's own lines of `ffxvr_native.cpp`, verbatim (the rule and the classification in
+  `ffxvr_on_draw`, the scene resolve, the opening clear, `ui_pass_open`, the Present reset, the frame end, the export),
+  against a model of what the scene target, its twin, the resolve, the eye-image copies and the UI layer hold. An ordinary
+  battle frame; the census's Holy frame (the target and 39 effects in both eyes, in the game's order, 69 HUD draws on the
+  panel, one depth reading); the setting 0 and "no battle" reproduce the census's result (3 UI draws, the eyes frozen);
+  two late layers; no HUD after the layer; the HUD's clear right after the layer; a layer opening with an effect or the
+  dummy camera; a camera draw into another target; the Kilika resolve; the Blitzball early pass; no UI split; a
+  220-frame cast (lines, census, the `ui:` counts); the old glue's 4000 scripts.
+  8449 checks.
+- `check.py` (770 scans in all): ABI 70 on both sides and in both histories, the export defined / bound / unbound with one
+  type, the setting in the default, the parser, the ini text, the menu and the docs, the rule's place in `ffxvr_on_draw`
+  and its one action, no value 2, and `ffxvr_native.cpp` without late3d's lines is the file of the commit before, byte
+  for byte. `mutants.py`: 442 mutants (77 of them late3d's rule, tracker, glue and managed lines), all caught.

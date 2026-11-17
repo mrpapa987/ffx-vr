@@ -20,6 +20,11 @@ namespace FFXVR;
 //    effect matrices are substituted around each run of an effect part (pppRunPart) so the sprites are built facing the
 //    head, and put back right after (ffxvr_fxface.h has the rule and why nothing moves). The detour is inserted the first
 //    frame the setting is on in such a battle; with the setting off it only calls the game's function.
+// 3. Late 3D layers (branch late3d, ABI 70; F8 > Battle > "Characters a spell draws by itself", ini late_3d_layer, default 1 =
+//    in 3D; design-notes "Late 3D layers: Holy"; the rule is native, ffxvr_late3d.h, unit-tested). In its second phase the
+//    spell Holy draws its target alone after the game's post-processing, behind a depth-only clear: the frame structure the
+//    mod knows the 2D UI pass by. Native tells the two apart at the pass's first draw; this file only pushes the setting,
+//    the battle state and the magic file's id (for the log lines) once a frame. No game hook, nothing written to the game.
 //
 // Game facts (FhUtil offsets = VA - 0x400000; ffx-rust's symbols/ffx.sym, docs/formats/battle.md and vfx.md, static research of
 // the same FFX.exe, and Fahrenheit's names; facts only). Not seen in the running game by us unless said:
@@ -42,6 +47,9 @@ public sealed unsafe partial class FFXVRModule {
 
     private int  _battle_cam_hide;        // ini battle_cam_hide: 0 (default) the battle camera's hides are skipped in VR battles, 1 the game's behaviour
     private bool _fx_face_eyes;           // ini fx_face_eyes (default 0): effect sprites aimed at the eyes
+    private int  _late_3d_layer = 1;      // ini late_3d_layer: 1 (default) a character a spell draws by itself stays in the 3D view, 0 the old behaviour (it lands on the UI panel)
+    private delegate* unmanaged[Cdecl]<int, int, int, int> _fn_late3d_set;                                           // ABI 70
+    private int _l3d_frames, _l3d_faults; // the frames with a late 3D layer this session (native's answer); failed reads of the magic id
     private delegate* unmanaged[Cdecl]<int, int, int, int, int, int*, int, int> _fn_bch_frame;                       // ABI 69
     private delegate* unmanaged[Cdecl]<uint, uint, uint, uint, uint, int> _fn_bch_decide;                            // ABI 69
     private delegate* unmanaged[Cdecl]<void> _fn_fxf_camcopy;                                                        // ABI 69
@@ -84,10 +92,11 @@ public sealed unsafe partial class FFXVRModule {
         switch (k) {
             case "battle_cam_hide": pi(k, v, ref _battle_cam_hide, 0, 1); return true;
             case "fx_face_eyes":    pb(k, v, ref _fx_face_eyes); return true;
+            case "late_3d_layer":   pi(k, v, ref _late_3d_layer, 0, 1); return true;
             default: return false;
         }
     }
-    private string bv2_ini_text() => $"battle_cam_hide={_battle_cam_hide.ToString(CI)}\nfx_face_eyes={(_fx_face_eyes ? 1 : 0)}\n";
+    private string bv2_ini_text() => $"battle_cam_hide={_battle_cam_hide.ToString(CI)}\nfx_face_eyes={(_fx_face_eyes ? 1 : 0)}\nlate_3d_layer={_late_3d_layer.ToString(CI)}\n";
     private void bv2_bind(Func<string, nint> req) {
         _fn_bch_frame = (delegate* unmanaged[Cdecl]<int, int, int, int, int, int*, int, int>)req("ffxvr_bch_frame");
         _fn_bch_decide = (delegate* unmanaged[Cdecl]<uint, uint, uint, uint, uint, int>)req("ffxvr_bch_decide");
@@ -95,13 +104,21 @@ public sealed unsafe partial class FFXVRModule {
         _fn_fxf_frame = (delegate* unmanaged[Cdecl]<int, int, int*, int, int>)req("ffxvr_fxf_frame");
         _fn_fxf_begin = (delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, int>)req("ffxvr_fxf_begin");
         _fn_fxf_end = (delegate* unmanaged[Cdecl]<float*, float*, float*, float*, float*, float*, float*, void>)req("ffxvr_fxf_end");
+        _fn_late3d_set = (delegate* unmanaged[Cdecl]<int, int, int, int>)req("ffxvr_late3d_set");
     }
-    private void bv2_unbind() { _fn_bch_frame = null; _fn_bch_decide = null; _fn_fxf_frame = null; _fn_fxf_begin = null; _fn_fxf_end = null; _fn_fxf_camcopy = null; }
+    private void bv2_unbind() { _fn_bch_frame = null; _fn_bch_decide = null; _fn_fxf_frame = null; _fn_fxf_begin = null; _fn_fxf_end = null; _fn_fxf_camcopy = null; _fn_late3d_set = null; }
 
     /// From push_all, every frame, before bv_tick (render thread; after push_player: the battle state and the view are this
     /// frame's). The battle camera hide's state to native (which hands the skipped hides to the battle research log), its
     /// detour the first frame it is needed; fx_face_eyes' head pose to native, its detour the first frame it is needed.
     private void bv2_tick() {
+        // late 3D layers (ABI 70): the setting, the battle state and the magic file's id in play (read only in a battle; for
+        // the log lines only) to native, every frame
+        if (_fn_late3d_set != null) {
+            int magic = -1;
+            if (_btl_was) { try { magic = FhUtil.get_at<int>(k_bv_magic_id); } catch { _l3d_faults++; magic = -1; } }
+            _l3d_frames = _fn_late3d_set(_late_3d_layer, _btl_was ? 1 : 0, magic);
+        }
         if (_fn_bch_frame == null || _fn_fxf_frame == null) return;
         int* st = stackalloc int[10];
         for (int i = 0; i < 10; i++) st[i] = 0;
@@ -273,6 +290,7 @@ public sealed unsafe partial class FFXVRModule {
 
     private const string k_bch_tip = "The game's battle camera hides a character for about a second during some actions (the one its camera would sit in or pass through: the target of Armor Break, the party member beside an attacker). In the headset your eyes are not that camera. Keep them shown: while a battle is drawn in VR in first person or the diorama (not on a screen in the headset), those hides are skipped; everything else the game hides (a spell's fade, a defeated enemy, party members off the field) stays the game's. Hide them: the game's own behaviour.";
     private const string k_fxf_tip = "The game builds spell sprites (glows, sparks, beams) facing its own battle camera, which in the headset looks somewhere else, so they can look flat or squashed. On: in a battle drawn in VR in first person or the diorama they are built facing your head instead (level, the same for both eyes). Experimental: if an effect looks wrong or sits in the wrong place with it on, untick it and send ffxvr_diag.log. With the battle research log (Developer > Inspect) also on, one more game hook counts how often an effect takes the game's camera by a route this box does not cover; without the log that hook is not installed.";
+    private const string k_l3d_tip = "Holy and some other spells draw one character a second time, by itself, after the rest of the picture is finished, and then draw their effects over it. In 3D: that character and those effects stay in the 3D view, and the battle menus stay on their panel. On the menu panel, as before: the old behaviour, where that character lands flat on the menu panel and the spell's effects and the battle menus are not shown for that part of the spell. If a spell looks wrong with \"in 3D\", pick the other one and send ffxvr_diag.log.";
     /// F8 > Battle.
     private void bv2_ui() {
         ImGui.SeparatorText("Characters and effects");
@@ -280,6 +298,9 @@ public sealed unsafe partial class FFXVRModule {
         ui_radio("battle_cam_hide", "keep them shown##bch", ref _battle_cam_hide, 0, UiTag.None, k_bch_tip); ImGui.SameLine();
         ui_radio("battle_cam_hide", "hide them, as the game does##bch", ref _battle_cam_hide, 1, UiTag.None, k_bch_tip);
         if (_battle_cam_hide == 0 && _bch_hook > 1) { ImGui.SameLine(); ImGui.TextDisabled("(no effect: see Developer > Inspect)"); }
+        ImGui.Text("Characters a spell draws by itself:"); ImGui.SameLine();
+        ui_radio("late_3d_layer", "in 3D##l3d", ref _late_3d_layer, 1, UiTag.None, k_l3d_tip); ImGui.SameLine();
+        ui_radio("late_3d_layer", "on the menu panel, as before##l3d", ref _late_3d_layer, 0, UiTag.None, k_l3d_tip);
         ui_check("fx_face_eyes", "Aim spell effects at your eyes##fxf", ref _fx_face_eyes, UiTag.Experimental, k_fxf_tip);
         if (_fx_face_eyes && _fxf_hook > 1) { ImGui.SameLine(); ImGui.TextDisabled("(no effect: see Developer > Inspect)"); }
     }
@@ -288,6 +309,7 @@ public sealed unsafe partial class FFXVRModule {
     private void bv2_dev_ui() {
         int s = _bch_st[0];
         ImGui.TextDisabled(esc(I($"battle camera hide: {(s >= 0 && s < k_bch_state.Length ? k_bch_state[s] : "?")} | hides skipped this session {_bch_st[1]}, camera hides asked {_bch_st[2]}, events lost {_bch_st[3]}, faults {_bch_faults} | msSetChrVisibleReq detour: {_bch_status}")));
+        ImGui.TextDisabled(esc(I($"late 3D layers: late_3d_layer {_late_3d_layer} | frames with one this session {_l3d_frames} | magic id reads failed {_l3d_faults} | the counts per 10 s are in the ui: line of ffxvr_diag.log")));
         ImGui.TextDisabled(esc(I($"fx face eyes: {(_fx_face_eyes ? (_fxf_st[0] != 0 ? "on, a head pose is published" : "on, no head pose now (not a VR battle in first person or the diorama, or the headset shows a screen)") : "off")} | part runs seen {_fxf_st[1]}, re-aimed {_fxf_st[2]}, not: no pose {_fxf_st[3]}, the view's copy differs {_fxf_st[4]}, a matrix did not invert {_fxf_st[5]}, no basis {_fxf_st[6]}, nested {_fxf_st[7]} | MsCopyCameraMatrix calls inside re-aimed runs {_fxf_st[9]} | frame censuses asked {_fxf_st[8]} | detour calls {_fxf_calls}, faults {_fxf_faults} | pppRunPart detour: {_fxf_status} | MsCopyCameraMatrix counting detour: {_fxcc_status}")));
     }
 }

@@ -347,6 +347,15 @@ your own body is hidden by the mod as before. `1`, "hide them, as the game does"
 seat view and third person always get). With `0` one detour is inserted on the game's visibility setter the first time a
 battle is drawn that way; `ffxvr_diag.log` gets a `vis:` line per skipped hide while the battle research log is on.
 
+**Characters a spell draws by itself** (Battle > Characters and effects, `late_3d_layer`, default 1): Holy, and
+probably other spells, overdrives and aeon attacks, draw one character a second time, alone, after the rest of the
+picture is finished, and then draw their effects over it. `1`, "in 3D": that character and those effects stay in the 3D
+view and the battle menus stay on their panel. `0`, "on the menu panel, as before": the old behaviour, where the
+character lands flat on the menu panel and the spell's effects and the battle menus are not shown for that part of the
+spell; pick it if a spell looks wrong with "in 3D", and send `ffxvr_diag.log`. It acts only in battles. The log has one
+`late3d:` line per spell per battle (an `fx:` line with the battle research log on), counts in the 10 s `ui:` line
+(developer mode), and the session's first such frame writes one frame census to `ffxvr_frame_auto.log`.
+
 **Aim spell effects at your eyes** (Battle > Characters and effects, `fx_face_eyes`, default 0, experimental): the game
 builds its effect sprites (glows, sparks, beams) facing its own battle camera, which in the headset usually looks
 somewhere else, so they can look flat or squashed. Ticked: in a battle drawn in the headset in first person or the
@@ -356,8 +365,8 @@ box unticked and ticked. If an effect looks wrong or sits in the wrong place wit
 re-aimed, and whether the effect took the game's camera by a route the box does not cover: such an effect can sit in
 the wrong place; that count needs one more hook, on the game's camera-copy function, which is installed only while both
 this box and the battle research log are on, and then stays until the game closes: normal play with the box ticked does
-not carry it). With the battle research log on, the first effect that has scene draws without an eye image (Holy) also writes
-one frame census to `ffxvr_frame_auto.log`.
+not carry it). With the battle research log on, the first effect that has scene draws without an eye image also writes
+one frame census to `ffxvr_frame_auto.log` (Holy did, before `late_3d_layer`: those draws were the battle menus).
 
 **Developer mode is `diag_verbose`.** Ticking **Developer** shows the
 Developer tab at once and turns on the verbose log: the periodic lines in
