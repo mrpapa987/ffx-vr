@@ -3,7 +3,9 @@
 #   -Profile Release   every diagnostic key off: what a fresh install has (a small, per-session ffxvr_diag.log of
 #                      events and errors only, capped at 4 MB; no periodic lines, no dumps, no diagnostic hooks)
 #   -Profile Verbose   more logging for a bug report, nothing else: diag_verbose (the periodic summaries, log cap
-#                      64 MB) and diag_load_lines; no extra hooks, patches or samplers (other keys left as they are)
+#                      64 MB) and diag_load_lines; no extra hooks, patches or samplers (other keys left as they are:
+#                      diag_battle, whose log puts a detour on the game's command parser, is never turned on here; in a
+#                      Cloister of Trials the read-only sphere research log runs while any diagnostic is on)
 #   -Profile Dev       the developer's set on: diag_verbose, diag_build7, diag_load, diag_load_lines,
 #                      diag_cluster_bytes, diag_va_log, diag_transition, diag_load_prof=2 (diag_actors, diag_sphere, diag_weapon and diag_battle are left as they are).
 #                      These add game hooks, an ntdll patch and a loader sampler: for the developer, not for players
@@ -57,8 +59,9 @@ if (-not (Test-Path -LiteralPath $ini)) {
     }
     $dir = Split-Path -Parent $ini
     if (-not (Test-Path -LiteralPath $dir)) { Write-Host "  The mod folder $dir does not exist: install the mod first."; exit 1 }
-    # Every diagnostic key (the profile's value, else Release's): with ini_rev that is 10 keys, so the mod's truncation check
-    # (fewer than 10 keys next to an ffxvr.ini.bak) does not flag the file.
+    # Every diagnostic key (the profile's value, else Release's): with ini_rev that is 13 keys, so the mod's truncation check
+    # (fewer than 10 keys next to an ffxvr.ini.bak) does not flag the file. Every other key is absent, so the mod uses its
+    # defaults for them (a fresh install's: VR hands on, for one).
     $lines = @('# FFX VR settings. Edited by the overlay; hand edits are fine.', 'ini_rev=2')
     foreach ($k in $FfxvrDiagKeys.Keys) {
         $v = if ($want.Contains($k)) { $want[$k] } else { $FfxvrDiagKeys[$k]['Release'] }

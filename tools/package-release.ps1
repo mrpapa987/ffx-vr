@@ -4,8 +4,10 @@
 #
 #   dist\ffx-vr-<label>.zip
 #     ffx-vr-<label>\
-#       README.md              packaging\README-zip.md with the version filled in
+#       README.md              packaging\README-zip.md with the version filled in (its image links ../docs/img/ -> docs/img/)
+#       TESTING.md             docs\tester-checklist.md (its image links img/ -> docs/img/): what a tester tries and sends back
 #       LICENSE, THIRD-PARTY-NOTICES
+#       docs\img\              controls.png, controls-chords.png (the controller diagrams the README and TESTING.md show)
 #       mod\ffxvr\             ffxvr.dll (+ deps/runtimeconfig/manifest json), ffxvr_native.dll,
 #                              openxr_loader.dll, hands\generic-glove\ and hands\generic\ (our generic hand packs, MIT:
 #                              an allowlist, tools\paths.ps1 $FfxvrHandPacks; a guard below fails on anything else there)
@@ -33,7 +35,7 @@
 # -Version equal to the csproj <Version> (e.g. -Version 0.1.0-alpha.1), so the zip is named like the tag v0.1.0-alpha.1.
 #
 # Run with:
-#   powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 [-Version 0.1.0-alpha1] [-SkipBuild] [-OutDir <folder>]
+#   powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 [-Version 0.1.0-alpha.1] [-SkipBuild] [-OutDir <folder>]
 #              [-ArtDir <folder with the 8 PNGs>] [-NoArt]
 
 param(
@@ -216,7 +218,23 @@ $readme = [IO.File]::ReadAllText((Join-Path $proj 'packaging\README-zip.md'))
 $readme = $readme.Replace('{VERSION}', $label).Replace('{COMMIT}', $short).
                   Replace('{DATE}', (Get-Date -Format 'yyyy-MM-dd')).Replace('{FAHRENHEIT_COMMIT}', $fhCommit).
                   Replace('{FAHRENHEIT_RELEASE}', $fhRelease)
+# In the repository the README sits in packaging\ and shows the diagrams as ../docs/img/...; in the zip it is at the root.
+$readme = $readme.Replace('](../docs/img/', '](docs/img/')
 [IO.File]::WriteAllText((Join-Path $root 'README.md'), $readme, (New-Object Text.UTF8Encoding $false))
+
+# The controller diagrams (docs\img\, the PNGs the README shows) and the tester checklist (as TESTING.md at the root; in the
+# repository it sits in docs\ and shows the diagrams as img/...).
+$imgDst = Join-Path $root 'docs\img'
+New-Item -ItemType Directory -Force -Path $imgDst | Out-Null
+foreach ($f in 'controls.png', 'controls-chords.png') {
+    $p = Join-Path $proj "docs\img\$f"
+    if (-not (Test-Path -LiteralPath $p)) { Fail "docs\img\$f is missing" }
+    Copy-Item -LiteralPath $p -Destination $imgDst
+}
+$checklist = Join-Path $proj 'docs\tester-checklist.md'
+if (-not (Test-Path -LiteralPath $checklist)) { Fail 'docs\tester-checklist.md is missing' }
+$testing = [IO.File]::ReadAllText($checklist).Replace('](img/', '](docs/img/')
+[IO.File]::WriteAllText((Join-Path $root 'TESTING.md'), $testing, (New-Object Text.UTF8Encoding $false))
 
 # A personal folder baked into a binary (a debug-info path such as C:\Users\<name>\...) would
 # ship with it. Repository-relative build paths are fine; user-profile ones are worth a look.

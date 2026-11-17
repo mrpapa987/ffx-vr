@@ -10,6 +10,11 @@
 # the tree EFL reads from data\mods\. (The game asks for "/FFX_Data/GameData/..."
 # and "/ffx_ps2/...": FFX_Data is the VBF's ffx_data folder, case-insensitive.)
 #
+# CAUTION (Nov 2026): the Re-Remastered pack caused performance problems in VR on the developer's PC (an RTX 3080 Ti):
+# it is not recommended without stronger hardware. It also needs a lot of disk space: the Medium (2.5x) pack is about
+# 18 GB of loose files once installed (-Compress roughly halves that with NTFS compression), on top of the downloaded
+# archive. -Uninstall removes it again. The script prints this before it extracts anything.
+#
 # What it does:
 #   1. creates <game>\fahrenheit\mods\<Id>\ with a manifest (no DLL = file-only mod)
 #   2. extracts the archive(s) with 7-Zip into that mod's efl\x\ (finds the VBF
@@ -92,6 +97,10 @@ $sevenZip = @("$env:ProgramFiles\7-Zip\7z.exe", "${env:ProgramFiles(x86)}\7-Zip\
 if (!$sevenZip) { throw "7-Zip not found (install from 7-zip.org; the pack is a .7z)" }
 if ($Archive.Count -eq 0) { throw "pass -Archive <path to the downloaded .7z (or .001)>" }
 foreach ($a in $Archive) { if (!(Test-Path -LiteralPath $a)) { throw "archive not found: $a" } }
+
+Log 'CAUTION: the Re-Remastered pack caused performance problems in VR on the developer''s PC (an RTX 3080 Ti):'
+Log '         not recommended without stronger hardware. It also needs a lot of disk space: the Medium pack is about'
+Log '         18 GB of loose files once installed (-Compress roughly halves that). -Uninstall removes it again.'
 
 # Mod skeleton
 New-Item -ItemType Directory -Force -Path $eflX | Out-Null

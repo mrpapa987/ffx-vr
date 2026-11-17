@@ -301,9 +301,23 @@ else {
     if ($sz -gt 50MB) { Write-Host ('  {0:N0} MB of old logs and captures in the mod folder; -DeleteLogs removes them' -f ($sz / 1MB)) }
 }
 
+# ---------------------------------------------------------------- settings kept from an older build
+# A kept ffxvr.ini holds every key, so a default that changed does not reach it. 0.1.0-alpha.1: VR hands are on by default
+# (vr_hands, 0 before). Nothing is changed here: the note only says what the player has and where the switch is.
+if ((Test-Path -LiteralPath $ini) -and ([IO.File]::ReadAllText($ini) -match '(?m)^\s*vr_hands\s*=\s*0\s*$')) {
+    Write-Host ''
+    Write-Host '[settings]'
+    Write-Host '  Your kept ffxvr.ini has VR hands off (vr_hands=0, the default before 0.1.0-alpha.1). A fresh install has them on.'
+    Write-Host '  To turn them on: F8 > Hands > "VR hands: your own hands at the controllers".'
+    Write-Host '  The cloister sphere grab and tap to press need them.'
+}
+
 Write-Host ''
 if ($problems -gt 0) {
     Write-Host "Installed, but $problems check(s) above need fixing before it will work."
 } else {
     Write-Host 'Installed. Start the game with:  powershell -ExecutionPolicy Bypass -File .\tools\run-ffx.ps1'
+}
+if (Test-Path -LiteralPath (Join-Path $FfxvrRepo 'TESTING.md')) {
+    Write-Host 'Testing this build? TESTING.md (next to README.md) says what to try and what to send back.'
 }
