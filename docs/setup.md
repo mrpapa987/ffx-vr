@@ -354,7 +354,9 @@ view and the battle menus stay on their panel. `0`, "on the menu panel, as befor
 character lands flat on the menu panel and the spell's effects and the battle menus are not shown for that part of the
 spell; pick it if a spell looks wrong with "in 3D", and send `ffxvr_diag.log`. It acts only in battles. The log has one
 `late3d:` line per spell per battle (an `fx:` line with the battle research log on), counts in the 10 s `ui:` line
-(developer mode), and the session's first such frame writes one frame census to `ffxvr_frame_auto.log`.
+(developer mode), and the session's first such frame writes one frame census to `ffxvr_frame_auto.log`. A battle
+without such a spell should leave those counts at 0. If the battle menus ever leave their panel with "in 3D", the log
+has a `late3d: ... SUSPECT` line (and `SUSPECT` in the `ui:` line): pick "on the menu panel, as before" and send the log.
 
 **Aim spell effects at your eyes** (Battle > Characters and effects, `fx_face_eyes`, default 0, experimental): the game
 builds its effect sprites (glows, sparks, beams) facing its own battle camera, which in the headset usually looks

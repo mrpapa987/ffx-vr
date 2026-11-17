@@ -7407,7 +7407,7 @@ What was checked for a pass that opens twice in a frame (none needed a change):
 - the per-frame counters (`ui draws last`, the scene draw index, the battle log's draw counts) now count the HUD as the
   UI and the target as scene draws; build 2's "no eye image" census trigger stays and no longer fires for Holy.
 
-**Why a real UI pass can never match.** A camera needs 368 bytes in the buffer (a view at +48 or +64, its inverse 256
+**A 2D draw can never match; a UI pass that opens with a 3D draw would (review S1).** A camera needs 368 bytes in the buffer (a view at +48 or +64, its inverse 256
 bytes on, a projection); the HUD's buffers are 224 and 240 bytes. In the recording the HUD's draws have no eye image
 of any kind: all 69 of them in both censused frames, and the log's "no eye image" peak of the first cast, 202, is the
 HUD's own draw count with the command menu open (`ui draws last 202`); before the spell that count is 0. The 2D
@@ -7416,6 +7416,22 @@ grid, cutscene subtitles, the world map, Blitzball) the rule changes nothing wha
 Frames that go to a screen in the headset (FMVs, the main menu, the save screen, the big screen) never open the pass.
 `late3d_test` runs 4000 random frame scripts through the rule's lines and through the same lines of the commit before
 it: with the setting 0, outside a battle, and in a battle whenever the rule does not fire, the results are identical.
+
+What that does **not** exclude: a real UI pass in a battle whose first draw is a true 3D draw with the scene camera. None
+is known in FFX's battle UI, but only one ordinary UI pass has been censused (69 draws; not the command menu open, the
+sub-menus, an overdrive's input, Scan, the switch window, a tutorial, the victory screen, a battle's start and end). Such
+a pass would be given back, no resolve would reopen it, and that frame's HUD would be drawn into both eye images instead
+of the panel. A second, smaller route: a UI draw whose shader binds nothing at slot 0 inherits the previous draw's buffer.
+The build cannot prevent this, so it shows it (log only, nothing changes):
+- **frames in which a pass was given back and no UI pass completed** (`Tracker::frame_end`, from "the last frame had a UI
+  pass");
+- **draws with no eye image inside a late layer** (from the give-back to the next scene resolve: a HUD in the eyes is
+  dozens a frame; Holy's layer has none).
+When either is not 0 the `ui:` line ends with `; SUSPECT (a real UI pass may have been taken for a late layer: was the HUD
+off its panel?): N frames gave a pass back and ended with no UI pass, N draws with no eye image inside a late layer`, and
+the session's first such frame writes one `late3d: ... | SUSPECT late 3D layer at frame N: ...` line (not verbose-gated)
+and asks for a census. Neither is proof: a spell layer with a flash quad, or a cast with the HUD hidden, counts too.
+The owner's check: a whole battle without Holy must leave `this session 0 frames, 0 layers`.
 
 ### Setting, export, log
 
@@ -7436,8 +7452,35 @@ it: with the setting 0, outside a battle, and in a battle whenever the rule does
   10812 | magic 0x0092 | late 3D layer at frame 10811: ... (a 6992 B buffer, 5226 indices): left in the 3D view
   (late_3d_layer 1) ...`), else a `late3d:` line. With the setting 0 the line says `NOT acted on`. Outside a battle: one
   `late3d:` line a session.
-- A frame census (`ffxvr_frame_auto.log`) for the session's first late layer, and one for the first match outside a
-  battle; the census has a `LATE 3D LAYER from frame draw N` line where the layer starts.
+- A frame census (`ffxvr_frame_auto.log`) for the session's first late layer, one for the first match outside a
+  battle and one for the first SUSPECT frame; a request the census slot cannot take is asked again every frame. The
+  census has a `LATE 3D LAYER from frame draw N` line where the layer starts.
+
+### The review round (17 Nov 2026, before 70 was delivered)
+
+An independent review (reading only; 0 blockers, 3 should-fix, 7 notes). Fixed:
+- **S1** (a false positive is not excluded and could not be seen): the two SUSPECT counters above, the claim reworded,
+  an owner's step added.
+- **S2** (first person with VR hands on: head parts are hidden by their ordinal among the followed character's scene
+  draws, so a second drawing of him in a late layer had ordinals N..2N-1 and his head was drawn at the eyes): a late
+  drawing's parts have their own counter (`g_l3d_part_idx`), zeroed where the pass opens; it is used only when the rule
+  would give the pass back for this draw or a late layer is open (`Tracker::late_now`), so an ordinary frame, the
+  setting 0 and "no battle" keep the old ordinals. Not decidable here: whether a spell's own model nodes use the
+  actor's index buffers (the battle identity rule keys on them).
+- **S3** (a census request refused by a busy slot was lost for the session): the request stays until `frame_arm_auto`
+  takes it.
+- **N1** (the battle flag was never aged): the pushed state counts for 2 frames after the last push.
+- **N5** (an `fx:` line dropped by a spent budget was lost): the glue then writes the `late3d:` line.
+Left, with the reason:
+- **N2** (one wasted pair of full-size copies per late layer): well under a millisecond; copying lazily at the first UI
+  draw would change the opener for every frame.
+- **N3** (the late layer draws over the VR hands): it draws over everything, as in the flat game; drawing the hands
+  again against the layer's depth would be wrong against the main scene.
+- **N4** (the `ui:` counters need `diag_verbose`): as every 10 s line; the per-spell line and the SUSPECT line do not.
+- **N6** (the first match outside a battle arms a census): one frame's hitch once a session, and it is the evidence
+  wanted; a Developer gate later if it annoys.
+- **N7** (a layer followed at once by the HUD's clear, no resolve between, leaves the HUD in the eyes): idle is still the
+  right state (resolved would freeze the eyes before the layer); the SUSPECT counters show it.
 
 ### Not confirmed in the game
 
@@ -7453,7 +7496,10 @@ it: with the setting 0, outside a battle, and in a battle whenever the rule does
 4. Which other spells, overdrives and aeon attacks have a late layer, and whether any opens with an effect draw instead
    of a character (the rule does not act then; `UI passes whose first draw had another eye image` counts them).
 5. A late layer that draws the followed character in first person with "VR hands" on: his head parts are told from the
-   rest by their index in the main pass, so a second drawing of him is not head-hidden (before, it landed on the panel).
+   rest by their ordinal, counted again from 0 for a late drawing (review S2). That assumes the late drawing issues his
+   parts in the main pass's order (it does for the enemy in the two censuses), and that the battle identity rule
+   recognises a spell's own drawing of him.
+8. That no real battle UI pass opens with a 3D draw (review S1): the SUSPECT counters and a battle without Holy show it.
 6. The late layer is drawn after the game's depth clear, so it draws over the VR hands where they overlap, as it draws
    over everything in the flat game.
 7. The game's mechanism (draw events) is ffx-rust's static reading; the fix does not depend on which path queues the draw.
@@ -7467,9 +7513,13 @@ it: with the setting 0, outside a battle, and in a battle whenever the rule does
   panel, one depth reading); the setting 0 and "no battle" reproduce the census's result (3 UI draws, the eyes frozen);
   two late layers; no HUD after the layer; the HUD's clear right after the layer; a layer opening with an effect or the
   dummy camera; a camera draw into another target; the Kilika resolve; the Blitzball early pass; no UI split; a
-  220-frame cast (lines, census, the `ui:` counts); the old glue's 4000 scripts.
-  8449 checks.
-- `check.py` (770 scans in all): ABI 70 on both sides and in both histories, the export defined / bound / unbound with one
+  220-frame cast (lines, census, the `ui:` counts); the old glue's 4000 scripts. The review round: a UI pass opening
+  with a 3D draw (the false positive itself, and its SUSPECT counts, line and census); a flash quad inside a true layer;
+  the first-person head hide's own lines, verbatim, for a second drawing of the followed character (main pass and late
+  layer, late layer only, two late layers, the setting 0); a census refused and asked again; a push that stops; the
+  `fx:` budget spent. 8508 checks.
+- `check.py` (773 scans in all): ABI 70 on both sides and in both histories, the export defined / bound / unbound with one
   type, the setting in the default, the parser, the ini text, the menu and the docs, the rule's place in `ffxvr_on_draw`
   and its one action, no value 2, and `ffxvr_native.cpp` without late3d's lines is the file of the commit before, byte
-  for byte. `mutants.py`: 442 mutants (77 of them late3d's rule, tracker, glue and managed lines), all caught.
+  for byte (the head hide's one changed line put back). `mutants.py`: 476 mutants (111 of them late3d's rule, tracker,
+  glue and managed lines, the review round's among them), all caught.

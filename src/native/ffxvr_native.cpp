@@ -1293,7 +1293,9 @@ int   g_ui_state = UI_IDLE;
 // sometimes the start of a late 3D layer instead (Holy's target, drawn alone after the post-processing). The rule is in
 // ffxvr_on_draw right before the UI classification; the setting, the battle state and the magic id come from managed once a
 // frame (ffxvr_late3d_set); the counts go to the ui: line. g_l3d_census: the frame censuses it asked for this session.
-l3d::Tracker g_l3d; uint32_t g_l3d_census = 0;
+// g_l3d_part_idx (review S2): the followed character's parts in a late drawing, counted from 0 again at each opener, so the
+// first-person head hide (by a part's ordinal) fits a second drawing of him in the same frame.
+l3d::Tracker g_l3d; uint32_t g_l3d_census = 0, g_l3d_part_idx = 0;
 bool  g_ui_enabled = true;
 float g_ui_dist = 1.5f, g_ui_width = 1.6f;
 bool  g_markers_3d = true;             // our battle markers as 3D geometry in the eye images
@@ -7858,11 +7860,11 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
             if (g_ui_last_frame_had_pass) g_ui_frames_with_pass++; else no_pass_acc++;
         }
         g_ui_resolves_frame = 0; g_ui_depth_clears_frame = 0;
-        g_l3d.frame_end();   // late3d: the frame's own counts start over
+        g_l3d.frame_end(g_ui_last_frame_had_pass, g_frames - 1u);   // late3d: the frame's own counts start over (xr_tick, above, set the flag for the frame just shown; review S1)
         static ULONGLONG next = 0; const ULONGLONG now = GetTickCount64();
         if (now >= next) {
             next = now + 10000;
-            char l3_hb[512]; g_l3d.hb_text(l3_hb, static_cast<int>(sizeof(l3_hb)));   // late3d: the window's counts (the window starts again, line or not)
+            char l3_hb[800]; g_l3d.hb_text(l3_hb, static_cast<int>(sizeof(l3_hb)));   // late3d: the window's counts (the window starts again, line or not)
             if (g_ui_frames_3d) diagv("ui: 3D frames %u, with a captured UI pass %u (none: %u) | per frame avg: scene resolves %.1f, depth clears on the scene target %.1f | ui draws last %u | ui_enabled %d xr_want %d | imgui layer draws last %u (force %d, min %u) | dream handled %u (mode %d, filter %s), filter-shaped quads with the wrong colour %u this session%s",
                 g_ui_frames_3d, g_ui_frames_with_pass, no_pass_acc, resolves_acc / (float)g_ui_frames_3d, clears_acc / (float)g_ui_frames_3d, g_ui_draws_report, g_ui_enabled ? 1 : 0, g_xr_want ? 1 : 0, g_imgui_draws_last, g_imgui_force ? 1 : 0, g_imgui_min_draws,
                 g_dream_handled_10s, g_dream_mode, g_dream_gate ? "on" : "off", g_dream_rejected, l3_hb);
@@ -8802,7 +8804,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
             if (fp_hiding && bm == 0 && g_fp_solo < 0) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's part", g_eye2_cur->world_pos, why, tex); return -1; }       // the whole body, in every pass
             if (g_hands_on && g_hands_show >= 2 && fp_hiding && g_fp_solo < 0 && !g_eye2_cur->pal_hands) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's part (floating hands: no hand bones)", g_eye2_cur->world_pos, why, tex); return -1; }   // floating hands: parts without hand bones are not drawn at all
             if (scene) {
-                const uint32_t pidx = g_fp_part_idx++;
+                const uint32_t pidx = g_l3d.late_now(g_ui_state == UI_PASS, g_ui_early, g_ui_draws_frame, g_frames) ? g_l3d_part_idx++ : g_fp_part_idx++;   // late3d (review S2): a late drawing's parts have their own ordinals
                 if (g_fp_solo >= 0) { if ((int)pidx != g_fp_solo) { g_fp_hidden_draws++; return -1; } }
                 else if (fp_hiding && bm == 1 && pidx < 32 && ((g_fp_head_mask >> pidx) & 1u)) { g_fp_hidden_draws++; fp_census_note(idx, "HIDDEN as the player's head part", g_eye2_cur->world_pos, why, tex); return -1; }   // a head part
             }
@@ -8838,7 +8840,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
                 { std::lock_guard<std::mutex> lock(g_mutex); FrameEv e; strncpy_s(e.text, l3_t, _TRUNCATE); if (g_frame_ev.size() < 2000) g_frame_ev.push_back(e); }
             }
         }
-        g_l3d.scene_draw();
+        g_l3d.scene_draw(g_eye2_cur != nullptr);
     }
     g_ui_draw_now = (g_ui_state == UI_PASS && g_cur_rtv_n > 0 && g_cur_rtv0_tex == g_scene_live_tex);
     if (g_ui_draw_now && g_ui_early) g_ui_early_draws++;
@@ -9824,6 +9826,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_clear_twin(void* view, int depth,
             if (g_ui_state == UI_RESOLVED && g_xr_want && g_ui_enabled && !g_ovr_suspend && !g_screen3d_now && !bt_no_split()) {   // screen frames keep their UI (subtitles) in the frame; a battle transition window has no UI split (its fade pass has the UI pass's signature)
                 uid_depth_pass(view, flags, d);   // uidepth: this frame's scene depth, read before the game's clear wipes it (this hook runs first)
                 ui_pass_open();
+                g_l3d_part_idx = 0;   // late3d (review S2): if this turns out to be a late 3D layer, its drawing of the followed character starts at part 0
             }
             else if (g_ui_state == UI_RESOLVED && !g_xr_want) { g_ui_flat_pass = true; g_ui_flat_resolved = false; g_ui_draws_frame = 0; }   // stereo on, headset off: recognise the pass, draw normally
         }
@@ -15300,21 +15303,28 @@ extern "C" __declspec(dllexport) uint32_t ffxvr_noimg_draws() { return g_noimg_d
 /// Once a frame (render thread, from push_all before the battle research log's frame). mode = ini late_3d_layer (0 the old
 /// behaviour: such a layer lands on the UI panel; 1 it stays in the 3D view); battle = a battle is running; magic = the
 /// game's magic file id in play (-1 none; for the lines only). Writes the line the frame just drawn left (an fx: line of
-/// the battle research log while it logs a battle, else a late3d: line) and asks for its frame census (the first late layer
-/// of the session, and the first of the same shape outside a battle). Returns the frames with a late 3D layer this session.
+/// the battle research log while it logs a battle and has the budget, else a late3d: line), the session's first SUSPECT
+/// line (review S1), and asks for the waiting frame census (the first late layer of the session, the first of the same
+/// shape outside a battle, the first suspect frame): the request stays until it could be armed (review S3).
+/// Returns the frames with a late 3D layer this session.
 extern "C" __declspec(dllexport) int ffxvr_late3d_set(int mode, int battle, int magic) {
-    g_l3d.set(mode, battle != 0, static_cast<int32_t>(magic));
+    g_l3d.set(mode, battle != 0, static_cast<int32_t>(magic), g_frames);
     l3d::Event ev = {};
     if (g_l3d.take_line(&ev)) {
         char what[640]; l3d::event_text(what, static_cast<int>(sizeof(what)), ev);
         char mg[40]; l3d::magic_text(mg, static_cast<int>(sizeof(mg)), ev.magic);
-        if (g_bv.active && ev.verdict != l3d::V_WOULD_NOBATTLE) g_bv.late3d(mg, what, bv_line, nullptr);
-        else diag("late3d: %s | %s", mg, what);
+        const bool as_fx = g_bv.active && ev.verdict != l3d::V_WOULD_NOBATTLE && g_bv.late3d(mg, what, bv_line, nullptr);   // (review N5: false when the fx: budget is spent)
+        if (!as_fx) diag("late3d: %s | %s", mg, what);
     }
-    if (g_l3d.take_census(&ev)) {
-        char why[128]; char cmg[40]; l3d::magic_text(cmg, static_cast<int>(sizeof(cmg)), ev.magic);
-        snprintf(why, sizeof(why), "late 3D layer: %s (%s)", ev.verdict == l3d::V_LATE ? "the session's first" : "the first not acted on, outside a battle", cmg);
-        if (frame_arm_auto(why, 1)) g_l3d_census++;
+    if (g_l3d.take_suspect(&ev)) {
+        char what[640]; l3d::suspect_text(what, static_cast<int>(sizeof(what)), ev);
+        char mg[40]; l3d::magic_text(mg, static_cast<int>(sizeof(mg)), ev.magic);
+        diag("late3d: %s | %s", mg, what);
+    }
+    if (g_l3d.census_on) {
+        char why[128]; char cmg[40]; l3d::magic_text(cmg, static_cast<int>(sizeof(cmg)), g_l3d.census.magic);
+        snprintf(why, sizeof(why), "late 3D layer: %s (%s)", l3d::census_text(g_l3d.census), cmg);
+        if (frame_arm_auto(why, 1)) { g_l3d.census_on = false; g_l3d_census++; }   // review S3: a refused request is asked again next frame
     }
     return static_cast<int>(g_l3d.s_frames);
 }
