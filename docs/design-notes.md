@@ -491,6 +491,15 @@ The rule now (`src/managed/battle_anchor.cs`; the review of the first build, S1 
   (the centre is then between them and moves steadily toward the party as enemies die). 1500 units: the bench stands
   about 3143 away, twice that, so nothing parked there can count, while an enemy several hundred units off does (how
   far the game's far fights really stand is not measured). An enemy beyond it is still drawn, only not counted. With no party candidate (nobody live on the roster) the monsters' own median and 400 units.
+- **Review round 2.** (S1) A party of one or two is no outlier test of itself: an aeon whose actor is still parked at
+  the bench when the roster already names it alone would have been the reference, with the real enemies dropped as
+  "too far", and the table would have gone to the bench. So when there are monster candidates and every one of them is
+  over 1500 units from the party, it is the party that is not trusted ("away from every enemy" in the log): nothing is
+  counted and the table stays where it is. With no monster candidate at all the party alone still gives a centre.
+  (S2) The enemies count up to 1500 units, but the plain average would then sit in empty space between the groups
+  (3 + 3 at 900 apart: 450 from everyone). The table's centre is therefore the average brought to within 150 units of
+  the party's own centre: an ordinary fight (enemies some 60 units away) is not touched, a far fight has the table
+  by the party, on the enemies' side, and the far enemies still give the start heading.
 - **When**: only at battle_state 0x16, 1 and 2 (the intro drawn in 3D and the fight; the eye-jump code's "live" class).
   In the load chain and the end states, with no usable roster, or when nothing is left to count, the table stays where
   it is; before the first centre the override is off (the diorama stays on the player, as it did with no combatant).
@@ -504,7 +513,8 @@ The rule now (`src/managed/battle_anchor.cs`; the review of the first build, S1 
   middle of a run-in is therefore not taken where the attacker happened to be, the table waits for him to be back;
   (b) when the centre has been more than 40 units from the table for a full second without a set change. It then
   glides there in 0.6 s, eased (smoothstep: no step is a snap); a move of more than 400 units is another place
-  altogether (fighters not placed yet) and is taken in one step. A run-in to attack and back, a spell's hop, a knock
+  altogether (fighters not placed yet) and is taken in one step, but (round 2) only once that centre has stood still
+  for 0.5 s: a far centre that keeps moving is waited for, however long, and the table stays. A run-in to attack and back, a spell's hop, a knock
   back: nothing moves. The first centre of a battle is taken as it is and corrected by rule (a) once the intro's
   fighters stand. `battle_anchor_smooth_ms` is kept and works on top: native still smooths what is pushed with that
   time constant (0, the default, adds nothing; with it on, the glide is a little softer and later).

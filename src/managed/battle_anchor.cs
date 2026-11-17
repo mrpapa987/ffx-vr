@@ -13,7 +13,10 @@ namespace FFXVR;
 //   Outliers (review S2): the party defines the arena. A candidate with a coordinate that is not a finite number is
 //   dropped; a party member farther than k_ba_radius (400) from the party's median (a newcomer still at the bench); an
 //   enemy only when farther than k_ba_far (1500) from it, so the enemies can never drop the party and a far enemy is
-//   still on the table. With no party candidate the monsters' own median and k_ba_radius.
+//   still an enemy. With no party candidate the monsters' own median and k_ba_radius. Review round 2: when every
+//   monster candidate is over k_ba_far from the party, the party is not trusted (an aeon still parked at the bench)
+//   and nothing is counted; and the table's centre is the average of the counted brought to within k_ba_reach (150)
+//   of the party's own centre, so far enemies do not pull it into empty space (they still give the start heading).
 //   When: only while the battle is drawn (battle_state 0x16, 1, 2: the load chain has the fielded party at the far
 //   spot too, the end states are not the fight any more); outside that, and when nothing is left to count, the table
 //   stays where it is (none yet: the diorama stays on the player, as before). A battle begins when battle_state leaves
@@ -37,7 +40,7 @@ public sealed unsafe partial class FFXVRModule {
 
     // --- pure rule begin ---
     internal const float k_ba_radius = 400.0f;   // units: a party member this far from the party's median (no party: a monster from the monsters') is an outlier
-    internal const float k_ba_far = 1500.0f;     // units: an enemy this far from the party's median is not part of the table (the bench stands about 3143 away)
+    internal const float k_ba_far = 1500.0f;     // units: an enemy this far from the party's median is not an enemy of this fight (the bench stands about 3143 away)
     internal const int k_ba_max = 32;            // candidates: 18 party slots + 11 monsters fit
     internal const int k_ba_mon = 0x100;         // a candidate's tag: a party entity's chr id (under this), a monster's slot + this
     internal const int k_ba_ok = 0;              // counted
@@ -48,6 +51,8 @@ public sealed unsafe partial class FFXVRModule {
     internal const int k_ba_dead = 5;            // a monster that is dead (stat_death Chr+0xDCC) or has no HP
     internal const int k_ba_nonfinite = 6;       // a coordinate is NaN or infinite
     internal const int k_ba_outlier = 7;         // too far (k_ba_radius / k_ba_far)
+    internal const int k_ba_untrusted = 8;       // a party candidate, when every enemy is over k_ba_far from the party: it is the party that is elsewhere
+    internal const float k_ba_reach = 150.0f;    // units: the table's centre is never farther than this from the party's centre
     internal const int k_ba_log_max = 40;        // "diorama: battle anchor" lines a battle
     // the table holds still (ba_hold_step)
     internal const float k_ba_band = 40.0f;      // units: the fight's centre may wander this far from the table's (a run-in, a kill) without moving it
@@ -131,14 +136,20 @@ public sealed unsafe partial class FFXVRModule {
     // reference is the party's median (per axis); a party member farther than k_ba_radius from it is k_ba_outlier (a
     // newcomer still at the bench), a monster only when farther than k_ba_far (the enemies never drop the party, and a
     // far enemy is still part of the fight). With no party candidate: the monsters' median and k_ba_radius.
-    // Returns how many are counted; c (9 floats): 0..2 the average of all counted, 3..5 of the party, 6..8 of the
-    // monsters (each group untouched when it has nobody).
+    // Review round 2, S1: a party of one or two is no outlier test of itself (an aeon still parked at the bench). When
+    // there are monster candidates and every one of them is too far from the party, it is the party that is not in the
+    // fight yet: the party candidates become k_ba_untrusted and nothing is counted (the caller's table stays).
+    // Returns how many are counted; c (9 floats): 0..2 the table's centre, 3..5 the party's average, 6..8 the monsters'
+    // (each group untouched when it has nobody). The centre is the average of all counted, brought to within k_ba_reach
+    // of the party's average when there is a party (round 2, S2: far enemies would put it in empty space; they still
+    // give the heading through 6..8).
     internal static int ba_select(float[] x, float[] y, float[] z, int[] why, int[] tag, int n, float[] tmp, float[] c) {
         for (int i = 0; i < n; i++) {
             if (why[i] != k_ba_ok) continue;
             if (!(float.IsFinite(x[i]) && float.IsFinite(y[i]) && float.IsFinite(z[i]))) why[i] = k_ba_nonfinite;
         }
         bool party = ba_counted(why, tag, n, 0, k_ba_mon) > 0;
+        int qc = ba_counted(why, tag, n, k_ba_mon, 0x7FFFFFFF);
         int lo = party ? 0 : k_ba_mon;
         int hi = party ? k_ba_mon : 0x7FFFFFFF;
         float mx = ba_median(x, why, tag, n, lo, hi, tmp);
@@ -162,11 +173,27 @@ public sealed unsafe partial class FFXVRModule {
             if (tag[i] < k_ba_mon) { px += x[i]; py += y[i]; pz += z[i]; pn++; }
             else { qx += x[i]; qy += y[i]; qz += z[i]; qn++; }
         }
+        if (qc > 0 && qn == 0) {   // (with no party candidate nobody is counted here anyway)
+            for (int i = 0; i < n; i++) {
+                if (why[i] == k_ba_ok) why[i] = k_ba_untrusted;
+            }
+            return 0;
+        }
         int m = pn + qn;
         if (m == 0) return 0;
         c[0] = (px + qx) / m; c[1] = (py + qy) / m; c[2] = (pz + qz) / m;
         if (pn > 0) { c[3] = px / pn; c[4] = py / pn; c[5] = pz / pn; }
         if (qn > 0) { c[6] = qx / qn; c[7] = qy / qn; c[8] = qz / qn; }
+        if (pn > 0) {
+            float ox = c[0] - c[3];
+            float oy = c[1] - c[4];
+            float oz = c[2] - c[5];
+            float o2 = ox * ox + oy * oy + oz * oz;
+            if (o2 > k_ba_reach * k_ba_reach) {
+                float k = k_ba_reach / MathF.Sqrt(o2);
+                c[0] = c[3] + ox * k; c[1] = c[4] + oy * k; c[2] = c[5] + oz * k;
+            }
+        }
         return m;
     }
     // The table (s: k_ba_hold_n floats): a battle's first centre. The table is put on it, and follows once it has stood
@@ -183,7 +210,8 @@ public sealed unsafe partial class FFXVRModule {
     // The table moves only (a) after a set change, once the centre has stood still k_ba_settle_s (or k_ba_wait_max_s after
     // the change): so a kill during a run-in is not taken where the attacker happened to be; (b) when the centre has been
     // more than k_ba_band away for k_ba_away_s. It then glides to the centre of that moment in k_ba_glide_s, eased; a move
-    // of more than k_ba_radius is another place altogether (the fighters were not placed yet): put there at once.
+    // of more than k_ba_radius is another place altogether (the fighters were not placed yet): put there at once, but
+    // only when the centre has stood still k_ba_settle_s (round 2, S1); while it has not, the table stays and waits.
     internal static void ba_hold_step(float[] s, float tx, float ty, float tz, bool changed, float dt) {
         if (!(dt > 0.0f)) dt = 0.0f;
         if (dt > 0.1f) dt = 0.1f;
@@ -212,7 +240,10 @@ public sealed unsafe partial class FFXVRModule {
         }
         if (go) {
             s[15] = 0.0f;
-            if (d2 > k_ba_radius * k_ba_radius) { s[0] = tx; s[1] = ty; s[2] = tz; s[9] = -1.0f; }
+            if (d2 > k_ba_radius * k_ba_radius) {
+                if (s[11] >= k_ba_settle_s) { s[0] = tx; s[1] = ty; s[2] = tz; s[9] = -1.0f; }
+                else s[10] = k_ba_wait_max_s;
+            }
             else if (d2 > 0.0001f) {
                 s[3] = s[0]; s[4] = s[1]; s[5] = s[2];
                 s[6] = tx; s[7] = ty; s[8] = tz;
@@ -259,7 +290,7 @@ public sealed unsafe partial class FFXVRModule {
 
     private static string ba_why_name(int w) =>
         w == k_ba_ok ? "counted" : w == k_ba_benched ? "benched" : w == k_ba_no_actor ? "no live actor" : w == k_ba_not_in ? "not in the battle"
-        : w == k_ba_hidden ? "hidden" : w == k_ba_dead ? "dead" : w == k_ba_nonfinite ? "not a finite position" : w == k_ba_outlier ? "outlier" : "?";
+        : w == k_ba_hidden ? "hidden" : w == k_ba_dead ? "dead" : w == k_ba_nonfinite ? "not a finite position" : w == k_ba_outlier ? "outlier" : w == k_ba_untrusted ? "away from every enemy" : "?";
     private int ba_count(int w) { int k = 0; for (int i = 0; i < _ba_n; i++) if (_ba_why[i] == w) k++; return k; }
     private string ba_table() => _ba_h[9] >= 0f ? "gliding to a new centre" : _ba_h[10] >= 0f ? "waiting for the fight to stand still" : "still";
 
@@ -297,7 +328,7 @@ public sealed unsafe partial class FFXVRModule {
                 if (_fn_eye_event != null && _ba_party > 0 && _ba_mons > 0) _fn_eye_event(4, -(_ba_c[6] - _ba_c[3]), 0f, _ba_c[8] - _ba_c[5]);
                 _ba_note = "";
             }
-            else _ba_note = "no combatant left to count";
+            else _ba_note = ba_count(k_ba_untrusted) > 0 ? "the party is away from every enemy (not placed yet)" : "no combatant left to count";
             ba_log(bst, m);
         }
         _ba_held = _ba_note.Length > 0;
@@ -368,7 +399,7 @@ public sealed unsafe partial class FFXVRModule {
         if (!_ba_have) return "battle diorama: no centre yet" + (_ba_note.Length > 0 ? " (" + _ba_note + ")" : "");
         int drop = _ba_n - _ba_party - _ba_mons;
         string s = I($"battle diorama: combatants {_battle_anchor_n} counted ({_ba_party} party + {_ba_mons} monsters), {drop} dropped");
-        if (drop > 0) s += I($" (benched {ba_count(k_ba_benched)}, hidden {ba_count(k_ba_hidden)}, dead {ba_count(k_ba_dead)}, outlier {ba_count(k_ba_outlier)}, other {ba_count(k_ba_no_actor) + ba_count(k_ba_not_in) + ba_count(k_ba_nonfinite)})");
+        if (drop > 0) s += I($" (benched {ba_count(k_ba_benched)}, hidden {ba_count(k_ba_hidden)}, dead {ba_count(k_ba_dead)}, outlier {ba_count(k_ba_outlier)}, other {ba_count(k_ba_no_actor) + ba_count(k_ba_not_in) + ba_count(k_ba_nonfinite) + ba_count(k_ba_untrusted)})");
         s += _ba_held ? "; the table stays: " + _ba_note : "; the table: " + ba_table();
         return s;
     }
