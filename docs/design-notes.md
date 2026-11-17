@@ -493,9 +493,12 @@ The rule now (`src/managed/battle_anchor.cs`; the review of the first build, S1 
   far the game's far fights really stand is not measured). An enemy beyond it is still drawn, only not counted. With no party candidate (nobody live on the roster) the monsters' own median and 400 units.
 - **Review round 2.** (S1) A party of one or two is no outlier test of itself: an aeon whose actor is still parked at
   the bench when the roster already names it alone would have been the reference, with the real enemies dropped as
-  "too far", and the table would have gone to the bench. So when there are monster candidates and every one of them is
-  over 1500 units from the party, it is the party that is not trusted ("away from every enemy" in the log): nothing is
-  counted and the table stays where it is. With no monster candidate at all the party alone still gives a centre.
+  "too far", and the table would have gone to the bench. So when one or two party members are counted, there are
+  monster candidates and every one of them is over 1500 units from the party, it is the party that is not trusted
+  ("away from every enemy" in the log): nothing is counted and the table stays where it is. Three or more party
+  members are their own outlier test and are trusted: with every enemy that far the table is the party's (giving no
+  table would leave the diorama on the player, who can be a benched member at the far spot: the original fault).
+  With no monster candidate at all the party alone still gives a centre.
   (S2) The enemies count up to 1500 units, but the plain average would then sit in empty space between the groups
   (3 + 3 at 900 apart: 450 from everyone). The table's centre is therefore the average brought to within 150 units of
   the party's own centre: an ordinary fight (enemies some 60 units away) is not touched, a far fight has the table

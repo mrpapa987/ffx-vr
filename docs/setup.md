@@ -322,8 +322,8 @@ fight: the party members on the field (the game's own field roster: three charac
 the enemies that are in the battle, shown and alive. The members on the bench do not count: the game keeps them at one
 spot about 3000 units from the arena, which used to drag the table metres away from the fight with a party of more
 than three. A party member more than 400 units from the others (someone still on his way in) and an enemy more than
-1500 units from the party are left out as well; if every enemy is that far, it is the party that is not in place yet
-(an aeon before it arrives) and the table waits. The table's centre is never more than 150 units from the party, so
+1500 units from the party are left out as well; if every enemy is that far from a party of one or two, it is the
+party that is not in place yet (an aeon before it arrives) and the table waits. The table's centre is never more than 150 units from the party, so
 in a fight against far enemies it stays by the party. **The table holds still**: it does not follow a character who runs in
 to attack; it moves only after someone joins or leaves the fight (a kill, a swap, a summon) once the fight stands
 still again, or when the fight's centre has been more than 40 units away for a second, and then it glides over about

@@ -14,7 +14,7 @@ namespace FFXVR;
 //   dropped; a party member farther than k_ba_radius (400) from the party's median (a newcomer still at the bench); an
 //   enemy only when farther than k_ba_far (1500) from it, so the enemies can never drop the party and a far enemy is
 //   still an enemy. With no party candidate the monsters' own median and k_ba_radius. Review round 2: when every
-//   monster candidate is over k_ba_far from the party, the party is not trusted (an aeon still parked at the bench)
+//   monster candidate is over k_ba_far from a party of one or two, the party is not trusted (an aeon still parked at the bench)
 //   and nothing is counted; and the table's centre is the average of the counted brought to within k_ba_reach (150)
 //   of the party's own centre, so far enemies do not pull it into empty space (they still give the start heading).
 //   When: only while the battle is drawn (battle_state 0x16, 1, 2: the load chain has the fielded party at the far
@@ -51,7 +51,7 @@ public sealed unsafe partial class FFXVRModule {
     internal const int k_ba_dead = 5;            // a monster that is dead (stat_death Chr+0xDCC) or has no HP
     internal const int k_ba_nonfinite = 6;       // a coordinate is NaN or infinite
     internal const int k_ba_outlier = 7;         // too far (k_ba_radius / k_ba_far)
-    internal const int k_ba_untrusted = 8;       // a party candidate, when every enemy is over k_ba_far from the party: it is the party that is elsewhere
+    internal const int k_ba_untrusted = 8;       // a party candidate (of one or two), when every enemy is over k_ba_far from the party: it is the party that is elsewhere
     internal const float k_ba_reach = 150.0f;    // units: the table's centre is never farther than this from the party's centre
     internal const int k_ba_log_max = 40;        // "diorama: battle anchor" lines a battle
     // the table holds still (ba_hold_step)
@@ -137,8 +137,10 @@ public sealed unsafe partial class FFXVRModule {
     // newcomer still at the bench), a monster only when farther than k_ba_far (the enemies never drop the party, and a
     // far enemy is still part of the fight). With no party candidate: the monsters' median and k_ba_radius.
     // Review round 2, S1: a party of one or two is no outlier test of itself (an aeon still parked at the bench). When
-    // there are monster candidates and every one of them is too far from the party, it is the party that is not in the
-    // fight yet: the party candidates become k_ba_untrusted and nothing is counted (the caller's table stays).
+    // one or two party members are counted, there are monster candidates and every one of them is too far from the
+    // party, it is the party that is not in the fight yet: the party candidates become k_ba_untrusted and nothing is
+    // counted (the caller's table stays). Three or more are trusted: the table is the party's (no table would leave
+    // the diorama on the player, who may be a benched member).
     // Returns how many are counted; c (9 floats): 0..2 the table's centre, 3..5 the party's average, 6..8 the monsters'
     // (each group untouched when it has nobody). The centre is the average of all counted, brought to within k_ba_reach
     // of the party's average when there is a party (round 2, S2: far enemies would put it in empty space; they still
@@ -173,7 +175,7 @@ public sealed unsafe partial class FFXVRModule {
             if (tag[i] < k_ba_mon) { px += x[i]; py += y[i]; pz += z[i]; pn++; }
             else { qx += x[i]; qy += y[i]; qz += z[i]; qn++; }
         }
-        if (qc > 0 && qn == 0) {   // (with no party candidate nobody is counted here anyway)
+        if (qc > 0 && qn == 0 && pn <= 2) {   // (three or more party members are their own outlier test: trusted)
             for (int i = 0; i < n; i++) {
                 if (why[i] == k_ba_ok) why[i] = k_ba_untrusted;
             }
