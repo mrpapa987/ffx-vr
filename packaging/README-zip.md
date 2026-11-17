@@ -21,6 +21,8 @@ Tested on one setup only: Windows 11, an RTX 3080 Ti, and a **Quest 3 over Virtu
 | `tools\set-logging.ps1` | Turns the mod's verbose log on for a bug report (`-Profile Verbose`) and every diagnostic off again (`-Profile Release`) |
 | `tools\game-settings.ps1`, `import-steam-saves.ps1`, `export-save-to-steam.ps1`, `install-texture-pack.ps1` | Optional extras (section 6) |
 | `tools\import-hands.ps1`, `tools\hands\` | VR hands: make a hand pack from a model you own (section 6) |
+| `docs\img\controls.png`, `controls-chords.png` | The controller diagrams: every button, and every chord and gesture the mod adds (section 5) |
+| `TESTING.md` | For testers: what to try in about an hour, and what to send back |
 | `LICENSE`, `THIRD-PARTY-NOTICES` | Licences (MIT for FFX VR; Apache-2.0 for the bundled OpenXR loader) |
 
 Extract it **anywhere outside the game folder**, e.g. `Documents`. Inside you'll find a folder
@@ -43,6 +45,9 @@ no `[` or `]` in it: Windows PowerShell may not run scripts from there.
 | **.NET 10 runtime, x86 (32-bit)** | `winget install Microsoft.DotNet.Runtime.10 --architecture x86`. The game is 32-bit, so the x86 one is the one that matters, even on 64-bit Windows. |
 | **Fahrenheit** {FAHRENHEIT_RELEASE}, the mod loader | See section 2. |
 | **FFX-60fps** (recommended) | See section 3. |
+| **A GPU that renders the game twice per frame** | Tested on an RTX 3080 Ti only. `tools\game-settings.ps1 -Profile vr` (section 6) makes it much lighter. |
+
+Not needed, and not recommended on that class of hardware: the Re-Remastered HD texture pack (section 6 says why).
 
 ---
 
@@ -95,6 +100,9 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
   The folder must contain `FFX.exe`.
 - **Updating:** extract the new zip and run its `install-mod.ps1`. Your settings
   (`ffxvr.ini`) are kept. To reset them, delete `ffxvr.ini` with the game closed.
+  Because your settings are kept, a new default does not reach you by itself. VR hands were off by default before
+  0.1.0-alpha.1: the installer says so when your kept `ffxvr.ini` still has them off; tick F8 > Hands > "VR hands: your
+  own hands at the controllers" to turn them on.
 - **Uninstalling:** `install-mod.ps1 -Uninstall` removes the mod and its load-order line and lists what is
   left (your settings and logs); `install-mod.ps1 -Uninstall -Purge` deletes those too.
 - **Coming from a test build?** If your kept `ffxvr.ini` has diagnostics on, the installer says so:
@@ -114,6 +122,14 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
    Steam must be running. When the game closes, the script collects the logs into `logs\`.
 3. In the game, press **F8** for the FFX VR overlay. Tick **Headset** (top left), and View >
    Starting > **Start in the headset** if you want it on from the next launch.
+4. The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
+   **right grip + right stick click** (or **End**) for first person: your hands appear there. With "Start in the
+   headset" ticked, the next launch starts in first person.
+5. In the headset the F8 menu is a panel in the room. Open or close it from the controllers: hold the **left grip**,
+   then press the **left menu button**. Point at it with either controller: the trigger clicks, the stick scrolls;
+   squeeze a grip on it to move it. **Bring here** (or Home) puts it in front of you again.
+
+Without a headset, or with Virtual Desktop not connected, the game plays normally on the monitor.
 
 ### Virtual Desktop settings
 
@@ -129,22 +145,45 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
 ### Controls
 
 The Quest controllers act as the gamepad (on by default; "Use the Quest controllers as the
-gamepad" in F8 > Controls). A normal gamepad works too.
+gamepad" in F8 > Controls). A normal gamepad works too. Two pictures show everything; they are in this zip's
+`docs\img\` folder if your viewer does not show them here.
+
+![The controllers: what every button does](../docs/img/controls.png)
+
+![The chords and gestures the mod adds](../docs/img/controls-chords.png)
 
 | Action | Controllers | Keyboard |
 |---|---|---|
-| Recentre the view | Hold the **Meta** button | **Home** |
+| Recentre the view | Hold the **Meta** (system) button | **Home** |
 | Turn | Right stick: smooth turning, at the turn speed set in F8 > Controls (there is no snap turning) | Numpad 1 / 3 |
 | Change view: first person, third person, diorama | **Right grip + right stick click** | **End** |
 | Reset the view (third person / diorama) | **Left grip + left stick click** | |
 | Battle: look through the next party member | **Left grip + right stick click** | **Insert** |
-| The overlay | | **F8** |
+| The overlay (F8 menu) | Hold the **left grip**, then press the **left menu button** | **F8** |
+| Battle: switch characters (LB) / one row back in the turn order (RB) | A **quick squeeze** of the left / right grip (in the diorama a held grip still grabs) | |
+| Battle: Defend | **Y** | |
+| Seat and diorama views: grab the world | Hold a grip and move your hand; both grips also turn, tilt and scale | |
+| First person, field: press confirm (A) by reaching | Squeeze a grip and push that hand forward about 10 cm ("tap to press action", F8 > Hands > gestures) | |
+| Djose's cloister: take or place a sphere | Squeeze the grip of the hand at the labelled sphere or socket | |
+| The F8 menu panel | Point at it; **trigger** clicks, **stick** scrolls; a grip on it moves it, both grips resize it | Mouse |
+| Fahrenheit's save / load screen | Left stick, **A** / **B**, grips page the list | |
+
+Leave these alone, they belong to Virtual Desktop: **both stick clicks together** (its overlay) and a **long press or
+double tap of the left menu button** (its menu).
 
 ### What to expect
 
 - **Field and battles**: first person (your body hidden), third person behind the player, or
   a tabletop **diorama** you can grab and scale with the grips. In battle, first person
-  follows whoever is on the field, and the summoner during a summon.
+  follows whoever is on the field, and the summoner during a summon; the battle diorama is a
+  table centred on the fight, and each battle starts from its default view.
+- **Your hands**: in first person a pair of gloved hands at the controllers (VR hands, on by default
+  for a fresh install; never in battle, menus or movies). In Djose's Cloister of Trials you take and
+  place the spheres with them: reach until a label shows, then squeeze the grip. The Destruction
+  Sphere and the other cloisters still use the A button.
+- **Overdrives**: the buttons work as always. F8 > Overdrives has gestures: Lulu's Fury by drawing
+  circles, and for Auron's Bushido choose "strike the targets" to cut each target with a blade
+  ("Practice targets" lets you try without a battle).
 - **Menus, dialogue, the battle command window**: on a panel in front of you.
 - **2D screens and movies**: a large flat virtual screen.
 - **Blitzball**: a large **stereo 3D screen** showing the game's own camera, with automatic
@@ -161,11 +200,21 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 | **Lighter render resolution**: 2560x1440 instead of 4K, much easier on the GPU (the mod does its own anti-aliasing) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` puts yours back) |
 | **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
 
-### VR hands (experimental), and your own hands
+### The optional Bushido target art
 
-The F8 **Hands** tab > tick **VR hands**: a pair of hands at your controllers in first person, fingers
-following the trigger, grip and touch sensors. **hand model** picks the look: our generic glove or bare hand, or a pack
-you made yourself (**rescan** after adding one).
+The Bushido targets are plain plates. A separate optional download on the same release page,
+`ffxvr-target-art-{VERSION}.zip`, turns them into textured medallions. Extract it into the **same folder** you
+extracted this zip into (it adds `mod\ffxvr\art\targets\` inside `ffx-vr-{VERSION}`), then run
+`tools\install-mod.ps1` again. The art was generated with Google Gemini and upscaled with Upscayl by the project
+owner: it is **AI-generated**, no rights are claimed, and it is free to use (`ART-NOTICE.txt` in it says the same).
+The mod works the same without it.
+
+### VR hands, and your own hands
+
+A pair of hands is drawn at your controllers in first person, fingers following the trigger, grip and touch sensors.
+They are **on by default** for a fresh install (the F8 **Hands** tab's first checkbox, "VR hands: your own hands at the
+controllers", turns them off; the tab still carries an "experimental" mark). **hand model** picks the look: our generic
+glove (the default) or bare hand, or a pack you made yourself (**rescan** after adding one).
 
 To make your own from a character model you own (a Wavefront `.obj` with its `.mtl` and textures beside it, full body,
 T or A pose, Y up), install [Python 3](https://www.python.org/downloads/) and numpy (the script tells you how), then:
@@ -184,18 +233,27 @@ likely), so it is marked private, and the installer and the release tools never 
 
 ### Later, if you like: HD textures
 
-Not needed, and best left until everything else works: it's a big download, a lot of disk
-space, and one more thing to rule out when something goes wrong. The
+**Read this before you install it.** The
 [Re-Remastered texture pack](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)
-works with FFX VR. Download it yourself (needs [7-Zip](https://www.7-zip.org/) installed), and
-**don't** install the External File Loader that comes with it; Fahrenheit serves the files
-instead:
+works with FFX VR, but:
+
+- **Performance:** it caused performance problems in VR on the developer's PC (an RTX 3080 Ti). It is **not
+  recommended unless your hardware is stronger than that.**
+- **Disk space:** the Medium (2.5x) pack is about **18 GB** of loose files once installed, on top of the downloaded
+  archive, which is a big download itself. `-Compress` turns on NTFS compression for the pack's folder, which roughly
+  halves the installed size.
+
+It is not needed, and best left until everything else works: it is one more thing to rule out when something goes
+wrong. If you try it and performance suffers, `-Uninstall` removes it again.
+
+Download it yourself (needs [7-Zip](https://www.7-zip.org/) installed), and **don't** install the External File Loader
+that comes with it; Fahrenheit serves the files instead:
 
 ```
-powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archive "<path to the .7z>"
+powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archive "<path to the .7z>" -Compress
 ```
 
-`-Compress` halves the disk use; `-Uninstall` removes it.
+`-Uninstall` removes it.
 
 ---
 
@@ -210,6 +268,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 | Ghosting when turning with the stick | Is "Extra-smooth stick turning (headset rate)" ticked in F8 > Controls > Turning? Then the Virtual Desktop refresh rate and SSW, above. If the game drops below 60 fps, try `game-settings.ps1 -Profile vr`. |
 | Blurry, or a lower resolution than usual | The F8 overlay says "Game renders at ..., below the headset's per-eye ..." when this is the cause. Two ways to get there: (1) the monitor was off or asleep when the game started: in fullscreen the game then only got Virtual Desktop's virtual display, often 1920x1080. Keep the monitor on when you start the game, raise the virtual display's resolution in the Virtual Desktop Streamer if your version offers it, or use a 4K HDMI/DisplayPort dummy plug. (2) The game's own resolution is set lower than the headset's per-eye size (for example 2560x1440 from `game-settings.ps1 -Profile vr` with a high Virtual Desktop quality preset): raise it with `game-settings.ps1 -Width 3200 -Height 1800`, or lower the quality preset. |
 | Everything broke after a Steam update | A game patch moves the addresses Fahrenheit hooks. Wait for a Fahrenheit (and maybe FFX VR) update. |
+
+**Testing this alpha?** `TESTING.md` in this folder says what to try and what to send back.
 
 **Bug reports:** open an issue at the [FFX VR repository](https://github.com/mrpapa987/ffx-vr/issues)
 (never on Fahrenheit's or FFX-60fps's pages), with the newest `logs\run-*.txt` and the `logs\run-*-gamelogs`

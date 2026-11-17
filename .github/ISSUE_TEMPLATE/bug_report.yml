@@ -15,7 +15,7 @@ body:
     id: mod_version
     attributes:
       label: FFX VR version
-      description: Shown at the bottom of the F8 overlay (e.g. "FFX VR 0.1.0-alpha.1+e6e10f9"), or the zip's name.
+      description: Shown in the header at the top of the F8 overlay (e.g. "FFX VR 0.1.0-alpha.1+e6e10f9"), or the zip's name.
     validations:
       required: true
   - type: input
@@ -51,13 +51,13 @@ body:
     id: pc
     attributes:
       label: PC
-      description: GPU, Windows version, the game's resolution and V-Sync setting.
+      description: GPU, Windows version, the game's resolution and V-Sync setting. The frame / GPU / VRAM line at the top of the F8 overlay helps too.
       placeholder: RTX 3080 Ti, Windows 11 24H2, 2560x1440, V-Sync off
   - type: textarea
     id: what
     attributes:
       label: What happened, and what you expected
-      description: Where in the game (area, battle, cutscene), which view (first person, third person, diorama, screen).
+      description: Where in the game (area, battle, cutscene), which view (first person, third person, diorama, screen), and whether VR hands were on (F8 > Hands).
     validations:
       required: true
   - type: textarea

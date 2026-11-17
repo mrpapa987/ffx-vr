@@ -1,8 +1,11 @@
 # FFX VR — alpha install guide
 
-This is a guide for testers. FFX VR is pre-alpha: there's no download yet. You build it from
-source with the scripts in `tools\`, which takes about 30–60 minutes the first time, mostly
-installing tools and waiting for builds.
+This guide is for building FFX VR from source with the scripts in `tools\`, which takes about
+30–60 minutes the first time, mostly installing tools and waiting for builds. **Testers who just
+want to play do not need it:** download the release zip from the
+[Releases page](https://github.com/mrpapa987/ffx-vr/releases) and follow the `README.md` inside
+(no build tools needed); [docs/tester-checklist.md](docs/tester-checklist.md) says what to try and
+what to send back.
 
 It has been developed and tested on one setup: Windows 11, an RTX 3080 Ti, and a **Quest 3
 over Virtual Desktop (VDXR)**. Anything else is untested.
@@ -32,7 +35,7 @@ over Virtual Desktop (VDXR)**. Anything else is untested.
 | vcpkg integration | Only for building Fahrenheit from source (step 4, optional) | After the Build Tools install, run once in a *Developer* prompt: `vcpkg integrate install` |
 | .NET 10 SDK | Building the mod | `winget install Microsoft.DotNet.SDK.10` |
 | .NET 10 **x86** runtime | Running the mod (it's 32-bit, like the game) | `winget install Microsoft.DotNet.Runtime.10 --architecture x86` |
-| 7-Zip | Only if you install a texture pack | `winget install 7zip.7zip` |
+| 7-Zip | Only if you install a texture pack (optional, and not recommended without hardware stronger than an RTX 3080 Ti: step 7) | `winget install 7zip.7zip` |
 
 ---
 
@@ -156,11 +159,28 @@ closed (deleted while the game runs, it is written again at your next settings c
 | What | Command |
 |---|---|
 | **VR render resolution**: 2560×1440 instead of 4K; much lighter on the GPU. (Anti-aliasing is handled by the mod: 4× by default, in F8 > View > Graphics & performance) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` restores yours) |
-| **Re-Remastered texture pack**: download it yourself from [Nexus](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244). Do **not** install its External File Loader; Fahrenheit serves the files instead | `.\tools\install-texture-pack.ps1 -Archive "<path to the .7z>"` (`-Compress` halves the disk use, `-Uninstall` removes it) |
 | **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
-| **Your own VR hands** from a model you own (Python 3 + numpy; README.md, "VR hands (experimental) and your own hands"). The pack goes into the game's mod folder, never into this repository: the importer refuses a git checkout | `.\tools\import-hands.ps1 "<model>.obj" -Name mine` |
+| **Your own VR hands** from a model you own (Python 3 + numpy; README.md, "VR hands and your own hands"). The pack goes into the game's mod folder, never into this repository: the importer refuses a git checkout | `.\tools\import-hands.ps1 "<model>.obj" -Name mine` |
 
 Prefix each with `powershell -ExecutionPolicy Bypass -File`.
+
+### The Re-Remastered texture pack (optional; read the caution first)
+
+- **Performance:** the pack caused performance problems in VR on the developer's PC (an RTX 3080 Ti). It is **not
+  recommended unless your hardware is stronger than that.**
+- **Disk space:** the Medium (2.5x) pack is about **18 GB** of loose files once installed, on top of the downloaded
+  archive, which is a big download itself. `-Compress` turns on NTFS compression for the pack's folder, which roughly
+  halves the installed size.
+
+If you still want it: download it yourself from
+[Nexus](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244). Do **not** install its External File Loader;
+Fahrenheit serves the files instead.
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archive "<path to the .7z>" -Compress
+```
+
+`-Uninstall` removes it again.
 
 ---
 
@@ -176,6 +196,12 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
    bug report.
 3. In the game, press **F8** for the FFX VR overlay. Tick **Headset** (top left), and View >
    Starting > **Start in the headset** if you want it on from the next launch.
+4. The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
+   **right grip + right stick click** (or **End**) for first person: your hands appear there. With "Start in the
+   headset" ticked, the next launch starts in first person.
+5. In the headset the F8 menu is a panel in the room. Open or close it from the controllers: hold the **left grip**,
+   then press the **left menu button**. Point at it with either controller: the trigger clicks, the stick scrolls;
+   squeeze a grip on it to move it. **Bring here** (or Home) puts it in front of you again.
 
 ### Virtual Desktop settings
 
@@ -194,9 +220,13 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 The Quest controllers act as the gamepad ("Use the Quest controllers as the gamepad" in F8 >
 Controls, on by default). A normal gamepad works too.
 
+![The controllers: what every button does](docs/img/controls.png)
+
+![The chords and gestures the mod adds](docs/img/controls-chords.png)
+
 | Action | Controllers | Keyboard |
 |---|---|---|
-| Recentre the view | Hold the **Meta** button | **Home** |
+| Recentre the view | Hold the **Meta** (system) button | **Home** |
 | Turn | Right stick: smooth turning, at the turn speed set in F8 > Controls (there is no snap turning) | Numpad 1 / 3 |
 | Change view: first person → third person → diorama | **Right grip + right stick click** | **End** |
 | Reset the view (third person / diorama) | **Left grip + left stick click** | |
@@ -204,13 +234,27 @@ Controls, on by default). A normal gamepad works too.
 | Battle: switch characters (LB) / scroll the turn order back (RB) | A **quick squeeze** of the left / right grip (in the diorama a held grip still grabs) | |
 | Battle: Defend | **Y** | |
 | Fahrenheit's save / load screen | Left stick, **A** / **B**, grips page the list | |
-| The overlay | | **F8** |
+| The overlay (F8 menu) | Hold the **left grip**, then press the **left menu button** | **F8** |
+| Seat and diorama views: grab the world | Hold a grip and move your hand; both grips also turn, tilt and scale | |
+| First person, field: press confirm (A) by reaching | Squeeze a grip and push that hand forward about 10 cm ("tap to press action", F8 > Hands > gestures) | |
+| Djose's cloister: take or place a sphere | Squeeze the grip of the hand at the labelled sphere or socket | |
+| The F8 menu panel | Point at it; **trigger** clicks, **stick** scrolls; a grip on it moves it, both grips resize it | Mouse |
+
+Leave these alone, they belong to Virtual Desktop: **both stick clicks together** (its overlay) and a **long press or
+double tap of the left menu button** (its menu).
 
 ### What to expect
 
 - **Field and battles**: first person (with your body hidden), third person behind the
   player, or a tabletop **diorama** you can grab and scale with the grips. In battle, first
-  person follows whoever is on the field, and the summoner during a summon.
+  person follows whoever is on the field, and the summoner during a summon; the battle diorama
+  is a table centred on the fight, and each battle starts from its default view.
+- **Your hands**: in first person a pair of gloved hands at the controllers (VR hands, on by default
+  when there is no `ffxvr.ini` yet; an `ffxvr.ini` kept from an earlier build keeps its own value: F8 >
+  Hands > "VR hands: your own hands at the controllers"). In Djose's Cloister of Trials you take and
+  place the spheres with them; the Destruction Sphere and the other cloisters still use the A button.
+- **Overdrives**: F8 > Overdrives has the gestures (Lulu's Fury by circles; for Auron's Bushido choose
+  "strike the targets"; "Practice targets" needs no battle).
 - **Menus, dialogue, the battle command window**: on a panel in front of you.
 - **2D screens and movies**: a large flat virtual screen.
 - **Blitzball**: a large **stereo 3D screen** showing the game's own camera, with automatic
@@ -233,6 +277,7 @@ Controls, on by default). A normal gamepad works too.
 
 For a bug report (an issue in this repository, never on Fahrenheit's pages), send the newest
 `logs\run-*.txt` and the `logs\run-*-gamelogs` folder next to it, plus a description of what you saw.
+[docs/tester-checklist.md](docs/tester-checklist.md) lists what to try and what to send back.
 
 ### Logging
 
@@ -241,6 +286,7 @@ session before is `ffxvr_diag.prev.log`) and `ffxvr_native.log`. With the game c
 `.\tools\set-logging.ps1 -Profile Verbose` only logs more (the periodic summaries and the load: lines; log cap
 64 MB): that is the one to ask testers for. `.\tools\set-logging.ps1 -Profile Dev` turns on the developer's
 diagnostics (also build-7's hooks and watchdog, the load profiler's sampler, battle-transition lines, the
-HD-cache pool hooks and the ntdll reservation patch: they cost frame time and change how the game runs) and
+HD-cache pool hooks and the ntdll reservation patch: they cost frame time and change how the game runs; the research
+logs under F8 > Developer > Inspect, for spheres, weapons and battle commands, are separate switches it leaves alone) and
 `.\tools\set-logging.ps1 -Profile Release` turns them all off again. Both edit `ffxvr.ini` in place and keep a
 timestamped `.bak`. The F8 overlay's header shows an amber "log: N on" while any is on (hover it for the list).

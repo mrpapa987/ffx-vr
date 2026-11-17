@@ -17,15 +17,22 @@ Each part of the game gets the viewpoint that suits it, instead of one VR camera
 | In the game | In the headset |
 | --- | --- |
 | Field | First person (your body hidden), third person behind the player, or a tabletop **diorama** you can grab and scale; free head look |
-| Battles | The same three views; first person follows whoever is on the field (and the summoner during a summon) |
+| Battles | The same three views; first person follows whoever is on the field (and the summoner during a summon); the diorama is a table centred on the fight |
 | Menus, dialogue, the battle command window | A UI panel in front of you that comes closer when the scene does |
 | 2D screens, pre-rendered movies, the save screen | A large flat virtual screen |
 | Blitzball | A large stereo 3D screen showing the game's own camera, with automatic depth |
 
 The Quest controllers act as the gamepad (with rumble), the stick turns smoothly at the headset's
 refresh rate, and the game's own battle cursors are drawn in 3D over their targets.
-Overdrives can be played with gestures (F8 > Overdrives), Auron's Bushido by cutting targets with a blade in each hand; an
-optional download, `ffxvr-target-art-<version>.zip` (AI-generated art), turns those targets into textured medallions.
+Your hands are drawn at the controllers in first person (VR hands, on by default), and in Djose's Cloister of Trials
+you take and place the spheres with them.
+Overdrives can be played with gestures (F8 > Overdrives): Lulu's Fury by drawing circles, and Auron's Bushido, once you
+choose "strike the targets", by cutting targets with a blade in each hand; an optional download,
+`ffxvr-target-art-<version>.zip` (AI-generated art), turns those targets into textured medallions.
+
+![The controllers: what every button does](docs/img/controls.png)
+
+The chords and gestures the mod adds are on a second picture, under [Controls](#controls).
 
 ## Requirements
 
@@ -42,8 +49,11 @@ optional download, `ffxvr-target-art-<version>.zip` (AI-generated art), turns th
 - A GPU that renders the game twice per frame comfortably (tested on an RTX 3080 Ti).
 - Optional, recommended: **[FFX-60fps](https://github.com/peternguyenst/FFX-60fps)** at 60 fps
   (smoother motion; without it the game runs at 30).
-- Optional, later: the **[Re-Remastered](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)**
-  HD texture pack.
+- Optional, and **not recommended without hardware stronger than an RTX 3080 Ti**: the
+  **[Re-Remastered](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)** HD texture pack. It caused
+  performance problems in VR on the developer's PC (RTX 3080 Ti), and it needs a lot of disk space: the Medium (2.5x)
+  pack is about 18 GB of loose files once installed (the installer's `-Compress` roughly halves that), on top of the
+  downloaded archive. Get everything else working first.
 
 ## Install
 
@@ -71,12 +81,44 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
   Desktop not running) the game plays normally on the monitor.
 - Press **F8** in the game for the FFX VR overlay. Tick **Headset** (top left), and View > Starting >
   **Start in the headset** to go straight into the headset from the next launch.
+- The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
+  **right grip + right stick click** (or **End**) for first person: your hands appear there.
 - **Recentre**: hold the Meta button, or press **Home**.
 - **Change view** (first person, third person, diorama): **right grip + right stick click**, or **End**.
 - **Reset the view** (third person, diorama): **left grip + left stick click**.
 - **In battle, look through the next party member**: **left grip + right stick click**, or **Insert**.
 - **Turn**: right stick, smooth (the speed is in F8 > Controls > Turning); there is no snap turn.
+- **The F8 menu in the headset** is a panel in the room: hold the **left grip**, then press the **left menu button** to
+  open or close it; point at it with either controller (trigger clicks, stick scrolls); squeeze a grip on it to move it.
+- **VR hands are on** for a fresh install (our generic dark glove; F8 > Hands). If you update from a test build your
+  settings are kept, so tick F8 > Hands > "VR hands: your own hands at the controllers" yourself.
 - Play seated, and quit through the game's menu rather than by closing the window.
+
+## Controls
+
+The Quest controllers act as the gamepad ("Use the Quest controllers as the gamepad" in F8 > Controls, on by default); a
+normal gamepad works too. The first picture (above) shows every button; this one shows the chords and gestures the mod
+adds. Both are in the release zip, and as `.svg` in [docs/img](docs/img).
+
+![The chords and gestures the mod adds](docs/img/controls-chords.png)
+
+| Action | Controllers | Keyboard |
+|---|---|---|
+| Recentre the view | Hold the **Meta** (system) button | **Home** |
+| Turn | Right stick, smooth | Numpad 1 / 3 |
+| Change view: first person, third person, diorama | **Right grip + right stick click** | **End** |
+| Reset the view (third person / diorama) | **Left grip + left stick click** | |
+| Battle: look through the next party member | **Left grip + right stick click** | **Insert** |
+| Open or close the F8 menu | Hold the **left grip**, then press the **left menu button** | **F8** |
+| Battle: switch characters (LB) / one row back in the turn order (RB) | A **quick squeeze** of the left / right grip | |
+| Battle: Defend | **Y** | |
+| Seat and diorama views: grab the world | Hold a grip and move; both grips also turn, tilt and scale | |
+| First person, field: press confirm (A) by reaching ("tap to press action") | Squeeze a grip and push that hand forward about 10 cm | |
+| Djose's cloister: take or place a sphere | Squeeze the grip of the hand at the labelled sphere or socket | |
+| The F8 menu panel | Point at it; **trigger** clicks, **stick** scrolls; a grip on it moves it, both grips resize it | Mouse |
+
+Leave these alone, they belong to Virtual Desktop: **both stick clicks together** (its overlay) and a **long press or
+double tap of the left menu button** (its menu). The full reference is in [docs/setup.md](docs/setup.md), "Controls".
 
 ## Known issues
 
@@ -91,14 +133,35 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
   last frame, head-tracked, rather than going black).
 - If the monitor is off when the game starts, the game may render at a low resolution; the overlay says
   so. Keep the monitor on, or see "When something goes wrong" in the zip's README.
-- Blitzball uses a stereo screen rather than a full VR view; chocobo riding has had no VR work yet.
-- Only Virtual Desktop (VDXR) on a Quest 3 has been tested.
+- Blitzball uses a stereo screen rather than a full VR view. Pre-rendered movies are flat.
+- **The sphere grab works in Djose's cloister only so far.** The Destruction Sphere there, and every other Cloister of
+  Trials, use the A button as in the flat game. The game's prompts are answered for you only when the game runs in
+  English; in another language the grip presses A once and the prompt shows as usual.
+- **Weapons are not in your hands yet.** In a first-person battle your character's weapon is where the game draws it,
+  and the VR hands are not shown in battle.
+- **Spells and overdrives with their own staging are seen from where you stand**, not from the game's camera, so some
+  effects are seen from the side or from behind. Holy is the only spell looked at so far with F8 > Battle >
+  "Characters a spell draws by itself:" on "in 3D"; if another spell, overdrive or aeon attack looks wrong, pick "on the
+  menu panel, as before" there and send the log. "Aim spell effects at your eyes" is experimental and off.
+- **The Re-Remastered HD texture pack** caused performance problems on the developer's RTX 3080 Ti and needs a lot of
+  disk space (see Requirements): not recommended without stronger hardware.
+- Only Virtual Desktop (VDXR) on a Quest 3 has been tested, on one PC (RTX 3080 Ti).
 
-## VR hands (experimental) and your own hands
+## VR hands and your own hands
 
-The F8 **Hands** tab > tick **VR hands** draws a pair of hands at your controllers in first person (and,
-if you tick them, in the diorama, third person and the seat view). The fingers follow the trigger, the grip and the
-touch sensors. It is off by default while it is being tested.
+A pair of hands is drawn at your controllers in first person (and, if you tick them in the F8 **Hands** tab, in the
+diorama, third person and the seat view; never in battle, menus or movies). The fingers follow the trigger, the grip
+and the touch sensors. **VR hands are on by default** for a fresh install, showing our generic dark glove; the tab still
+carries an "experimental" mark, and its first checkbox, "VR hands: your own hands at the controllers", turns them off.
+Without a headset or controllers nothing is drawn.
+
+**Cloister of Trials spheres with your hands (Djose only so far)** (F8 > Hands > "Grab spheres with your hands (Cloisters
+of Trials)", on): in first person, a label names the sphere or socket your hand comes near ("Take ...", "Insert ...";
+"Step closer" means move nearer first). Squeeze that hand's grip and the sphere is taken or placed, with no prompt to
+answer. The sphere you carry sits in your palm ("Carried sphere in your hand", and "Sphere straight to and from your
+hand" for the moments in between), and "Fast sphere grab" lets the game's own take / place animation pass quickly (its
+"speed" slider: x6 by default, 1 = off). The A button works as always, and is still what the Destruction Sphere and the
+other cloisters need.
 
 **Tap to press action** (F8 > Hands > gestures, on with VR hands): **squeeze the grip and push your hand forward about a
 hand's width (10 cm) toward what you're facing**: it presses confirm (A: talk, examine, open) with a short tick on that
@@ -137,6 +200,11 @@ made 0.19 m from wrist to middle fingertip (`-HandLength`; `-KeepProportions` ke
 else's copyright. The importer marks every pack it makes as private (`"private": true` and a
 `PRIVATE-do-not-share.txt`), refuses to write into a git checkout, and FFX VR's tools never copy, package or upload such
 a pack (`install-mod.ps1 -Uninstall` keeps it; `-Purge` names it before deleting it). FFX VR itself ships no game data.
+
+## Testing this alpha
+
+[docs/tester-checklist.md](docs/tester-checklist.md) (`TESTING.md` in the zip) says what to try in about an hour, what
+"right" looks like, and exactly what to send back.
 
 ## Reporting bugs
 
@@ -193,7 +261,7 @@ This mod only works because of other people's projects:
     tools/hands/   The hand-pack tools: the generator, the importer (import-hands.py, objio.py; tools/import-hands.ps1),
                    handlib.py, preview-pack.py
     packaging/     The release zip's installer and README
-    docs/          Design notes
+    docs/          Design notes; docs/img/ the controller diagrams; docs/tester-checklist.md the tester's checklist
 
 [docs/design.md](docs/design.md) has the reasoning behind each view,
 [docs/design-notes.md](docs/design-notes.md) the running log of findings,

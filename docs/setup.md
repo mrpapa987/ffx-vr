@@ -179,7 +179,7 @@ settings to try, in this order, one at a time:
    scene targets (F8 shows `next scene` beside it until then; at the latest the
    next start). Edges alias a little more.
 3. Optional comparisons, only to measure: the texture pack off (same spot),
-   and `cull_scene=0` ("keep all geometry drawn" off: cheaper, but scenery the
+   and `cull_scene=0` ("Draw the whole scene (fixes edge pop-in; costs GPU)" off: cheaper, but scenery the
    authored camera does not see can disappear when you look around).
 
 **What to read** (F8: the frame / GPU / VRAM line at the top of the window;
@@ -202,7 +202,18 @@ first 3D frame), `start_view` (0 seat, 1 first person, 3 third person, 2
 diorama), `overlay_at_start` (0 = no mod window until F8). `menu_tab` is the
 F8 tab last selected; `vr_menu_*` place the menu panel in the headset and set its
 pointer (below). `hands_dev=1` adds the old bone-hands tools to the
-Developer tab's First person & body group.
+Developer tab's First person & body group. Every player-facing key, with its
+default and its F8 label, is listed in "Settings reference" at the end of this
+file.
+
+**Defaults and an existing ini.** The file holds every key, so a build with a new
+default changes nothing for a player who already has an `ffxvr.ini`: the value in
+the file wins. Only a fresh install (no `ffxvr.ini`), or a key the file lacks, gets
+the code's default. Release 0.1.0-alpha.1 changed one default: `vr_hands` 0 -> 1
+(VR hands on). An upgrading player keeps `vr_hands=0` until he ticks F8 > Hands >
+"VR hands: your own hands at the controllers" (`packaging/install-mod.ps1` says so
+when it finds the old value) or deletes `ffxvr.ini` with the game closed. `ini_rev`
+stays 2: no value is migrated.
 
 ## The F8 menu
 
@@ -223,7 +234,7 @@ tab is not: a launch with it saved opens View):
 | Battle | Battle view (incl. when characters swap, face the enemies); Characters and effects (the battle camera's hides, spell effects aimed at your eyes); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
-| Hands | VR hands (experimental), with a **Fix it** button when the hands cannot show because your body is shown |
+| Hands | VR hands (on by default since 0.1.0-alpha.1; the tab still carries an "experimental" mark), with a **Fix it** button when the hands cannot show because your body is shown; the hand model; the views; gestures (tap to press action); the cloister spheres (grab, carried sphere, fast grab); fine tune |
 | Developer | only in developer mode: everything the old Debug section held, in eight groups (Logging & status, Camera & stereo, Rendering, First person & body, Battle internals, Loading, Inspect, Captures) |
 
 Every tooltip ends with the setting's ini key (`not saved` for a control that
@@ -412,6 +423,13 @@ was left away from its default in the ini.
 
 ## Controls (Quest controllers only)
 
+Two pictures show every button and every chord (the `.svg` sources are beside them in `docs/img/`; both `.png` files
+are in the release zip):
+
+![The controllers: what every button does](img/controls.png)
+
+![The chords and gestures the mod adds](img/controls-chords.png)
+
 The Quest controllers are the gamepad (`vrpad=1`), merged with an Xbox pad if one is connected (buttons OR, the stick
 pushed further wins). Mapping: right A / B = A / B, left X / Y = X / Y, triggers = LT / RT, grips = LB / RB (below), left
 menu = Start (with the left grip already held: the mod's window opens or closes instead, as F8; see the F8 menu. Virtual Desktop reads this button on the headset itself: a long press or a double tap is its own menu, whatever the mod does), left stick click = Back, right stick click = R3, sticks = sticks.
@@ -428,8 +446,13 @@ about 8 %, so a finger resting on a trigger presses nothing; a very light half-p
 
 Battle: Y = Defend, right trigger held = scroll the turn order forward, left trigger = previous in the switch list. Chords
 (never reach the game): right grip + right stick click = the next view, left grip + right stick click = the next party
-member's view (battle), left grip + left stick click = reset the view, both stick clicks = Virtual Desktop's overlay (the
-game gets neither Back nor R3). Overdrive inputs: a pad and the controllers' buttons always work; F8 > Overdrives has the
+member's view (battle), left grip + left stick click = reset the view, left grip held + left menu button = the F8 menu
+(see "The F8 menu"), both stick clicks = Virtual Desktop's overlay (the
+game gets neither Back nor R3). Gestures: a held grip grabs the world in the seat and diorama views (both grips: pan,
+turn, tilt and scale; in third person both grips set the follow distance); in first person in the field, with VR hands,
+a grip squeezed and that hand pushed forward about 10 cm presses confirm ("tap to press action", F8 > Hands >
+gestures; README, "VR hands and your own hands"); in Djose's cloister a grip squeezed at a labelled sphere or socket
+takes or places the sphere (below); on the F8 menu's panel the trigger clicks and the stick scrolls. Overdrive inputs: a pad and the controllers' buttons always work; F8 > Overdrives has the
 gesture options: Lulu's circles, Tidus's swing, and "Auron's Bushido:" off / strike the targets / slashes and punches (experimental) (the d-pad
 arrows appear on the left, A / B / X / Y and L1 / R1 on the right; cut the big plate with either hand along its sliding chevrons:
 A down, B right, X left, Y up as on an Xbox pad, L1 left, R1 right; each plate shows only its big arrow, and "Show the button
@@ -460,6 +483,19 @@ with `imgui pad:`; quick squeezes log `grips:` lines.
 In a Cloister of Trials (Djose for now), in first person with the VR hands on: a label names the sphere or socket a hand
 comes near, and a squeeze of that hand's grip takes or places the sphere, the game's prompt answered for you.
 
+- **The labels** fade in from about 0.6 m and are clear at the 0.30 m grab reach: "Take ...", "Insert ...", "Hands
+  full", "Empty recess", and "Step closer" when the game would not choose that sphere or socket from where you stand
+  (walk nearer, or stand still, and it changes). A note at the hand says what happened ("Picked up ...", "Inserted
+  ...").
+- **The grab** is the game's own interaction: one A, then each line of its prompt answered when the game is ready for
+  it, with the prompt hidden in the headset meanwhile. It matches the prompts' English text: in another language the
+  grip presses A once and the prompt shows as usual. Anything unexpected (your own button, a timeout) stops it and the
+  prompt shows for you to answer.
+- **Not covered yet:** the Destruction Sphere's place in Djose, and every other cloister (Besaid, Kilika, Macalania,
+  Bevelle, Zanarkand): use the A button there, as in the flat game. The A button works everywhere as always.
+- F8 > Hands: "Grab spheres with your hands (Cloisters of Trials)", "Carried sphere in your hand", "Fast sphere grab"
+  with its "speed" slider, "Sphere straight to and from your hand".
+
 Keys: `sphere_hands` (1: the labels and the grip grab), `sphere_carry` (1: the carried sphere is drawn in your palm),
 `sphere_carry_seq` (1: during a grip-started grab the sphere is in your palm from the moment the game shows it, and stays
 there on a place until it is in the socket, instead of following the game's hand animation; 0 = in the palm only while you
@@ -469,7 +505,30 @@ grab), `sphere_fast_factor` (6, 1..12: how many times faster; 1 = off). `sphere_
 distance from the palm. Each grab logs `sphere grab:` lines in `ffxvr_diag.log`, the fast part one `sph: fast` line (the
 factor, how long, and whether the game took it: "NO EFFECT" means it did not), the palm part `carry:` lines.
 
+### A steady view during scripted moves (F8 > View > First person)
+
+"Steady view during scripted moves" (`fp_event_hold`, default 1) with "slack (units)" (`fp_event_leash`, 12): in first
+person, while the game has taken control and moves your character at an interaction (a sphere grab's own walk and camera
+cut, for one), the eye holds where you stood instead of being dragged along; it lets go at a camera cut that moves you
+past the slack, and glides (or blinks) back when control returns.
+
+### Developer-only research logs
+
+F8 > Developer > Inspect has three log-only switches for features still being worked on, all off by default and never
+needed by a player unless asked: "Sphere research log" (`diag_sphere`), "Weapon research log" (`diag_weapon`) and
+"Battle research log" (`diag_battle`, above). `tools\set-logging.ps1 -Profile Release` turns all three off; `-Profile
+Verbose` leaves them as they are (in a Cloister of Trials the sphere log also runs while any diagnostic is on; it only
+reads and installs no hook).
+
 ## Texture packs (External File Loader style) under Fahrenheit
+
+**Caution, before installing one.** The Re-Remastered pack caused performance problems in VR on the developer's PC
+(an RTX 3080 Ti): it is not recommended unless your hardware is stronger than that. It also needs a lot of disk space:
+the Medium (2.5x) pack is 18 GB of loose files once installed (docs/design-notes.md), on top of the downloaded
+archive (a large download; the installer extracts into a temporary folder on the game's drive and moves the files, so
+no second copy is made there). `-Compress` turns on NTFS compression for the pack's folder: about half the size.
+`-Uninstall` removes the pack. The loose files are read synchronously through the file loader, which the design notes
+name as the likely main contributor to the long frames at scene loads.
 
 Loose-file texture packs for this game (e.g. HitokageWorshipper's
 "Re-Remastered", Nexus mod 244) are written for ffgriever's External File
@@ -575,3 +634,293 @@ without those options. Tests (no torch, no GPU, no game data): `python -m unitte
 Depth quality figures (read-only, prints numbers; noise, pumping, the model's window stride, clipping, per-shot raw range):
 `& "$env:LOCALAPPDATA\ffxvr\fmvdepth-venv\Scripts\python.exe" tools\fmvdepth\fvd_stats.py <game>\fahrenheit\mods\ffxvr\fmvdepth\opn_us.fvd
 <...>\sin_us.fvd <...>\end_us.fvd --shots` (the converter's venv: XPRESS needs Windows' cabinet.dll). Send the output.
+
+## Settings reference (ffxvr.ini)
+
+Every player-facing key in `<game>\fahrenheit\mods\ffxvr\ffxvr.ini`, with the default a fresh install has and the
+control that sets it in F8 (the tab and section in bold; the same key is at the end of each control's tooltip). The ranges
+are the ones the file accepts. Keys that only the Developer tab draws (the `diag_*` switches, the old bone hands'
+`hands_*`, the `fp_head_*` and `shadow_*` tuning, `sphere_carry_offset`, `hd_cluster_cache`, `load_lock_release`,
+`slow_guard` and the rest of `k_dev_keys` in `src/managed/menu.cs`) are left out: leave them alone unless asked.
+Not in F8 at all: `ini_rev` (the file's revision, written by the mod), `menu_tab` (the tab last selected),
+`overlay_open` (whether the F8 window was open), `turn_mode` / `turn_snap` / `turn_blink` (older turning keys; F8 only
+offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_left`, `hands_dev` (developer leftovers).
+`diag_verbose` is the header's **Developer** checkbox (default 0).
+
+**View > Starting**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `headset_autostart` | 0 | "Start in the headset" |
+| `start_view` | 1 | 0 "seat", 1 "first person", 3 "third person", 2 "diorama" |
+| `overlay_at_start` | 1 | "Open this menu at start" |
+
+**View > View**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `world_scale` | 94 | "World size"; 10..300 units per metre |
+| `head_position` | 1 | "Lean with your head" |
+| `seat` | 1 | "Seat view: look around freely" |
+| `headset_fov` | 1 | "Use the headset's full field of view" |
+| `pitch_follow` | 0.85 | "Follow the camera's tilt" (0..1) |
+| `seat_height` | -78 | "Seat height" (-5000..5000) |
+| `seat_forward` | 0 | "Seat forward" (-5000..5000) |
+
+**View > Third person & diorama**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `tp_distance` | 24 | "distance" (4..120) |
+| `tp_height` | 22 | "height" (0..60) |
+| `tp_pitch` | -8 | "pitch" (-60..30) |
+| `tp_follow_rate` | 0 | "heading follows the run" (0..180) |
+| `follow_distance` | 60 | "follow distance" (10..300) |
+| `follow_height` | 25 | "follow height" (0..150) |
+| `diorama_floor` | 8 | "Diorama floor" (0..40) |
+| `anchor_smooth_ms` | 0 | "Follow smoothing (ms)" (0..500) |
+
+**View > First person**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `fp_body_mode` | 0 | 0 "hide all", 1 "show body, hide head", 2 "show everything" |
+| `fp_battle_hide` | 1 | 1 "hide by model (only your own character)", 0 "hide by distance (the old rule)" |
+| `fp_head_anchor` | 1 | 0 "fixed", 1 "follow the head (swim, crouch)", 2 "full head bone" |
+| `fp_eye_height` | 18 | "Eye height (units)" (0..40) |
+| `fp_self_shadow` | 1 | "Your own shadow" |
+| `fp_event_hold` | 1 | "Steady view during scripted moves" |
+| `fp_event_leash` | 12 | "slack (units)" (5..40) |
+| `ride_smooth` | 1 | 0 "off", 1 "height", 2 "height + sideways" |
+| `ride_smooth_ms` | 150 | "ms" (0..1000) |
+| `ride_hide_mount` | 0 | "Riding: also hide the chocobo" |
+| `ride_hide_radius` | 6 | "radius" (0.5..12) |
+
+**View > Comfort**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `cut_recentre` | 1 | "face the new view" |
+| `cut_blink` | 0 | "blink" |
+| `follow_pans` | 0 | "Follow camera pans" |
+| `follow_rate` | 20 | "speed (deg/s)" (1..360) |
+| `eye_jump_blink` | 6 | "frames" (0..15) |
+| `eye_jump_units` | 8 | "distance (units)" (4..40) |
+
+**View > Panels**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `ui_panel` | 1 | "Game menus and subtitles on a floating panel" |
+| `ui_distance` | 1.5 | "Panel distance (m)" (0.5..4) |
+| `ui_width` | 1.6 | "size (m)" (0.5..4) |
+| `ui_adaptive` | 1 | "Bring the panel in front of nearby objects" |
+| `ui_backing` | 0.35 | "Darken behind the panel" (0..1) |
+| `dream_overlay` | 1 | 1 "hide", 2 "tint both eyes", 0 "on the panel (old)" |
+| `backdrop_mode` | 1 | 1 "on the big screen", 0 "3D props over the painting" |
+| `imgui_layer` | 1 | "Show mod menus in the headset (this menu, Fahrenheit's menus)" |
+| `fh_menu_on_screen` | 1 | "Save screen on the big screen" |
+| `overlay_text_scale` | 1.00 | "Menu text size"; 0.5..2 in steps of 0.05 |
+
+**View > Graphics & performance**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `shadow_cam` | 1 | "Character shadows" |
+| `cull_dist` | 1 | "Never hide distant characters (no pop-in)" |
+| `cull_scene` | 1 | "Draw the whole scene (fixes edge pop-in; costs GPU)" |
+| `msaa` | 4 | 0 "game (8x)", 4 "4x", 2 "2x" |
+| `hist_mode` | 1 | 1 "off", 0 "game", 2 "skip pass" |
+| `heat_haze` | 0 | 0 "off in the headset", 2 "as the game", 1 "per eye" |
+
+**Controls > Controllers**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `vrpad` | 1 | "Use the Quest controllers as the gamepad" |
+| `haptics` | 1 | "Controller rumble" |
+| `haptics_gain` | 0.8 | "strength" (0..1) |
+| `grip_lbrb` | 1 | 0 "off", 1 "in battle, seat and diorama", 2 "everywhere" |
+| `grip_tap_ms` | 300 | "squeeze length (ms)" (150..500) |
+| `grip_tap_press_ms` | 0 | 0..150; ini only |
+| `vd_overlay_mask` | 1 | "Keep Virtual Desktop's chord (both stick clicks) away from the game" |
+| `imgui_vrpad` | 1 | 0 off, 1 "Controllers in Fahrenheit's save screen", 2 also "and in every mod menu (Start and Back too)" |
+| `imgui_vrpad_strict` | 0 | ini only |
+
+**Controls > Turning**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `turn_stick` | 1 | "Turn with the right stick" |
+| `turn_rate` | 90 | "speed" (10..360) |
+| `stick_reproject` | 1 | "Extra-smooth stick turning (headset rate)": 0 off, 1 "first person + seat", 2 "all views (approximate)" |
+
+**Controls > Moving**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `move_remap` | 1 | "Walk where you look (first person)" |
+| `move_invert` | 0 | "invert" |
+| `move_remap_walk_only` | 1 | "... only while walking" |
+
+**Controls > Grab the world**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `gestures` | 1 | "Grab the world with the grips (seat and diorama)" |
+| `gest_tilt` | 1 | "wrist-roll tilt" (-2..2) |
+
+**Controls > Menu panel (in the headset)**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `vr_menu_panel` | 1 | "This menu on its own panel in the room" |
+| `vr_menu_chord` | 1 | "Left grip + left menu button opens or closes this menu" |
+| `vr_menu_distance` | 1.0 | "distance (m)" (0.4..2.5) |
+| `vr_menu_height` | -0.15 | "height (m)" (-0.6..0.3) |
+| `vr_menu_scale` | 1.0 | "size" (0.6..2) |
+| `vr_menu_hand` | 0 | 0 "either hand", 1 "right", 2 "left" |
+| `vr_menu_haptics` | 1 | "ticks" |
+
+**Battle > Battle view**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `battle_view` | -1 | -1 "as now", 1 "first person", 3 "third person", 2 "diorama" |
+| `battle_anchor` | 1 | "Battle diorama: centre on the fight" |
+| `battle_view_reset` | 1 | "Battle diorama: start each battle from the default view" |
+| `battle_follow` | 1 | "First person in battle: ride along with the active character" |
+| `bt_tag` | 1 | 0 "wait for him", 1 "tag on the spot", 2 "ride in with him" |
+| `bt_tag_dist` | 6 | 1..20 units |
+| `battle_anchor_smooth_ms` | 0 | "Battle follow smoothing (ms)" (0..3000) |
+| `battle_face` | 1 | 0 "off", 1 "body forward", 2 "where you look" |
+
+**Battle > Characters and effects**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `battle_cam_hide` | 0 | 0 "keep them shown", 1 "hide them, as the game does" |
+| `late_3d_layer` | 1 | 1 "in 3D", 0 "on the menu panel, as before" |
+| `fx_face_eyes` | 0 | "Aim spell effects at your eyes" |
+
+**Battle > Battle start**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `battle_transition` | 2 | 2 "frozen world", 1 "head-locked", 0 "original" |
+
+**Battle > Target cursor**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `cursor_look` | game | "Use the game's cursor art"; `game` / `mod` |
+| `cursor_hand_size` | 1 | "Hand size" (0.3..3) |
+| `marker_scale` | 1 | "Cursor size" (0.2..5) |
+| `marker_lift` | 2 | "lift" (-5..20) |
+| `fp_self_marker` | 0 | 0 "low", 1 "hidden", 2 "normal" |
+
+**Battle > Blitzball**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `blitz_overlay` | 1 | "Scoreboard and radar on the panel" |
+
+**Battle > 3D damage numbers (experimental)**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `dmg3d_show` | 0 | "3D damage numbers" |
+| `dmg3d_scale` | 1 | "size" (0.3..3) |
+| `dmg3d_lift` | 0 | "lift" (-10..20) |
+| `dmg3d_hide2d` | 0 | "hide the flat numbers" |
+
+**Overdrives > Gestures**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `od_gestures` | 1 | "Overdrive gestures (the buttons keep working)" |
+| `od_gest_lulu` | 1 | "Lulu: circles for Fury" |
+| `od_circle_cm` | 4 | "smallest circle (cm)" (1..20) |
+| `od_lulu_stick` | 0 | 0 right, 1 left, 2 both: "stick for Fury" |
+| `od_gest_tidus_swing` | 0 | "Tidus: swing for Swordplay" |
+| `od_slash_speed` | 1.6 | "swing speed (m/s)" (0.8..5) |
+| `od_gest_auron` | 0 | 0 "off", 2 "strike the targets", 1 "slashes and punches" |
+| `od_gest_haptics` | 1 | "Buzz on hits and misses" |
+| `od_visuals` | 1 | "Guides near your hands" |
+| `od_visual_size` | 1 | "size" (0.5..2) |
+
+**Overdrives > Bushido targets**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `od_targets_blade_pitch` | 0 | "Blade angle (deg)" (-45..45) |
+| `od_targets_dist2` | 0.50 | "distance (m)" (0.35..0.9) |
+| `od_targets_height2` | -0.30 | "height (m)" (-0.5..0) |
+| `od_targets_size` | 1 | "size" (0.6..1.6) |
+| `od_targets_spread` | 0.36 | "spacing (m)" (0.25..0.6) |
+| `od_targets_time` | 1 | "More time for Bushido (x)" (1..3) |
+| `od_targets_art` | 1 | "Target art (local pack)" |
+| `od_targets_badge` | 0 | "Show the button letter" |
+| `od_targets_hide2d` | 1 | "Hide the game's Bushido row" |
+
+**Movies > 3D movies (experimental; needs the depth pack, a developer tool for now)**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `fmv_depth` | 0 | "Movies in 3D (needs the depth pack)" |
+| `fmv_depth_amount` | 1 | "amount" (0..1) |
+| `fmv_depth_range` | 10 | "Depth behind the screen" (0.5..20) |
+| `fmv_depth_pop` | 0.5 | "pop-out in front" (0..2) |
+| `fmv_depth_grid` | 1 | 1 "640, smooth (recommended)", 0 "320", 2 "640, guided" |
+| `fmv_depth_soften` | 1 | "Edge softening (depth texels)" (0..1.5) |
+| `fmv_depth_smooth` | 0.6 | "shimmer smoothing" (0..0.95) |
+| `fmv_depth_flat_subs` | 0 | "Keep subtitles flat" |
+
+**Movies > Big screen**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `screen_mode` | 0 | 0 "auto", 1 "always", 2 "never" |
+| `screen_width` | 2.5 | "Screen size (m)" (1..8) |
+| `screen_distance` | 2.5 | "distance (m)" (1..6) |
+
+**Movies > 3D cinema screen**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `stereo_screen_blitz` | 1 | "in blitzball" |
+| `stereo_screen_all` | 0 | "everywhere" |
+| `stereo_screen_depth` | 1 | "Depth" (0..4) |
+| `stereo_screen_auto` | 1 | "Auto depth" |
+| `stereo_screen_max_pop` | 2.5 | "max pop-out (% of the screen)" (0..6) |
+| `stereo_screen_plane` | 300 | "Screen plane" (10..5000) |
+
+**Hands**
+
+| Key | Default | In F8 |
+|---|---|---|
+| `vr_hands` | 1 | "VR hands: your own hands at the controllers" |
+| `vr_hands_pack` | generic-glove | "hand model:"; a folder under the mod folder's `hands\` (`generic-glove` the dark glove, `generic` the bare hand, or your own) |
+| `vr_hands_views` | 1 | the "show in" checkboxes, as bits added up: 1 first person (always), 2 "the diorama", 4 "third person", 8 "the seat view" |
+| `vr_hands_rest_curl` | 0.20 | "idle finger curl" (0..1) |
+| `vr_hands_scale` | 1.00 | "size" (0.8..1.25) |
+| `vr_hands_cal` | empty | set by **calibrate: 10 s countdown**; empty = the default placement |
+| `vr_hands_tap` | 1 | "tap to press action (squeeze the grip and push your hand forward)" |
+| `vr_hands_tap_sens` | 1.00 | "tap sensitivity" (0.5..2) |
+| `vr_hands_tap_dialogue` | 0 | "also advance dialogue (tap while a text box is up)" |
+| `vr_hands_tap_haptic` | 1 | "haptic tick" |
+| `vr_hands_tap_point` | 0 | "require a pointing finger (index off the trigger)" |
+| `vr_hands_tap_hold_grip` | 0 | "don't pass the grip to the game while a tap can fire (LB / RB)" |
+| `vr_hands_tap_button` | a | `a` / `b` / `x` / `y`; ini only |
+| `vr_hands_tap_press_ms` | 100 | 60..300; ini only |
+| `sphere_hands` | 1 | "Grab spheres with your hands (Cloisters of Trials)" |
+| `sphere_carry` | 1 | "Carried sphere in your hand" |
+| `sphere_fast` | 1 | "Fast sphere grab" |
+| `sphere_fast_factor` | 6 | "speed" (1..12) |
+| `sphere_carry_seq` | 1 | "Sphere straight to and from your hand" |
+| `vr_hands_yaw` | 0 | "yaw" (-45..45) |
+| `vr_hands_pitch` | 0 | "pitch" (-45..45) |
+| `vr_hands_roll` | 0 | "roll" (-45..45) |
+| `vr_hands_off_right` | 0 | "out" (-0.10..0.10) |
+| `vr_hands_off_up` | 0 | "up" (-0.10..0.10) |
+| `vr_hands_off_back` | 0 | "back" (-0.10..0.10) |

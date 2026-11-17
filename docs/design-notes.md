@@ -7638,3 +7638,35 @@ Left, with the reason:
   and its one action, no value 2, and `ffxvr_native.cpp` without late3d's lines is the file of the commit before, byte
   for byte (the head hide's one changed line put back). `mutants.py`: 476 mutants (111 of them late3d's rule, tracker,
   glue and managed lines, the review round's among them), all caught.
+
+## Release 0.1.0-alpha.1 prep (branch `release-alpha1`, 17 Nov 2026; ABI 70 kept, no export or native change)
+
+For the first tester (Quest 3 + Virtual Desktop), delivered as a GitHub pre-release. Not built or run here: no C#
+compiler, no PowerShell; every PowerShell line added copies an idiom already in that file.
+
+- **One default changed: `vr_hands` 0 -> 1** (`hands.cs`; the owner's decision). The sphere grab and tap to press need
+  the hands; a fresh install shows `generic-glove`. What follows from it on a fresh install, all already built that way:
+  the hands in first person only (`vr_hands_views` 1), "tap to press action" on (`vr_hands_tap` 1: a grip squeezed and
+  the hand pushed forward 10 cm presses A in the field), the sphere labels and grab on (`sphere_hands` 1), the carried
+  sphere and the fast grab on. With the headset off or no controller tracked nothing is drawn or read
+  (`ffxvr_hands2_set` answers 0 without `g_xr_want`; the pack and the pass are built at the first Present with the
+  headset on; the slow-GPU guard can still switch the hands off). The Bushido targets do **not** need `vr_hands`: their
+  blades are drawn by the targets' own pass, and the hands are never drawn in battle.
+- **An existing ini keeps `vr_hands=0`**: `ini_text` writes every key, so only a fresh install (or a short file such as
+  the one `set-logging.ps1 -Profile Verbose` writes when there is none) gets the new default. No migration, `ini_rev`
+  stays 2: a 0 in the file cannot be told from a choice. `install-mod.ps1` prints a `[settings]` note when the kept ini
+  has `vr_hands=0`; the CHANGELOG and README-zip say what to tick.
+- **The Hands tab keeps its "experimental" mark** (`menu.cs` `tab_hands`): a question for the owner, not changed.
+- **Every diagnostic is off on a fresh install** (checked: the twelve keys of `diag_on()` = `$FfxvrDiagKeys` in
+  `tools/paths.ps1`; `vr_hands_debug` 0, `hands_dev` 0, `fx_face_eyes` 0, `dmg3d_show` 0, `od_gest_auron` 0,
+  `fmv_depth` 0). `set-logging.ps1 -Profile Verbose` installs no hook: `diag_battle` (a detour on the command parser)
+  is `$null` there and `0` in Release; the sphere and weapon research logs only read.
+- **The zip** gains `TESTING.md` (from `docs/tester-checklist.md`) and `docs\img\controls.png`,
+  `controls-chords.png` (original schematic drawings, `docs/img/*.svg` the sources). `package-release.ps1` rewrites the
+  two Markdown files' image links for the zip's layout.
+- **Texture pack caution** (the owner, 17 Nov): the Re-Remastered pack caused performance problems on his RTX 3080 Ti;
+  every doc that names the pack, and `install-texture-pack.ps1` itself, now says so before the install steps, with the
+  disk figure this file records (18 GB of loose files for the Medium pack; `-Compress` about half).
+- **Not verified**: the build; the installer's and the packager's new lines on Windows PowerShell 5.1; a fresh install
+  with the hands on in the game; the diagrams against a real controller in the hand (they follow `ffxvr_pad.h`'s
+  mapping and `gesture_tick`'s chords).
