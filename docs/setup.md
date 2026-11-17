@@ -465,7 +465,7 @@ game's input timer while the targets window is open, if the time is too short. "
 Overdrives > Gestures, every player, not saved) sets the game's own debug flag in each battle while ticked, so any
 overdrive can be practised at once; the flag is cleared at each battle's end and when unticked, and while it is on
 the gauge is not spent (a save made then keeps a full gauge). The targets can be textured medallions from the optional art download
-(`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the same folder as the mod's zip, then run
+(`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the folder the mod's zip was extracted to, so its `mod\ffxvr\art\` merges with the mod's, then run
 `tools\install-mod.ps1`) or a pack you make yourself
 (docs/design-notes.md, "Bushido target art (local pack)").
 

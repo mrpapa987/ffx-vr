@@ -151,6 +151,6 @@ $rc = $LASTEXITCODE
 Write-Host ''
 if ($rc -ne 0) { Write-Host "The import failed (exit code $rc): see the message above."; exit $rc }
 if ($OutDir) { Write-Host "Made the pack in $out (copy that folder to <game>\fahrenheit\mods\ffxvr\hands\ to use it)." }
-else { Write-Host "Made hands\$Name. In game: F8 > VR hands (experimental) > hand model > rescan, then pick it." }
+else { Write-Host "Made hands\$Name. In game: F8 > Hands > hand model > rescan, then pick it." }
 Write-Host 'It is made from your model: keep it on this PC, do not share the folder.'
 exit 0
