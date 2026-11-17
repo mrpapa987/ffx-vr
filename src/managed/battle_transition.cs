@@ -18,7 +18,7 @@ namespace FFXVR;
 //     detection) never depends on it.
 public sealed unsafe partial class FFXVRModule {
 
-    private int  _battle_transition = 2;       // ini battle_transition: 0 old, 1 head-locked, 2 frozen world
+    private int  _battle_transition = 1;       // ini battle_transition: 0 old, 1 head-locked (default since release 0.1.0-alpha.1; was 2), 2 frozen world
     private bool _diag_transition = false;     // ini diag_transition: the per-frame bt: lines (default 0 since the loads build)
     private delegate* unmanaged[Cdecl]<int, int, void> _fn_bt_set;          // (mode | 0x100 on a user view action, diag); ABI 16
     private bool _bt_user_ev;                  // a user view action this frame (hotkeys, gestures, overlay): an open transition window ends at once

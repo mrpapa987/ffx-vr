@@ -448,7 +448,7 @@ public sealed unsafe partial class FFXVRModule {
         return s != null ? Marshal.PtrToStringAnsi((nint)s) ?? "" : "";
     }
 
-    /// <summary>F8 > Hands (the tab that replaced the "VR hands (experimental)" header; menu.cs draws its experimental tag).</summary>
+    /// <summary>F8 > Hands (the tab that replaced the "VR hands (experimental)" header; no experimental tag since release 0.1.0-alpha.1).</summary>
     private void hands2_ui() {
         if (_fn_hands2_set == null) { ImGui.TextDisabled("VR hands need the native helper's hands support (not loaded)."); return; }
         ui_check("vr_hands", "VR hands: your own hands at the controllers##h2on", ref _vr_hands, UiTag.Common, "Hands drawn at the controllers in first person (with your body hidden) and the views ticked below.");

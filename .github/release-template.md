@@ -19,7 +19,8 @@ RTX 3080 Ti: not recommended without stronger hardware. It also needs a lot of d
 
 **Optional download: `ffxvr-target-art-X.Y.Z.zip`** - textured medallions for the Bushido targets. **AI-generated art**
 (generated with Google Gemini and upscaled with Upscayl by the project owner; no rights claimed, free to use). Extract
-it into the same folder as the mod's zip, then run `tools\install-mod.ps1`. Without it the mod draws plain targets.
+it into the folder that contains `ffx-vr-X.Y.Z` (so the two merge; not into a folder of its own), then run
+`tools\install-mod.ps1`, which says whether it found the art. Without it the mod draws plain targets.
 SHA-256: `[paste from ffxvr-target-art-X.Y.Z.zip.sha256]`
 
 **Updating:** extract the new zip and run its `tools\install-mod.ps1`; your settings are kept (so a changed default,

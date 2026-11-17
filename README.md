@@ -26,8 +26,8 @@ The Quest controllers act as the gamepad (with rumble), the stick turns smoothly
 refresh rate, and the game's own battle cursors are drawn in 3D over their targets.
 Your hands are drawn at the controllers in first person (VR hands, on by default), and in Djose's Cloister of Trials
 you take and place the spheres with them.
-Overdrives can be played with gestures (F8 > Overdrives): Lulu's Fury by drawing circles, and Auron's Bushido, once you
-choose "strike the targets", by cutting targets with a blade in each hand; an optional download,
+Overdrives can be played with gestures (F8 > Overdrives): Lulu's Fury by drawing circles, and Auron's Bushido by
+cutting targets with a blade in each hand ("strike the targets", on by default); an optional download,
 `ffxvr-target-art-<version>.zip` (AI-generated art), turns those targets into textured medallions.
 
 ![The controllers: what every button does](docs/img/controls.png)
@@ -79,8 +79,9 @@ The DLLs are not code-signed; Windows SmartScreen or an antivirus may ask about 
 
 - **Connect Virtual Desktop to the PC before starting the game.** Without a headset (or with Virtual
   Desktop not running) the game plays normally on the monitor.
-- Press **F8** in the game for the FFX VR overlay. Tick **Headset** (top left), and View > Starting >
-  **Start in the headset** to go straight into the headset from the next launch.
+- **Your saves:** Fahrenheit keeps its own save set; `tools\import-steam-saves.ps1` copies your normal saves in.
+- The FFX VR window is open when the game first starts (**F8** hides and shows it). Tick **Headset** (top left), and
+  View > Starting > **Start in the headset** to go straight into the headset from the next launch.
 - The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
   **right grip + right stick click** (or **End**) for first person: your hands appear there.
 - **Recentre**: hold the Meta button, or press **Home**.
@@ -151,8 +152,8 @@ double tap of the left menu button** (its menu). The full reference is in [docs/
 
 A pair of hands is drawn at your controllers in first person (and, if you tick them in the F8 **Hands** tab, in the
 diorama, third person and the seat view; never in battle, menus or movies). The fingers follow the trigger, the grip
-and the touch sensors. **VR hands are on by default** for a fresh install, showing our generic dark glove; the tab still
-carries an "experimental" mark, and its first checkbox, "VR hands: your own hands at the controllers", turns them off.
+and the touch sensors. **VR hands are on by default** for a fresh install, showing our generic dark glove; the tab's
+first checkbox, "VR hands: your own hands at the controllers", turns them off.
 Without a headset or controllers nothing is drawn.
 
 **Cloister of Trials spheres with your hands (Djose only so far)** (F8 > Hands > "Grab spheres with your hands (Cloisters
@@ -171,7 +172,7 @@ battle, a menu, the sphere grid, the save screen, a movie or blitzball, never wi
 the game has taken control of the character (cutscenes, dialogue), while you turn with the stick or move your head fast,
 and not while a text box is up unless you tick **also advance dialogue** (then a tap advances a line once it is fully
 shown, never while it is still typing, never a choice). **tap sensitivity** sets the distance
-(2.0: 5 cm, 0.5: 20 cm); F8 shows "armed" and how far you have pushed. The grips are also LB / RB to the game; tick
+(2.0: 5 cm, 0.5: 20 cm); with Developer ticked, F8 shows "armed" and how far you have pushed. The grips are also LB / RB to the game; tick
 **don't pass the grip to the game while a tap can fire** if that ever gets in the way: a grip squeezed where a tap can
 fire is then held back from the game until you let go (in battle and menus the grips work as before).
 
@@ -246,7 +247,7 @@ This mod only works because of other people's projects:
 - **[OpenXR](https://www.khronos.org/openxr/)** (Khronos; loader and headers from the official
   NuGet packages) - the headset interface, through Virtual Desktop's VDXR runtime.
 - **[Re-Remastered](https://www.nexusmods.com/finalfantasyxx2hdremaster/mods/244)**
-  (HitokageWorshipper) - the texture pack installed alongside, written for ffgriever's External
+  (HitokageWorshipper) - an optional texture pack, written for ffgriever's External
   File Loader and served here through Fahrenheit's file loader instead.
 - The PS2-era modding community's documentation of the game's formats (the VBF archive,
   Phyre assets), and the game's own debug leftovers, read with objdump.

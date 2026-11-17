@@ -16,8 +16,10 @@ is about 18 GB of loose files once installed).
 
 **Updating from a test build:** your `ffxvr.ini` is kept, so the new defaults below do not reach you by themselves. VR
 hands were off by default before this release: tick F8 > Hands > "VR hands: your own hands at the controllers" to get
-them (the cloister sphere grab and tap to press need them), or delete `ffxvr.ini` with the game closed to start from
-the defaults.
+them (the cloister sphere grab and tap to press need them). The other defaults that changed: Auron's Bushido on
+"strike the targets" with the targets at 0.76 m, size 1.6 and "More time for Bushido (x)" 2 (F8 > Overdrives), the
+battle start effect "head-locked" (F8 > Battle), and `hd_cluster_cache` on. Or delete `ffxvr.ini` with the game closed
+to start from the defaults.
 
 ### What's in it
 
@@ -46,7 +48,8 @@ the defaults.
 - **A virtual screen** for 2D scenes, pre-rendered movies and Fahrenheit's save screen; a **stereo 3D
   screen** with automatic depth for blitzball (optionally for the whole game).
 - **The game's own battle cursors in 3D** over their targets.
-- **The battle-entry glass break** shown in the headset.
+- **The battle-entry glass break** shown in the headset, locked to your head by default (F8 > Battle > "Battle
+  start effect:": "head-locked"; "frozen world" and "original" are the other choices).
 - **Quest controllers as the gamepad**, with the game's rumble on the controllers. They also work in Fahrenheit's
   save / load screen; the left stick acts as a gamepad's in battle and menus (it follows your view only while you walk);
   in battle and the diorama a quick squeeze of a grip is LB / RB (switch characters, scroll the turn order) while a held
@@ -54,7 +57,9 @@ the defaults.
   on one presses nothing.
 - **Smooth stick turning at the headset's refresh rate** (stick reprojection), and the last picture
   kept, head-tracked, while the game loads instead of a black headset.
-- **Faster loads in the headset**: the game's loader no longer waits while the mod waits for the headset's next frame.
+- **Faster loads in the headset**: the game's loader no longer waits while the mod waits for the headset's next frame,
+  and the textures of the field and battle maps stay loaded across random battles in one zone (`hd_cluster_cache`, on
+  by default; its switch is in the Developer tab).
 - **4x MSAA** handled by the mod; the F8 overlay warns when the game renders below the headset's
   resolution.
 - **The F8 overlay** for every setting, saved to `ffxvr.ini` (hand edits are read back while the game
@@ -70,7 +75,7 @@ the defaults.
   Start; Virtual Desktop keeps that button's long press and double tap for its own menu).
 - **Installer** (`tools\install-mod.ps1`) that checks every requirement, and `tools\run-ffx.ps1` that
   starts the game and collects the logs for a bug report.
-- **VR hands, on by default** (still marked experimental in F8 > Hands): your hands drawn at the controllers in first
+- **VR hands, on by default**: your hands drawn at the controllers in first
   person (optionally in the diorama, third person and the seat view; never in battle), depth-tested in both eyes,
   fingers following the trigger, grip and touch sensors. A fresh install shows our generic dark glove; F8 > Hands >
   **hand model** picks the look: that glove or our generic bare hand (MIT), or a pack
@@ -87,8 +92,8 @@ the defaults.
   straight to and from your hand"), and the game's take / place animation passes quickly ("Fast sphere grab", with a
   speed slider). The Destruction Sphere and the other cloisters still use the A button.
 - **Overdrives with gestures** (F8 > Overdrives; the buttons always keep working): Lulu's Fury by drawing circles, and
-  for Auron's Bushido choose "strike the targets" to cut each input's target along its arrow with a blade in either
-  hand (off until you choose it). "Practice targets" lets you try them without a battle, "More time for Bushido"
+  for Auron's Bushido cut each input's target along its arrow with a blade in either hand ("strike the targets", on
+  by default; the targets sit 0.76 m ahead at 1.6 times size, with twice the game's time). "Practice targets" lets you try them without a battle, "More time for Bushido"
   slows the game's timer, and "Overdrives always ready" lets you practise any overdrive at once. An optional download,
   `ffxvr-target-art-<version>.zip` (AI-generated art), turns the targets into textured medallions. "Tidus: swing for
   Swordplay" and Bushido's "slashes and punches" are there to try (off by default).

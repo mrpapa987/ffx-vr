@@ -24,20 +24,23 @@ from the mod's.
 
 ## If you only have 15 minutes
 
-1. **Install** on a game folder that has never had FFX VR (README sections 1 to 4):
+1. **Install** on a game folder that has never had FFX VR (README sections 1 to 5):
    `powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1`
    Copy everything it prints into your report. Right looks like: every `[checks]` line found (Fahrenheit
    `1.0.0-alpha12 (7e85839, official release)`, a .NET 10 x86 runtime, `OpenXR (32-bit)    : VDXR`), six files listed
    under `[install]` plus `hands\generic-glove\` and `hands\generic\`, `added 'ffxvr' to mods\loadorder`,
-   `no ffxvr.ini yet`, and the last line `Installed. Start the game with: ...`.
-2. **Start** with Virtual Desktop connected first:
+   `no ffxvr.ini yet`, then `Installed. Start the game with: ...`. A line saying the optional target art was not
+   found is fine: it is a separate download.
+2. **Copy your saves in** (game closed). Fahrenheit keeps its own save set, so without this the load screen is empty:
+   `powershell -ExecutionPolicy Bypass -File .\tools\import-steam-saves.ps1`
+3. **Start** with Virtual Desktop connected first:
    `powershell -ExecutionPolicy Bypass -File .\tools\run-ffx.ps1`
-3. Load a save in the field. Press **F8**, tick **Headset** (top left). The picture should appear in the headset, in
-   3D, and follow your head.
-4. Press **right grip + right stick click** until you are in first person (the first view after ticking Headset is the
+4. Load a save in the field. The FFX VR window is already open (**F8** hides and shows it): tick **Headset** (top
+   left). The picture should appear in the headset, in 3D, and follow your head.
+5. Press **right grip + right stick click** until you are in first person (the first view after ticking Headset is the
    seat view, the game's own camera position). Walk, turn with the right stick, look at your hands.
-5. Get into one battle, win it, then quit **through the game's menu**.
-6. Send the logs and your notes (the last section).
+6. Get into one battle, win it, then quit **through the game's menu**.
+7. Send the logs and your notes (the last section).
 
 The five questions that matter most: Did it install without an error? Did the headset show the game in 3D? Was it
 comfortable (smooth when you turn your head, smooth when you turn with the stick)? Did anything look wrong (say where)?
@@ -56,7 +59,7 @@ As above. Also worth noting:
 ### 2. First run: what you should see (5 minutes)
 
 - Without the headset ticked, the game plays on the monitor as usual.
-- **F8** opens the FFX VR overlay: a header with **Headset**, **Recentre**, a status line, a frame / GPU / VRAM line
+- The FFX VR window is open when the game starts for the first time; **F8** hides it and shows it again. It has a header with **Headset**, **Recentre**, a status line, a frame / GPU / VRAM line
   and the version (`FFX VR 0.1.0-alpha.1+<commit>`), then the tabs **View, Controls, Battle, Overdrives, Movies,
   Hands**. There should be **no** amber "log: N on" in the header and **no** Developer tab.
 - Tick **Headset**: the 3D picture appears in the headset at the next 3D scene. It starts in the **seat** view.
@@ -68,7 +71,7 @@ As above. Also worth noting:
 
 ### 3. Views and controls (10 minutes)
 
-The two pictures show every button and chord:
+The two pictures show every button and chord (the files are in `docs\img\` if your viewer shows no pictures here):
 
 ![The controllers: what every button does](img/controls.png)
 
@@ -130,13 +133,14 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
 
 - F8 > Overdrives > Bushido targets > **Practice targets** (headset on; no battle needed): targets appear in front of
   you, one at a time; cut each along its arrow with either hand. Are they at a comfortable place and height?
-- For the real thing, choose "strike the targets" under "Auron's Bushido:"; "Overdrives always ready" lets you use an
-  overdrive in any battle (while it is ticked the gauge is not spent, so a save made then keeps a full gauge).
+- For the real thing, "Auron's Bushido:" is on "strike the targets" for a fresh install; "Overdrives always ready"
+  lets you use an overdrive in any battle (while it is ticked the gauge is not spent, so a save made then keeps a full gauge).
 - Lulu's Fury: draw circles with a controller ("Lulu: circles for Fury").
 
 ### 8. Without the headset, and uninstalling (5 minutes)
 
-- Start the game with Virtual Desktop **not** connected: it should play on the monitor, and F8 should still open.
+- Start the game with Virtual Desktop **not** connected: it should play on the monitor, with the FFX VR window there
+  as before (F8 hides and shows it).
 - `powershell -ExecutionPolicy Bypass -File .\tools\install-mod.ps1 -Uninstall` removes the mod and lists what it left
   (your settings and logs); add `-Purge` to delete those too. Does the game then start without FFX VR?
 
@@ -160,14 +164,15 @@ instead of 4K; `-Profile flat` puts your own setting back) and record the same t
 1. **The logs.** Start the game with `tools\run-ffx.ps1` every time. When the game closes it copies that run's logs
    into the `logs\` folder next to `tools\`: `logs\run-<date>-<time>.txt` (the console) and
    `logs\run-<date>-<time>-gamelogs\` (the mod's `ffxvr_diag.log` and `ffxvr_native.log`, Fahrenheit's logs,
-   `fps60.log`). Zip the whole `logs\` folder.
-2. **Your settings**: `ffxvr.ini` from `<game folder>\fahrenheit\mods\ffxvr\` (it holds the mod's settings only).
+   `fps60.log`, and a copy of your settings, `ffxvr.ini`). Zip the whole `logs\` folder.
+2. **If you did not use `run-ffx.ps1`**: `ffxvr.ini` from `<game folder>\fahrenheit\mods\ffxvr\` as well (it holds the
+   mod's settings only).
 3. **What `install-mod.ps1` printed**, and your notes from "Write these down first" and "Performance".
 4. **What went wrong, one item each**: where in the game, which view, what you did, what you saw, what you expected. A
    screenshot or a short clip from Virtual Desktop helps a lot for anything visual.
 
-Send it as an issue at <https://github.com/mrpapa987/ffx-vr/issues> ("Bug report"; one issue per problem, and one
-"Tester report" issue for the general notes is fine), with the zip attached. Never report FFX VR problems to the
+Send it as an issue at <https://github.com/mrpapa987/ffx-vr/issues>, with the zip attached: New issue > "Bug report",
+one issue per problem. For your general notes use the same form and title it "Tester report". Never report FFX VR problems to the
 Fahrenheit or FFX-60fps projects.
 
 The logs name your game folder's path and describe your PC (GPU, Windows version, headset runtime); look through them

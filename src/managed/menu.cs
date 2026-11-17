@@ -180,7 +180,7 @@ public sealed unsafe partial class FFXVRModule {
                     // armed only after a click on the tab this session, as the old Debug header (collapsed at every launch) needed
                     var fl = _menu_tab_restore && i != k_tab_dev && k_tab_key[i] == _menu_tab ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
                     bool open = ImGui.BeginTabItem(k_tab_label[i], fl);
-                    if (i == k_tab_hands) ui_tip("VR hands at the controllers (experimental)");
+                    if (i == k_tab_hands) ui_tip("VR hands at the controllers");
                     if (open) { sel = i; ImGui.EndTabItem(); }
                 }
             }
@@ -537,9 +537,7 @@ public sealed unsafe partial class FFXVRModule {
 
     /// <summary>Hands (design 2.3, tab "Hands"): today's "VR hands (experimental)" header, hands.cs.</summary>
     private void tab_hands() {
-        ImGui.TextColored(k_tag_amber, "experimental");
-        ui_tip("VR hands are experimental: they may change or misbehave. Tell the developer what you see.");
-        hands2_ui();
+        hands2_ui();   // (release 0.1.0-alpha.1: the tab's "experimental" mark is gone; VR hands are on by default)
     }
 
     // -- Developer > Logging & status: the readouts that sat beside the player settings -----------------------------------

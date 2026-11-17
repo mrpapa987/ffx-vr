@@ -7670,3 +7670,22 @@ compiler, no PowerShell; every PowerShell line added copies an idiom already in 
 - **Not verified**: the build; the installer's and the packager's new lines on Windows PowerShell 5.1; a fresh install
   with the hands on in the game; the diagrams against a real controller in the hand (they follow `ffxvr_pad.h`'s
   mapping and `gesture_tick`'s chords).
+
+### After the review and the owner's answers (17 Nov 2026, same branch; ABI 70 kept)
+
+- **More defaults, the owner's values** (each a field initialiser; an existing ini keeps its own): `od_gest_auron` 0 -> 2
+  ("strike the targets"), `od_targets_dist2` 0.50 -> 0.76, `od_targets_size` 1 -> 1.6, `od_targets_time` 1 -> 2
+  (`od_targets_height2` -0.30 and `od_targets_spread` 0.36 were already his), `battle_transition` 2 -> 1
+  ("head-locked"), `hd_cluster_cache` 0 -> 1. At size 1.6 the plate is 38.4 cm, so the two spots are held at least
+  40.4 cm apart whatever `od_targets_spread` says (the rule in the slider's tooltip). `hd_cluster_cache` on means a
+  fresh install holds texture clusters across random battles and writes its `HDC:` line per map free; the load hooks
+  were already installed on a fresh install (`load_lock_release` 1). `diag_cluster_bytes` and `diag_transition` stay 0.
+- **The Hands tab's "experimental" mark is gone** (`menu.cs` `tab_hands`, the tab's tooltip).
+- The "Target art (local pack)" tooltip no longer names `tools\target-art`, which a player's zip does not have.
+- `ffxvr.csproj`: `FhManifestHomePage` is the repository's URL.
+- Tools: `vr_hands_debug` is in the Release logging profile (`$FfxvrDiagKeys`; `diag_on()` in the mod is unchanged, so
+  the F8 header does not count it); `run-ffx.ps1` copies `ffxvr.ini` beside the collected logs; `install-mod.ps1`
+  always says whether the optional target art was found, and where it looked.
+- Docs: the saves step (`import-steam-saves.ps1`) is on the tester's path; the FFX VR window is open at a first start
+  (`overlay_at_start` 1), so "press F8" became "F8 hides and shows it"; how to extract the art zip so that it merges;
+  the release procedure packages and smoke-tests before the tag is pushed; written for a public repository.

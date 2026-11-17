@@ -9,7 +9,7 @@ namespace FFXVR;
 //
 // The load hooks below are installed at launch when any feature that needs them is on then (loads build): diag_load_lines
 // (default 1: the load: lines, load_lines.cs), load_lock_release (default 1: its load phases and loadPCluster windows),
-// hd_cluster_cache (default 0: its acquire and releases ride on them) or diag_load. Per battle, the phases of the way in and the
+// hd_cluster_cache (default 1 since release 0.1.0-alpha.1: its acquire and releases ride on them) or diag_load. Per battle, the phases of the way in and the
 // way back, timed with QPC, one summary line each in ffxvr_diag.log ("load: battle N ..."), with the HD cluster loads split
 // into open / read / parse / GPU create and the pool bytes of the misses; load_lines.cs adds the area / event / save / title
 // loads, the Present tracker and the lock release's counts. diag_load (default 0 since the loads build; at once for the

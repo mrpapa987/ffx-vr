@@ -9,7 +9,7 @@ namespace FFXVR;
 //   Tidus's Swordplay  a quick swing of the right hand presses A once per swing (the bring-back and a reach up are not
 //                   swings); off by default (od_gest_tidus_swing=0) until the owner's test: a press outside the zone RESTARTS the bar
 //                   (0x8923F8..0x89244F: the cursor back to its start while the timer runs), so a false A costs a traversal
-//   Auron's Bushido od_gest_auron: 0 off (the default), 1 slashes and punches: slashes left / right / up / down = the d-pad, a punch
+//   Auron's Bushido od_gest_auron: 0 off, 2 strike the targets (the default since release 0.1.0-alpha.1), 1 slashes and punches: slashes left / right / up / down = the d-pad, a punch
 //                   forward = LB (left hand) / RB (right hand), the face buttons on the controllers; 2 strike the targets (native
 //                   ffxvr_odtarget.h, ABI 52-54): one big bright plate at chest height shows the current input, the d-pad
 //                   arrows in a left spot and A / B / X / Y, L1 / R1 in a right spot (the next one small above its own spot); a
@@ -27,9 +27,9 @@ namespace FFXVR;
 // the built-in k_auron_map; the mod still learns each value it sees as a cross-check and logs any disagreement); any other
 // bring-back of the same hand within 0.3 s is ignored.
 // ini: od_gestures (1), od_gest_lulu (1), od_gest_tidus_swing (0; the old key od_gest_tidus, saved as 1 by the first build,
-// is ignored so the new default reaches every ini), od_gest_auron (0 / 1 / 2, default 0; an older ini's bool 1 / true reads as 1,
-// slashes and punches, as before), od_targets_blade_pitch (-45..45 deg; 0), od_targets_dist2 (0.35-0.9 m; 0.5), od_targets_height2
-// (-0.5..0 m; -0.3), od_targets_size (0.6-1.6, a multiplier on the 24 cm plate; 1), od_targets_time (1-3; 1: the game's Bushido
+// is ignored so the new default reaches every ini), od_gest_auron (0 / 1 / 2, default 2; an older ini's bool 1 / true reads as 1,
+// slashes and punches, as before), od_targets_blade_pitch (-45..45 deg; 0), od_targets_dist2 (0.35-0.9 m; 0.76), od_targets_height2
+// (-0.5..0 m; -0.3), od_targets_size (0.6-1.6, a multiplier on the 24 cm plate; 1.6), od_targets_time (1-3; 2, where 1 is the game's Bushido
 // countdown runs that many times slower in a strike-the-targets window, practice's bar too), od_targets_spread (0.25-0.6 m between
 // the two spots' centres; 0.36; at least the plate + 2 cm), od_targets_art (1: the local target art pack when present); the first build's od_targets_dist / _height
 // (0.6 / -0.2 for its row of plates) are ignored so the one-target defaults reach every ini; od_gest_haptics (1), od_circle_cm (1-20; 4),
@@ -38,10 +38,10 @@ namespace FFXVR;
 // drawn near the hands in the headset only while that overdrive's window is open with its gestures on.
 public sealed unsafe partial class FFXVRModule {
     private bool  _od_gestures = true, _od_gest_lulu = true, _od_gest_tidus = false, _od_gest_haptics = true;
-    private int   _od_gest_auron = 0;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52)
+    private int   _od_gest_auron = 2;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52); default 2 since release 0.1.0-alpha.1 (was 0)
     private bool _od_tgt_old_logged;                                                                                     // R5-N2: the old keys' one line
-    private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.50f, _od_tgt_height = -0.30f, _od_tgt_size = 1f;   // ini od_targets_blade_pitch / _dist2 / _height2 / _size
-    private float _od_tgt_time = 1f;                                                                      // ini od_targets_time (the countdown's stretch)
+    private float _od_tgt_pitch = 0f, _od_tgt_dist = 0.76f, _od_tgt_height = -0.30f, _od_tgt_size = 1.6f;   // ini od_targets_blade_pitch / _dist2 / _height2 / _size (release 0.1.0-alpha.1: the owner's settled placement, 0.76 m and 1.6; were 0.50 and 1)
+    private float _od_tgt_time = 2f;                                                                      // ini od_targets_time (the countdown's stretch; 2 since release 0.1.0-alpha.1, was 1)
     private float _od_tgt_spread = 0.36f;                                                                 // ini od_targets_spread (between the two spots)
     private bool _od_tgt_art = true;                                                                      // ini od_targets_art (the local target art pack, <mod>\art\targets)
     private bool _od_tgt_badge = false;                                                                   // ini od_targets_badge (a small button letter; off: arrows only)
@@ -311,7 +311,7 @@ public sealed unsafe partial class FFXVRModule {
         ui_slider("od_targets_time", "More time for Bushido (x)##odt", ref _od_tgt_time, 1f, 3f, "%.1f", UiTag.None,
                   "In strike the targets, the game's input timer runs this many times slower while the targets window is open (1 = the game's own time). Practice targets' bar uses it too. The game also counts the extra seconds left at the end toward Bushido's damage bonus (up to x1.5 with the whole time left), so a fast finish with more time hits harder. Nothing changes for the slashes and punches or any other overdrive.", 130f);
         ui_check("od_targets_art", "Target art (local pack)##odt", ref _od_tgt_art, UiTag.None,
-                 "Textured medallions for the targets from the art pack in the mod folder's art\\targets (the optional download ffxvr-target-art, AI-generated, or your own made with tools\\target-art; not in the mod's zip). Without the pack, or off, the flat plates.");
+                 "Textured medallions for the targets from the art pack in the mod folder's art\\targets (the optional download ffxvr-target-art, AI-generated, or a pack of your own: docs/design-notes.md in the repository; not in the mod's zip). Without the pack, or off, the flat plates.");
         ImGui.SameLine(); ImGui.TextDisabled(esc(odg_text(6)));
         ui_check("od_targets_badge", "Show the button letter##odt", ref _od_tgt_badge, UiTag.None,
                  "Every target shows one big arrow: the way to cut (A down, B right, X left, Y up, L1 left, R1 right; the d-pad as itself). Tick this to also show the button's letter, small, at the bottom of the rim.");

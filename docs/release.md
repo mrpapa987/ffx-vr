@@ -148,7 +148,9 @@ game version (Steam build id).
   disclaimer). **Still to do: screenshots or a short clip** (placeholder comment at the top of README.md)
 - [x] `ffxvr.ini` defaults reviewed (Nov 2026, release prep notes): no change to the play defaults; questions for the owner
   on battle_transition (code 2, the owner runs 1), dream_overlay (code 1, the owner runs 0) and hd_cluster_cache (code 0,
-  the owner runs 1)
+  the owner runs 1). **Decided 17 Nov 2026 for 0.1.0-alpha.1:** the owner's values: `battle_transition` 1,
+  `hd_cluster_cache` 1 (`dream_overlay` is 1 on both sides now); also `vr_hands` 1, `od_gest_auron` 2 and his Bushido
+  target placement (`od_targets_dist2` 0.76, `od_targets_size` 1.6, `od_targets_time` 2)
 - [x] debug-only defaults: every diagnostic off for a fresh install (diag_load_lines 1 -> 0; the new diag_verbose gates
   the periodic lines, the legacy markers' 1 s "window:" line, the camera trace and Ctrl+F9's 100 MB dump);
   `ffxvr_diag.log` per session and capped at 4 MB (64 MB while any diagnostic is on); `tools/set-logging.ps1 -Profile
@@ -197,7 +199,8 @@ game version (Steam build id).
 
 **For 0.1.0-alpha.1 (17 Nov 2026)** the delivery is a GitHub **pre-release** for one volunteer tester (Quest 3 +
 Virtual Desktop), with the mod zip, the optional target art zip and their two `.sha256` files attached. The zip now also
-carries `TESTING.md` and the controller diagrams. The fresh-install defaults changed in one place: `vr_hands` 0 -> 1.
+carries `TESTING.md` and the controller diagrams. The repository is made public for it, with Issues as the place to
+report. The fresh-install defaults that changed are listed in docs/setup.md, "Defaults and an existing ini".
 
 **Status (3 Nov 2026): experimental.** The release tools (`package-release.ps1`, `set-logging.ps1`, `install-mod.ps1`'s
 `-ResetLogging` / `-DeleteLogs` / `-Purge`, the fresh-install defaults) were reviewed and run in a sandbox, and the new
@@ -210,29 +213,31 @@ public tag, have a second person run them on a separate install.
 2. **Checks.** Section 5's printf greps print nothing but the known hits; `git status` is clean; `git ls-files` has nothing
    new that should not be public (no art, no game data, no personal paths); the docs' relative links and image paths
    resolve; every F8 label the docs quote is in the code.
-3. **Build and try it** on the game PC before tagging (`tools\build-mod.ps1`): a tag is hard to take back once pushed.
-4. **Tag.** `git tag -a v0.1.0-alpha.1 -m "FFX VR 0.1.0-alpha.1"` on that commit, `git push origin master`,
-   `git push origin v0.1.0-alpha.1`.
-5. **Package**, from the tagged, clean checkout:
+3. **Build and try it** on the game PC (`tools\build-mod.ps1`).
+4. **Package**, from the clean, committed checkout (no tag is needed yet: the zip is named by `-Version`):
    `powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 -Version 0.1.0-alpha.1`
    (it warns if `-Version` is not the csproj's, or if the tree is dirty). Out: `dist\ffx-vr-0.1.0-alpha.1.zip` and its
    `.sha256`, and, when the target art pack is in the game's mod folder (`art\targets\`, or `-ArtDir`),
    `dist\ffxvr-target-art-0.1.0-alpha.1.zip` and its `.sha256`. Read the listing it prints: `README.md`, `TESTING.md`,
    `LICENSE`, `THIRD-PARTY-NOTICES`, `docs\img\` (two PNGs), `mod\ffxvr\` (six files and the two hand packs),
    `tools\`; no `art\` in the mod zip.
-6. **Smoke test the zip** on the game PC (the fail-safe tests in the release-prep notes): a fresh install into a game folder
-   with no `ffxvr.ini` (F8's header shows the version and no amber "log: N on", and there is no Developer tab; `ffxvr_diag.log` stays small;
+5. **Smoke test the zip** on the game PC (the fail-safe tests in the release-prep notes): a fresh install into a game folder
+   with no `ffxvr.ini` (the FFX VR window is open at the start; its header shows the version and no amber "log: N on", and there is no Developer tab; `ffxvr_diag.log` stays small;
    in first person the generic glove hands show: VR hands are on by default), a start without the
    headset, `install-mod.ps1 -Uninstall -Purge`. Move your own `fahrenheit\mods\ffxvr` folder aside first and put it
-   back afterwards (`-Purge` deletes settings, logs, your own hand packs and the art folder).
-7. **GitHub release** from the tag: title `FFX VR 0.1.0-alpha.1`, tick "Set as a pre-release", body from
+   back afterwards (`-Purge` deletes settings, logs, your own hand packs and the art folder). The zip's `tools\` has no
+   `paths.local.ps1`: if the game is found through that file, set `FFXVR_GAME_DIR` for the test.
+   If anything needs a fix: fix, commit, package again. Nothing has been published yet.
+6. **Tag and push**, only after the smoke test passed, on the commit that was packaged:
+   `git tag -a v0.1.0-alpha.1 -m "FFX VR 0.1.0-alpha.1"`, `git push origin master`, `git push origin v0.1.0-alpha.1`.
+7. **GitHub**: make the repository public and check that Issues are enabled (section 5's GitHub item; the whole history
+   and every commit's author e-mail become public with it).
+8. **GitHub release** from the tag: title `FFX VR 0.1.0-alpha.1`, tick "Set as a pre-release", body from
    `.github/release-template.md` + the CHANGELOG entry + both SHA-256 values; attach the mod zip, its `.sha256`, the art
    zip and its `.sha256`. The art zip is AI-generated art: the release notes say so (the template has the sentence).
-   While the repository is private, a release is visible only to collaborators: invite the tester (Settings >
-   Collaborators) or make the repository public first (section 5's GitHub item).
-8. **Your own setup afterwards.** The release defaults are for players; for development keep (or restore) the diagnostics
+9. **Your own setup afterwards.** The release defaults are for players; for development keep (or restore) the diagnostics
    with `tools\set-logging.ps1 -Profile Dev` (and `-Profile Release` to see what a player gets). A new build keeps an existing
    ini's values: an ini older than `ini_rev` 2 reads diag_verbose as 1 and is saved as rev 2 with it a few seconds after the
    start (and one older than rev 1 still gets the loads build's load_lock_release / heat_haze migration).
-   Your own `ffxvr.ini` keeps `vr_hands` as you had it; only a fresh install gets the new default.
-9. Nexus / Reddit posts link to the GitHub release, never to a rehost.
+   Your own `ffxvr.ini` keeps every value as you had it; only a fresh install gets the new defaults.
+10. Nexus / Reddit posts link to the GitHub release, never to a rehost.

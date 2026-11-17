@@ -209,8 +209,10 @@ file.
 **Defaults and an existing ini.** The file holds every key, so a build with a new
 default changes nothing for a player who already has an `ffxvr.ini`: the value in
 the file wins. Only a fresh install (no `ffxvr.ini`), or a key the file lacks, gets
-the code's default. Release 0.1.0-alpha.1 changed one default: `vr_hands` 0 -> 1
-(VR hands on). An upgrading player keeps `vr_hands=0` until he ticks F8 > Hands >
+the code's default. Release 0.1.0-alpha.1 changed these defaults: `vr_hands` 0 -> 1
+(VR hands on), `od_gest_auron` 0 -> 2 ("strike the targets"), `od_targets_dist2` 0.50 -> 0.76,
+`od_targets_size` 1 -> 1.6, `od_targets_time` 1 -> 2, `battle_transition` 2 -> 1 ("head-locked"),
+`hd_cluster_cache` 0 -> 1. An upgrading player keeps `vr_hands=0` until he ticks F8 > Hands >
 "VR hands: your own hands at the controllers" (`packaging/install-mod.ps1` says so
 when it finds the old value) or deletes `ffxvr.ini` with the game closed. `ini_rev`
 stays 2: no value is migrated.
@@ -234,7 +236,7 @@ tab is not: a launch with it saved opens View):
 | Battle | Battle view (incl. when characters swap, face the enemies); Characters and effects (the battle camera's hides, spell effects aimed at your eyes); Battle start effect; Target cursor; Blitzball; 3D damage numbers (experimental) |
 | Overdrives | Gestures (Lulu, Tidus, Auron's Bushido, buzz, guides, **Overdrives always ready**); Bushido targets (Practice targets, the layout, more time, art) |
 | Movies | 3D movies; Big screen (2D scenes, menus, movies: when, size, distance); 3D cinema screen |
-| Hands | VR hands (on by default since 0.1.0-alpha.1; the tab still carries an "experimental" mark), with a **Fix it** button when the hands cannot show because your body is shown; the hand model; the views; gestures (tap to press action); the cloister spheres (grab, carried sphere, fast grab); fine tune |
+| Hands | VR hands (on by default since 0.1.0-alpha.1), with a **Fix it** button when the hands cannot show because your body is shown; the hand model; the views; gestures (tap to press action); the cloister spheres (grab, carried sphere, fast grab); fine tune |
 | Developer | only in developer mode: everything the old Debug section held, in eight groups (Logging & status, Camera & stereo, Rendering, First person & body, Battle internals, Loading, Inspect, Captures) |
 
 Every tooltip ends with the setting's ini key (`not saved` for a control that
@@ -640,7 +642,8 @@ Depth quality figures (read-only, prints numbers; noise, pumping, the model's wi
 Every player-facing key in `<game>\fahrenheit\mods\ffxvr\ffxvr.ini`, with the default a fresh install has and the
 control that sets it in F8 (the tab and section in bold; the same key is at the end of each control's tooltip). The ranges
 are the ones the file accepts. Keys that only the Developer tab draws (the `diag_*` switches, the old bone hands'
-`hands_*`, the `fp_head_*` and `shadow_*` tuning, `sphere_carry_offset`, `hd_cluster_cache`, `load_lock_release`,
+`hands_*`, the `fp_head_*` and `shadow_*` tuning, `sphere_carry_offset`, `hd_cluster_cache` (default 1 since
+0.1.0-alpha.1: the field and battle maps' textures stay loaded across random battles in one zone), `load_lock_release`,
 `slow_guard` and the rest of `k_dev_keys` in `src/managed/menu.cs`) are left out: leave them alone unless asked.
 Not in F8 at all: `ini_rev` (the file's revision, written by the mod), `menu_tab` (the tab last selected),
 `overlay_open` (whether the F8 window was open), `turn_mode` / `turn_snap` / `turn_blink` (older turning keys; F8 only
@@ -807,7 +810,7 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 
 | Key | Default | In F8 |
 |---|---|---|
-| `battle_transition` | 2 | 2 "frozen world", 1 "head-locked", 0 "original" |
+| `battle_transition` | 1 | 2 "frozen world", 1 "head-locked", 0 "original" |
 
 **Battle > Target cursor**
 
@@ -844,7 +847,7 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 | `od_lulu_stick` | 0 | 0 right, 1 left, 2 both: "stick for Fury" |
 | `od_gest_tidus_swing` | 0 | "Tidus: swing for Swordplay" |
 | `od_slash_speed` | 1.6 | "swing speed (m/s)" (0.8..5) |
-| `od_gest_auron` | 0 | 0 "off", 2 "strike the targets", 1 "slashes and punches" |
+| `od_gest_auron` | 2 | 0 "off", 2 "strike the targets", 1 "slashes and punches" |
 | `od_gest_haptics` | 1 | "Buzz on hits and misses" |
 | `od_visuals` | 1 | "Guides near your hands" |
 | `od_visual_size` | 1 | "size" (0.5..2) |
@@ -854,11 +857,11 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 | Key | Default | In F8 |
 |---|---|---|
 | `od_targets_blade_pitch` | 0 | "Blade angle (deg)" (-45..45) |
-| `od_targets_dist2` | 0.50 | "distance (m)" (0.35..0.9) |
+| `od_targets_dist2` | 0.76 | "distance (m)" (0.35..0.9) |
 | `od_targets_height2` | -0.30 | "height (m)" (-0.5..0) |
-| `od_targets_size` | 1 | "size" (0.6..1.6) |
+| `od_targets_size` | 1.6 | "size" (0.6..1.6) |
 | `od_targets_spread` | 0.36 | "spacing (m)" (0.25..0.6) |
-| `od_targets_time` | 1 | "More time for Bushido (x)" (1..3) |
+| `od_targets_time` | 2 | "More time for Bushido (x)" (1..3) |
 | `od_targets_art` | 1 | "Target art (local pack)" |
 | `od_targets_badge` | 0 | "Show the button letter" |
 | `od_targets_hide2d` | 1 | "Hide the game's Bushido row" |

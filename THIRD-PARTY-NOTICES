@@ -25,6 +25,10 @@ The generic hand packs (mod\ffxvr\hands\generic-glove\, hands\generic\)
 are FFX VR's own work, made by tools/hands/make-generic-hand.py with no
 third-party art, under FFX VR's MIT licence (LICENSE).
 
+The controller diagrams (docs\img\controls.png, controls-chords.png and
+their .svg sources in the repository) are FFX VR's own schematic drawings,
+with no third-party art, under FFX VR's MIT licence (LICENSE).
+
 ===============================================================================
 2. Used but not redistributed (credited; install them separately)
 ===============================================================================

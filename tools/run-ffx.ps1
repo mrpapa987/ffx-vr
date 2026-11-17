@@ -2,7 +2,7 @@
 #
 # Launches Final Fantasy X through the Fahrenheit loader and captures all output
 # into logs\ in this repository, plus any log files the game or Fahrenheit write
-# during the run.
+# during the run, and a copy of the mod's settings (ffxvr.ini).
 #
 # Steam must already be running. Do NOT run this elevated - Fahrenheit's docs
 # say running it as administrator breaks startup.
@@ -83,6 +83,15 @@ foreach ($f in $found) {
     New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
     Copy-Item -LiteralPath $f.FullName -Destination $to -Force -ErrorAction SilentlyContinue
     Write-Host ('collected: ' + $rel)
+}
+
+# The mod's settings as they are now, beside the logs (ffxvr.ini is no log: the date filter above never takes it).
+$iniSrc = Join-Path $game 'fahrenheit\mods\ffxvr\ffxvr.ini'
+if (Test-Path -LiteralPath $iniSrc) {
+    $iniTo = Join-Path $collected 'fahrenheit\mods\ffxvr'
+    New-Item -ItemType Directory -Force -Path $iniTo | Out-Null
+    Copy-Item -LiteralPath $iniSrc -Destination $iniTo -Force -ErrorAction SilentlyContinue
+    Write-Host 'collected: fahrenheit\mods\ffxvr\ffxvr.ini (the settings)'
 }
 
 Write-Host ''

@@ -23,7 +23,7 @@
 
         <RepositoryType>git</RepositoryType>
         <RepositoryUrl>https://github.com/mrpapa987/ffx-vr</RepositoryUrl>
-        <FhManifestHomePage></FhManifestHomePage>
+        <FhManifestHomePage>https://github.com/mrpapa987/ffx-vr</FhManifestHomePage>
 
         <!--
           Enum-valued, so it must be a real member, not empty: an empty string fails

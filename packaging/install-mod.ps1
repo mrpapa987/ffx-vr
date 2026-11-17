@@ -265,7 +265,9 @@ if (Test-Path -LiteralPath $artFrom) {
     }
     Write-Host "  art\targets\  ($artN files: the optional target art)"
 } elseif (Test-Path -LiteralPath (Join-Path $dest 'art\targets')) {
-    Write-Host '  art\targets\  (kept: the target art installed before)'
+    Write-Host '  art\targets\  (kept: the target art installed before; none in this folder)'
+} else {
+    Write-Host ('  art\targets\  (the optional target art: not found, looked in {0}; the mod draws plain targets)' -f $artFrom)
 }
 
 # ---------------------------------------------------------------- loadorder

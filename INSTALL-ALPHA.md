@@ -48,8 +48,6 @@ git clone https://github.com/mrpapa987/ffx-vr.git
 cd ffx-vr
 ```
 
-(While the repository is private, you need to have been invited as a collaborator.)
-
 **Run every command below from this folder**, in PowerShell, **not as administrator**.
 Fahrenheit refuses to start when elevated.
 
@@ -186,6 +184,15 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
 
 ## 8. Play
 
+**Your saves first.** Fahrenheit keeps its own set of saves, so your normal saves do **not** show in the load screen
+until you copy them in (game closed; your Steam saves are not touched):
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\import-steam-saves.ps1
+```
+
+Without it the load list is empty and you would have to start a new game.
+
 1. On the PC, start the **Virtual Desktop Streamer**. Put on the headset and connect to the
    PC in Virtual Desktop.
 2. Launch the game **through Fahrenheit**, not from Steam:
@@ -194,7 +201,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\install-texture-pack.ps1 -Archi
    ```
    This also collects the logs into `logs\` when the game closes, which is what to send with a
    bug report.
-3. In the game, press **F8** for the FFX VR overlay. Tick **Headset** (top left), and View >
+3. The FFX VR window is already open when the game starts for the first time (**F8** hides and shows it; in the
+   headset, the left grip held + the left menu button does the same). Tick **Headset** (top left), and View >
    Starting > **Start in the headset** if you want it on from the next launch.
 4. The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
    **right grip + right stick click** (or **End**) for first person: your hands appear there. With "Start in the
@@ -253,8 +261,8 @@ double tap of the left menu button** (its menu).
   when there is no `ffxvr.ini` yet; an `ffxvr.ini` kept from an earlier build keeps its own value: F8 >
   Hands > "VR hands: your own hands at the controllers"). In Djose's Cloister of Trials you take and
   place the spheres with them; the Destruction Sphere and the other cloisters still use the A button.
-- **Overdrives**: F8 > Overdrives has the gestures (Lulu's Fury by circles; for Auron's Bushido choose
-  "strike the targets"; "Practice targets" needs no battle).
+- **Overdrives**: F8 > Overdrives has the gestures (Lulu's Fury by circles; Auron's Bushido by cutting
+  targets, "strike the targets", on by default; "Practice targets" needs no battle).
 - **Menus, dialogue, the battle command window**: on a panel in front of you.
 - **2D screens and movies**: a large flat virtual screen.
 - **Blitzball**: a large **stereo 3D screen** showing the game's own camera, with automatic

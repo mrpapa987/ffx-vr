@@ -31,12 +31,12 @@ namespace FFXVR;
 //   over either; admission while a 129 MB block is free below 2 GB (the game's transient 128 MB pool growth) and, per
 //   cluster, only while that transient block is down for its whole load (HC-T-1: residue in it would keep the game from
 //   freeing it); release all when the block is gone with the transient block down; at most 260 held.
-// - Off (hd_cluster_cache=0, the default): nothing is admitted, and anything still held is released at the next map free. The
+// - Off (hd_cluster_cache=0; the default is 1 since release 0.1.0-alpha.1): nothing is admitted, and anything still held is released at the next map free. The
 //   diagnostics (sample paths, the HDC: line per map free with its address-space walks) run with the cache on, or with
 //   diag_load=1 (loads build; before it they ran either way).
 public sealed unsafe partial class FFXVRModule {
 
-    private bool _hd_cluster_cache = false;    // ini hd_cluster_cache (admission at once; releases at the next map free)
+    private bool _hd_cluster_cache = true;     // ini hd_cluster_cache (admission at once; releases at the next map free); default 1 since release 0.1.0-alpha.1 (was 0)
     private bool _diag_cluster_bytes = false;  // HC-2: ini diag_cluster_bytes (hooks at the next launch; default 0: the Phyre header read gives the size). The global pool hooks are a hot path, measurement only
     private bool _diag_va_log = false;          // HC-6: ini diag_va_log (hooks at the next launch; default 0: the patch-free region diff covers it). On: the ntdll NtAllocateVirtualMemory patch names the caller
 

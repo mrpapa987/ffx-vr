@@ -113,6 +113,15 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
 
 ## 5. Play
 
+**Your saves first.** Fahrenheit keeps its own set of saves, so your normal saves do **not** show in the load screen
+until you copy them in (game closed; your Steam saves are not touched):
+
+```
+powershell -ExecutionPolicy Bypass -File .\tools\import-steam-saves.ps1
+```
+
+Without it the load list is empty and you would have to start a new game.
+
 1. On the PC, start the **Virtual Desktop Streamer**. Put the headset on and connect to the PC
    in Virtual Desktop.
 2. Start the game **through Fahrenheit**, not from Steam:
@@ -120,7 +129,8 @@ It finds the game through Steam, checks the list in section 1, copies the mod in
    powershell -ExecutionPolicy Bypass -File .\tools\run-ffx.ps1
    ```
    Steam must be running. When the game closes, the script collects the logs into `logs\`.
-3. In the game, press **F8** for the FFX VR overlay. Tick **Headset** (top left), and View >
+3. The FFX VR window is already open when the game starts for the first time (**F8** hides and shows it; in the
+   headset, the left grip held + the left menu button does the same). Tick **Headset** (top left), and View >
    Starting > **Start in the headset** if you want it on from the next launch.
 4. The headset starts in the **seat** view (the game's own camera position, your head free to look around). Press
    **right grip + right stick click** (or **End**) for first person: your hands appear there. With "Start in the
@@ -182,8 +192,8 @@ double tap of the left menu button** (its menu).
   place the spheres with them: reach until a label shows, then squeeze the grip. The Destruction
   Sphere and the other cloisters still use the A button.
 - **Overdrives**: the buttons work as always. F8 > Overdrives has gestures: Lulu's Fury by drawing
-  circles, and for Auron's Bushido choose "strike the targets" to cut each target with a blade
-  ("Practice targets" lets you try without a battle).
+  circles, and Auron's Bushido by cutting each input's target with a blade in either hand ("strike the
+  targets", on by default; "Practice targets" lets you try without a battle).
 - **Menus, dialogue, the battle command window**: on a panel in front of you.
 - **2D screens and movies**: a large flat virtual screen.
 - **Blitzball**: a large **stereo 3D screen** showing the game's own camera, with automatic
@@ -203,9 +213,16 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 ### The optional Bushido target art
 
 The Bushido targets are plain plates. A separate optional download on the same release page,
-`ffxvr-target-art-{VERSION}.zip`, turns them into textured medallions. Extract it into the **same folder** you
-extracted this zip into (it adds `mod\ffxvr\art\targets\` inside `ffx-vr-{VERSION}`), then run
-`tools\install-mod.ps1` again. The art was generated with Google Gemini and upscaled with Upscayl by the project
+`ffxvr-target-art-{VERSION}.zip`, turns them into textured medallions.
+
+1. Extract it into the folder that **contains** `ffx-vr-{VERSION}` (the folder you extracted this zip into), so that
+   its files merge into this one. Watch out: Explorer's *Extract All* suggests a new folder named after the zip
+   (`...\ffxvr-target-art-{VERSION}\`); remove that last part of the path. Right is: the file
+   `ffx-vr-{VERSION}\mod\ffxvr\art\targets\frame.png` exists.
+2. Run `tools\install-mod.ps1` again. It prints `art\targets\  (N files: the optional target art)` when it found the
+   art, and `art\targets\  (the optional target art: not found, looked in ...)` when it did not.
+
+The art was generated with Google Gemini and upscaled with Upscayl by the project
 owner: it is **AI-generated**, no rights are claimed, and it is free to use (`ART-NOTICE.txt` in it says the same).
 The mod works the same without it.
 
@@ -213,7 +230,7 @@ The mod works the same without it.
 
 A pair of hands is drawn at your controllers in first person, fingers following the trigger, grip and touch sensors.
 They are **on by default** for a fresh install (the F8 **Hands** tab's first checkbox, "VR hands: your own hands at the
-controllers", turns them off; the tab still carries an "experimental" mark). **hand model** picks the look: our generic
+controllers", turns them off). **hand model** picks the look: our generic
 glove (the default) or bare hand, or a pack you made yourself (**rescan** after adding one).
 
 To make your own from a character model you own (a Wavefront `.obj` with its `.mtl` and textures beside it, full body,

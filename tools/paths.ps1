@@ -37,7 +37,8 @@ $FfxvrUtf8     = New-Object Text.UTF8Encoding $false
 #   Verbose = more logging only, for a player's bug report: the periodic lines and the load: lines; no extra hooks, patches
 #             or samplers;
 #   Dev     = the developer's set, hooks and profilers included (they cost frame time and change how the game runs).
-# Keep in step with diag_on() in src\managed\logging.cs.
+# Keep in step with diag_on() in src\managed\logging.cs (its twelve keys, plus vr_hands_debug, which the mod does not count as a
+# diagnostic in its F8 header but which draws debug shapes and writes log lines).
 $FfxvrDiagKeys = [ordered]@{
     diag_verbose       = @{ Release = '0'; Verbose = '1';   Dev = '1' }   # the periodic log lines, the camera trace, Ctrl+F9 dumps
     diag_build7        = @{ Release = '0'; Verbose = $null; Dev = '1' }   # build 7: game-function hooks, cursor / timing lines, the stall watchdog
@@ -51,6 +52,7 @@ $FfxvrDiagKeys = [ordered]@{
     diag_va_log        = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the ntdll reservation patch (next launch)
     diag_transition    = @{ Release = '0'; Verbose = $null; Dev = '1' }   # the per-frame bt: lines and the first glass break's frame census
     diag_load_prof     = @{ Release = '0'; Verbose = $null; Dev = '2' }   # the load profiler: a sampler thread, probe hooks (next launch)
+    vr_hands_debug     = @{ Release = '0'; Verbose = $null; Dev = $null } # VR hands' debug bits (wrist axes, boxes, placement lines in the log); not in diag_on()
 }
 # VR hands: the hand packs the mod ships, ours (tools\hands\make-generic-hand.py, MIT): assets\hands\<name>\ in the
 # repository, mod\ffxvr\hands\<name>\ in the release zip, <game>\fahrenheit\mods\ffxvr\hands\<name>\ installed. The tools
