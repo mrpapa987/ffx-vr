@@ -8,14 +8,17 @@ namespace FFXVR;
 // ours, MIT), skinned on the GPU, its fingers following the controllers' trigger, grip and touch sensors; the S1 boxes are
 // the fallback (no pack, a pack that failed to load) and a debug option. S3: every pack folder under <mod>\hands\ (the two
 // shipped ones and the user's own, e.g. made by tools\import-hands.ps1 from a model they own) is listed in F8 with its
-// hand.json (hand_pack.cs: parsed, validated, clamped); "rescan" reads the folder again. Off by default.
+// hand.json (hand_pack.cs: parsed, validated, clamped); "rescan" reads the folder again. On by default since release
+// 0.1.0-alpha.1 (the owner's decision, 17 Nov 2026: the sphere grab and the tap need them); an ini that already has vr_hands=0
+// keeps it.
 //
 // The owner's rules (2 Nov, 3 Nov 2026): in first person only with the player's body hidden (fp_body_mode 0, "hide my whole
 // body", the default; no forearm cutting), and by choice in the diorama ("to give our hands some context when adjusting the
 // view"), third person and the seat view, where Tidus is part of the scene. No optical hand tracking.
 //
 // ini keys (all applied at once):
-//   vr_hands            0/1, default 0: the master switch. 0 costs one branch per resolve: no shaders, nothing drawn.
+//   vr_hands            0/1, default 1 (0 before release 0.1.0-alpha.1): the master switch. 0 costs one branch per resolve: no
+//                       shaders, nothing drawn. 1 with the headset off draws nothing either (ffxvr_hands2_set answers 0).
 //   vr_hands_views      bits, default 1: 1 first person (always), 2 the diorama, 4 third person, 8 the seat view.
 //   vr_hands_pack       a folder under <mod>\hands\, default generic-glove: the hand model. Missing or unusable: generic-glove,
 //                       then generic, then the boxes (logged).
@@ -70,7 +73,7 @@ public sealed unsafe partial class FFXVRModule {
     private delegate* unmanaged[Cdecl]<VrTapCfg*, int, void> _fn_hands2_tap_set;              // ABI 30: the tap's settings and the game gate
     private delegate* unmanaged[Cdecl]<float*, int, byte*> _fn_hands2_tap_status;            // ABI 30: the F8 readout
 
-    private bool   _vr_hands = false;            // ini vr_hands (default 0)
+    private bool   _vr_hands = true;             // ini vr_hands (default 1 since release 0.1.0-alpha.1; an existing ini keeps its value)
     private int    _vr_hands_debug = 0;          // ini vr_hands_debug (bits 1, 2, 4)
     private int    _vr_hands_views = 1;          // ini vr_hands_views (bit 0 first person, always; 2 diorama, 4 third person, 8 seat)
     private string _vr_hands_pack = "generic-glove";   // ini vr_hands_pack: a folder under <mod>\hands\
