@@ -1038,6 +1038,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
                 case "gest_tilt":         pf(k, v, ref _gest_tilt, -2f, 2f); break;
                 case "fp_body_mode":      pe(k, v, ref _fp_body_mode, 0, 1, 2); break;
                 case "battle_anchor":     pb(k, v, ref _battle_anchor); break;
+                case "battle_view_reset": pb(k, v, ref _battle_view_reset); break;   // battle_anchor.cs
                 case "ui_hide":           pi(k, v, ref _ui_hide, 0, 5); break;
                 case "hide_cursor":       pb(k, v, ref _hide_cursor); break;
                 case "hide_pointers":     pb(k, v, ref _hide_pointers); break;
@@ -1421,6 +1422,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             $"fp_body_mode={_fp_body_mode.ToString(ci)}\n" +
             $"fp_head_anchor={_fp_head_anchor.ToString(ci)}\n" +
             $"battle_anchor={(_battle_anchor ? 1 : 0)}\n" +
+            $"battle_view_reset={(_battle_view_reset ? 1 : 0)}\n" +
             $"ui_hide={_ui_hide.ToString(ci)}\n" +
             $"hide_cursor={(_hide_cursor ? 1 : 0)}\n" +
             $"hide_pointers={(_hide_pointers ? 1 : 0)}\n" +
@@ -2364,24 +2366,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
     /// <summary>An actor slot that is really in use. Before the field is up the table is uninitialised memory
     /// (0xCDCDCDCD fill), so only a plain 1 counts as enabled and the name pointer must look like one.</summary>
     private static bool live(in Actor a) => a.chr_enabled == 1 && (nint)a.chr_name > 0x10000 && (nint)a.chr_name < 0x7FFF0000;
-    /// <summary>In battle the diorama anchors to the centre of the combatants (party and monsters
-    /// from the battle lists, whoever is in the fight), not the player, who may be swapped out.</summary>
-    private void push_battle_anchor() {
-        if (_fn_anchor_override == null) return;
-        _battle_anchor_n = 0;
-        if (!_battle_anchor) { _fn_anchor_override(0, 0, 0, 0); return; }
-        Btl* btl = Globals.Battle.btl;
-        if (!read(btl, out Btl btl_v) || btl_v.battle_state == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
-        Chr* mons = Globals.Battle.monster_characters; Chr* plys = Globals.Battle.player_characters;
-        float sx = 0, sy = 0, sz = 0; int n = 0;
-        for (int i = 0; i < k_ply_n; i++)
-            if (plys != null && read(plys + i, out Chr pc) && pc.actor != null && read(pc.actor, out Actor pa) && live(pa)) { sx += pa.chr_pos_vec.X; sy += pa.chr_pos_vec.Y; sz += pa.chr_pos_vec.Z; n++; }
-        for (int i = 0; i < k_mon_n; i++)
-            if (mons != null && read(mons + i, out Chr mc) && mc.actor != null && read(mc.actor, out Actor ma) && live(ma) && mc.stat_visible != 0) { sx += ma.chr_pos_vec.X; sy += ma.chr_pos_vec.Y; sz += ma.chr_pos_vec.Z; n++; }
-        _battle_anchor_n = n;
-        if (n == 0) { _fn_anchor_override(0, 0, 0, 0); return; }
-        _fn_anchor_override(-sx / n, -sy / n, sz / n, 1);   // render space negates X and Y
-    }
+    // push_battle_anchor (the battle diorama's centre): battle_anchor.cs
     private void push_hands() {
         if (!_hands_cal_loaded && _fn_hands_cal_data != null && _hands_cal_ini.Length > 0) {
             _hands_cal_loaded = true; var t = _hands_cal_ini.Split(','); if (t.Length == 18) { float* rc = stackalloc float[18]; bool ok = true; for (int i = 0; i < 18; i++) ok &= float.TryParse(t[i], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out rc[i]); if (ok) { _fn_hands_cal_data(rc, 1); _hands_cal_seen = _fn_hands_cal_data(null, 0); } }

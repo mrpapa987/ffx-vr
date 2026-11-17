@@ -1576,6 +1576,10 @@ float    g_fp_anchor[3] = {}; bool g_fp_anchor_valid = false; float g_fp_anchor_
 // Battle: the diorama anchors to the centre of the combatants (set by the managed side from the battle lists).
 // Its own time constant; 0 = snap. A/B target: 325 ms ("0.05 per frame").
 float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was = false; float g_anchor_ovr_tau = 0.f;   // s
+// dio-anchor: a battle seen in the diorama starts from the default view (ini battle_view_reset). The managed side numbers the
+// battles (ffxvr_anchor_override's "valid": bit 0 valid, bit 1 reset, the serial from bit 2 up; battle_anchor.cs); the first
+// frame the diorama uses a battle's centre, the offset, tilt and zoom go back to their defaults, once for that battle.
+bool     g_anchor_ovr_reset = false; int g_anchor_ovr_epoch = 0, g_anchor_ovr_epoch_done = 0;
 // The once-per-frame view tick (R4): the third-person slew, the anchor and the seat follow-pans advance at the first
 // eye-1 upload of a real 3D camera in each frame, on the render thread. g_anchor_frame: the last frame the anchor
 // advanced (a gap of more than 2 frames snaps it).
@@ -2529,6 +2533,10 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float* target = ovr_on ? g_anchor_ovr : g_fp_pos;
             if (advance) {
                 if (ovr_on != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = ovr_on; }   // battle start / end: snap
+                if (ovr_on && g_anchor_ovr_epoch != g_anchor_ovr_epoch_done) {   // dio-anchor: this battle's centre is used for the first time
+                    g_anchor_ovr_epoch_done = g_anchor_ovr_epoch;
+                    if (g_anchor_ovr_reset) { view_defaults(2); g_fp_anchor_valid = false; }   // behind and above the fight, not where the view was left
+                }
                 const uint32_t gap = g_frames - g_anchor_frame; g_anchor_frame = g_frames;
                 if (gap > 2) g_fp_anchor_valid = false;                 // idle for a while (screen, stereo screen, backdrop, seat, first person, loading): snap
                 if (g_fp_anchor_valid && !ovr_on) {                     // a warp (ffxvr_player_set's 50-unit rule): snap; the battle centre keeps its glide
@@ -14784,7 +14792,8 @@ extern "C" __declspec(dllexport) void ffxvr_view_smooth_set(float field_ms, floa
 }
 extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_floor = units; }
 /// Diorama anchor override (render space): the centre of the battle while one is on; valid = 0 hands it back to the player.
-extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; }
+// (dio-anchor: "valid" also carries bit 1 = start this battle from the default view, and the battle's serial from bit 2 up; 0 and 1 mean what they did: no export change)
+extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; g_anchor_ovr_reset = (valid & 2) != 0; g_anchor_ovr_epoch = valid >> 2; }
 /// Chord events since the last call (cleared), plus the gesture state for the overlay.
 extern "C" __declspec(dllexport) uint32_t ffxvr_gesture_poll(float* move3, float* scale_mul, int* active) {
     const uint32_t n = (g_gest_toggle_fp & 0xFF) | ((g_gest_next_chr & 0xFF) << 8); g_gest_toggle_fp = 0; g_gest_next_chr = 0;   // low byte: view toggles, next byte: next-character presses

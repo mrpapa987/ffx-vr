@@ -471,7 +471,8 @@ public sealed unsafe partial class FFXVRModule {
         ui_radio("battle_view", "first person##bv", ref _battle_view, 1, UiTag.Common, k_bv_tip); ImGui.SameLine();
         ui_radio("battle_view", "third person##bv", ref _battle_view, 3, UiTag.Common, k_bv_tip); ImGui.SameLine();
         ui_radio("battle_view", "diorama##bv", ref _battle_view, 2, UiTag.Common, k_bv_tip);
-        ui_check("battle_anchor", "Battle diorama: centre on the fight", ref _battle_anchor, UiTag.None, "In battle the diorama centres on the fight, not on the player.");
+        ui_check("battle_anchor", "Battle diorama: centre on the fight", ref _battle_anchor, UiTag.None, "In battle the diorama centres on the fight (the party members on the field and the enemies), not on the player.");
+        ui_check("battle_view_reset", "Battle diorama: start each battle from the default view", ref _battle_view_reset, UiTag.None, "A battle seen in the diorama starts behind and above the fight (follow distance / height), not where the view was left. What you move during a battle stays for that battle.");
         ui_check("battle_follow", "First person in battle: ride along with the active character", ref _battle_follow, UiTag.None,
                  "First person follows the field: Tidus when he is on it, swaps move the eyes, a summon gives them to Yuna. Tidus joining the field takes the eyes; "
                + "left grip + right stick click (or Insert) moves them to the next party member.");
@@ -607,7 +608,7 @@ public sealed unsafe partial class FFXVRModule {
             ImGui.TreePop();
         }
         if (ImGui.TreeNode("Battle, overdrives and rendering")) {
-            ImGui.TextDisabled(_battle_anchor_n > 0 ? $"battle diorama: combatants {_battle_anchor_n}" : "battle diorama: not in battle");
+            ImGui.TextDisabled(ba_status());   // battle_anchor.cs: counted and dropped
             if (_btl_who.Length > 0) ImGui.TextDisabled($"battle first person now: {esc(_btl_who)}");   // an actor name read from the game
             ImGui.TextDisabled(_in_blitz ? $"blitzball overlay: routed last frame {_blitz_overlay_n}" : "blitzball overlay: not in blitzball");
             if (_fn_bt_status != null) ImGui.TextDisabled("battle start: " + esc(bt_status_text()));
