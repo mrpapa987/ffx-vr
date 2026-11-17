@@ -472,41 +472,72 @@ the party had no bench. The same spot holds the fielded members before the battl
 in the logs; by 0x0C they stand in the arena), and a member who is swapped out walks off first (about 200 units away)
 and is moved there afterwards.
 
-The rule now (`src/managed/battle_anchor.cs`):
+The rule now (`src/managed/battle_anchor.cs`; the review of the first build, S1 to S5, is worked in):
 
 - **Party: the game's field roster** (three chr ids at 0xD2C895, the roster the battle follow uses). A member on it
   counts whatever its visibility votes say, so a front-liner an effect hides for a moment does not make the table jump;
   a member off it is "benched". During a summon the roster is the aeon (or the three Magus Sisters) alone: the aeon
   counts, the summoner and the party that walked off do not. The roster is not used while it is the battle before's
-  (battle_state 4..7) or names a chr id twice.
+  (battle_state 4..7), names a chr id twice, or is three empty slots.
 - **Monsters**: the 11 monster slots, a live actor, in the battle (Chr+0x10), shown (the main vote +0x16 and the appear
   vote +0x17, as the "face the enemies" filter), not dead (stat_death +0xDCC) and with HP. The effect and camera votes
   are not asked.
-- **Outliers**: a candidate with a coordinate that is not a finite number is dropped; then one farther than 400 units
-  from the median (per axis) of the rest. The fight spans 60 to 200 units and the bench is 3000 away, so this alone
-  would have held the reported case (the tests run it both ways); it is the second line of defence for a stale monster,
-  an actor not yet placed, or a newcomer still at the bench in the frame of a swap. A lone enemy more than 400 units
-  from a party of three (a far boss) is left out: the table then centres on the party.
+- **Outliers: the party defines the arena** (review S2). A candidate with a coordinate that is not a finite number is
+  dropped. With a party candidate left, the reference is the party's median (per axis): a party member more than
+  400 units from it is an outlier (a newcomer still at the bench in the frame of a swap; the fight spans 60 to 200
+  units), an enemy only when more than 1500 units from it. The first build took the median of everybody, which
+  followed the majority: four enemies 450 units away dropped the party, three at 900 dropped everyone, and the centre
+  changed sides as enemies died. Now the enemies can never drop the party, and a far-enemy fight keeps both groups
+  (the centre is then between them and moves steadily toward the party as enemies die). 1500 units: the bench stands
+  about 3143 away, twice that, so nothing parked there can count, while an enemy several hundred units off does (how
+  far the game's far fights really stand is not measured). An enemy beyond it is still drawn, only not counted. With no party candidate (nobody live on the roster) the monsters' own median and 400 units.
 - **When**: only at battle_state 0x16, 1 and 2 (the intro drawn in 3D and the fight; the eye-jump code's "live" class).
-  In the load chain and the end states, with no usable roster, or when nothing is left to count, the last centre of this
-  battle is kept; before the first one the override is off (the diorama stays on the player, as it did with no
-  combatant). Nothing falls back to the player in the middle of a battle.
-- **The centre** is still the average of the counted set, pushed every frame and followed at `battle_anchor_smooth_ms`
-  (0: a snap each frame, checked in native: `k = 1`). It therefore still moves a few units when a character runs in
-  to attack or a monster dies (one of six combatants moving 40 units moves it 7). Home or slot positions would be the
-  steadier anchor, but Fahrenheit's Chr has only the slot numbers (+0x4FC area, +0x4FE pos), no position for them, so
-  that is left; 325 ms of smoothing is the existing remedy.
+  In the load chain and the end states, with no usable roster, or when nothing is left to count, the table stays where
+  it is; before the first centre the override is off (the diorama stays on the player, as it did with no combatant).
+  Nothing falls back to the player in the middle of a battle.
+- **A battle begins** (review S4) when battle_state leaves 0, and also when it enters 4..7 (the start of the load
+  chain) from any later state: battles that follow each other with no frame at 0 get a fresh table, a new serial (so
+  the start view below) and a new log budget. In the logs one battle never returns to 4..7 once it has left them.
+- **The table holds still** (review S3). What is pushed is not each frame's average but a held place. The average is
+  still computed every frame (the "centre"), and the table moves to it only (a) after the counted set changed (a kill,
+  a swap, a summon), once the centre has stood still for 0.5 s (or 3 s after the change at the latest): a kill in the
+  middle of a run-in is therefore not taken where the attacker happened to be, the table waits for him to be back;
+  (b) when the centre has been more than 40 units from the table for a full second without a set change. It then
+  glides there in 0.6 s, eased (smoothstep: no step is a snap); a move of more than 400 units is another place
+  altogether (fighters not placed yet) and is taken in one step. A run-in to attack and back, a spell's hop, a knock
+  back: nothing moves. The first centre of a battle is taken as it is and corrected by rule (a) once the intro's
+  fighters stand. `battle_anchor_smooth_ms` is kept and works on top: native still smooths what is pushed with that
+  time constant (0, the default, adds nothing; with it on, the glide is a little softer and later).
 
-**The view at the start** (`battle_view_reset`, default 1). The diorama's offset, tilt and zoom were set to their
-defaults only when the view mode changed (`ffxvr_fp_set`), so a battle entered in the diorama from a field in the
-diorama kept whatever the view had been pulled to, and so did the battle after one in which the view was pulled (the
-owner's pulls toward the fight carried over, against a centre that was wrong in a different way each battle). The
-managed side numbers the battles and sends the number in `ffxvr_anchor_override`'s `valid` argument (bit 0 valid, bit 1
-"start from the defaults", the serial from bit 2 up); the first frame native uses a battle's centre in the diorama it
-calls `view_defaults(2)`, once for that battle, so what is moved during the battle stays. Values 0 and 1 mean what
-they did, the export's shape is the same and either DLL works with the other's older build, so this stays ABI 70. The
-existing `ffxvr_gesture_reset` was not used: it counts as a user's view action and would end the battle transition's
-window, which is still open when the fight is first drawn. The field's own offset is not put back after the battle.
+**The view at the start and the end** (`battle_view_reset`, default 1; native `src/native/ffxvr_dioanchor.h`, pure
+logic, and `dio_battle_view` in ffxvr_native.cpp). The diorama's offset, tilt and zoom were set to their defaults only
+when the view mode changed (`ffxvr_fp_set`), so a battle entered in the diorama from a field in the diorama kept
+whatever the view had been pulled to, and so did the battle after one in which the view was pulled.
+
+- The managed side numbers the battles and sends the number in `ffxvr_anchor_override`'s `valid` argument (bit 0
+  valid, bit 1 "start from the defaults", the serial from bit 2 up). The first frame native uses a battle's table in the
+  diorama it calls `view_defaults(2)`, once for that battle, so what is moved during the battle stays.
+- **The heading** (review S5): "behind" used to mean behind along whatever heading the field's diorama had. The
+  managed side sends the direction from the party's centre to the enemies' centre (`ffxvr_eye_event` kind 4, render
+  space, with every centre that has both groups; zero at a battle's start); at the reset native sets the latched
+  heading to it, the way the eye-jump code sets a new heading (`g_fp_yaw`, `g_sr_epoch`: a new heading, not a stick
+  turn; no blink, no recentre). If the party or the enemies are missing at that frame, or the two centres are less than
+  a unit apart, the heading is left as it was. This is the diorama's own rule; `battle_face` stays first and third
+  person's.
+- **The field's view is kept** (review S1): at the reset the field's offset, zoom, tilt and heading are saved, and
+  put back the first frame the table is taken away while the view is still the diorama (the battle ended, or
+  `battle_anchor` was unticked). A battle right after another keeps the first save. If the view mode was changed during
+  the battle the saved view is dropped: the mode change has already put its own defaults in, and nothing is put back
+  after the battle. After a battle the eye-jump code's own "field heading back" (`battle_face` on) runs after this and
+  has the last word on the heading.
+- Small rules: a grab in progress on that first frame skips that battle's reset (the hand is already moving the view);
+  a quick squeeze in progress gets the new view as its snapshot, so releasing it does not bring the old offset back;
+  ticking `battle_anchor` on in the middle of a battle gives the table but no reset.
+- None of it is a user's view action: `ffxvr_gesture_reset` was not used, because it would end the battle
+  transition's window, which is still open when the fight is first drawn.
+- No export changes shape (`valid`'s values 0 and 1 mean what they did; an unknown `ffxvr_eye_event` kind was and is
+  ignored by an older native DLL), so this stays ABI 70. The cost: a stale DLL on one side loads without complaint and
+  the start view simply does not happen.
 
 **Checked and not a cause.** The override is pushed every frame in every view, so switching to the diorama in the
 middle of a battle finds it; the mode change itself resets the offset. The head's own offset: the head position is
@@ -515,17 +546,19 @@ multiplied by the world scale, which is what makes one metre in the room one met
 the side at the start of a battle moves the view by that step, not by more. It is not recentred at battle start.
 
 **Log.** With `diag_verbose` or `diag_battle`: `diorama: battle anchor: battle N, battle_state 0x.., view V | the
-centre (x y z) (game space) of P party + M monster(s); dropped D of C ... | chr 0 (x y z) counted; chr 2 (x y z)
-benched; monster 0 (x y z) counted; ...` at the first centre of a battle and whenever the set changes, 40 a battle at
-most. F8's line: `battle diorama: combatants N counted (P party + M monsters), D dropped (benched .., hidden .., dead
-.., outlier .., other ..)`, and "the centre is kept: ..." while it is.
+centre (x y z) (game space) of P party + M monster(s), the table at (x y z) still; the party at (x y z), the enemies
+at (x y z); dropped D of C ... | chr 0 (x y z) counted; chr 2 (x y z) benched; monster 0 (x y z) counted; ...` at
+the first centre of a battle and whenever the set changes, 40 a battle at most. F8's line: `battle diorama:
+combatants N counted (P party + M monsters), D dropped (benched .., hidden .., dead .., outlier .., other ..); the
+table: still`, or "the table stays: ..." while no centre is computed.
 
-**Not verified in the game** (no build here): that the roster and the bytes read as in the logs for every encounter
-type (ambushes, scripted fights, the far-enemy fights); that a quick grip squeeze in progress at the reset does not
-bring the old offset back (the grab's snapshot); the look of the first frame after the transition. The rule's lines
-are built and tested outside the game: the checks turn the C# of the rule into C++ by textual replacement and run it
-(the reported case, a swap, an aeon, dead / hidden / stale monsters, NaN, one candidate, none, the native reading of
-the argument).
+**Not verified in the game** (not built here: no C# compiler, no Windows headers): that the roster and the bytes read
+as in the logs for every encounter type (ambushes, scripted and chained fights, the far-enemy fights); whether the
+monsters are already shown on the first frame of state 0x16 (if not, the start view has no heading to take and the
+table starts on the party, then glides when they appear: the log lines show it); how the reset looks when the battle
+transition's freeze lets go. Tested outside the game (`dio_chk`): the rule's C# lines are turned into C++ by textual
+replacement and run; the native header is built as it is; the native glue's lines are extracted verbatim and built
+against stand-in globals; the managed `push_battle_anchor` is replayed by a hand copy whose lines are pinned by text.
 
 ### Diorama floor (19 Oct 2026)
 

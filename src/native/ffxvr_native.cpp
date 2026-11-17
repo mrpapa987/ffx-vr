@@ -53,6 +53,7 @@
 #include "ffxvr_battlevis.h" // battle-vis: the battle research log (cmd: / vis: / fx:), the first-person battle body hide by identity (pure logic)
 #include "ffxvr_fxface.h"   // battle-vis build 2: fx_face_eyes, the effect code's matrices around one part run (pure logic)
 #include "ffxvr_late3d.h"   // late3d: a late 3D layer (Holy's target drawn after the post-processing) is not the UI pass (pure logic)
+#include "ffxvr_dioanchor.h" // dio-anchor: the battle diorama's view at a battle's start and end (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -1576,10 +1577,9 @@ float    g_fp_anchor[3] = {}; bool g_fp_anchor_valid = false; float g_fp_anchor_
 // Battle: the diorama anchors to the centre of the combatants (set by the managed side from the battle lists).
 // Its own time constant; 0 = snap. A/B target: 325 ms ("0.05 per frame").
 float    g_anchor_ovr[3] = {}; bool g_anchor_ovr_valid = false, g_anchor_ovr_was = false; float g_anchor_ovr_tau = 0.f;   // s
-// dio-anchor: a battle seen in the diorama starts from the default view (ini battle_view_reset). The managed side numbers the
-// battles (ffxvr_anchor_override's "valid": bit 0 valid, bit 1 reset, the serial from bit 2 up; battle_anchor.cs); the first
-// frame the diorama uses a battle's centre, the offset, tilt and zoom go back to their defaults, once for that battle.
-bool     g_anchor_ovr_reset = false; int g_anchor_ovr_epoch = 0, g_anchor_ovr_epoch_done = 0;
+// dio-anchor (ffxvr_dioanchor.h; ini battle_view_reset): a battle seen in the diorama starts from the default view, turned to
+// look from the party toward the enemies, once a battle; the field's view is kept meanwhile and put back after (dio_battle_view).
+dio::Battle g_dio;
 // The once-per-frame view tick (R4): the third-person slew, the anchor and the seat follow-pans advance at the first
 // eye-1 upload of a real 3D camera in each frame, on the render thread. g_anchor_frame: the last frame the anchor
 // advanced (a gap of more than 2 frames snaps it).
@@ -2315,6 +2315,28 @@ ej::Limit g_cut_lim;                              // S4: cut_blink's one start p
 const uint32_t k_ej_hold_age = 600;               // frames after a battle's end the field heading may still be restored
 const float    k_ej_cam_tol = 30.f * 0.0174533f;  // S2: the same field camera = within 30 deg of the saved yaw
 static void ej_blink() { if (g_ej_cfg.blink > g_blink_frames) g_blink_frames = g_ej_cfg.blink; }
+/// dio-anchor (ffxvr_dioanchor.h): the diorama's view at a battle's first frame on its table (the defaults, the heading from
+/// the party toward the enemies; the field's view kept) and when the table is taken away (the field's view back). On the
+/// view tick, after the heading latch, before ej_heading (the field heading it restores or re-latches after a battle is the
+/// later word) and before this frame's heading is used. A new heading is set as ej_heading sets one (g_sr_epoch: not a stick
+/// turn); not a user's view action.
+static void dio_battle_view() {
+    dio::View cur, back;
+    memcpy(cur.move, g_gest_move, sizeof(cur.move)); cur.scale = g_gest_scale; cur.pitch = g_gest_pitch; cur.yaw = g_fp_yaw;
+    back = cur;
+    const int act = dio::battle_view(g_dio, g_fp_mode == 2, g_gest_active, cur, &back);
+    if (act == dio::ACT_NONE) return;
+    if (act == dio::ACT_RESET) {
+        view_defaults(2);
+        if (g_dio.face && g_fp_yaw_latched) { g_fp_yaw = g_dio.yaw; g_sr_epoch++; }
+    }
+    else {
+        memcpy(g_gest_move, back.move, sizeof(g_gest_move)); g_gest_scale = back.scale; g_gest_pitch = back.pitch;
+        if (g_fp_yaw_latched) { g_fp_yaw = back.yaw; g_sr_epoch++; }
+    }
+    g_fp_anchor_valid = false;   // the anchor snaps with the view
+    for (int h = 0; h < 2; ++h) if (g_grip_snap_mode[h] == 2) memcpy(g_grip_snap[h], g_gest_move, sizeof(g_gest_move));   // a quick squeeze in progress gives back this view, not the one before
+}
 /// The heading changes managed asked for, at the primary advance call right after the latch (so a mode switch's re-latch from
 /// the game's camera is overridden): the field heading after a battle, or the battle heading toward the enemies.
 static void ej_heading() {
@@ -2502,6 +2524,7 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             g_sr_epoch++;                               // stickrep: a new heading, not a stick turn
             g_ej_latch_seq++;
         }
+        if (advance) dio_battle_view();     // dio-anchor: the battle diorama's view at a battle's start and end (before ej_heading: its field heading after a battle wins)
         if (advance) ej_heading();          // eye jumps: face the enemies (battle follow), or the field heading back after a battle
         if (g_fp_mode == 3 && advance && g_tp_follow_rate > 0.f && g_fp_step > 0.f && g_fp_move_dir_valid && !g_gest_active) {
             // Third person: the heading slews round behind the direction of
@@ -2533,10 +2556,6 @@ static void build_override_view(const float v[12], float Vn[16], float In[16], f
             const float* target = ovr_on ? g_anchor_ovr : g_fp_pos;
             if (advance) {
                 if (ovr_on != g_anchor_ovr_was) { g_fp_anchor_valid = false; g_anchor_ovr_was = ovr_on; }   // battle start / end: snap
-                if (ovr_on && g_anchor_ovr_epoch != g_anchor_ovr_epoch_done) {   // dio-anchor: this battle's centre is used for the first time
-                    g_anchor_ovr_epoch_done = g_anchor_ovr_epoch;
-                    if (g_anchor_ovr_reset) { view_defaults(2); g_fp_anchor_valid = false; }   // behind and above the fight, not where the view was left
-                }
                 const uint32_t gap = g_frames - g_anchor_frame; g_anchor_frame = g_frames;
                 if (gap > 2) g_fp_anchor_valid = false;                 // idle for a while (screen, stereo screen, backdrop, seat, first person, loading): snap
                 if (g_fp_anchor_valid && !ovr_on) {                     // a warp (ffxvr_player_set's 50-unit rule): snap; the battle centre keeps its glide
@@ -14694,6 +14713,7 @@ extern "C" __declspec(dllexport) void ffxvr_eye_event(int kind, float x, float y
         g_ej_face_rq.on = false;
     }
     else if (kind == 3) { ej::hold_arm(g_ej_hold, g_frames); g_ej_face_rq.on = false; }
+    else if (kind == 4) g_dio.face = dio::face_yaw(x, z, &g_dio.yaw);   // dio-anchor: the direction from the party to the enemies (render space; none: 0, 0)
 }
 /// Battle tag (ABI 46, ffxvr_tag.h): managed's push_player (render thread) while a swap-in is pending. op 0: the swap begins
 /// (ox, oz the outgoing character, the one followed; ix, iz the incoming one; game space, horizontal); op 1: a frame of it.
@@ -14793,7 +14813,10 @@ extern "C" __declspec(dllexport) void ffxvr_view_smooth_set(float field_ms, floa
 extern "C" __declspec(dllexport) void ffxvr_floor_set(float units) { g_diorama_floor = units; }
 /// Diorama anchor override (render space): the centre of the battle while one is on; valid = 0 hands it back to the player.
 // (dio-anchor: "valid" also carries bit 1 = start this battle from the default view, and the battle's serial from bit 2 up; 0 and 1 mean what they did: no export change)
-extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) { g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z; g_anchor_ovr_valid = valid != 0; g_anchor_ovr_reset = (valid & 2) != 0; g_anchor_ovr_epoch = valid >> 2; }
+extern "C" __declspec(dllexport) void ffxvr_anchor_override(float x, float y, float z, int valid) {
+    g_anchor_ovr[0] = x; g_anchor_ovr[1] = y; g_anchor_ovr[2] = z;
+    const dio::Arg a = dio::arg_decode(valid); g_anchor_ovr_valid = a.valid; g_dio.valid = a.valid; g_dio.reset = a.reset; g_dio.epoch = a.serial;
+}
 /// Chord events since the last call (cleared), plus the gesture state for the overlay.
 extern "C" __declspec(dllexport) uint32_t ffxvr_gesture_poll(float* move3, float* scale_mul, int* active) {
     const uint32_t n = (g_gest_toggle_fp & 0xFF) | ((g_gest_next_chr & 0xFF) << 8); g_gest_toggle_fp = 0; g_gest_next_chr = 0;   // low byte: view toggles, next byte: next-character presses
@@ -15003,7 +15026,7 @@ extern "C" __declspec(dllexport) void ffxvr_fp_set(int mode, float eye_h, float 
     if (mode != g_fp_mode) { g_fp_yaw_latched = false; g_seat_latched = false; g_xr_recenter_pending = true; g_sr_epoch++; }
     const int mode_before = g_fp_mode;
     g_fp_mode = mode; g_fp_eye_h = eye_h; g_fp_follow_dist = follow_dist; g_fp_follow_h = follow_h; g_fp_hide_body = hide_body != 0; g_fp_hide_radius = hide_radius;
-    if (mode != mode_before) { view_defaults(mode); g_fp_anchor_valid = false; }   // the grab offset means something different per mode: start each mode from its default
+    if (mode != mode_before) { view_defaults(mode); g_fp_anchor_valid = false; dio::mode_changed(g_dio); }   // the grab offset means something different per mode: start each mode from its default
 }
 extern "C" __declspec(dllexport) void ffxvr_fp_body_set(int mode, uint32_t head_mask, int solo) { g_fp_body_mode = mode; g_fp_head_mask = head_mask; g_fp_solo = solo; }
 extern "C" __declspec(dllexport) uint32_t ffxvr_fp_parts() { return g_fp_parts_last; }

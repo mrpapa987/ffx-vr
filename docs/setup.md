@@ -317,19 +317,26 @@ default layout and size), then comes back; if that would be more than 60 degrees
   opens in a session (`xr: menu panel 6 swapchain`), and the session start logs
   the runtime's layer limit.
 
-**The diorama in battle** (Battle > Battle view, `battle_anchor`, default 1): the diorama is centred on the fight: the
-party members on the field (the game's own field roster: three characters, or the aeon during a summon) and the enemies
-that are in the battle, shown and alive. The members on the bench do not count: the game keeps them at one spot about
-3000 units from the arena, which used to drag the table metres away from the fight with a party of more than three. A
-combatant farther than 400 units from the others' median is left out as well, and while the battle loads or ends the
-last centre is kept. **Start each battle from the default view** (`battle_view_reset`, default 1): a battle seen in the
-diorama starts behind and above the fight (the follow distance and height, the default tilt and size), whatever the view
-was moved to on the field or in the battle before; what you move during a battle stays for that battle, and after it the
-field's diorama is where the battle left it. `0` keeps the view as it was left. F8 > Developer > Logging & status >
-"Battle, overdrives and rendering" has the line `battle diorama: combatants N counted (P party + M monsters), D dropped`
-with the reasons; with developer mode or the battle research log on, `ffxvr_diag.log` gets a `diorama: battle anchor`
-line at each battle's first centre and whenever the set changes (every candidate, its position, and whether it was
-counted, benched, hidden, dead or an outlier).
+**The diorama in battle** (Battle > Battle view, `battle_anchor`, default 1): the diorama is a table centred on the
+fight: the party members on the field (the game's own field roster: three characters, or the aeon during a summon) and
+the enemies that are in the battle, shown and alive. The members on the bench do not count: the game keeps them at one
+spot about 3000 units from the arena, which used to drag the table metres away from the fight with a party of more
+than three. A party member more than 400 units from the others (someone still on his way in) and an enemy more than
+1500 units from the party are left out as well. **The table holds still**: it does not follow a character who runs in
+to attack; it moves only after someone joins or leaves the fight (a kill, a swap, a summon) once the fight stands
+still again, or when the fight's centre has been more than 40 units away for a second, and then it glides over about
+half a second. While the battle loads or ends it stays where it is. `battle_anchor_smooth_ms` (default 0) still adds
+its own lag on top if set.
+**Start each battle from the default view** (`battle_view_reset`, default 1): a battle seen in the diorama starts at
+the default distance, height, tilt and size, looking from the party toward the enemies, whatever the view was moved to
+on the field or in the battle before. What you move during a battle stays for that battle; when it ends, the field's
+own view (offset, size, tilt and heading) is put back as you left it. If you change the view mode during the battle,
+the field's view is not put back (each mode starts from its defaults, as always). `0` keeps the view as it was left.
+F8 > Developer > Logging & status > "Battle, overdrives and rendering" has the line `battle diorama: combatants N
+counted (P party + M monsters), D dropped` with the reasons and what the table is doing; with developer mode or the
+battle research log on, `ffxvr_diag.log` gets a `diorama: battle anchor` line at each battle's first centre and
+whenever the set changes (every candidate, its position, and whether it was counted, benched, hidden, dead or an
+outlier).
 
 **Your body in a first-person battle** (View > First person > "Your body in battle", `fp_battle_hide`): `1`, the
 default, hides only the draws of your own character's model (found by the model's index buffers, as on the field), so
