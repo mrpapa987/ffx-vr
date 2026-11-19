@@ -346,8 +346,9 @@ def inside_repo(path):
     root = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     if not os.path.exists(os.path.join(root, ".git")):
         return None
-    p = os.path.realpath(path)
-    return root if p == root or p.startswith(root + os.sep) else None
+    p = os.path.normcase(os.path.realpath(path))
+    r = os.path.normcase(root)   # (review N-R5: case-blind on Windows whatever realpath gives)
+    return root if p == r or p.startswith(r + os.sep) else None
 
 
 def main():

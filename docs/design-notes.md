@@ -6042,7 +6042,8 @@ own values.
   and the art loaded, the swing gesture on), and in state 4 while our art bar is up (the art ready, the visuals wanted now, a
   Swordplay window open and injecting, the art built at one of the last 3 Presents) or, while it is coming, for state 4's
   first 0.25 s (review S1: the visuals are built in xr_tick before od_gest_tick opens the gesture window, so the first
-  state-4 Presents have no art bar yet). Otherwise it calls 0x897240. The timer (0x8955E0) stays. No
+  state-4 Presents have no art bar yet); "coming" also needs the right grip tracked (review N-R1: else our bar gets no anchor).
+  Otherwise it calls 0x897240. The timer (0x8955E0) stays. No
   detour: the Bushido row's detour was the mechanism that did not run in the owner's first test, and the call-site patch
   alone hid the row. **Lulu's window is not hidden**: it holds Fury's hit counter, which the mod does not show; the same
   patch at 0x89B41B (0x895660) would hide it if wanted.
@@ -6078,6 +6079,11 @@ own values.
   decompression-bomb guard kept, at 150 MP (N4); the slicer refuses an output folder inside the repository and `.gitignore`
   ignores `art/odbar/` (N5); the F8 lines with a folder are read as UTF-8 (N6); README-zip and the tester checklist say the
   VR Swordplay bar needs "Tidus: swing for Swordplay" (N7); the guard at a fixed distance (N8); state 3 measured (N9).
+- **Second pass:** "coming" needs the right grip tracked (N-R1); a retry keeps the failure's F8 line instead of flipping to
+  "loading" (N-R3); a locked or unreadable PNG leaves out its own pack only, with a warning (N-R4); the repository refusal is
+  case-blind (N-R5); one `.gitignore` line (N-R6). **Left as it is (N-R2):** "drawn" counts the art bar even when the near-eye
+  fade (30 to 20 cm from an eye) has faded it out, so with the right hand raised to the face during Swordplay neither bar is
+  seen until the hand comes down; a rare pose, and the game's bar would then flash in and out with the hand.
 
 ### Not verified (nobody here can run the game)
 

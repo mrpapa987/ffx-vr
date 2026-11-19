@@ -6568,7 +6568,7 @@ static LONG odb_hide_decide(const odg::FrameIn& in) {
     odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0;
     const bool ready = odb_art_ready();
     hi.drawn = odb::art_bar_up(ready, odv_wanted(), g_odg.open && g_odg.inject_now == odg::OD_TIDUS && g_odg.sess.od == odg::OD_TIDUS, g_frames - g_odb_built_frame);
-    hi.coming = g_odv_on && ready && g_odg.cfg.on && g_odg.cfg.tidus;
+    hi.coming = g_odv_on && ready && g_odg.cfg.on && g_odg.cfg.tidus && in.valid[1];   // (review N-R1: the right grip tracked, or our bar gets no anchor)
     hi.opening = g_odb_open.step(in.r.ok ? in.r.tidus : 0, in.fresh && in.r.ok, odv_now());
     hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
     hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
@@ -12248,7 +12248,7 @@ static void odb_art_frame(bool wanted_now) {
             if (q != nullptr) { q->gen = ++g_odb_art_gen; _snwprintf_s(q->dir, _TRUNCATE, L"%s\\art\\odbar", g_dir); }
             g_odb_art_busy.store(true);
             HANDLE th = q ? CreateThread(nullptr, 256 * 1024, odb_art_worker, q, 0, nullptr) : nullptr;
-            if (th != nullptr) { CloseHandle(th); snprintf(g_odb_why, sizeof(g_odb_why), "bar art: loading in the background"); }   // detached: it ends by itself
+            if (th != nullptr) { CloseHandle(th); if (!retry) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: loading in the background"); }   // detached: it ends by itself (a retry keeps the failure's line: review N-R3)
             else { delete q; g_odb_art_busy.store(false); snprintf(g_odb_why, sizeof(g_odb_why), "bar art: no worker thread: the plain visuals"); diag("odb: %s", g_odb_why); }
         }
     }

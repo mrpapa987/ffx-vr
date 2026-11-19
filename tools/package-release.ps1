@@ -302,7 +302,7 @@ function Get-ArtProblems([string]$Dir, [string[]]$Files, [hashtable]$Sizes) {
     foreach ($f in $Files) {
         $path = Join-Path $Dir $f
         if (-not (Test-Path -LiteralPath $path)) { $p.Add("$f missing"); continue }
-        $sz = Get-PngSize $path
+        try { $sz = Get-PngSize $path } catch { $p.Add(("{0} not readable ({1})" -f $f, $_.Exception.Message)); continue }   # (review N-R4: a locked file costs its own pack only)
         $r = $Sizes[$f]
         if ($null -eq $sz) { $p.Add("$f is not a PNG"); continue }
         if ($sz[0] -ne $r[0] -or $sz[1] -lt $r[1] -or $sz[1] -gt $r[2]) {
@@ -335,12 +335,12 @@ if ($NoArt) {
         if (-not $artSrc) {
             Write-Host 'Target art zip: the Bushido targets left out (no game folder found and no -ArtDir; the mod zip does not need them).'
         } elseif (-not $haveTargets) {
-            Write-Host ("Target art zip: the Bushido targets left out (in {0}: {1}; the mod would refuse them; the mod zip does not need them)." -f $artSrc, ($missing -join ', '))
+            Write-Host ("WARNING: target art zip: the Bushido targets left out (in {0}: {1}; the mod would refuse them; the mod zip does not need them)." -f $artSrc, ($missing -join ', '))
         }
         if (-not $barSrc) {
             Write-Host 'Target art zip: the overdrive bar left out (no game folder found and no -BarArtDir; the mod zip does not need it).'
         } elseif (-not $haveBar) {
-            Write-Host ("Target art zip: the overdrive bar left out (in {0}: {1}; the mod would refuse it; cut it again with tools\target-art\bar_art.py; the mod zip does not need it)." -f $barSrc, ($barMissing -join ', '))
+            Write-Host ("WARNING: target art zip: the overdrive bar left out (in {0}: {1}; the mod would refuse it; cut it again with tools\target-art\bar_art.py; the mod zip does not need it)." -f $barSrc, ($barMissing -join ', '))
         }
         if (-not $haveTargets -and -not $haveBar) {
             Write-Host 'Target art zip: skipped (no complete pack; the mod zip does not need it).'
@@ -354,7 +354,7 @@ if ($NoArt) {
                 foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
                 $artArrow = Join-Path $artSrc 'arrow.png'   # optional: the pack's own arrow (without it the mod draws its procedural arrow)
                 if (Test-Path -LiteralPath $artArrow) {
-                    $as = Get-PngSize $artArrow
+                    $as = $null; try { $as = Get-PngSize $artArrow } catch { }   # (unreadable: left out alone, as an odd size)
                     if ($null -ne $as -and $as[0] -eq 1024 -and $as[1] -eq 1024) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
                     else { Write-Host 'Target art zip: arrow.png left out (not a 1024 x 1024 PNG: the mod would draw its own arrow).' }
                 }

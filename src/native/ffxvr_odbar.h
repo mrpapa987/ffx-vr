@@ -173,7 +173,7 @@ inline float readable_scale(float hi, float d) {
 /// from that Present's facts only (review B1: a remembered "drawn" kept the game's bar hidden in later Swordplays the mod did not
 /// draw): always a battle, a fresh read, the headset's 3D view, the gestures able to inject (the headset, the VR pad), no other
 /// overdrive; then state 3 (the window pending; the game's state 3 lasts one logic frame) when our bar is coming (the visuals on,
-/// the art loaded, Tidus's swing gesture on); state 4 while our bar is up, and its first k_open_s while it is coming (review S1:
+/// the art loaded, Tidus's swing gesture on, the right grip tracked); state 4 while our bar is up, and its first k_open_s while it is coming (review S1:
 /// the visuals are built before the gesture window opens in the same Present, so the first state-4 Presents have no art bar yet).
 struct HideIn {
     bool on = false, drawn = false, coming = false, opening = false;   // the setting; our art bar up now; coming; state 4 younger than k_open_s
