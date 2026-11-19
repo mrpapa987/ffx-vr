@@ -135,7 +135,12 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
   you, one at a time; cut each along its arrow with either hand. Are they at a comfortable place and height?
 - For the real thing, "Auron's Bushido:" is on "strike the targets" for a fresh install; "Overdrives always ready"
   lets you use an overdrive in any battle (while it is ticked the gauge is not spent, so a save made then keeps a full gauge).
-- Lulu's Fury: draw circles with a controller ("Lulu: circles for Fury").
+- Lulu's Fury: draw circles with a controller ("Lulu: circles for Fury"). With the optional art zip installed, a
+  countdown bar sits above the ring: does it run down with the game's timer, and can you read it?
+- Tidus's Swordplay with "Tidus: swing for Swordplay" ticked: with the art zip, the bar above your right hand is the
+  ornate one (golden zone, two pointers pinching the cursor) and the game's own Swordplay bar is hidden from the next
+  launch on ("Hide the game's Swordplay bar"). Can you time a swing by it? F8 > Overdrives shows under "Overdrive bar art
+  (local pack)" whether the art loaded.
 
 ### 8. Without the headset, and uninstalling (5 minutes)
 

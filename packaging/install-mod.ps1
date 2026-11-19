@@ -5,8 +5,8 @@
 # so installing a newer zip over an older one is safe. The shipped hand packs (hands\generic-glove\,
 # hands\generic\) are replaced; a hand pack folder of your own under hands\ is never touched. Neither is fmvdepth\ (FMV depth
 # made on your PC by convert-fmv-depth.ps1, private): not even -Uninstall -Purge deletes it. The optional target art
-# (ffxvr-target-art-<version>.zip extracted into the same folder as this zip: mod\ffxvr\art\targets\) is copied when it
-# is there; an installed art\ folder is never deleted by an install whose zip has none (only -Uninstall -Purge deletes it).
+# (ffxvr-target-art-<version>.zip extracted into the same folder as this zip: mod\ffxvr\art\targets\ and art\odbar\) is copied
+# when it is there; an installed art\ folder is never deleted by an install whose zip has none (only -Uninstall -Purge deletes it).
 # It also checks what the mod needs at run time and says what is missing.
 #
 #   -Uninstall     remove the mod's files and its load-order line (ffxvr.ini, logs and your own hand packs are kept, and listed)
@@ -252,22 +252,25 @@ foreach ($pk in $FfxvrHandPacks) {
     }
     Write-Host "  hands\$pk\  (the generic hand)"
 }
-# The optional target art (its own zip, extracted over this one): copied when present, its files replaced; nothing is deleted.
-$artFrom = Join-Path $src 'art\targets'
-if (Test-Path -LiteralPath $artFrom) {
-    $artTo = Join-Path $dest 'art\targets'
-    New-Item -ItemType Directory -Force -Path $artTo | Out-Null
-    $artN = 0
-    foreach ($f in @(Get-ChildItem -LiteralPath $artFrom -File)) {
-        Copy-Item -LiteralPath $f.FullName -Destination $artTo -Force
-        Unblock-File -LiteralPath (Join-Path $artTo $f.Name) -ErrorAction SilentlyContinue
-        $artN++
+# The optional target art (its own zip, extracted over this one): the Bushido targets (art\targets) and the overdrive bar
+# (art\odbar, Tidus's Swordplay bar and Lulu's countdown); each copied when present, its files replaced; nothing is deleted.
+foreach ($art in @(@('targets', 'the Bushido targets', 'the mod draws plain targets'), @('odbar', 'the overdrive bar', 'the mod draws its plain overdrive bar'))) {
+    $artFrom = Join-Path $src ('art\' + $art[0])
+    $artTo = Join-Path $dest ('art\' + $art[0])
+    if (Test-Path -LiteralPath $artFrom) {
+        New-Item -ItemType Directory -Force -Path $artTo | Out-Null
+        $artN = 0
+        foreach ($f in @(Get-ChildItem -LiteralPath $artFrom -File)) {
+            Copy-Item -LiteralPath $f.FullName -Destination $artTo -Force
+            Unblock-File -LiteralPath (Join-Path $artTo $f.Name) -ErrorAction SilentlyContinue
+            $artN++
+        }
+        Write-Host ('  art\{0}\  ({1} files: the optional target art, {2})' -f $art[0], $artN, $art[1])
+    } elseif (Test-Path -LiteralPath $artTo) {
+        Write-Host ('  art\{0}\  (kept: the target art installed before, {1}; none in this folder)' -f $art[0], $art[1])
+    } else {
+        Write-Host ('  art\{0}\  (the optional target art, {1}: not found, looked in {2}; {3})' -f $art[0], $art[1], $artFrom, $art[2])
     }
-    Write-Host "  art\targets\  ($artN files: the optional target art)"
-} elseif (Test-Path -LiteralPath (Join-Path $dest 'art\targets')) {
-    Write-Host '  art\targets\  (kept: the target art installed before; none in this folder)'
-} else {
-    Write-Host ('  art\targets\  (the optional target art: not found, looked in {0}; the mod draws plain targets)' -f $artFrom)
 }
 
 # ---------------------------------------------------------------- loadorder

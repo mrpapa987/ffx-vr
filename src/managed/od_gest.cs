@@ -36,6 +36,9 @@ namespace FFXVR;
 // od_slash_speed (0.8-5 m/s; 1.6), od_lulu_stick (0 right, 1 left, 2 both; 0), od_visuals (1) and od_visual_size (0.5-2; 1): the
 // overdrive visuals (native ffxvr_odvis.h: trails, bursts, Lulu's ring and spin count, Tidus's blade and bar, Auron's input row),
 // drawn near the hands in the headset only while that overdrive's window is open with its gestures on.
+// od-bar-art (ABI 71; native ffxvr_odbar.h): od_bar_art (1: Tidus's bar and a countdown for Lulu from the local bar art pack,
+// <mod>\art\odbar, when present; without it, or 0, the visuals above as they were), od_bar_plate (0: the ornate plate behind),
+// od_bar_hide2d (1: the game's Swordplay bar hidden while ours is up; its call-site patch is made at launch, as the Bushido row's).
 public sealed unsafe partial class FFXVRModule {
     private bool  _od_gestures = true, _od_gest_lulu = true, _od_gest_tidus = false, _od_gest_haptics = true;
     private int   _od_gest_auron = 2;   // 0 off, 1 slashes and punches, 2 strike the targets (ABI 52); default 2 since release 0.1.0-alpha.1 (was 0)
@@ -63,30 +66,36 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _od_always_ready;     // F8 > Overdrives, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
-    private delegate* unmanaged[Cdecl]<int, float, int> _fn_odv_set;                 // ABI 49: the overdrive visuals
+    private delegate* unmanaged[Cdecl]<int, float, int, int> _fn_odv_set;            // ABI 49: the overdrive visuals; ABI 71: + the bar art's flags
     private delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void> _fn_odt_set; // ABI 52: strike the targets; 53: + time; 54: + spread; 55: + art; 56: (pitch, distance, height, size, time, spread, art, badge)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odt_practice;                   // ABI 52: Practice targets (1 random, 2 the last Bushido)
     private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
     private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
+    private bool  _od_bar_art = true, _od_bar_plate = false, _od_bar_hide2d = true;   // ini od_bar_art / od_bar_plate / od_bar_hide2d (od-bar-art, ABI 71)
+    private int   _odb_patch_state;      // the Swordplay bar's call-site patch (ffxvr_odb_patch at launch: 1 patched, 2 off, < 0 not patched)
+    private delegate* unmanaged[Cdecl]<int, int> _fn_odb_patch;                       // ABI 71: the call-site patch at 0x89B416 (native, at init)
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_odg_text;
     private static readonly string[] k_odg_stick = { "right stick", "left stick", "both sticks" };
 
     private void odg_bind(Func<string, nint> req) {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
-        _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int>)req("ffxvr_odv_set");
+        _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int, int>)req("ffxvr_odv_set");   // ABI 71 (+ bar)
+        _fn_odb_patch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odb_patch");   // ABI 71
         _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void>)req("ffxvr_odt_set");   // ABI 56 (+ time, + spread, + art, + badge)
         _fn_odt_hide2d = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_odt_hide2d");   // ABI 56
         _fn_odt_row_patch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_row_patch");   // ABI 57
         _fn_odt_row_stat = (delegate* unmanaged[Cdecl]<int, int, int, int, int>)req("ffxvr_odt_row_stat");   // ABI 57
         _fn_odt_practice = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odt_practice");
     }
-    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; _fn_odt_hide2d = null; _fn_odt_row_patch = null; _fn_odt_row_stat = null; }
+    private void odg_clear() { _fn_odg_set = null; _fn_odg_text = null; _fn_odv_set = null; _fn_odt_set = null; _fn_odt_practice = null; _fn_odt_hide2d = null; _fn_odt_row_patch = null; _fn_odt_row_stat = null; _fn_odb_patch = null; }
 
     /// <summary>At module init, after dmg3d_init (Fahrenheit's commit stops at the first failing insertion: a refusal here takes
     /// nothing else with it): with od_targets_hide2d=1 the hook on the game's Bushido input row.</summary>
     private void odt_row_init() {
         _od_tgt_hide_at_launch = _od_tgt_hide2d;
+        // od-bar-art: the game's Swordplay bar's call-site patch (native, the row's kind; no detour), with od_bar_hide2d at launch
+        if (_native_ok && _fn_odb_patch != null) { _odb_patch_state = _fn_odb_patch(_od_bar_hide2d ? 1 : 0); _logger.Info("odb: the game's Swordplay bar's call-site patch (0x89B416): " + odt_patch_name(_odb_patch_state)); }
         // section 15: native's own call-site patch first (it does not depend on Fahrenheit's hook commit); the detour as well
         if (_native_ok && _fn_odt_row_patch != null) _odt_patch_state = _fn_odt_row_patch(_od_tgt_hide2d ? 1 : 0);
         if (!_od_tgt_hide2d) return;
@@ -191,6 +200,9 @@ public sealed unsafe partial class FFXVRModule {
             case "od_lulu_stick":   pe(k, v, ref _od_lulu_stick, 0, 1, 2); return true;
             case "od_visuals":      pb(k, v, ref _od_visuals); return true;
             case "od_visual_size":  pf(k, v, ref _od_visual_size, 0.5f, 2f); return true;
+            case "od_bar_art":      pb(k, v, ref _od_bar_art); return true;
+            case "od_bar_plate":    pb(k, v, ref _od_bar_plate); return true;
+            case "od_bar_hide2d":   pb(k, v, ref _od_bar_hide2d); return true;
             default: return false;
         }
     }
@@ -215,14 +227,17 @@ public sealed unsafe partial class FFXVRModule {
             $"od_slash_speed={_od_slash_speed.ToString("0.##", ci)}\n" +
             $"od_lulu_stick={_od_lulu_stick.ToString(ci)}\n" +
             $"od_visuals={(_od_visuals ? 1 : 0)}\n" +
-            $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n";
+            $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n" +
+            $"od_bar_art={(_od_bar_art ? 1 : 0)}\n" +
+            $"od_bar_plate={(_od_bar_plate ? 1 : 0)}\n" +
+            $"od_bar_hide2d={(_od_bar_hide2d ? 1 : 0)}\n";
     }
     /// <summary>Every frame from push_all: the settings; "overdrives always ready".</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
-        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size);
+        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size, (_od_bar_art ? 1 : 0) | (_od_bar_plate ? 2 : 0) | (_od_bar_hide2d ? 4 : 0));
         if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0, _od_tgt_badge ? 1 : 0);
         if (_fn_odt_row_stat != null) _odt_patch_state = _fn_odt_row_stat(_odt_row_install, _odt_row_calls, _odt_row_hidden, _odt_row_faults);   // section 15: the window line's row part
         odg_always_tick();
@@ -281,6 +296,14 @@ public sealed unsafe partial class FFXVRModule {
         ui_check("od_gest_haptics", "Buzz on hits and misses##odg", ref _od_gest_haptics, UiTag.None, "Also on a wrong Bushido input or a Swordplay miss from a button.");
         ui_check("od_visuals", "Guides near your hands##odv", ref _od_visuals, UiTag.None, "In the headset: Fury a ring and the spins; Swordplay a light blade and the bar; Bushido the inputs ahead.");
         if (_od_visuals) { ImGui.SameLine(); ui_slider("od_visual_size", "size##odv", ref _od_visual_size, 0.5f, 2f, "%.1f", UiTag.None, null, 140f); }
+        if (!_od_visuals) ImGui.BeginDisabled(true);
+        ui_check("od_bar_art", "Overdrive bar art (local pack)##odb", ref _od_bar_art, UiTag.None,
+                 "Tidus's Swordplay bar drawn from the art pack in the mod folder's art\\odbar (the optional download ffxvr-target-art, AI-generated, or a pack of your own: docs/design-notes.md in the repository; not in the mod's zip), and a countdown bar for Lulu's Fury above her ring. Without the pack, or off, the plain bar as before (and no countdown).");
+        ImGui.SameLine(); ui_check("od_bar_plate", "ornate base plate##odb", ref _od_bar_plate, UiTag.None, "With the bar art: the pack's ornate plate behind the bar.");
+        ImGui.SameLine(); ui_check("od_bar_hide2d", "Hide the game's Swordplay bar##odb", ref _od_bar_hide2d, UiTag.NextLaunch,
+                 "While the bar art's Swordplay bar is up in the headset (and from just before the window opens), the game's own Swordplay bar is left out of the UI panel; the timer stays. Lulu's window stays (it shows Fury's hit count). Turning it on takes effect at the next launch (the patch is made at launch; while patched it follows this box at once).");
+        ImGui.TextDisabled(esc(odg_text(7)));
+        if (!_od_visuals) ImGui.EndDisabled();
         if (!_od_gestures) ImGui.EndDisabled();
         string warn = odg_text(3);
         if (warn.Length > 0) { ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1f, 0.6f, 0.2f, 1f)); ImGui.TextWrapped(esc(warn)); ImGui.PopStyleColor(1); }

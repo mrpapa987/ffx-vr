@@ -5537,7 +5537,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 70;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer)
+constexpr int FFXVR_ABI = 71;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer); 71: ffxvr_odv_set(on, size, bar), + ffxvr_odb_patch, ffxvr_odg_text 7 (od-bar-art: the overdrive bar art from a local pack, the game's Swordplay bar's call-site patch)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6535,6 +6535,34 @@ static int odt_row_line(char* s, size_t n, int k) {
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
 // from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
 static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.f;
+// -- od-bar-art: the overdrive bar art (ffxvr_odbar.h; ABI 71) ----------------------------------------------------------------
+// The local pack <mod>\art\odbar\*.png (never shipped in the mod's zip; the optional art download or bar_art.py's own cut),
+// loaded like the target art (a worker decodes and packs one 1024 atlas with its chain; the render thread makes the texture)
+// at the first Swordplay or Fury window drawn, or when F8 > Overdrives shows its line (ffxvr_odg_text 7 asks). ffxvr_odv_set's
+// flags: 1 od_bar_art, 2 od_bar_plate, 4 od_bar_hide2d. The game's Swordplay window (0x897240, called by the battle UI at
+// 0x89B416, right after the Bushido row's call at 0x89B411) is skipped through a call-site patch of the same kind as the
+// row's (ffxvr_odb_patch, at launch with od_bar_hide2d) while odb::hide_tidus says so (decided each Present in od_gest_tick).
+static volatile LONG g_odb_flags = 1;   // ffxvr_odv_set's bar flags (render thread writes; the F8 line reads)
+static volatile LONG g_odb_req = 0;     // F8 showed the line: load the pack at the next Present (render thread)
+static char g_odb_why[320] = "bar art: not loaded yet (it loads at the first Swordplay or Fury window, or when this line is shown)";
+static bool g_odb_drawn = false;        // render thread: the art bar of a Swordplay window drawn at the last Present
+static void odb_art_frame(bool wanted_now);   // (defined with the marker pass)
+static bool odb_art_ready();                  // (the same)
+static volatile LONG g_odb_hide2d = 0;  // the stub skips 0x897240 while 1 (published interlocked each Present)
+static volatile LONG g_odb_patch_calls = 0, g_odb_patch_hidden = 0;
+static int g_odb_patch_state = 0;       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
+static uintptr_t g_odb_fn = 0;          // 0x897240 (rebased), the stub's call
+/// The patched call site's target (the game's main thread, from 0x89B416; cdecl, no arguments, as 0x897240, whose eax the battle
+/// UI drops).
+static void __cdecl odb_tidus_stub() {
+    InterlockedIncrement(&g_odb_patch_calls);
+    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_patch_hidden); return; }
+    reinterpret_cast<void(__cdecl*)()>(g_odb_fn)();
+}
+static const char* odb_patch_name(int st) {
+    switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
+                  case -3: return "FAILED (VirtualProtect)"; case -4: return "not patched (a battle was on at launch)"; case -5: return "not patched (the DLL could not be pinned)"; default: return "not asked"; }
+}
 static uint32_t g_odg_lines = 0;
 static char g_odg_last_line[700] = "";   // the last summary (F8)
 static uint16_t g_odg_seq[odg::k_seq_max]; static int g_odg_seq_n = 0; static uint32_t g_odg_seq_ptr = 0; static int32_t g_odg_seq_len = -1;
@@ -6721,6 +6749,14 @@ static void od_gest_tick() {
         const LONG hd = odt::hide_row(ri) ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd);
         const LONG st = in.fresh && in.r.ok ? in.r.auron : 0; if (g_odt_row_st != st) InterlockedExchange(&g_odt_row_st, st);   // the questions' bucket
     }
+    {   // od-bar-art: the game's Swordplay bar (its call-site patch): while our art bar is drawn, and from Tidus's state 3 when it is coming
+        odb_art_frame(false);   // the F8 box (off: released) and F8's request to load
+        odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0; hi.drawn = g_odb_drawn;
+        hi.coming = g_odv_on && odb_art_ready() && g_odg.cfg.on && g_odg.cfg.tidus;
+        hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
+        hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
+        const LONG hd = odb::hide_tidus(hi) ? 1 : 0; if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
+    }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
     // the targets' lines (the odg: cap)
@@ -6877,14 +6913,55 @@ extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
     return 1;
 }
 /// Overdrive visuals (ABI 49): ini od_visuals (on) and od_visual_size (0.5-2), every frame from managed's push (render thread).
+/// ABI 71 (od-bar-art): bar, the bar art's flags: 1 od_bar_art (the local pack when present), 2 od_bar_plate, 4 od_bar_hide2d (the
+/// game's Swordplay bar hidden while ours is up; its patch is made at launch, ffxvr_odb_patch).
 /// Returns 1 while battle.dds is held (Lulu's spin count as digits; dots otherwise).
-extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size) {
+extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size, int bar) {
     g_odv_on = on != 0; g_odv_size = std::isfinite(size) ? odg::clampf(size, 0.5f, 2.f) : 1.f;
+    const LONG b = static_cast<LONG>(bar & 7); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
     return g_c3_srv ? 1 : 0;
+}
+/// ABI 71 (od-bar-art; managed, at init, with od_bar_hide2d): on = 1 points the battle UI's call of 0x897240 (Tidus's Swordplay
+/// window, at 0x89B416) at odb_tidus_stub after checking its bytes, exactly as ffxvr_odt_row_patch does the Bushido row's at
+/// 0x89B411 (the same checks: no battle UI alive, E8 and a target of 0x897240 at the real base, the DLL pinned, the rel32 in one
+/// interlocked store); 0 records "off". Returns the patch state (1 patched; < 0 why not). Once a session.
+extern "C" __declspec(dllexport) int ffxvr_odb_patch(int on) {
+    if (g_odb_patch_state != 0) return g_odb_patch_state;
+    if (!on) { g_odb_patch_state = 2; return 2; }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    if (base == 0) { g_odb_patch_state = -1; return -1; }
+    const uintptr_t site = base + (0x89B416u - 0x400000u), fn = base + (0x897240u - 0x400000u);
+    uint32_t alive = 0;   // (as the row's patch, R10-N2: only while the battle UI 0x89B360 returns at once, [0x133C948] == 0)
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x133C948u - 0x400000u)), &alive, 4) || alive != 0) {
+        g_odb_patch_state = -4; diag("odb: Swordplay bar call-site patch: the battle UI is alive ([0x133C948] = %u, or unreadable): not patched (only before a battle)", alive); return -4;
+    }
+    uint8_t b[5] = {};
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(site), b, 5)) { g_odb_patch_state = -2; diag("odb: Swordplay bar call-site patch: 0x89B416 unreadable: not patched"); return -2; }
+    LONG rel = 0; memcpy(&rel, b + 1, 4);
+    if (b[0] != 0xE8 || site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) != fn) {
+        g_odb_patch_state = -2;
+        diag("odb: Swordplay bar call-site patch: 0x89B416 reads %02X %02X %02X %02X %02X, not a call of 0x897240: not patched (another mod or another exe): the game's bar stays", b[0], b[1], b[2], b[3], b[4]);
+        return -2;
+    }
+    HMODULE pin = nullptr;   // (R10-N1: the stub outlives every call through the site)
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(reinterpret_cast<uintptr_t>(&odb_tidus_stub)), &pin)) {
+        g_odb_patch_state = -5; diag("odb: Swordplay bar call-site patch: the DLL could not be pinned (%lu): not patched", GetLastError()); return -5;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { g_odb_patch_state = -3; diag("odb: Swordplay bar call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
+    g_odb_fn = fn;
+    const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odb_tidus_stub) - (site + 5));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store
+    DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
+    g_odb_patch_state = 1;
+    diag("odb: Swordplay bar call-site patch: 0x89B416 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x897240 while our art bar is up", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    return 1;
 }
 /// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
 /// expected sequence (raw); 3: a warning ("" none: a hand's poses mostly inferred in the open window); ABI 52: 4: the last practice /
-/// targets line; 5: the last Bushido sequence seen this session as symbols ("" none: no replay). Returns the length written.
+/// targets line; 5: the last Bushido sequence seen this session as symbols ("" none: no replay); ABI 55: 6: the target art's status;
+/// ABI 71: 7: the bar art's status and the Swordplay bar's patch (asking for it loads the pack). Returns the length written.
 extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n) {
     if (out == nullptr || n <= 0) return 0;
     int k = 0;
@@ -6911,6 +6988,11 @@ extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n)
     else if (which == 2) { char sq[400]; odg::seq_text(sq, sizeof(sq), g_odg_seq, g_odg_seq_n); k = snprintf(out, n, "%s", g_odg_seq_n ? sq : "not read yet"); }
     else if (which == 4) k = snprintf(out, n, "%s", g_odt_line[0] ? g_odt_line : "no practice yet");
     else if (which == 6) k = snprintf(out, n, "%s", g_odt_art_why);   // ABI 55: the target art's status
+    else if (which == 7) {   // ABI 71 (od-bar-art): the bar art's status (shown: the pack is loaded at the next Present) and the Swordplay bar's patch
+        InterlockedExchange(&g_odb_req, 1);
+        k = snprintf(out, n, "%s; the game's Swordplay bar: %s, hidden %ld of %ld frames", g_odb_why, odb_patch_name(g_odb_patch_state),
+                     static_cast<long>(InterlockedCompareExchange(&g_odb_patch_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_patch_calls, 0, 0)));
+    }
     else if (which == 5) {
         out[0] = 0;
         for (int i = 0; i < g_odt_last_n && i < odg::k_seq_max; ++i) k = odg::fmt_append(out, static_cast<size_t>(n), k, "%s%s", i ? " " : "", odt::sym_name(odv::glyph_of(g_odt_last_map, g_odt_last_seq[i])));
@@ -11533,7 +11615,7 @@ ID3D11Buffer* g_mk_vb = nullptr; ID3D11Buffer* g_mk_cb = nullptr; ID3D11BlendSta
 ID3D11PixelShader* g_mk_pst = nullptr; ID3D11BlendState* g_mk_blend_pm = nullptr; ID3D11SamplerState* g_mk_smp_art = nullptr;
 bool g_mk_tried = false;
 struct MkVertex { float p[3]; float c[4]; float t[3]; };
-static const int k_mk_max_verts = 32 * 48 + odv::k_max_verts + odt::k_max_verts;   // the markers and the damage numbers (1536), the overdrive visuals (3072), the targets (4608)
+static const int k_mk_max_verts = 32 * 48 + odv::k_max_verts + odv::k_bar_verts + odt::k_max_verts;   // the markers and the damage numbers (1536), the overdrive visuals (3072), the bar art (256, od-bar-art), the targets (4608)
 static_assert(sizeof(MkVertex) == sizeof(odv::Vtx), "odv::Vtx is the marker vertex");
 
 static bool marker_pass_init() {
@@ -11953,6 +12035,7 @@ extern "C" __declspec(dllexport) void ffxvr_dmg_status(uint32_t* u, int n) {
 
 // -- overdrive visuals (ffxvr_odvis.h): built once a Present, after the views (draw_markers_both), drawn after the markers ------
 static odv::Vtx g_odv_raw[odv::k_max_verts]; static MkVertex g_odv_mk[odv::k_max_verts]; static int g_odv_nv = 0;   // render thread only
+static odv::Vtx g_odb_raw[odv::k_bar_verts]; static MkVertex g_odb_mk[odv::k_bar_verts]; static int g_odb_nv = 0;   // od-bar-art: the bar art's sink (render thread only)
 static uint32_t g_odv_frames = 0, g_odv_verts_max = 0, g_odv_dropped = 0;
 /// The visuals' clock: the poses' time (the gesture driver's), else QPC.
 static double odv_now() {
@@ -12013,9 +12096,17 @@ static void odv_build() {
     }
     else if (in.win == odg::OD_TIDUS) { in.cursor = g_od.cursor; in.zone_lo = g_od.zone_lo; in.zone_hi = g_od.zone_hi; in.start = x.tidus_start; in.blen = x.tidus_len; }
     else if (in.win == odg::OD_AURON) { in.seq_n = g_odg_seq_n; memcpy(in.seq, g_odg_seq, sizeof(in.seq)); in.prog = x.auron_prog; in.map = d.map; }
+    // od-bar-art: the pack is asked for at the first Swordplay or Fury window; the art bar while it is made and the shader is ready
+    odb_art_frame(in.win == odg::OD_TIDUS || in.win == odg::OD_LULU);
+    in.bar_art = odb_art_ready(); in.bar_plate = (g_odb_flags & 2) != 0;
+    if (g_od.timer_ok) { in.od_left = g_od.left; in.od_total = g_od.total; }   // Lulu's countdown: the game's shared timer
     odv::Out o; o.v = g_odv_raw; o.max = odv::k_max_verts;
-    g_odv.build(in, o);
-    g_odv_dropped += static_cast<uint32_t>(o.dropped);
+    odv::Out oa; oa.v = g_odb_raw; oa.max = odv::k_bar_verts;
+    g_odv.build(in, o, in.bar_art ? &oa : nullptr);
+    g_odv_dropped += static_cast<uint32_t>(o.dropped) + static_cast<uint32_t>(oa.dropped);
+    g_odb_nv = 0;
+    if (oa.n > 0) { odv_to_render(g_odb_raw, g_odb_mk, oa.n); g_odb_nv = oa.n; }
+    g_odb_drawn = oa.n > 0 && g_odv.last_win == odg::OD_TIDUS;   // (the hide's "drawn": a Swordplay window's art bar, its fade too)
     if (o.n == 0) return;
     odv_to_render(g_odv_raw, g_odv_mk, o.n);
     g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);
@@ -12024,6 +12115,131 @@ static int odv_emit(MkVertex* verts, int room) {
     if (g_odv_nv == 0 || room <= 0) return 0;
     const int n = g_odv_nv <= room ? g_odv_nv : room - room % 3;
     memcpy(verts, g_odv_mk, sizeof(MkVertex) * n);
+    return n;
+}
+// -- od-bar-art: the bar art's pack (<mod>\art\odbar\*.png; ffxvr_odbar.h) ----------------------------------------------------
+// As the target art's: a worker thread reads and decodes the seven pieces (hv_read_file, hv_wic_decode), checks each size
+// (odb::size_ok), packs them into one 1024 x 1024 atlas (odt::art::put at 1:1) and builds its chain (odt::art::mip_down), all
+// on the CPU, handing the result over through one atomic slot; the render thread makes the immutable texture (5.3 MB) at the
+// next Present. A result of an older request (the box turned off meanwhile) is dropped by its generation. Anything missing or
+// odd: nothing is kept, the plain visuals, and the reason in one log line and F8 (ffxvr_odg_text 7). Off releases it.
+struct OdbArt { bool tried = false, ok = false; ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; };
+static OdbArt g_odb_art;
+struct OdbArtCpu { uint32_t gen = 0; bool ok = false; char why[240] = ""; int loaded = 0; double ms = 0.0; std::vector<std::vector<uint32_t>> mip; };
+struct OdbArtReq { uint32_t gen = 0; wchar_t dir[MAX_PATH] = {}; };
+static std::atomic<OdbArtCpu*> g_odb_art_ready{ nullptr };
+static std::atomic<bool> g_odb_art_busy{ false };
+static uint32_t g_odb_art_gen = 0;   // render thread: the request now (bumped by each request and each "off")
+static void odb_art_release() {
+    if (g_odb_art.srv) g_odb_art.srv->Release();
+    if (g_odb_art.tex) g_odb_art.tex->Release();
+    g_odb_art = OdbArt{};
+}
+/// The worker: read, decode, check, pack, mip. No logging, no globals but the slot and the busy flag. `arg`: a heap request, freed here.
+static DWORD WINAPI odb_art_worker(LPVOID arg) {
+    OdbArtReq* q = static_cast<OdbArtReq*>(arg);
+    OdbArtCpu* r = new (std::nothrow) OdbArtCpu();
+    if (r != nullptr) {
+        r->gen = q->gen;
+        LARGE_INTEGER q0, q1, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+        const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // WIC
+        try {
+            const DWORD da = GetFileAttributesW(q->dir);
+            if (da == INVALID_FILE_ATTRIBUTES || (da & FILE_ATTRIBUTE_DIRECTORY) == 0) snprintf(r->why, sizeof(r->why), "no pack (the folder is not there)");
+            std::vector<uint32_t> atl;
+            if (!r->why[0]) atl.assign(static_cast<size_t>(odb::k_side) * odb::k_side, 0u);
+            for (int p = 0; p < odb::P_N && !r->why[0]; ++p) {
+                const char* nm = odb::file(p);
+                wchar_t path[MAX_PATH]; _snwprintf_s(path, _TRUNCATE, L"%s\\%S", q->dir, nm);
+                std::vector<uint8_t> bytes; char err[160] = "";
+                if (!hv_read_file(path, 16u << 20, &bytes, err, sizeof(err))) { snprintf(r->why, sizeof(r->why), "%s not found or unreadable (%s)", nm, err); break; }
+                HvImage im;
+                if (!hv_wic_decode(bytes.data(), bytes.size(), &im, err, sizeof(err))) { snprintf(r->why, sizeof(r->why), "%s: %s", nm, err); break; }
+                const odb::Cell c = odb::cell(p);
+                if (!odb::size_ok(p, im.w, im.h)) { snprintf(r->why, sizeof(r->why), "%s is %dx%d, not %dx%d (cut it with tools/target-art/bar_art.py)", nm, im.w, im.h, c.w, c.h); break; }
+                odt::art::Cell ac; ac.atlas = 0; ac.x = c.x; ac.y = c.y; ac.w = c.w; ac.h = c.h;
+                odt::art::put(atl.data(), odb::k_side, im.rgba.data(), im.w, im.h, ac);
+                r->loaded++;
+            }
+            if (!r->why[0]) {   // the chain
+                const int lv = odt::art::levels(odb::k_side);
+                r->mip.resize(static_cast<size_t>(lv));
+                r->mip[0].swap(atl);
+                for (int l = 1, w = odb::k_side; l < lv; ++l, w /= 2) {
+                    r->mip[static_cast<size_t>(l)].assign(static_cast<size_t>(w / 2) * static_cast<size_t>(w / 2), 0u);
+                    odt::art::mip_down(r->mip[static_cast<size_t>(l) - 1].data(), w, r->mip[static_cast<size_t>(l)].data());
+                }
+            }
+        }
+        catch (...) { snprintf(r->why, sizeof(r->why), "out of memory while packing"); r->mip.clear(); }
+        if (SUCCEEDED(co)) CoUninitialize();
+        QueryPerformanceCounter(&q1); r->ms = qf.QuadPart ? 1000.0 * static_cast<double>(q1.QuadPart - q0.QuadPart) / static_cast<double>(qf.QuadPart) : 0.0;
+        r->ok = !r->why[0];
+    }
+    delete q;
+    if (r != nullptr) { OdbArtCpu* old = g_odb_art_ready.exchange(r); delete old; }   // (an unconsumed older one: dropped)
+    g_odb_art_busy.store(false);
+    return 0;
+}
+/// The atlas's texture from a taken chain (render thread).
+static bool odb_art_upload(std::vector<std::vector<uint32_t>>& mips) {
+    const int n = odb::k_side, lv = static_cast<int>(mips.size());
+    if (lv != odt::art::levels(n)) return false;
+    std::vector<D3D11_SUBRESOURCE_DATA> sd(static_cast<size_t>(lv));
+    for (int l = 0, w = n; l < lv; ++l, w = w > 1 ? w / 2 : 1) { sd[static_cast<size_t>(l)].pSysMem = mips[static_cast<size_t>(l)].data(); sd[static_cast<size_t>(l)].SysMemPitch = static_cast<UINT>(w) * 4u; sd[static_cast<size_t>(l)].SysMemSlicePitch = 0; }
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = td.Height = static_cast<UINT>(n); td.MipLevels = static_cast<UINT>(lv); td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    const bool ok = SUCCEEDED(g_device->CreateTexture2D(&td, sd.data(), &g_odb_art.tex)) && g_odb_art.tex != nullptr
+                    && SUCCEEDED(g_device->CreateShaderResourceView(g_odb_art.tex, nullptr, &g_odb_art.srv)) && g_odb_art.srv != nullptr;
+    std::vector<std::vector<uint32_t>>().swap(mips);
+    return ok;
+}
+/// The bar art drawable now: the box on, the texture made, the targets' shader, blend and sampler ready.
+static bool odb_art_ready() { return (g_odb_flags & 1) != 0 && g_odb_art.ok && g_odb_art.srv != nullptr && g_mk_pst != nullptr && g_mk_blend_pm != nullptr && g_mk_smp_art != nullptr; }
+/// Every Present (od_gest_tick: wanted_now false; odv_build: true in a Swordplay or Fury window): the F8 box (off: released, a
+/// load in flight dropped); the first window, or F8's request (g_odb_req), asks the worker; a finished result is made into the
+/// texture at once.
+static void odb_art_frame(bool wanted_now) {
+    const bool on = (g_odb_flags & 1) != 0;
+    const bool asked = InterlockedExchange(&g_odb_req, 0) != 0;
+    if (!on && (g_odb_art.ok || g_odb_art.tried)) {
+        if (g_odb_art.ok) diag("odb: bar art released (overdrive bar art off)");
+        odb_art_release(); g_odb_art_gen++;
+        snprintf(g_odb_why, sizeof(g_odb_why), "bar art: off (the plain visuals)");
+    }
+    if (on && !g_odb_art.tried && strncmp(g_odb_why, "bar art: off", 12) == 0) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: not loaded yet (it loads at the first Swordplay or Fury window, or when this line is shown)");
+    if (OdbArtCpu* r = g_odb_art_ready.exchange(nullptr)) {
+        if (on && g_odb_art.tried && !g_odb_art.ok && r->gen == g_odb_art_gen) {
+            char d8[MAX_PATH * 2] = ""; wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\odbar", g_dir); WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
+            if (!r->ok) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: %s at %s (loaded %d of %d): the plain visuals", r->why, d8, r->loaded, static_cast<int>(odb::P_N));
+            else if (!odb_art_upload(r->mip)) { odb_art_release(); g_odb_art.tried = true; snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the %d atlas could not be made (loaded %d of %d): the plain visuals", odb::k_side, r->loaded, static_cast<int>(odb::P_N)); }
+            else {
+                g_odb_art.ok = true;
+                snprintf(g_odb_why, sizeof(g_odb_why), "bar art: loaded %d of %d from %s (atlas %d, %.1f MB; %.0f ms in the background)", r->loaded, static_cast<int>(odb::P_N), d8, odb::k_side,
+                         static_cast<double>(4u * odt::art::chain_texels(odb::k_side)) / (1024.0 * 1024.0), r->ms);
+            }
+            diag("odb: %s", g_odb_why);
+        }
+        delete r;
+    }
+    if (on && !g_odb_art.tried && (wanted_now || asked) && !g_odb_art_busy.load() && marker_pass_init()) {
+        g_odb_art.tried = true;
+        if (!(g_mk_pst && g_mk_blend_pm && g_mk_smp_art)) { snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the targets' shader is not ready (see the log): the plain visuals"); diag("odb: %s", g_odb_why); }
+        else {
+            OdbArtReq* q = new (std::nothrow) OdbArtReq();
+            if (q != nullptr) { q->gen = ++g_odb_art_gen; _snwprintf_s(q->dir, _TRUNCATE, L"%s\\art\\odbar", g_dir); }
+            g_odb_art_busy.store(true);
+            HANDLE th = q ? CreateThread(nullptr, 256 * 1024, odb_art_worker, q, 0, nullptr) : nullptr;
+            if (th != nullptr) { CloseHandle(th); snprintf(g_odb_why, sizeof(g_odb_why), "bar art: loading in the background"); }   // detached: it ends by itself
+            else { delete q; g_odb_art_busy.store(false); snprintf(g_odb_why, sizeof(g_odb_why), "bar art: no worker thread: the plain visuals"); diag("odb: %s", g_odb_why); }
+        }
+    }
+}
+static int odb_emit(MkVertex* verts, int room) {
+    if (g_odb_nv == 0 || room <= 0) return 0;
+    const int n = g_odb_nv <= room ? g_odb_nv : room - room % 3;
+    memcpy(verts, g_odb_mk, sizeof(MkVertex) * n);
     return n;
 }
 // -- strike the targets / Practice targets (ffxvr_odtarget.h): their own share of the marker buffer (odt::k_max_verts), drawn last ----
@@ -12222,7 +12438,7 @@ static int odt_emit(MkVertex* verts, int room) {
 extern int g_sphl_nv; static bool sphl_wanted(); static void sphl_build(const float bb[12]); static int sphl_emit(MkVertex* verts, int room);
 extern ID3D11ShaderResourceView* g_sphl_srv;
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12], bool only_odt = false) {
-    if ((only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
+    if ((only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odb_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
     if (dst == nullptr || !marker_pass_init()) return;
     // Projection from the tangents (x/y only; z is forced to mid-range in the shader).
     float P[16] = {};
@@ -12239,6 +12455,10 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     }
     if (mk) nv += dmg_emit(verts + nv, k_mk_max_verts - nv);   // 3D damage numbers, after the markers (32 x 12 + 64 x 12 fit the 1536)
     if (!only_odt) nv += odv_emit(verts + nv, k_mk_max_verts - nv);   // the overdrive visuals (their own 3072)
+    const int nv_odb0 = nv;
+    const bool odb_ok = !only_odt && g_odb_nv > 0 && g_odb_art.srv != nullptr && g_mk_pst && g_mk_blend_pm && g_mk_smp_art;
+    if (odb_ok) nv += odb_emit(verts + nv, k_mk_max_verts - nv);   // od-bar-art: the bar art (its own 256), drawn with pst and its atlas
+    const bool bar_on = nv > nv_odb0;   // (od-bar-art)
     const int nv_pre = nv;
     nv += odt_emit(verts + nv, k_mk_max_verts - nv);   // the targets, last: on top (their own 4608)
     const int nv_odt = nv;
@@ -12262,8 +12482,8 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
     ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
     ID3D11ShaderResourceView* o_srv = nullptr; g_ctx->PSGetShaderResources(0, 1, &o_srv); ID3D11SamplerState* o_smp = nullptr; g_ctx->PSGetSamplers(0, 1, &o_smp);
-    ID3D11ShaderResourceView* o_srv2[3] = {}; ID3D11SamplerState* o_smp2 = nullptr;   // slots 1-3 (A, B, C) and sampler 1, the targets' draw only
-    if (own) { g_ctx->PSGetShaderResources(1, 3, o_srv2); g_ctx->PSGetSamplers(1, 1, &o_smp2); }
+    ID3D11ShaderResourceView* o_srv2[3] = {}; ID3D11SamplerState* o_smp2 = nullptr;   // slots 1-3 (A, B, C) and sampler 1, the targets' draw and the bar art's only
+    if (own || bar_on) { g_ctx->PSGetShaderResources(1, 3, o_srv2); g_ctx->PSGetSamplers(1, 1, &o_smp2); }
 
     InEye2 guard;
     ID3D11RenderTargetView* rt[1] = { dst };
@@ -12276,13 +12496,25 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(nullptr);
     { ID3D11ShaderResourceView* sv = g_c3_srv; g_ctx->PSSetShaderResources(0, 1, &sv); g_ctx->PSSetSamplers(0, 1, &g_mk_smp); }   // C3: battle.dds (null when not held: no textured vertices then)
-    if (!own) { if (nv_odt > 0) g_ctx->Draw(static_cast<UINT>(nv_odt), 0); }
-    else {   // the markers, digits and visuals exactly as before; then the targets with pst, the premultiplied blend and the art
+    if (!own && !bar_on) { if (nv_odt > 0) g_ctx->Draw(static_cast<UINT>(nv_odt), 0); }
+    else if (!bar_on) {   // the markers, digits and visuals exactly as before; then the targets with pst, the premultiplied blend and the art
         if (nv_pre > 0) g_ctx->Draw(static_cast<UINT>(nv_pre), 0);
         ID3D11ShaderResourceView* sv[3] = { g_odt_art.srv[0], g_odt_art.srv[1], g_odt_art.srv[2] };   // (null without the pack or arrow.png: no such vertices then)
         g_ctx->PSSetShaderResources(1, 3, sv); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
         g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF);
         g_ctx->Draw(static_cast<UINT>(nv_odt - nv_pre), static_cast<UINT>(nv_pre));
+    }
+    else {   // od-bar-art: the markers, digits and visuals as before; the bar art with pst and its atlas in slot 1; then the targets
+        if (nv_odb0 > 0) g_ctx->Draw(static_cast<UINT>(nv_odb0), 0);
+        ID3D11ShaderResourceView* sb[3] = { g_odb_art.srv, nullptr, nullptr };   // (the bar art's vertices use t.z 2 / 6: slot 1 only)
+        g_ctx->PSSetShaderResources(1, 3, sb); g_ctx->PSSetSamplers(1, 1, &g_mk_smp_art);
+        g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF);
+        g_ctx->Draw(static_cast<UINT>(nv_pre - nv_odb0), static_cast<UINT>(nv_odb0));
+        if (nv_odt > nv_pre) {   // the targets after it, as in the branch above (own: pst and their art; else ps, as without the art)
+            if (own) { ID3D11ShaderResourceView* sv[3] = { g_odt_art.srv[0], g_odt_art.srv[1], g_odt_art.srv[2] }; g_ctx->PSSetShaderResources(1, 3, sv); }
+            else { g_ctx->PSSetShader(g_mk_ps, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF); }
+            g_ctx->Draw(static_cast<UINT>(nv_odt - nv_pre), static_cast<UINT>(nv_pre));
+        }
     }
     if (nv > nv_odt && g_sphl_srv) {   // sphere hands: the labels with ps and their text texture in slot 0 (white on a dark plate)
         g_ctx->PSSetShader(g_mk_ps, nullptr, 0); g_ctx->OMSetBlendState(g_mk_blend, nullptr, 0xFFFFFFFF);
@@ -12298,7 +12530,7 @@ static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const 
     g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
     g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
     g_ctx->PSSetShaderResources(0, 1, &o_srv); g_ctx->PSSetSamplers(0, 1, &o_smp);
-    if (own) { g_ctx->PSSetShaderResources(1, 3, o_srv2); g_ctx->PSSetSamplers(1, 1, &o_smp2); for (auto* v : o_srv2) if (v) v->Release(); if (o_smp2) o_smp2->Release(); }
+    if (own || bar_on) { g_ctx->PSSetShaderResources(1, 3, o_srv2); g_ctx->PSSetSamplers(1, 1, &o_smp2); for (auto* v : o_srv2) if (v) v->Release(); if (o_smp2) o_smp2->Release(); }
     for (auto* v : o_rtv) if (v) v->Release();
     if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
     if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
@@ -12336,7 +12568,7 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
         if ((!odt_on && !sphl_on) || !g_cam_valid) return;
     }
     else {
-        g_odv_nv = 0; g_odt_nv = 0;
+        g_odv_nv = 0; g_odb_nv = 0; g_odt_nv = 0;
         if (((!g_markers_3d || (g_marker_n == 0 && g_dmg_n == 0)) && !odv && !odt_on && !sphl_on) || !g_cam_valid) { g_dmg_nv = 0; return; }
     }
     float v[12];
@@ -12362,7 +12594,7 @@ static void draw_markers_both(ID3D11Texture2D* e1, ID3D11RenderTargetView* r1, I
     if (odv) odv_build();   // the overdrive visuals: once for both eyes, with the base the eye-1 view just published (g_hb_*)
     if (odt_on) odt_build();   // the targets: the same base
     if (sphl_on) sphl_build(bb);   // the sphere labels: the same billboard frame
-    if ((only_odt ? g_odt_nv == 0 : ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
+    if ((only_odt ? g_odt_nv == 0 : ((!g_markers_3d || g_marker_n == 0) && g_dmg_nv == 0 && g_odv_nv == 0 && g_odb_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
     D3D11_TEXTURE2D_DESC d;
     if (e1 && r1) { e1->GetDesc(&d); draw_markers_eye(r1, d.Width, d.Height, V1, g_xr_fov_used[0], bb, only_odt); }
     if (e2 && r2) { e2->GetDesc(&d); draw_markers_eye(r2, d.Width, d.Height, V2, g_xr_fov_used[1], bb, only_odt); }

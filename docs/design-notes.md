@@ -5942,6 +5942,123 @@ background time and the textures' time. Turning the box off releases the texture
   blade's direction suits the Quest grips (the pitch slider), the draw path's placement in every view, and the game facts the
   first scheme also rests on.
 
+## Overdrive bar art (local pack; branch `od-bar-art`, 19 Nov 2026; ABI 71)
+
+The owner, sharing an AI-generated sprite sheet: "after this we should consider updating tidus's overdrive bar (and any
+others with a similar bar?) to use this kind of art instead", then "let's only use it for tidus and lulu for now, auron is
+already complicated enough with our mods". **The art follows the target art's rule**: it is the owner's own AI-generated
+art, never in the repository and never in the mod's zip; it lives in a local pack, `<the mod folder>\art\odbar\`, and ships
+only inside the optional `ffxvr-target-art-<version>.zip` (its own `art/odbar/` folder and `ART-NOTICE.txt`; docs/release.md
+section 1). The repository has the loader, the cutting script `tools/target-art/bar_art.py` with the sheet's box table (the
+owner's numbers, not image data) and these notes. Without the pack, or with the box off, every overdrive visual is exactly
+what it was.
+
+### What the game and the mod drew before
+
+- **The game, Swordplay** (`TOBtlDrawTidusLimitWindow` 0x897240, ffx-rust's port of it): while Tidus's state 0x133D734 is 3
+  or 4, a special gauge frame, two gradient boxes over the zone (the half-widths of the zone from its start), the shape 400
+  (the cursor) at the marker's x, and the caption 0x3010. **Fury** (`TOBtlDrawLuluLimitWindow` 0x895660): while Lulu's state
+  0x133D708 is 3 or 4, the hit counter (u8 +0x17, 0x133D71F), a black box and a gauge box over it filled by that counter, the
+  special gauge frame, the caption. **The countdown** is neither: `BtlDrawRatio` 0x8955E0 draws the shared timer's seconds
+  (0x133F794) as a number while the timer word is set, for every overdrive. The battle UI 0x89B360 calls the six drawers in a
+  row (ffx-rust's `BTL_DRAWERS`: 0x8933C0, 0x895390, 0x892740, 0x897240, 0x895660, 0x8955E0); the Bushido row's call is at
+  0x89B411, so with five-byte `call rel32`s and no arguments Tidus's is at 0x89B416 and Lulu's at 0x89B41B (inferred from
+  the order; the patch below checks the bytes before it writes anything).
+- **The mod** (ffxvr_odvis.h, coloured triangles in the 3D marker pass, no texture but battle.dds's digits): Tidus, with the
+  swing gesture on, a 22 x 1.8 cm bar (x the size) 16 cm above the right hand, facing the eye, following the hand in 0.5 s:
+  a dark rect, the zone in green, a white cursor line, and a green / red mark where each swing landed; Lulu a ring in the
+  fitted circle's plane, an arc for the turn's quadrants and the spin count (battle.dds digits). Neither drew a countdown.
+
+### The pieces and their alpha
+
+`python tools/target-art/bar_art.py SHEET OUT_DIR [--no-trim] [--all]` (numpy and Pillow, as target_art.py). The sheet's
+pieces sit on black, with no alpha. The script finds each piece's own content (the brightness above 10 of 255, joined
+across gaps under 9 px, labelled on a 4:1 grid; each part goes to the box holding most of it, and where two pieces' glows
+touch they are split at their boxes), trims it to that content with a 4 px margin (the owner's boxes clip the zone's glow on
+all sides, the cursors' glows at the top and bottom, and the plate's box holds part of the up cursor's glow: the script
+prints which), gives it alpha and writes it at the exact size its atlas cell has. The alpha: on the brightness L (the
+brightest channel), a black floor f and an opaque level t: alpha = clamp((L - f) / (t - f)), colour = the pixel / alpha, so a
+piece drawn over black is the sheet again.
+
+| File | From | Cell | Alpha (f, t of 255) | Why |
+|---|---|---|---|---|
+| frame.png | bar_frame_outer | 1024 x 112 | key (12, 60), gaps under 7 px closed | the metal opaque, the black opening transparent, the cyan glints soft |
+| track_fill.png | bar_fill_track's lit part | 1024 x 96 | light (8, 200) | a translucent energy tube: alpha follows the brightness |
+| track_empty.png | its dark part, mirrored to full length | 1024 x 96 | light (8, 200) | the same; mirrored so both ends are round |
+| plate.png | plate_ornate_base | 1024 x 160 | key (12, 55), the whole outline filled | a backing plate: no holes where its grooves are dark |
+| zone.png | target_zone_hit | 512 x 224 | light (8, 255) | the golden glow and sparks stay soft |
+| cursor_down.png / cursor_up.png | cursor_tri_down / _up | 256 x 208 | key (12, 110), gaps under 7 px closed | the silver and its white fill opaque, the halo soft |
+
+The track on the sheet is drawn as a bar 78 % full (a lit body with a bright leading edge, then a dull tail): the script
+finds that boundary (the middle rows' brightness falling by a third within 24 px) and makes two pieces of it, the lit part
+(its round left cap, the body, the leading edge) and the dull part made full length (its right two thirds mirrored, a round
+cap at each end). Each track piece is composed so its caps are exactly 48 columns (the leading edge 40) and the zone so its
+two end bars sit at columns 24 and 488: the mod's three-slices rely on those columns. `--all` also writes the five pieces the
+mod does not use (the arrow cursors, the two studs, the corner cap) as cut.
+
+What the script measured on the owner's sheet, and the mod's ffxvr_odbar.h assumes: the frame's opening x 0.0488..0.9512,
+y 0.2857..0.7143 of its cell; the zone's golden body 0.223..0.786 of its height (k_zone_h 1.78: the body fills the opening);
+the cursors' tips at 0.933 (down) and 0.029 (up) of their height. A sheet of your own should come close; the script prints its
+own values.
+
+### How the mod draws them
+
+- **Loading** (as the target art): at the first Swordplay or Fury window drawn, or when F8 > Overdrives shows the bar art's
+  line, a worker thread reads the seven PNGs, decodes them with WIC, checks each size, packs them at 1:1 into one 1024 x 1024
+  atlas (16 texels between pieces) and builds its full mip chain (alpha-weighted, odt::art's packing); the render thread makes
+  the immutable texture (5.3 MB). Anything missing or odd: nothing is kept, the plain visuals, the reason in one `odb:` log
+  line and F8. Turning the box off releases it.
+- **The draw:** the art goes into its own vertex sink (256) and is drawn after the plain overdrive visuals with the targets'
+  pixel shader and premultiplied blend, the atlas in slot 1 (t.z 2; 6 additive, unused so far: the zone drawn additively over
+  the track washed out to white in the mock-up, so it is drawn normally). The swing marks stay plain colour in the same draw.
+- **Tidus** (the same place, the same anchor and following, the same 22 cm x size): the opening (the track) is the old bar's
+  22 cm, so the cursor and zone sit exactly where the plain bar put them (odv::bar_x of the game's cursor 0x133D742, zone
+  0x133D73C..0x133D73E, start 0x133D736, length 0x133D73A); the frame is 24.4 cm wide around it, 2.7 cm tall, the opening
+  1.14 cm (the art's proportions: the plain bar was 1.8 cm tall). From the back: the ornate plate (F8 "ornate base plate", off by default), a dark backing in the opening (the
+  sheet's black, so the translucent pieces look as drawn), the dull track (round caps at their natural width, the body
+  stretched), the golden zone (its end bars exactly at the zone's ends, their scrolls as caps squeezed for a narrow zone, its
+  glow outside the bars), the frame, the cursor as the classic pinch pair (the down pointer's tip 15 % of the opening below
+  its top, the up pointer's as far above its bottom, 1.45x the opening tall), the swing marks.
+- **Lulu** (the art only; without it there is still no countdown): a 16 cm (x the size) bar above her ring, 3 cm over the
+  ring's top, or 16 cm above the leading hand until there is a ring, following in 0.5 s, facing the eye: the plate (if on), the
+  backing, the dull track dimmed to 60 %, the lit track over the time left (its cap and leading edge at their natural width,
+  squeezed together when shorter, the body stretched), the frame. The time left is the game's shared timer, f32 0x133F790
+  over its total 0x133F78C (od::Raw's left / total, read every Present while a minigame is up), so it is the game's own
+  countdown, stepping at the game's 30 Hz. The ring, arc and spin count stay as they were.
+- **Pixel density:** at the defaults Tidus's bar is about 0.43 m from the eyes: the frame about 32 degrees wide (about 630 px
+  at the Quest 3's ~20 px a degree), the opening 1.5 degrees tall (about 30 px), the pointers 44 px; at 0.6 m 460 px, 22 px
+  and 32 px. Lulu's 16 cm bar: the opening about 22 px at 0.43 m. The 1024-texel pieces are drawn at mip 0-1 (trilinear, the
+  art's sampler, mips to 6). **The readable-size guard:** the opening never shows smaller than 0.9 degrees (about 18 px): a
+  bar that would (a small size, or far out: Lulu's at 0.6 m is grown x1.13) is grown, at most 3x.
+- **The game's Swordplay bar** (F8 "Hide the game's Swordplay bar", ini `od_bar_hide2d`, on): a call-site patch of the
+  Bushido row's kind, made once at launch (`ffxvr_odb_patch`): only before any battle (the battle UI's alive word 0 at
+  0x133C948), only if 0x89B416 reads E8 with a target of 0x897240 at the real base (else nothing is written and a line says
+  so), the DLL pinned, the rel32 rewritten in one interlocked store. The stub skips the call while our art bar of a Swordplay
+  window is drawn (its fade too), and from Tidus's state 3 when it is coming (the visuals and the art loaded, the swing
+  gesture able to inject, a battle, the headset's 3D view); otherwise it calls 0x897240. The timer (0x8955E0) stays. No
+  detour: the Bushido row's detour was the mechanism that did not run in the owner's first test, and the call-site patch
+  alone hid the row. **Lulu's window is not hidden**: it holds Fury's hit counter, which the mod does not show; the same
+  patch at 0x89B41B (0x895660) would hide it if wanted.
+- **Settings:** `od_bar_art` (1), `od_bar_plate` (0), `od_bar_hide2d` (1; patched at launch, then live both ways; turning it
+  on unpatched waits for the next launch) under F8 > Overdrives > Gestures, after "Guides near your hands" (greyed while the
+  guides are off), with the status line `bar art: loaded 7 of 7 from ... (atlas 1024, 5.3 MB; ...); the game's Swordplay bar:
+  patched, hidden N of M frames`. ABI 71: `ffxvr_odv_set(on, size, bar)` (bar: 1 art, 2 plate, 4 hide), `ffxvr_odb_patch`,
+  `ffxvr_odg_text` 7.
+- **Tests** (outside the repository, as the other overdrive suites): the layout from the game's values (the zone's end bars
+  and the cursors' tips where they belong, the slices contiguous and in order), the countdown's clip, the guard, the hide's
+  rule, the atlas cells; a mock-up renders the real ffxvr_odvis.h output with the cut pieces at the headset's pixel density.
+
+### Not verified (nobody here can run the game)
+
+1. Tidus's and Lulu's drawers' call sites, 0x89B416 and 0x89B41B, are inferred from the port's call order and the Bushido
+   row's 0x89B411; the patch checks the bytes and refuses anything else.
+2. That skipping 0x897240 has no side effect the battle UI needs (its port shows only draws and the caption's width in its
+   own frame; the Bushido row's skip had none).
+3. The look and the size in the headset (the mock-up is only a mock-up), the pointers' readability at 0.45-0.6 m, and whether
+   the plate looks right behind the bar.
+4. The zone's values at the edges (the plain bar used zone_lo..zone_hi as edges the same way).
+5. The pack's file names and sizes on the owner's PC (bar_art.py writes them; the mod refuses any other size).
+
 ## The F8 menu reorganised (vr-menu S1, branch `vr-menu`, 8 Nov 2026)
 
 Design: research/vr-menu-design.md (session scratchpad), sections 2 and 6, with the owner's decisions of 8 Nov (developer

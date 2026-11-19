@@ -467,7 +467,11 @@ overdrive can be practised at once; the flag is cleared at each battle's end and
 the gauge is not spent (a save made then keeps a full gauge). The targets can be textured medallions from the optional art download
 (`ffxvr-target-art-<version>.zip`, AI-generated; extract it into the folder the mod's zip was extracted to, so its `mod\ffxvr\art\` merges with the mod's, then run
 `tools\install-mod.ps1`) or a pack you make yourself
-(docs/design-notes.md, "Bushido target art (local pack)").
+(docs/design-notes.md, "Bushido target art (local pack)"). The same zip can carry the overdrive bar art: with it, and with
+the guides near your hands on, Tidus's Swordplay bar (with "Tidus: swing for Swordplay" ticked) is drawn ornate, and Lulu's
+Fury gets a countdown bar above her ring (the game's time left); "Hide the game's Swordplay bar", on by default and applied
+from the next launch, hides the game's own Swordplay bar while ours is up (the timer and Lulu's window stay). Make your own
+with `tools\target-art\bar_art.py` (docs/design-notes.md, "Overdrive bar art (local pack)").
 
 Keys (F8 > Controls): `move_remap_walk_only` (1; 0 = the stick is rotated in every first-person view, the old
 behaviour), `grip_lbrb` (1 = quick squeeze in battle and the seat / diorama; 0 = LB / RB at once everywhere, the old
@@ -851,6 +855,9 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 | `od_gest_haptics` | 1 | "Buzz on hits and misses" |
 | `od_visuals` | 1 | "Guides near your hands" |
 | `od_visual_size` | 1 | "size" (0.5..2) |
+| `od_bar_art` | 1 | "Overdrive bar art (local pack)": Tidus's Swordplay bar from the art pack in `art\odbar` and a countdown bar above Lulu's ring; without the pack, or 0, the plain bar (and no countdown) |
+| `od_bar_plate` | 0 | "ornate base plate" (with the bar art) |
+| `od_bar_hide2d` | 1 | "Hide the game's Swordplay bar" (while the bar art's bar is up; patched at launch, so turning it on waits for the next launch) |
 
 **Overdrives > Bushido targets**
 

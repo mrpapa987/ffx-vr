@@ -16,12 +16,14 @@
 #                              game-settings.ps1, import-steam-saves.ps1, export-save-to-steam.ps1,
 #                              install-texture-pack.ps1, set-logging.ps1
 #   dist\ffx-vr-<label>.zip.sha256
-#   dist\ffxvr-target-art-<label>.zip (+ .sha256)   OPTIONAL, a separate download: the Bushido target art pack (the owner's
-#                              AI-generated medallion art, never in the repository or in the mod's zip), from
-#                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir; it mirrors the mod zip's layout,
-#                              ffx-vr-<label>\mod\ffxvr\art\targets\ (8 PNGs, arrow.png when there, ART-NOTICE.txt), so extracting both zips
-#                              into one folder and running install-mod installs the art too. No pack: skipped with a note,
-#                              never a failure. -NoArt skips it.
+#   dist\ffxvr-target-art-<label>.zip (+ .sha256)   OPTIONAL, a separate download: the owner's AI-generated art, never in
+#                              the repository or in the mod's zip: the Bushido target art pack (the medallions), from
+#                              <game>\fahrenheit\mods\ffxvr\art\targets\ or -ArtDir, and the overdrive bar art pack (Tidus's
+#                              Swordplay bar, Lulu's countdown), from <game>\fahrenheit\mods\ffxvr\art\odbar\ or -BarArtDir; it
+#                              mirrors the mod zip's layout, ffx-vr-<label>\mod\ffxvr\art\targets\ (8 PNGs, arrow.png when there,
+#                              ART-NOTICE.txt) and ...\art\odbar\ (7 PNGs, ART-NOTICE.txt), so extracting both zips into one folder
+#                              and running install-mod installs the art too. Each pack goes in when it is complete; neither:
+#                              skipped with a note, never a failure. -NoArt skips it.
 #
 # Fahrenheit and FFX-60fps are NOT included: they are separate projects with their own licences
 # and releases (see docs\release.md). No settings, logs, captures or .pdb files are included, and
@@ -36,13 +38,14 @@
 #
 # Run with:
 #   powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 [-Version 0.1.0-alpha.1] [-SkipBuild] [-OutDir <folder>]
-#              [-ArtDir <folder with the 8 PNGs>] [-NoArt]
+#              [-ArtDir <folder with the 8 PNGs>] [-BarArtDir <folder with the 7 bar PNGs>] [-NoArt]
 
 param(
     [string]$Version = '',
     [switch]$SkipBuild,
     [string]$OutDir = '',
     [string]$ArtDir = '',
+    [string]$BarArtDir = '',
     [switch]$NoArt
 )
 
@@ -270,36 +273,63 @@ Write-Host ''
 Write-Host 'Players: extract it anywhere, then follow README.md (tools\install-mod.ps1).'
 
 # ---------------------------------------------------------------- the optional target art zip (a separate download)
-# The Bushido target art pack is the owner's own AI-generated art: never in the repository, never in the mod's zip (the guard
-# above fails on any art\ folder there). This step only packs it as its own optional zip. Anything wrong: a note, never a failure.
+# The target art packs (the Bushido targets, the overdrive bar) are the owner's own AI-generated art: never in the repository,
+# never in the mod's zip (the guard above fails on any art\ folder there). This step only packs them as their own optional zip,
+# each pack when it is complete. Anything wrong: a note, never a failure.
 $artFiles = @('frame.png', 'glow.png', 'halo.png', 'swirl.png', 'back.png', 'edge.png', 'burst.png', 'sparks.png')
 $artNotice = 'Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights claimed, free to use. Optional: without it the mod draws plain targets.'
+$barFiles = @('frame.png', 'track_fill.png', 'track_empty.png', 'plate.png', 'zone.png', 'cursor_down.png', 'cursor_up.png')   # (tools\target-art\bar_art.py's output)
+$barNotice = 'Generated with AI by the project owner (a sprite sheet, cut with tools\target-art\bar_art.py); AI-generated; no rights claimed, free to use. Optional: without it the mod draws its plain overdrive bar.'
 Write-Host ''
 if ($NoArt) {
     Write-Host 'Target art zip: skipped (-NoArt).'
 } else {
     try {
         $artSrc = $ArtDir
-        if (-not $artSrc) {
+        $barSrc = $BarArtDir
+        if (-not $artSrc -or -not $barSrc) {
             $g = Find-FfxvrGame
-            if ($g) { $artSrc = [IO.Path]::Combine($g, 'fahrenheit', 'mods', $modId, 'art', 'targets') }
+            if ($g) {
+                if (-not $artSrc) { $artSrc = [IO.Path]::Combine($g, 'fahrenheit', 'mods', $modId, 'art', 'targets') }
+                if (-not $barSrc) { $barSrc = [IO.Path]::Combine($g, 'fahrenheit', 'mods', $modId, 'art', 'odbar') }
+            }
         }
         $missing = @()
         if ($artSrc) { $missing = @($artFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $artSrc $_)) }) }
+        $barMissing = @()
+        if ($barSrc) { $barMissing = @($barFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $barSrc $_)) }) }
+        $haveTargets = [bool]$artSrc -and $missing.Count -eq 0
+        $haveBar = [bool]$barSrc -and $barMissing.Count -eq 0
         if (-not $artSrc) {
-            Write-Host 'Target art zip: skipped (no game folder found and no -ArtDir; the mod zip does not need it).'
-        } elseif ($missing.Count -gt 0) {
-            Write-Host ("Target art zip: skipped (not in {0}: {1}; the mod zip does not need it)." -f $artSrc, ($missing -join ', '))
+            Write-Host 'Target art zip: the Bushido targets left out (no game folder found and no -ArtDir; the mod zip does not need them).'
+        } elseif (-not $haveTargets) {
+            Write-Host ("Target art zip: the Bushido targets left out (not in {0}: {1}; the mod zip does not need them)." -f $artSrc, ($missing -join ', '))
+        }
+        if (-not $barSrc) {
+            Write-Host 'Target art zip: the overdrive bar left out (no game folder found and no -BarArtDir; the mod zip does not need it).'
+        } elseif (-not $haveBar) {
+            Write-Host ("Target art zip: the overdrive bar left out (not in {0}: {1}; the mod zip does not need it)." -f $barSrc, ($barMissing -join ', '))
+        }
+        if (-not $haveTargets -and -not $haveBar) {
+            Write-Host 'Target art zip: skipped (no complete pack; the mod zip does not need it).'
         } else {
             $artName  = "ffxvr-target-art-$label"
             $artStage = Join-Path $OutDir '_stage_art'
-            $artTo    = [IO.Path]::Combine($artStage, $name, 'mod', $modId, 'art', 'targets')   # the mod zip's layout (install-mod copies it)
             if (Test-Path -LiteralPath $artStage) { Remove-Item -LiteralPath $artStage -Recurse -Force }
-            New-Item -ItemType Directory -Force -Path $artTo | Out-Null
-            foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
-            $artArrow = Join-Path $artSrc 'arrow.png'   # optional: the pack's own arrow (without it the mod draws its procedural arrow)
-            if (Test-Path -LiteralPath $artArrow) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
-            [IO.File]::WriteAllText((Join-Path $artTo 'ART-NOTICE.txt'), $artNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
+            if ($haveTargets) {
+                $artTo = [IO.Path]::Combine($artStage, $name, 'mod', $modId, 'art', 'targets')   # the mod zip's layout (install-mod copies it)
+                New-Item -ItemType Directory -Force -Path $artTo | Out-Null
+                foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
+                $artArrow = Join-Path $artSrc 'arrow.png'   # optional: the pack's own arrow (without it the mod draws its procedural arrow)
+                if (Test-Path -LiteralPath $artArrow) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
+                [IO.File]::WriteAllText((Join-Path $artTo 'ART-NOTICE.txt'), $artNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
+            }
+            if ($haveBar) {
+                $barTo = [IO.Path]::Combine($artStage, $name, 'mod', $modId, 'art', 'odbar')   # the same layout (install-mod copies it)
+                New-Item -ItemType Directory -Force -Path $barTo | Out-Null
+                foreach ($f in $barFiles) { Copy-Item -LiteralPath (Join-Path $barSrc $f) -Destination $barTo -Force }
+                [IO.File]::WriteAllText((Join-Path $barTo 'ART-NOTICE.txt'), $barNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
+            }
             $artZip = Join-Path $OutDir "$artName.zip"
             if (Test-Path -LiteralPath $artZip) { Remove-Item -LiteralPath $artZip -Force }
             [IO.Compression.ZipFile]::CreateFromDirectory($artStage, $artZip, [IO.Compression.CompressionLevel]::Optimal, $false)
@@ -307,7 +337,7 @@ if ($NoArt) {
             $artHash = (Get-FileHash $artZip -Algorithm SHA256).Hash.ToLower()
             Set-Content -Path "$artZip.sha256" -Value "$artHash  $artName.zip" -Encoding ascii
             Write-Host "Target art zip (optional, a separate download): $artZip"
-            Write-Host ('  {0:N0} KB   sha256 {1}   from {2}' -f ((Get-Item $artZip).Length / 1KB), $artHash, $artSrc)
+            Write-Host ('  {0:N0} KB   sha256 {1}   the Bushido targets: {2}   the overdrive bar: {3}' -f ((Get-Item $artZip).Length / 1KB), $artHash, $(if ($haveTargets) { $artSrc } else { 'left out' }), $(if ($haveBar) { $barSrc } else { 'left out' }))
             $za = [IO.Compression.ZipFile]::OpenRead($artZip)
             try { $za.Entries | Sort-Object FullName | ForEach-Object { Write-Host ('  {0,10:N0}  {1}' -f $_.Length, $_.FullName) } }
             finally { $za.Dispose() }

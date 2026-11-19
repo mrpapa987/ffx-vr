@@ -210,21 +210,24 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 | **Lighter render resolution**: 2560x1440 instead of 4K, much easier on the GPU (the mod does its own anti-aliasing) | `.\tools\game-settings.ps1 -Profile vr` (`-Profile flat` puts yours back) |
 | **Your existing saves**: Fahrenheit keeps its own save slots | `.\tools\import-steam-saves.ps1` copies your normal saves in (it never replaces a VR save unless you pass `-Force`); `.\tools\export-save-to-steam.ps1` copies one back |
 
-### The optional Bushido target art
+### The optional target art
 
-The Bushido targets are plain plates. A separate optional download on the same release page,
-`ffxvr-target-art-{VERSION}.zip`, turns them into textured medallions.
+The Bushido targets are plain plates, and Tidus's Swordplay bar near your hand is a plain bar. A separate optional
+download on the same release page, `ffxvr-target-art-{VERSION}.zip`, turns the targets into textured medallions and the
+Swordplay bar into an ornate one (with a matching countdown bar for Lulu's Fury, when the zip has the bar art).
 
 1. Extract it into the folder that **contains** `ffx-vr-{VERSION}` (the folder you extracted this zip into), so that
    its files merge into this one. Watch out: Explorer's *Extract All* suggests a new folder named after the zip
    (`...\ffxvr-target-art-{VERSION}\`); remove that last part of the path. Right is: the file
-   `ffx-vr-{VERSION}\mod\ffxvr\art\targets\frame.png` exists.
-2. Run `tools\install-mod.ps1` again. It prints `art\targets\  (N files: the optional target art)` when it found the
-   art, and `art\targets\  (the optional target art: not found, looked in ...)` when it did not.
+   `ffx-vr-{VERSION}\mod\ffxvr\art\targets\frame.png` (or `...\art\odbar\frame.png`) exists.
+2. Run `tools\install-mod.ps1` again. It prints `art\targets\  (N files: the optional target art, the Bushido targets)`
+   and `art\odbar\  (N files: the optional target art, the overdrive bar)` for what it found, and `(the optional target art,
+   ...: not found, looked in ...)` for what it did not.
 
-The art was generated with Google Gemini and upscaled with Upscayl by the project
-owner: it is **AI-generated**, no rights are claimed, and it is free to use (`ART-NOTICE.txt` in it says the same).
-The mod works the same without it.
+The art was made by the project owner with AI (the medallions with Google Gemini, upscaled with Upscayl): it is
+**AI-generated**, no rights are claimed, and it is free to use (the `ART-NOTICE.txt` in each folder says the same).
+The mod works the same without it. F8 > Overdrives: "Overdrive bar art (local pack)" turns the bar art off, and the line
+under it says whether it loaded.
 
 ### VR hands, and your own hands
 

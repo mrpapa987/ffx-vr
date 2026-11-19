@@ -40,7 +40,7 @@ building anything:
 **What the mod reads from its folder at run time** (audited 17 Nov 2026 for 0.1.0-alpha.1; everything else is compiled
 into the two DLLs, the shaders included): `ffxvr_native.dll` and `openxr_loader.dll` (packed); `hands\<pack>\hand.json`
 and `right.glb` / `left.glb` (the two shipped packs are packed; without them VR hands fall back to boxes); optional and
-never packed: `art\targets\*.png` (the separate art zip), `fmvdepth\` (made on the player's PC), `bone_labels.txt`
+never packed: `art\targets\*.png` and `art\odbar\*.png` (the separate art zip), `fmvdepth\` (made on the player's PC), `bone_labels.txt`
 (developer), `ffxvr.ini` (written by the mod).
 
 `<label>` is `-Version` if given, else the csproj `<Version>` plus the short commit
@@ -53,18 +53,23 @@ file is newer than the DLLs. It warns if a packed DLL contains a `C:\Users\<name
 (debug-info paths; ours are `C:\projects\FFX-VR\...`, which is fine).
 
 **The optional target art zip.** Next to the mod's zip, `package-release.ps1` also makes
-`ffxvr-target-art-<label>.zip` (+ `.sha256`) when the Bushido target art pack is on the packing PC (in
-`<game>\fahrenheit\mods\ffxvr\art\targets\`, or `-ArtDir <folder>`; `-NoArt` skips it). It mirrors the mod
-zip's layout, `ffx-vr-<label>/mod/ffxvr/art/targets/`, so a player extracts both zips into the same folder and runs
-`tools\install-mod.ps1`, which copies the art when it is there (and never deletes an installed `art\` when a later zip has
-none; only `-Uninstall -Purge` does). It holds the eight PNGs (and `arrow.png` when the pack has it) and `ART-NOTICE.txt` ("Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights
-claimed, free to use. Optional: without it the mod draws plain targets."). Without the pack the step prints a note and the
-release goes on. The art is the owner's own AI-generated art: it is never in the repository, and never in the mod's zip
+`ffxvr-target-art-<label>.zip` (+ `.sha256`) when an art pack is on the packing PC: the Bushido target art (in
+`<game>\fahrenheit\mods\ffxvr\art\targets\`, or `-ArtDir <folder>`) and the overdrive bar art (Tidus's Swordplay bar, Lulu's
+countdown; in `<game>\fahrenheit\mods\ffxvr\art\odbar\`, or `-BarArtDir <folder>`); each goes in when it is complete, the zip is
+made when at least one is (`-NoArt` skips it). It mirrors the mod zip's layout, `ffx-vr-<label>/mod/ffxvr/art/targets/` and
+`.../art/odbar/`, so a player extracts both zips into the same folder and runs `tools\install-mod.ps1`, which copies each
+art folder when it is there (and never deletes an installed `art\` when a later zip has none; only `-Uninstall -Purge`
+does). `art/targets/` holds the eight PNGs (and `arrow.png` when the pack has it) and `ART-NOTICE.txt` ("Generated with Google
+Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights claimed, free to use. Optional: without it the
+mod draws plain targets."); `art/odbar/` holds the seven PNGs `tools/target-art/bar_art.py` cuts (frame, track_fill,
+track_empty, plate, zone, cursor_down, cursor_up) and its own `ART-NOTICE.txt` ("Generated with AI by the project owner (a
+sprite sheet, cut with tools\target-art\bar_art.py); AI-generated; no rights claimed, free to use. Optional: without it the
+mod draws its plain overdrive bar."). Without a pack the step prints a note and the release goes on. The art is the owner's own AI-generated art: it is never in the repository, and never in the mod's zip
 (a guard fails the package on any `art\` folder there). Attach it to the GitHub release as a separate, optional download.
 **Nexus and other hosts ask whether a file contains AI-generated content: tick that disclosure for the art zip.**
 
 Not in the zip: `ffxvr.ini` (the mod writes it on first run), `.pdb`, logs, captures, bone
-labels, `.bak`, the target art pack (a separate optional zip, above); Fahrenheit and FFX-60fps (separate projects, own licences and releases; the
+labels, `.bak`, the target art packs (a separate optional zip, above); Fahrenheit and FFX-60fps (separate projects, own licences and releases; the
 README sends players to them). The README puts the HD texture pack last, as an optional
 "later" step: most players won't start with it.
 
@@ -217,8 +222,9 @@ public tag, have a second person run them on a separate install.
 4. **Package**, from the clean, committed checkout (no tag is needed yet: the zip is named by `-Version`):
    `powershell -ExecutionPolicy Bypass -File .\tools\package-release.ps1 -Version 0.1.0-alpha.1`
    (it warns if `-Version` is not the csproj's, or if the tree is dirty). Out: `dist\ffx-vr-0.1.0-alpha.1.zip` and its
-   `.sha256`, and, when the target art pack is in the game's mod folder (`art\targets\`, or `-ArtDir`),
-   `dist\ffxvr-target-art-0.1.0-alpha.1.zip` and its `.sha256`. Read the listing it prints: `README.md`, `TESTING.md`,
+   `.sha256`, and, when a target art pack is in the game's mod folder (`art\targets\`, or `-ArtDir`; the bar art
+   `art\odbar\`, or `-BarArtDir`), `dist\ffxvr-target-art-0.1.0-alpha.1.zip` and its `.sha256` (its listing shows which
+   packs went in). Read the listing it prints: `README.md`, `TESTING.md`,
    `LICENSE`, `THIRD-PARTY-NOTICES`, `docs\img\` (two PNGs), `mod\ffxvr\` (six files and the two hand packs),
    `tools\`; no `art\` in the mod zip.
 5. **Smoke test the zip** on the game PC (the fail-safe tests in the release-prep notes): a fresh install into a game folder

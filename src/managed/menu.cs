@@ -64,7 +64,7 @@ public sealed unsafe partial class FFXVRModule {
     private void menu_launch_snapshot() { _nl_at = launch_keys(); _verbose_at_launch = _diag_verbose; _msaa_at_targets = _msaa; }
 
     private LaunchKeys launch_keys() => new LaunchKeys {
-        dmg_hide2d = _dmg_hide2d, odt_hide2d = _od_tgt_hide2d, cluster_bytes = _diag_cluster_bytes, va_log = _diag_va_log,
+        dmg_hide2d = _dmg_hide2d, odt_hide2d = _od_tgt_hide2d, odb_hide2d = _od_bar_hide2d, cluster_bytes = _diag_cluster_bytes, va_log = _diag_va_log,
         load_prof = _diag_load_prof, cursor_game = _cursor_game_cfg, diag7 = _diag7, load_lines = _diag_load_lines,
         lock_release = _load_lock_release, hd_cache = _hd_cluster_cache, diag_load = _diag_load,
     };
@@ -637,6 +637,7 @@ internal enum UiTag { None = 0, Common = 1, Experimental = 2, NextLaunch = 4, De
 /// game types for the scratch test.</summary>
 internal struct LaunchKeys {
     public bool dmg_hide2d, odt_hide2d, cluster_bytes, va_log, cursor_game, diag7, load_lines, hd_cache, diag_load;
+    public bool odb_hide2d;   // od-bar-art: od_bar_hide2d (its call-site patch is made only at init, odt_row_init)
     public int load_prof, lock_release;
 }
 
@@ -653,6 +654,7 @@ internal static class NextLaunch {
         // review S1: only on without the hook; hooked at launch, the switch is live both ways
         if (now.dmg_hide2d && !at.dmg_hide2d) p.Add("dmg3d_hide2d");
         if (now.odt_hide2d != at.odt_hide2d) p.Add("od_targets_hide2d");
+        if (now.odb_hide2d && !at.odb_hide2d) p.Add("od_bar_hide2d");   // od-bar-art: patched at launch, the box is live both ways; not patched, on waits
         if (now.cluster_bytes != at.cluster_bytes) p.Add("diag_cluster_bytes");
         if (now.va_log != at.va_log) p.Add("diag_va_log");
         if ((now.load_prof > 0) != (at.load_prof > 0)) p.Add("diag_load_prof");
