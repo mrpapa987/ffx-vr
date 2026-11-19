@@ -149,11 +149,14 @@ inline float countdown(float left, float total) {
 }
 
 // -- the readable-size guard --------------------------------------------------------------------------------------------
-/// The opening never shows smaller than this angle at the eye: about 18 px at the Quest 3's ~20 px a degree, the cursors (1.45x)
-/// about 26 px. At the defaults (Tidus: a 22 cm opening 16 cm above the right hand, about 0.43 m from the eyes) the opening is
+/// The opening never shows smaller than this angle at arm's length (k_guard_dist): about 18 px at the Quest 3's ~20 px a degree,
+/// the cursors (1.45x) about 26 px. At the defaults (Tidus: a 22 cm opening 16 cm above the right hand, about 0.43 m from the eyes) the opening is
 /// 1.14 cm, about 1.5 degrees (30 px; the frame 24.4 x 2.7 cm, about 630 px wide); Lulu's 16 cm countdown's is 0.83 cm, about
-/// 1.1 degrees: the guard acts only at a small size or with the bar far out (Lulu's at 0.6 m: x1.13).
+/// 1.1 degrees (at 0.6 m 0.8: the guard draws it x1.13); the guard grows a bar only at a small size setting.
 constexpr float k_min_deg = 0.9f, k_max_grow = 3.f;
+/// The distance the guard is judged at (review N8): a fixed arm's length, not the hand's distance now, so the bar's size never
+/// follows the hand (Tidus's 22 cm needs nothing there; Lulu's 16 cm countdown is drawn x1.13, as if 18 cm).
+constexpr float k_guard_dist = 0.6f;
 /// A factor >= 1 on the bar's width so its opening (hi metres tall at d metres from the eye) is at least k_min_deg tall
 /// (at most k_max_grow); 1 when it already is, or for odd inputs.
 inline float readable_scale(float hi, float d) {
@@ -165,19 +168,39 @@ inline float readable_scale(float hi, float d) {
 }
 
 // -- the game's Swordplay window ----------------------------------------------------------------------------------------
-/// The game's own Swordplay bar (0x897240, drawn by the battle UI at 0x89B416 while Tidus's state 0x133D734 is 3 or 4) hidden:
-/// with F8 "hide the game's Swordplay bar" (ini od_bar_hide2d, the call-site patch made at launch) while our art bar is drawn
-/// in the headset, and from state 3 (the window pending) when it is coming: the visuals and the bar art on and loaded, Tidus's
-/// swing gesture able to inject (the gestures on, the headset, the VR pad), a battle, the 3D view, no other overdrive.
+/// The game's own Swordplay bar (0x897240, drawn by the battle UI at 0x89B416 while Tidus's state 0x133D734 is 3 or 4) hidden
+/// with F8 "hide the game's Swordplay bar" (ini od_bar_hide2d, the call-site patch made at launch), decided afresh each Present
+/// from that Present's facts only (review B1: a remembered "drawn" kept the game's bar hidden in later Swordplays the mod did not
+/// draw): always a battle, a fresh read, the headset's 3D view, the gestures able to inject (the headset, the VR pad), no other
+/// overdrive; then state 3 (the window pending; the game's state 3 lasts one logic frame) when our bar is coming (the visuals on,
+/// the art loaded, Tidus's swing gesture on); state 4 while our bar is up, and its first k_open_s while it is coming (review S1:
+/// the visuals are built before the gesture window opens in the same Present, so the first state-4 Presents have no art bar yet).
 struct HideIn {
-    bool on = false, drawn = false, coming = false;   // the setting; our art bar drawn this Present; it will be drawn when the window opens
+    bool on = false, drawn = false, coming = false, opening = false;   // the setting; our art bar up now; coming; state 4 younger than k_open_s
     bool battle = false, fresh = false, gate = false, view = false;
     int auron = 0, lulu = 0, tidus = 0, wakka = 0;
 };
 inline bool hide_tidus(const HideIn& x) {
-    if (!x.on) return false;
-    if (x.drawn) return true;
-    return x.coming && x.battle && x.fresh && x.gate && x.view && x.tidus == 3 && x.auron == 0 && x.lulu == 0 && x.wakka == 0;
+    if (!x.on || !x.battle || !x.fresh || !x.gate || !x.view || x.auron != 0 || x.lulu != 0 || x.wakka != 0) return false;
+    if (x.tidus == 3) return x.coming;
+    if (x.tidus == 4) return x.drawn || (x.coming && x.opening);
+    return false;
 }
+/// Our art bar of a Swordplay window is up at this Present (review B1): the art drawable, the visuals wanted now (odv_wanted:
+/// the headset's 3D view, not the virtual screen the slow-GPU guard forces), a Swordplay window open with its gestures injecting,
+/// and the art sink built at one of the last k_built_presents Presents (a 3D frame without the game's UI pass builds nothing).
+constexpr uint32_t k_built_presents = 3;
+inline bool art_bar_up(bool ready, bool wanted, bool tidus_window, uint32_t since_built) { return ready && wanted && tidus_window && since_built <= k_built_presents; }
+/// State 4's age (review S1): true while Tidus's state has been 4 for less than k_open_s (a stale read changes nothing).
+constexpr double k_open_s = 0.25;
+struct Opening {
+    int last = 0; double t4 = -1e300;
+    bool step(int tidus, bool fresh, double t) {
+        if (!fresh) return false;
+        if (tidus == 4 && last != 4) t4 = t;
+        last = tidus;
+        return tidus == 4 && t - t4 >= 0.0 && t - t4 < k_open_s;
+    }
+};
 
 }  // namespace odb

@@ -5971,7 +5971,8 @@ what it was.
 
 ### The pieces and their alpha
 
-`python tools/target-art/bar_art.py SHEET OUT_DIR [--no-trim] [--all]` (numpy and Pillow, as target_art.py). The sheet's
+`python tools/target-art/bar_art.py SHEET OUT_DIR [--no-trim] [--all] [--force]` (numpy and Pillow, as target_art.py; it
+refuses an OUT_DIR inside the repository). The sheet's
 pieces sit on black, with no alpha. The script finds each piece's own content (the brightness above 10 of 255, joined
 across gaps under 9 px, labelled on a 4:1 grid; each part goes to the box holding most of it, and where two pieces' glows
 touch they are split at their boxes), trims it to that content with a 4 px margin (the owner's boxes clip the zone's glow on
@@ -6007,7 +6008,8 @@ own values.
   line, a worker thread reads the seven PNGs, decodes them with WIC, checks each size, packs them at 1:1 into one 1024 x 1024
   atlas (16 texels between pieces) and builds its full mip chain (alpha-weighted, odt::art's packing); the render thread makes
   the immutable texture (5.3 MB). Anything missing or odd: nothing is kept, the plain visuals, the reason in one `odb:` log
-  line and F8. Turning the box off releases it.
+  line and F8; a failed load is asked again at the next window or when the line is shown, 5 s on at the soonest (review N1).
+  Turning the box off releases it; off (from launch too) the line says so.
 - **The draw:** the art goes into its own vertex sink (256) and is drawn after the plain overdrive visuals with the targets'
   pixel shader and premultiplied blend, the atlas in slot 1 (t.z 2; 6 additive, unused so far: the zone drawn additively over
   the track washed out to white in the mock-up, so it is drawn normally). The swing marks stay plain colour in the same draw.
@@ -6028,14 +6030,19 @@ own values.
 - **Pixel density:** at the defaults Tidus's bar is about 0.43 m from the eyes: the frame about 32 degrees wide (about 630 px
   at the Quest 3's ~20 px a degree), the opening 1.5 degrees tall (about 30 px), the pointers 44 px; at 0.6 m 460 px, 22 px
   and 32 px. Lulu's 16 cm bar: the opening about 22 px at 0.43 m. The 1024-texel pieces are drawn at mip 0-1 (trilinear, the
-  art's sampler, mips to 6). **The readable-size guard:** the opening never shows smaller than 0.9 degrees (about 18 px): a
-  bar that would (a small size, or far out: Lulu's at 0.6 m is grown x1.13) is grown, at most 3x.
+  art's sampler, mips to 6). **The readable-size guard:** the opening never shows smaller than 0.9 degrees (about 18 px)
+  judged at a fixed arm's length, 0.6 m (review N8: not the hand's distance now, so the size never pumps): a bar that would
+  is grown, at most 3x. Tidus's 22 cm needs nothing; Lulu's 16 cm countdown is drawn x1.13 (as if 18 cm).
 - **The game's Swordplay bar** (F8 "Hide the game's Swordplay bar", ini `od_bar_hide2d`, on): a call-site patch of the
   Bushido row's kind, made once at launch (`ffxvr_odb_patch`): only before any battle (the battle UI's alive word 0 at
   0x133C948), only if 0x89B416 reads E8 with a target of 0x897240 at the real base (else nothing is written and a line says
-  so), the DLL pinned, the rel32 rewritten in one interlocked store. The stub skips the call while our art bar of a Swordplay
-  window is drawn (its fade too), and from Tidus's state 3 when it is coming (the visuals and the art loaded, the swing
-  gesture able to inject, a battle, the headset's 3D view); otherwise it calls 0x897240. The timer (0x8955E0) stays. No
+  so), the DLL pinned, the rel32 rewritten in one interlocked store. The stub skips the call by a decision made afresh each
+  Present from that Present's facts (odb::hide_tidus, odb::art_bar_up; review B1): only in a battle, with a fresh read, the
+  headset's 3D view, the gestures able to inject and no other overdrive; then in state 3 when our bar is coming (the visuals
+  and the art loaded, the swing gesture on), and in state 4 while our art bar is up (the art ready, the visuals wanted now, a
+  Swordplay window open and injecting, the art built at one of the last 3 Presents) or, while it is coming, for state 4's
+  first 0.25 s (review S1: the visuals are built in xr_tick before od_gest_tick opens the gesture window, so the first
+  state-4 Presents have no art bar yet). Otherwise it calls 0x897240. The timer (0x8955E0) stays. No
   detour: the Bushido row's detour was the mechanism that did not run in the owner's first test, and the call-site patch
   alone hid the row. **Lulu's window is not hidden**: it holds Fury's hit counter, which the mod does not show; the same
   patch at 0x89B41B (0x895660) would hide it if wanted.
@@ -6047,6 +6054,30 @@ own values.
 - **Tests** (outside the repository, as the other overdrive suites): the layout from the game's values (the zone's end bars
   and the cursors' tips where they belong, the slices contiguous and in order), the countdown's clip, the guard, the hide's
   rule, the atlas cells; a mock-up renders the real ffxvr_odvis.h output with the cut pieces at the headset's pixel density.
+
+### Review fixes (19 Nov 2026)
+
+- **B1, the hide stuck on.** 7b52060 remembered "the art bar was drawn" in a flag written only while the visuals were built;
+  the last build was a fade frame with art in it, so the flag stayed true, and the game's Swordplay bar stayed hidden in later
+  Swordplays the mod did not draw (the virtual screen, the slow-GPU guard's forced screen, the gestures or guides off, the
+  controllers lost, flat play). The decision is now made each Present from that Present's facts (above), and every rule needs
+  a battle, a fresh read, the 3D view and the gate; only a recency of the last art build (3 Presents) is kept. A test
+  (odbar_chk's hide_glue_test, the glue's lines extracted) replays the reviewer's scenario: it fails on 7b52060 and passes now.
+- **S1, the flash at a Swordplay's start:** the 0.25 s grace above. How long nothing shows: the game's state 3 ("arming the
+  timer", TOBtlCtrlTidusLimitWindow) lasts one logic frame (it stops the timer and goes to 4; ffx-rust's port), and state 4's
+  first frame starts the timer, so the gesture window opens one logic frame later and our bar is drawn at the next Present:
+  about 2-3 game frames (70-100 ms) with neither bar while the cursor starts from its start (review N9; left as it is).
+- **S2, the slicer's memory:** the sheet held once as 8-bit RGB; the labels on a reduced copy (a sheet wider than 2576 px
+  pooled to about that) and counted in strips; each piece cut, masked and shrunk to at most 4x its cell before it is
+  floating point. Measured: the owner's sheet 150 MB peak, a 2x upscale 411 MB, a 4x (59 MP) 659 MB and 23 s, under a 1.5 GB
+  address-space cap; the owner's pieces come out byte for byte as before.
+- **S3:** the slicer checks the opening, the tips and the zone's body against the mod's tolerances (0.02, 0.05, 0.05) and
+  writes nothing (exit 1) unless `--force`; `package-release.ps1` reads each PNG's size (its IHDR) and leaves out a pack the
+  mod would refuse (the targets too; an odd arrow.png alone).
+- **Nits:** a failed load is retried (N1); the F8 line says "off" from launch (N2); the slicer's docstring (N3); Pillow's
+  decompression-bomb guard kept, at 150 MP (N4); the slicer refuses an output folder inside the repository and `.gitignore`
+  ignores `art/odbar/` (N5); the F8 lines with a folder are read as UTF-8 (N6); README-zip and the tester checklist say the
+  VR Swordplay bar needs "Tidus: swing for Swordplay" (N7); the guard at a fixed distance (N8); state 3 measured (N9).
 
 ### Not verified (nobody here can run the game)
 

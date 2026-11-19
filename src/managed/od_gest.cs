@@ -264,7 +264,8 @@ public sealed unsafe partial class FFXVRModule {
         if (_fn_odg_text == null) return "";
         byte* b = stackalloc byte[768];
         int n = _fn_odg_text(which, b, 768);
-        return n > 0 ? Marshal.PtrToStringAnsi((nint)b) ?? "" : "";
+        if (n <= 0) return "";
+        return (which == 6 || which == 7 ? Marshal.PtrToStringUTF8((nint)b) : Marshal.PtrToStringAnsi((nint)b)) ?? "";   // 6 / 7 carry a folder, written as UTF-8 (review N6)
     }
     private const string k_auron_tip = "Strike the targets: one big plate at chest height shows the input to give now: the d-pad arrows in the left spot, A / B / X / Y and "
         + "L1 / R1 in the right spot (the next one small above its own spot). Cut it with the blade in either hand along its sliding chevrons: an arrow its way; the face "

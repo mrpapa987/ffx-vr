@@ -6545,9 +6545,11 @@ static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.
 static volatile LONG g_odb_flags = 1;   // ffxvr_odv_set's bar flags (render thread writes; the F8 line reads)
 static volatile LONG g_odb_req = 0;     // F8 showed the line: load the pack at the next Present (render thread)
 static char g_odb_why[320] = "bar art: not loaded yet (it loads at the first Swordplay or Fury window, or when this line is shown)";
-static bool g_odb_drawn = false;        // render thread: the art bar of a Swordplay window drawn at the last Present
+static uint32_t g_odb_built_frame = 0x80000000u;   // render thread: the Present (g_frames) that last built a Swordplay window's art bar (review B1: only a recency, never a remembered "drawn")
+static odb::Opening g_odb_open;         // render thread: the age of Tidus's state 4 (review S1)
 static void odb_art_frame(bool wanted_now);   // (defined with the marker pass)
 static bool odb_art_ready();                  // (the same)
+static bool odv_wanted(); static double odv_now();   // (the same)
 static volatile LONG g_odb_hide2d = 0;  // the stub skips 0x897240 while 1 (published interlocked each Present)
 static volatile LONG g_odb_patch_calls = 0, g_odb_patch_hidden = 0;
 static int g_odb_patch_state = 0;       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
@@ -6558,6 +6560,19 @@ static void __cdecl odb_tidus_stub() {
     InterlockedIncrement(&g_odb_patch_calls);
     if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_patch_hidden); return; }
     reinterpret_cast<void(__cdecl*)()>(g_odb_fn)();
+}
+/// The hide decision, each Present (od_gest_tick, after the driver: this Present's window), from this Present's facts only (review
+/// B1: ffxvr_odbar.h hide_tidus, art_bar_up). xr_tick (the visuals' build) runs before od_gest_tick, so a build of this Present
+/// counts (since 0).
+static LONG odb_hide_decide(const odg::FrameIn& in) {
+    odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0;
+    const bool ready = odb_art_ready();
+    hi.drawn = odb::art_bar_up(ready, odv_wanted(), g_odg.open && g_odg.inject_now == odg::OD_TIDUS && g_odg.sess.od == odg::OD_TIDUS, g_frames - g_odb_built_frame);
+    hi.coming = g_odv_on && ready && g_odg.cfg.on && g_odg.cfg.tidus;
+    hi.opening = g_odb_open.step(in.r.ok ? in.r.tidus : 0, in.fresh && in.r.ok, odv_now());
+    hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
+    hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
+    return odb::hide_tidus(hi) ? 1 : 0;
 }
 static const char* odb_patch_name(int st) {
     switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
@@ -6751,11 +6766,7 @@ static void od_gest_tick() {
     }
     {   // od-bar-art: the game's Swordplay bar (its call-site patch): while our art bar is drawn, and from Tidus's state 3 when it is coming
         odb_art_frame(false);   // the F8 box (off: released) and F8's request to load
-        odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0; hi.drawn = g_odb_drawn;
-        hi.coming = g_odv_on && odb_art_ready() && g_odg.cfg.on && g_odg.cfg.tidus;
-        hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
-        hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
-        const LONG hd = odb::hide_tidus(hi) ? 1 : 0; if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
+        const LONG hd = odb_hide_decide(in); if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
     }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
@@ -12106,7 +12117,7 @@ static void odv_build() {
     g_odv_dropped += static_cast<uint32_t>(o.dropped) + static_cast<uint32_t>(oa.dropped);
     g_odb_nv = 0;
     if (oa.n > 0) { odv_to_render(g_odb_raw, g_odb_mk, oa.n); g_odb_nv = oa.n; }
-    g_odb_drawn = oa.n > 0 && g_odv.last_win == odg::OD_TIDUS;   // (the hide's "drawn": a Swordplay window's art bar, its fade too)
+    if (oa.n > 0 && in.win == odg::OD_TIDUS && in.inject) g_odb_built_frame = g_frames;   // (the hide's recency: a live Swordplay window's art bar; review B1)
     if (o.n == 0) return;
     odv_to_render(g_odv_raw, g_odv_mk, o.n);
     g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);
@@ -12130,6 +12141,8 @@ struct OdbArtReq { uint32_t gen = 0; wchar_t dir[MAX_PATH] = {}; };
 static std::atomic<OdbArtCpu*> g_odb_art_ready{ nullptr };
 static std::atomic<bool> g_odb_art_busy{ false };
 static uint32_t g_odb_art_gen = 0;   // render thread: the request now (bumped by each request and each "off")
+static bool g_odb_art_failed = false; static double g_odb_art_fail_t = 0.0;   // render thread: the last load failed, and when (review N1: asked again 5 s on)
+static char g_odb_logged[320] = "";   // render thread: the last result logged (a retry that fails the same way is not logged again)
 static void odb_art_release() {
     if (g_odb_art.srv) g_odb_art.srv->Release();
     if (g_odb_art.tex) g_odb_art.tex->Release();
@@ -12203,29 +12216,33 @@ static bool odb_art_ready() { return (g_odb_flags & 1) != 0 && g_odb_art.ok && g
 static void odb_art_frame(bool wanted_now) {
     const bool on = (g_odb_flags & 1) != 0;
     const bool asked = InterlockedExchange(&g_odb_req, 0) != 0;
-    if (!on && (g_odb_art.ok || g_odb_art.tried)) {
-        if (g_odb_art.ok) diag("odb: bar art released (overdrive bar art off)");
-        odb_art_release(); g_odb_art_gen++;
-        snprintf(g_odb_why, sizeof(g_odb_why), "bar art: off (the plain visuals)");
+    if (!on) {   // (review N2: the line says "off" from launch too, not only after a load)
+        if (g_odb_art.ok || g_odb_art.tried) {
+            if (g_odb_art.ok) diag("odb: bar art released (overdrive bar art off)");
+            odb_art_release(); g_odb_art_gen++;
+        }
+        g_odb_art_failed = false;
+        if (strncmp(g_odb_why, "bar art: off", 12) != 0) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: off (the plain visuals)");
     }
     if (on && !g_odb_art.tried && strncmp(g_odb_why, "bar art: off", 12) == 0) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: not loaded yet (it loads at the first Swordplay or Fury window, or when this line is shown)");
     if (OdbArtCpu* r = g_odb_art_ready.exchange(nullptr)) {
         if (on && g_odb_art.tried && !g_odb_art.ok && r->gen == g_odb_art_gen) {
             char d8[MAX_PATH * 2] = ""; wchar_t dir[MAX_PATH]; _snwprintf_s(dir, _TRUNCATE, L"%s\\art\\odbar", g_dir); WideCharToMultiByte(CP_UTF8, 0, dir, -1, d8, sizeof(d8), nullptr, nullptr);
-            if (!r->ok) snprintf(g_odb_why, sizeof(g_odb_why), "bar art: %s at %s (loaded %d of %d): the plain visuals", r->why, d8, r->loaded, static_cast<int>(odb::P_N));
-            else if (!odb_art_upload(r->mip)) { odb_art_release(); g_odb_art.tried = true; snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the %d atlas could not be made (loaded %d of %d): the plain visuals", odb::k_side, r->loaded, static_cast<int>(odb::P_N)); }
+            if (!r->ok) { g_odb_art_failed = true; g_odb_art_fail_t = static_cast<double>(GetTickCount64()) * 0.001; snprintf(g_odb_why, sizeof(g_odb_why), "bar art: %s at %s (loaded %d of %d): the plain visuals (asked again at the next window or when this line is shown, 5 s on)", r->why, d8, r->loaded, static_cast<int>(odb::P_N)); }
+            else if (!odb_art_upload(r->mip)) { odb_art_release(); g_odb_art.tried = true; g_odb_art_failed = true; g_odb_art_fail_t = static_cast<double>(GetTickCount64()) * 0.001; snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the %d atlas could not be made (loaded %d of %d): the plain visuals", odb::k_side, r->loaded, static_cast<int>(odb::P_N)); }
             else {
                 g_odb_art.ok = true;
                 snprintf(g_odb_why, sizeof(g_odb_why), "bar art: loaded %d of %d from %s (atlas %d, %.1f MB; %.0f ms in the background)", r->loaded, static_cast<int>(odb::P_N), d8, odb::k_side,
                          static_cast<double>(4u * odt::art::chain_texels(odb::k_side)) / (1024.0 * 1024.0), r->ms);
             }
-            diag("odb: %s", g_odb_why);
+            if (strcmp(g_odb_why, g_odb_logged) != 0) { diag("odb: %s", g_odb_why); snprintf(g_odb_logged, sizeof(g_odb_logged), "%s", g_odb_why); }
         }
         delete r;
     }
-    if (on && !g_odb_art.tried && (wanted_now || asked) && !g_odb_art_busy.load() && marker_pass_init()) {
-        g_odb_art.tried = true;
-        if (!(g_mk_pst && g_mk_blend_pm && g_mk_smp_art)) { snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the targets' shader is not ready (see the log): the plain visuals"); diag("odb: %s", g_odb_why); }
+    const bool retry = g_odb_art.tried && !g_odb_art.ok && g_odb_art_failed && static_cast<double>(GetTickCount64()) * 0.001 - g_odb_art_fail_t >= 5.0;   // (review N1: a failed load is asked again, at most every 5 s)
+    if (on && (!g_odb_art.tried || retry) && (wanted_now || asked) && !g_odb_art_busy.load() && marker_pass_init()) {
+        g_odb_art.tried = true; g_odb_art_failed = false;
+        if (!(g_mk_pst && g_mk_blend_pm && g_mk_smp_art)) { snprintf(g_odb_why, sizeof(g_odb_why), "bar art: the targets' shader is not ready (see the log): the plain visuals"); diag("odb: %s", g_odb_why); }   // (not retried: the shader is made once)
         else {
             OdbArtReq* q = new (std::nothrow) OdbArtReq();
             if (q != nullptr) { q->gen = ++g_odb_art_gen; _snwprintf_s(q->dir, _TRUNCATE, L"%s\\art\\odbar", g_dir); }

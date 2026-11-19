@@ -83,3 +83,6 @@ debug-preview.png
 
 # The Bushido target art pack: the owner's own AI-generated art, local only (tools/target-art; docs "Bushido target art")
 assets/art/
+# The overdrive bar art pack (tools/target-art/bar_art.py refuses to write inside the repository; this catches a copy)
+art/odbar/
+**/art/odbar/

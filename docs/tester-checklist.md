@@ -137,9 +137,10 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
   lets you use an overdrive in any battle (while it is ticked the gauge is not spent, so a save made then keeps a full gauge).
 - Lulu's Fury: draw circles with a controller ("Lulu: circles for Fury"). With the optional art zip installed, a
   countdown bar sits above the ring: does it run down with the game's timer, and can you read it?
-- Tidus's Swordplay with "Tidus: swing for Swordplay" ticked: with the art zip, the bar above your right hand is the
-  ornate one (golden zone, two pointers pinching the cursor) and the game's own Swordplay bar is hidden from the next
-  launch on ("Hide the game's Swordplay bar"). Can you time a swing by it? F8 > Overdrives shows under "Overdrive bar art
+- Tidus's Swordplay: tick "Tidus: swing for Swordplay" first (it is off by default, and the bar near your hand exists only
+  with it). With the art zip, the bar above your right hand is the ornate one (golden zone, two pointers pinching the
+  cursor) and the game's own Swordplay bar is hidden while it is up ("Hide the game's Swordplay bar", on by default). Can
+  you time a swing by it? Untick the swing: the game's own bar must be back. F8 > Overdrives shows under "Overdrive bar art
   (local pack)" whether the art loaded.
 
 ### 8. Without the headset, and uninstalling (5 minutes)

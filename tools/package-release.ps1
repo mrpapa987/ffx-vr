@@ -280,6 +280,38 @@ $artFiles = @('frame.png', 'glow.png', 'halo.png', 'swirl.png', 'back.png', 'edg
 $artNotice = 'Generated with Google Gemini and upscaled with Upscayl by the project owner; AI-generated; no rights claimed, free to use. Optional: without it the mod draws plain targets.'
 $barFiles = @('frame.png', 'track_fill.png', 'track_empty.png', 'plate.png', 'zone.png', 'cursor_down.png', 'cursor_up.png')   # (tools\target-art\bar_art.py's output)
 $barNotice = 'Generated with AI by the project owner (a sprite sheet, cut with tools\target-art\bar_art.py); AI-generated; no rights claimed, free to use. Optional: without it the mod draws its plain overdrive bar.'
+# The sizes the mod accepts (width, smallest and largest height): ffxvr_odtarget.h odt::art::size_bad (1024 x 1024; the edge
+# strip 1024 x 32..512) and ffxvr_odbar.h odb::cell. A pack the mod would refuse is not packed (review S3).
+$artSizes = @{ 'frame.png' = @(1024, 1024, 1024); 'glow.png' = @(1024, 1024, 1024); 'halo.png' = @(1024, 1024, 1024); 'swirl.png' = @(1024, 1024, 1024);
+               'back.png' = @(1024, 1024, 1024); 'edge.png' = @(1024, 32, 512); 'burst.png' = @(1024, 1024, 1024); 'sparks.png' = @(1024, 1024, 1024) }
+$barSizes = @{ 'frame.png' = @(1024, 112, 112); 'track_fill.png' = @(1024, 96, 96); 'track_empty.png' = @(1024, 96, 96); 'plate.png' = @(1024, 160, 160);
+               'zone.png' = @(512, 224, 224); 'cursor_down.png' = @(256, 208, 208); 'cursor_up.png' = @(256, 208, 208) }
+# A PNG's width and height from its IHDR (bytes 16..23, big-endian); $null when it is not a PNG.
+function Get-PngSize([string]$Path) {
+    $b = New-Object byte[] 24
+    $fs = [IO.File]::OpenRead($Path)
+    try { $n = $fs.Read($b, 0, 24) } finally { $fs.Dispose() }
+    if ($n -ne 24 -or $b[0] -ne 0x89 -or $b[1] -ne 0x50 -or $b[2] -ne 0x4E -or $b[3] -ne 0x47 -or $b[12] -ne 0x49 -or $b[13] -ne 0x48 -or $b[14] -ne 0x44 -or $b[15] -ne 0x52) { return $null }
+    $w = ([int]$b[16] -shl 24) -bor ([int]$b[17] -shl 16) -bor ([int]$b[18] -shl 8) -bor [int]$b[19]
+    $h = ([int]$b[20] -shl 24) -bor ([int]$b[21] -shl 16) -bor ([int]$b[22] -shl 8) -bor [int]$b[23]
+    return @($w, $h)
+}
+# What keeps a pack from the zip: each file missing, not a PNG, or of a size the mod refuses ("" none).
+function Get-ArtProblems([string]$Dir, [string[]]$Files, [hashtable]$Sizes) {
+    $p = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $Files) {
+        $path = Join-Path $Dir $f
+        if (-not (Test-Path -LiteralPath $path)) { $p.Add("$f missing"); continue }
+        $sz = Get-PngSize $path
+        $r = $Sizes[$f]
+        if ($null -eq $sz) { $p.Add("$f is not a PNG"); continue }
+        if ($sz[0] -ne $r[0] -or $sz[1] -lt $r[1] -or $sz[1] -gt $r[2]) {
+            $want = if ($r[1] -eq $r[2]) { "$($r[0])x$($r[1])" } else { "$($r[0])x$($r[1])..$($r[2])" }
+            $p.Add(("{0} is {1}x{2}, not {3}" -f $f, $sz[0], $sz[1], $want))
+        }
+    }
+    return $p.ToArray()
+}
 Write-Host ''
 if ($NoArt) {
     Write-Host 'Target art zip: skipped (-NoArt).'
@@ -295,20 +327,20 @@ if ($NoArt) {
             }
         }
         $missing = @()
-        if ($artSrc) { $missing = @($artFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $artSrc $_)) }) }
+        if ($artSrc) { $missing = @(Get-ArtProblems $artSrc $artFiles $artSizes) }
         $barMissing = @()
-        if ($barSrc) { $barMissing = @($barFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $barSrc $_)) }) }
+        if ($barSrc) { $barMissing = @(Get-ArtProblems $barSrc $barFiles $barSizes) }
         $haveTargets = [bool]$artSrc -and $missing.Count -eq 0
         $haveBar = [bool]$barSrc -and $barMissing.Count -eq 0
         if (-not $artSrc) {
             Write-Host 'Target art zip: the Bushido targets left out (no game folder found and no -ArtDir; the mod zip does not need them).'
         } elseif (-not $haveTargets) {
-            Write-Host ("Target art zip: the Bushido targets left out (not in {0}: {1}; the mod zip does not need them)." -f $artSrc, ($missing -join ', '))
+            Write-Host ("Target art zip: the Bushido targets left out (in {0}: {1}; the mod would refuse them; the mod zip does not need them)." -f $artSrc, ($missing -join ', '))
         }
         if (-not $barSrc) {
             Write-Host 'Target art zip: the overdrive bar left out (no game folder found and no -BarArtDir; the mod zip does not need it).'
         } elseif (-not $haveBar) {
-            Write-Host ("Target art zip: the overdrive bar left out (not in {0}: {1}; the mod zip does not need it)." -f $barSrc, ($barMissing -join ', '))
+            Write-Host ("Target art zip: the overdrive bar left out (in {0}: {1}; the mod would refuse it; cut it again with tools\target-art\bar_art.py; the mod zip does not need it)." -f $barSrc, ($barMissing -join ', '))
         }
         if (-not $haveTargets -and -not $haveBar) {
             Write-Host 'Target art zip: skipped (no complete pack; the mod zip does not need it).'
@@ -321,7 +353,11 @@ if ($NoArt) {
                 New-Item -ItemType Directory -Force -Path $artTo | Out-Null
                 foreach ($f in $artFiles) { Copy-Item -LiteralPath (Join-Path $artSrc $f) -Destination $artTo -Force }
                 $artArrow = Join-Path $artSrc 'arrow.png'   # optional: the pack's own arrow (without it the mod draws its procedural arrow)
-                if (Test-Path -LiteralPath $artArrow) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
+                if (Test-Path -LiteralPath $artArrow) {
+                    $as = Get-PngSize $artArrow
+                    if ($null -ne $as -and $as[0] -eq 1024 -and $as[1] -eq 1024) { Copy-Item -LiteralPath $artArrow -Destination $artTo -Force }
+                    else { Write-Host 'Target art zip: arrow.png left out (not a 1024 x 1024 PNG: the mod would draw its own arrow).' }
+                }
                 [IO.File]::WriteAllText((Join-Path $artTo 'ART-NOTICE.txt'), $artNotice + "`r`n", (New-Object Text.UTF8Encoding $false))
             }
             if ($haveBar) {

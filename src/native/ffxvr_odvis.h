@@ -356,14 +356,14 @@ struct Vis {
         for (int i = 0; i < n; ++i) tex_rect(o, c, R, U, sg[i].x0, y0, sg[i].x1, y1, piece, sg[i].p0, sg[i].p1, k, add);
     }
     /// The bar art (ffxvr_odbar.h): a bar whose opening is W wide (grown by the readable-size guard only when it would show under
-    /// 0.9 degrees) at c on the plane (R, U), into `a`, drawn by the glue with the targets' shader and the atlas in slot 1. From
+    /// 0.9 degrees at arm's length) at c on the plane (R, U), into `a`, drawn by the glue with the targets' shader and the atlas in slot 1. From
     /// the back: the ornate plate (In::bar_plate), a dark backing in the opening (the sheet's black, so the light pieces look as
     /// drawn), the empty track; Tidus: the golden zone over the game's zone (blended as a light piece: drawn additively it washed
     /// out to white over the track in the mock-up), the frame, the cursor's pinch pair and the
     /// swing marks (plain colour, as before); Lulu: the lit track over the time left, then the frame. k: the fade.
     void draw_bar_art(Out& a, V3 c, V3 R, V3 U, float W, const In& s, float k, bool tidus) const {
         odb::Layout L = odb::layout(W);
-        const float g = odb::readable_scale(L.hi, len(c - s.eye));
+        const float g = odb::readable_scale(L.hi, odb::k_guard_dist);   // (review N8: at a fixed arm's length, so the size never pumps with the hand)
         if (g > 1.f) L = odb::layout(W * g);
         if (!(L.W > 0.f)) return;
         const Col wk = col(1.f, 1.f, 1.f, k);

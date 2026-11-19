@@ -212,9 +212,11 @@ Prefix each with `powershell -ExecutionPolicy Bypass -File`.
 
 ### The optional target art
 
-The Bushido targets are plain plates, and Tidus's Swordplay bar near your hand is a plain bar. A separate optional
-download on the same release page, `ffxvr-target-art-{VERSION}.zip`, turns the targets into textured medallions and the
-Swordplay bar into an ornate one (with a matching countdown bar for Lulu's Fury, when the zip has the bar art).
+The Bushido targets are plain plates. A separate optional download on the same release page,
+`ffxvr-target-art-{VERSION}.zip`, turns them into textured medallions, and, when the zip has the bar art, gives Lulu's Fury a
+countdown bar above her ring and draws the Swordplay bar near your hand as an ornate one. That Swordplay bar exists only with
+F8 > Overdrives "Tidus: swing for Swordplay" ticked (off by default); then the game's own Swordplay bar is hidden while
+ours is up. With the buttons alone nothing changes for Swordplay.
 
 1. Extract it into the folder that **contains** `ffx-vr-{VERSION}` (the folder you extracted this zip into), so that
    its files merge into this one. Watch out: Explorer's *Extract All* suggests a new folder named after the zip
