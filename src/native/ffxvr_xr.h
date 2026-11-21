@@ -80,6 +80,12 @@ struct XrUiPanel {
     int   nb;
     float bq[2][4], bp[2][3], blen[2];
     int   bfaint[2];
+    // od-bar-art round 5: the overdrive bar in front of the eyes (Tidus's Swordplay bar, Lulu's countdown), a world-locked quad (the
+    // reference space) right after the UI panel in the layer order, so the panel never draws over it. otex: its premultiplied image
+    // (null: no bar layer this frame), copied whole into its own swapchain (xr_bar_ensure); oq / op: pose (+Z toward the eyes),
+    // ow x oh: size (m). Only over a projection base (never the screens).
+    ID3D11Texture2D* otex;
+    float oq[4], op[3], ow, oh;
 };
 
 /// Controller input through the OpenXR action system (Touch controllers;
@@ -118,6 +124,9 @@ bool        xr_panel_ready();                               // vr-menu S2: the m
 bool        xr_panel_possible();                            // ... or can be made: a running session where making it has not failed
 bool        xr_panel_ensure();                              // render thread: makes it at the first use (review N6: nothing while the panel is unused); true = it exists
                                                             // (vr-menu S3: the beam's 16 x 128 swapchain with it; a failure there only drops the beams)
+bool        xr_bar_possible();                              // od-bar-art round 5: the overdrive bar's swapchain exists or can be made (a running session where making it has not failed)
+bool        xr_bar_ensure();                                // render thread: makes it (k_bar_w x k_bar_h) at the first use; true = it exists
+void        xr_bar_size(unsigned* w, unsigned* h);          // its size (0 x 0 before it is made)
 uint32_t    xr_max_layers();                                // the runtime's maxLayerCount (0 before the first session)
 bool        xr_srgb();                                      // the swapchains are R8G8B8A8_UNORM_SRGB: the compositor decodes our UNORM bytes before it blends (uidepth's plate)
 void xr_timing(double* wait_ms, double* end_ms);

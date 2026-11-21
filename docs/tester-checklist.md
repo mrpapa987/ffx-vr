@@ -139,8 +139,9 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
   countdown bar sits in front of you (above the ring with "above your hand (as before)"): does it run down with the game's
   timer, and can you read it?
 - Tidus's Swordplay: tick "Tidus: swing for Swordplay" first (it is off by default, and our bar exists only with it).
-  - The bar is straight out in front of you, at eye level, and follows your head slowly. F8 > Overdrives, "Swordplay /
-    Fury bar:", has "in front of you" and "above your hand (as before)", with the distance and the height.
+  - The bar is straight out in front of you, at eye level, and follows your head slowly. Nothing of the game's UI should draw
+    over it, and it should look nearer than the UI. It also stays in view when you look down at your hands. F8 > Overdrives,
+    "Swordplay / Fury bar:", has "in front of you" and "above your hand (as before)", with the distance and the height.
   - With the art zip, it is the ornate bar (golden zone, two pointers pinching the cursor). It should look solid: nothing
     shows through it.
   - The game's own Swordplay bar and its background plates are hidden from the intro to the result ("Hide the game's

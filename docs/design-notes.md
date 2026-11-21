@@ -6044,8 +6044,9 @@ own values.
   first 0.25 s (review S1: the visuals are built in xr_tick before od_gest_tick opens the gesture window, so the first
   state-4 Presents have no art bar yet); "coming" also needs the right grip tracked (review N-R1: else our bar gets no anchor).
   Otherwise it calls 0x897240. The timer (0x8955E0) stays. No
-  detour: the Bushido row's detour was the mechanism that did not run in the owner's first test, and the call-site patch
-  alone hid the row. **Lulu's window is not hidden**: it holds Fury's hit counter, which the mod does not show; the same
+  detour: the Bushido row's detour was the mechanism that did not run in the owner's first test. The call-site patch was
+  meant to hide the row on its own, but that is **unverified**: no log or test shows a call-site patch inside 0x89B360
+  hiding anything in the headset (review N-T4; round 5's window lines and the Developer switch test it). **Lulu's window is not hidden**: it holds Fury's hit counter, which the mod does not show; the same
   patch at 0x89B41B (0x895660) would hide it if wanted.
 - **Settings:** `od_bar_art` (1), `od_bar_plate` (0), `od_bar_hide2d` (1; patched at launch, then live both ways; turning it
   on unpatched waits for the next launch) under F8 > Overdrives > Gestures, after "Guides near your hands" (greyed while the
@@ -6160,6 +6161,44 @@ mod.
   height)`, where bar | 8 = above the hand. odv::In's default stays "above the hand", so with `od_bar_place=1` the plain visuals
   are byte-identical to fadbc15's (the trace).
 
+### Round 5 (the third review pass on 06616aa, 21 Nov 2026)
+
+- **The bar in front gets its own composition layer** (review S-T2). The UI panel is a quad layer composited after the
+  projection layer, so with the bar drawn into the eye images every panel pixel covering it was drawn over it, at a depth
+  0.9 m behind. That covered the game's bar, its scenes, the timer and Lulu's window, and made the bar look transparent.
+  - With `od_bar_place` 0, `odv::Vis::build` puts Tidus's bar (art or plain) and Lulu's countdown into a fourth sink, in
+    their own plane (x right, y up, metres, the anchor at the origin). It records the anchor and the plane's axes.
+  - The glue draws that sink into a 768 x 192 texture: the marker pass's `pst` shader and premultiplied blend, no culling,
+    an orthographic map of the vertices' extent plus 3 %.
+  - It is submitted as a world-locked quad (the reference space) right after the UI panel and before the ImGui layer
+    (`XrUiPanel::otex`, swapchain 8). It uses the ImGui layer's premultiplied copy and is held and re-sent on extra frames as
+    the other quads are. Never over a screen.
+  - The swapchain is made at the first Swordplay or Fury window with the bar in front (`xr_bar_ensure`). That window's first
+    frame still goes into the eye images.
+  - Above the hand (`od_bar_place` 1), or with the Developer box `od_bar_layer` off, the bar is drawn into the eye images
+    as in round 4. The same happens after a failed swapchain or draw, which is logged once.
+  - The no-pack trace with place 1 is unchanged, since build's new `lay` sink defaults to none.
+  - Without the pack, the plain bar in front is on the layer too, so the game's own (unhidden) bar never covers it.
+- **The verdict compares proportions** (S-T1). "Most" means at least 80 %. A window that hid only some Presents of states 3
+  and 4 is named as "the decision said SHOW at most Presents (hidden H of N)". A window whose stub skipped only some calls is
+  named as "skipped only K of C". "Something other than 0x897240 draws it" needs most calls skipped.
+- **One test separates the causes** (S-T3).
+  - The window line now carries the Bushido row stub's calls at 0x89B411, the drawer called just before ours. It also counts
+    the Presents with the bar's layer up. If the plates and the row stub are called but ours is not, the code is not what the
+    port says.
+  - The Developer switch `od_bar_force_hide` (F8 > Developer > Inspect, off) makes both stubs skip whenever their own read of
+    Tidus's state is 3 or 4, whatever the decision. The line says FORCED HIDE, and the verdict says whether the stub skipped
+    nearly every call. If the game's bar still shows then, 0x897240 does not draw it.
+  - Auron's `odt:` line ends with a one-line verdict for the row's call-site patch.
+- **The plates have their own flag** (N-T2). They are hidden in states 3 and 4 with the bar, and in 5-10 only while one of
+  our bars is still drawn (its fade). They stay in the intro, and the first state-3 frame still shows them.
+- **Cache lines** (N-T1). Both patches log when the rel32 crosses a cache line. This is harmless: no thread runs the battle
+  UI at launch, and the store is one locked exchange.
+- **The pitch band** (N-T5) is now 40 degrees down and 10 up. Looking down at the hands, the bar stays in view.
+- **The wording** (N-T3). F8's bar art tooltip no longer says "the plain bar as before". This section's earlier claim about
+  the row is marked unverified (N-T4).
+- ABI stays 72. The new switches ride `ffxvr_odv_set`'s bar flags (16 = the layer off, 32 = force-hide); no export changed.
+
 ### Not verified (nobody here can run the game)
 
 1. Tidus's and Lulu's drawers' call sites, 0x89B416 and 0x89B41B, are inferred from the port's call order and the Bushido
@@ -6174,6 +6213,9 @@ mod.
 7. The plates' call site: found by the scan, and refused unless it is exactly where the port puts it. Also unverified: that
    skipping 0x8A1CE0 has no side effect (its port only draws).
 8. That what stays on the panel during a hidden Swordplay is only the btidu and bgood scenes and the timer.
+9. The bar's layer in the headset: its pose (the anchor and the plane's yaw as a quaternion, +Z toward the eyes), its
+   orientation (the image's top is the bar's top), the premultiplied copy into the sRGB swapchain, and that Virtual Desktop
+   composites one more quad without cost. None of the D3D or OpenXR code was compiled here.
 
 ## The F8 menu reorganised (vr-menu S1, branch `vr-menu`, 8 Nov 2026)
 

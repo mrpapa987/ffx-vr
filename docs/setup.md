@@ -861,6 +861,8 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 | `od_bar_place` | 0 | "Swordplay / Fury bar": "in front of you" (0) or "above your hand (as before)" (1). It moves Tidus's bar and Lulu's countdown; Lulu's ring stays at your hand. |
 | `od_bar_dist` | 0.6 | "distance (m)" of the bar in front of your eyes (0.35..1.2) |
 | `od_bar_height` | 0 | "height (m)" of the bar in front, up (+) or down (-) from eye level (-0.4..0.4) |
+| `od_bar_layer` | 1 | F8 > Developer > Inspect, "Overdrive bar in front on its own layer": the bar in front is drawn over the game's UI panel. 0 draws it into the 3D image, where the panel can cover it. |
+| `od_bar_force_hide` | 0 | F8 > Developer > Inspect, "Force-hide the game's Swordplay bar in Tidus's states 3-4 (test)": skips the game's bar and plates in those states, whatever the hide decides (needs `od_bar_hide2d` at launch) |
 
 **Overdrives > Bushido targets**
 

@@ -20,9 +20,11 @@
 // The bar art (19 Nov 2026, ffxvr_odbar.h; In::bar_art: the local pack loaded, F8 "overdrive bar art" on): Tidus's bar drawn
 // from the pack's pieces instead (the same place, opening 22 cm x size, the same zone, cursor and marks), and Lulu gets a
 // countdown bar above her ring (16 cm x size; the game's time left); both into a second sink (build's `art`), which the glue
-// draws with the targets' shader and the atlas. Without the art everything above is exactly as it was.
+// draws with the targets' shader and the atlas. Without the art, and above the hand (od_bar_place 1), everything above is exactly
+// as it was.
 // The bar's place (round 4, In::bar_place, ini od_bar_place): 0 (the glue's default) Tidus's bar, art or plain, and Lulu's
 // countdown out in front of the eyes at od_bar_dist along the head's yaw (+ od_bar_height), following in 0.5 s; 1 as above.
+// Round 5: in front, build's `lay` sink takes the bar in its own plane, for the glue's composition layer above the UI panel.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -218,6 +220,25 @@ inline V3 front_point(V3 eye, const float* head_q, float dist, float height) {
     const float p = odb::front_pitch(fw.y), d = odb::front_dist(dist);
     return eye + yaw * (d * std::cos(p)) + v3(0.f, d * std::sin(p) + odb::front_height(height), 0.f);
 }
+/// The unit quaternion (x, y, z, w) of the rotation whose columns are R, U and R x U (round 5: the bar layer's quad pose, its +Z
+/// toward the eyes; R and U orthonormal, as face_axes gives them).
+inline void basis_quat(V3 R, V3 U, float* q) {
+    const V3 N = cross(R, U);
+    const float m00 = R.x, m01 = U.x, m02 = N.x, m10 = R.y, m11 = U.y, m12 = N.y, m20 = R.z, m21 = U.z, m22 = N.z;
+    const float tr = m00 + m11 + m22;
+    if (tr > 0.f) { const float t = std::sqrt(tr + 1.f) * 2.f; q[3] = 0.25f * t; q[0] = (m21 - m12) / t; q[1] = (m02 - m20) / t; q[2] = (m10 - m01) / t; }
+    else if (m00 > m11 && m00 > m22) { const float t = std::sqrt(1.f + m00 - m11 - m22) * 2.f; q[3] = (m21 - m12) / t; q[0] = 0.25f * t; q[1] = (m01 + m10) / t; q[2] = (m02 + m20) / t; }
+    else if (m11 > m22) { const float t = std::sqrt(1.f + m11 - m00 - m22) * 2.f; q[3] = (m02 - m20) / t; q[0] = (m01 + m10) / t; q[1] = 0.25f * t; q[2] = (m12 + m21) / t; }
+    else { const float t = std::sqrt(1.f + m22 - m00 - m11) * 2.f; q[3] = (m10 - m01) / t; q[0] = (m02 + m20) / t; q[1] = (m12 + m21) / t; q[2] = 0.25f * t; }
+}
+/// Round 5: the layer's extent, symmetric about the anchor (the quad's centre): the largest |x| and |y| of the plane's vertices,
+/// 3 % more. False: nothing finite to show.
+inline bool lay_extent(const Vtx* v, int n, float* xm, float* ym) {
+    float x = 0.f, y = 0.f;
+    for (int i = 0; i < n; ++i) { const float ax = std::fabs(v[i].p[0]), ay = std::fabs(v[i].p[1]); if (ax > x) x = ax; if (ay > y) y = ay; }
+    if (!(x > 1e-4f) || !(y > 1e-4f) || !std::isfinite(x) || !std::isfinite(y)) return false;
+    *xm = 1.03f * x; *ym = 1.03f * y; return true;
+}
 /// The Tidus bar's 0..1 position of a game value v (the bar spans [start, start + len]).
 inline float bar_x(int v, int start, int blen) { return blen > 0 ? clamp01(static_cast<float>(v - start) / static_cast<float>(blen)) : 0.f; }
 
@@ -225,6 +246,9 @@ struct Vis {
     Trail trail[2]; Flash fl[k_flash_n]; int fl_next = 0; Mark mk[k_mark_n]; int mk_next = 0;
     In last; bool have_last = false; double close_t = -1e300; int last_win = odg::OD_NONE;
     V3 bar_anchor; bool bar_have = false; double bar_t = 0.0;
+    // round 5 (review S-T2): the bar in front drawn into build's `lay` sink in its own plane (x right, y up, metres, the anchor at
+    // the origin) for the glue's own composition layer above the UI panel; lay_on: drawn this build, at lay_c facing (lay_R, lay_U)
+    bool lay_on = false; V3 lay_c, lay_R, lay_U;
     V3 row_f; bool row_have = false; double row_t = 0.0;   // Auron's row: its yaw direction, following the head's slowly (0.3 s; review N5)
     double t_now = 0.0;
     /// Events (the render tick).
@@ -238,8 +262,10 @@ struct Vis {
         return false;
     }
     /// art: the bar art's sink (drawn by the glue with the targets' shader and the atlas in slot 1), or nullptr: the plain bar.
-    int build(const In& in, Out& o, Out* art = nullptr) {
-        t_now = in.t;
+    /// lay (round 5): with od_bar_place 0, Tidus's bar (art or plain) and Lulu's countdown go there instead, in their own plane
+    /// (lay_on, lay_c, lay_R, lay_U say where); nullptr: in the 3D sinks as before.
+    int build(const In& in, Out& o, Out* art = nullptr, Out* lay = nullptr) {
+        t_now = in.t; lay_on = false;
         const bool live = in.on && in.win != odg::OD_NONE && in.inject;
         if (live) { last = in; have_last = true; close_t = in.t + k_fade; last_win = in.win; }   // close_t: the fade ends k_fade after the last live frame
         else if (have_last && in.t >= close_t) { have_last = false; for (Trail& tr : trail) tr.clear(); bar_have = false; row_have = false; }
@@ -261,8 +287,9 @@ struct Vis {
             if (act) draw_trail(trail[h], s, o, 0.005f * S, k, view_up);
         }
         Out* ar = s.bar_art ? art : nullptr;   // the bar art's sink (nullptr: the plain bar, as before)
-        if (s.win == odg::OD_LULU) { draw_lulu(s, o, S, k, view_up); if (ar != nullptr) draw_lulu_bar(s, *ar, S, k, view_up, live); }
-        else if (s.win == odg::OD_TIDUS) draw_tidus(s, o, S, k, view_up, live, ar);
+        Out* ly = s.bar_place == 0 ? lay : nullptr;   // (round 5: the bar's own layer, in front only)
+        if (s.win == odg::OD_LULU) { draw_lulu(s, o, S, k, view_up); if (ar != nullptr) draw_lulu_bar(s, *ar, S, k, view_up, live, ly); }
+        else if (s.win == odg::OD_TIDUS) draw_tidus(s, o, S, k, view_up, live, ar, ly);
         else if (s.win == odg::OD_AURON) draw_auron(s, o, S, k);
         draw_flashes(s, o, S);
         fade_near(s, o, n0);
@@ -320,7 +347,7 @@ struct Vis {
             disc(o, s.c + R * x, R, U, 0.004f * S, col(1.f, 1.f, 1.f, k), col(1.f, 1.f, 1.f, k), 6);
         }
     }
-    void draw_tidus(const In& s, Out& o, float S, float k, V3 view_up, bool live, Out* art = nullptr) {
+    void draw_tidus(const In& s, Out& o, float S, float k, V3 view_up, bool live, Out* art = nullptr, Out* lay = nullptr) {
         const HandIn& hd = s.hand[1];
         if (hd.ok) {   // the blade: from the aim pose when there is one (the pointing ray), else the grip's -Z
             const V3 p = hd.aim_ok ? hd.aim_p : hd.p; const V3 f = norm(qrot(hd.aim_ok ? hd.aim_q : hd.q, v3(0.f, 0.f, -1.f)));
@@ -339,18 +366,23 @@ struct Vis {
         }
         if (!bar_have || s.blen <= 0) return;
         V3 R, U; face_axes(bar_anchor, s.eye, view_up, &R, &U);
-        if (art != nullptr) { draw_bar_art(*art, bar_anchor, R, U, 0.22f * S, s, k, true); return; }   // the bar art: the same place and width
+        V3 c = bar_anchor; Out* po = &o;
+        if (lay != nullptr) {   // round 5: in its own plane, for the glue's layer (the art too)
+            lay_on = true; lay_c = bar_anchor; lay_R = R; lay_U = U;
+            c = v3(0.f, 0.f, 0.f); R = v3(1.f, 0.f, 0.f); U = v3(0.f, 1.f, 0.f); po = lay; if (art != nullptr) art = lay;
+        }
+        if (art != nullptr) { draw_bar_art(*art, c, R, U, 0.22f * S, s, k, true); return; }   // the bar art: the same place and width
         const float W = 0.22f * S, H = 0.018f * S;
         auto X = [&](float x01) { return (x01 - 0.5f) * W; };
-        rect(o, bar_anchor, R, U, -0.5f * W, -0.5f * H, 0.5f * W, 0.5f * H, col(0.1f, 0.1f, 0.15f, 0.6f * k));
+        rect(*po, c, R, U, -0.5f * W, -0.5f * H, 0.5f * W, 0.5f * H, col(0.1f, 0.1f, 0.15f, 0.6f * k));
         const float z0 = bar_x(s.zone_lo, s.start, s.blen), z1 = bar_x(s.zone_hi, s.start, s.blen);
-        if (z1 > z0) rect(o, bar_anchor, R, U, X(z0), -0.5f * H, X(z1), 0.5f * H, col(0.3f, 0.9f, 0.35f, 0.85f * k));
+        if (z1 > z0) rect(*po, c, R, U, X(z0), -0.5f * H, X(z1), 0.5f * H, col(0.3f, 0.9f, 0.35f, 0.85f * k));
         const float cx = X(bar_x(s.cursor, s.start, s.blen));
-        rect(o, bar_anchor, R, U, cx - 0.0015f * S, -0.9f * H, cx + 0.0015f * S, 0.9f * H, col(1.f, 1.f, 1.f, k));
+        rect(*po, c, R, U, cx - 0.0015f * S, -0.9f * H, cx + 0.0015f * S, 0.9f * H, col(1.f, 1.f, 1.f, k));
         for (const Mark& m : mk) {   // where each swing landed: green in the zone, red outside (0.8 s)
             const double a = s.t - m.t0; if (!(a >= 0.0 && a < k_mark)) continue;
             const float u = 1.f - static_cast<float>(a / k_mark), mx = X(m.x);
-            rect(o, bar_anchor, R, U, mx - 0.003f * S, -1.2f * H, mx + 0.003f * S, 1.2f * H, m.in_zone ? col(0.4f, 1.f, 0.45f, u * k) : col(1.f, 0.3f, 0.25f, u * k));
+            rect(*po, c, R, U, mx - 0.003f * S, -1.2f * H, mx + 0.003f * S, 1.2f * H, m.in_zone ? col(0.4f, 1.f, 0.45f, u * k) : col(1.f, 0.3f, 0.25f, u * k));
         }
     }
     /// One textured rectangle of a piece of the bar art in the plane (R, U) at c, local x0..x1, y0..y1 (y up), the piece's
@@ -408,7 +440,7 @@ struct Vis {
     }
     /// Lulu's countdown (the bar art only): above her ring (its fitted centre and radius), or 16 cm above the leading hand until
     /// there is a ring, following in 0.5 s (as Tidus's bar), facing the eye; 16 cm x the size wide; the game's time left.
-    void draw_lulu_bar(const In& s, Out& a, float S, float k, V3 view_up, bool live) {
+    void draw_lulu_bar(const In& s, Out& a, float S, float k, V3 view_up, bool live, Out* lay = nullptr) {
         const int h = s.lead < 0 ? 1 : s.lead > 1 ? 1 : s.lead;
         const bool ring = s.ring_ok && finite3(s.c) && len(s.n) >= 0.5f;
         const float W = 0.16f * S;
@@ -423,6 +455,7 @@ struct Vis {
         }
         if (!bar_have) return;
         V3 R, U; face_axes(bar_anchor, s.eye, view_up, &R, &U);
+        if (lay != nullptr) { lay_on = true; lay_c = bar_anchor; lay_R = R; lay_U = U; draw_bar_art(*lay, v3(0.f, 0.f, 0.f), v3(1.f, 0.f, 0.f), v3(0.f, 1.f, 0.f), W, s, k, false); return; }   // (round 5: its own layer)
         draw_bar_art(a, bar_anchor, R, U, W, s, k, false);
     }
     void draw_auron(const In& s, Out& o, float S, float k) {

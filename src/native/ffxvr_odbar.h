@@ -11,6 +11,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 
 namespace odb {
 
@@ -162,7 +163,7 @@ constexpr float k_guard_dist = 0.6f;
 /// the guard's own arm's length), its pitch followed only within k_front_down below and k_front_up above the horizon, raised by
 /// od_bar_height; the guard is then judged at that distance.
 constexpr float k_front_dmin = 0.35f, k_front_dmax = 1.2f, k_front_hmax = 0.4f;
-constexpr float k_front_down = 20.f * 0.0174532925f, k_front_up = 10.f * 0.0174532925f;
+constexpr float k_front_down = 40.f * 0.0174532925f, k_front_up = 10.f * 0.0174532925f;   // (round 5, review N-T5: 40 down, so the bar stays in view looking down at the hands)
 inline float front_dist(float d) { return std::isfinite(d) ? (d < k_front_dmin ? k_front_dmin : d > k_front_dmax ? k_front_dmax : d) : k_guard_dist; }
 inline float front_height(float h) { return std::isfinite(h) ? (h < -k_front_hmax ? -k_front_hmax : h > k_front_hmax ? k_front_hmax : h) : 0.f; }
 /// The head's pitch (radians, up positive) from its forward's y, clamped to the front band.
@@ -267,8 +268,8 @@ inline uint32_t why_shown(const HideIn& x, const Parts& p) {
 /// Presents by state: [0] 1-2, [1] 3, [2] 4, [3] 5-10, each [shown, hidden]; the stub's counts are the glue's snapshots.
 struct Win {
     bool open = false, held = false; double t0 = 0.0;
-    uint32_t pres[4][2] = {}, unread = 0, presents = 0, ui_pass = 0, why_n[k_why_n] = {};
-    uint32_t snap[6] = {};   // the glue's counters at the open (the stub's [3/4 through, 3/4 skipped, other through, other skipped], the plates' [calls, skipped])
+    uint32_t pres[4][2] = {}, unread = 0, presents = 0, ui_pass = 0, why_n[k_why_n] = {}, lay = 0;   // lay: Presents with the bar's own layer up (round 5)
+    uint32_t snap[8] = {};   // the glue's counters at the open (the stub's [3/4 through, 3/4 skipped, other through, other skipped], the plates' [calls, skipped], the Bushido row stub's [calls, skipped])
     /// Opens or closes: 1 opened (snapshot now), 2 closed (write the line), 0 neither. A stale read neither opens nor closes.
     int step(bool battle, bool fresh, int tidus, double t) {
         if (open && !battle) { open = false; return 2; }
@@ -279,25 +280,43 @@ struct Win {
         return 0;
     }
     /// This Present's decision (after step, while open and fresh).
-    void note(int tidus, bool hidden, uint32_t why, bool ui) {
+    void note(int tidus, bool hidden, uint32_t why, bool ui, bool lay_up = false) {
         if (!open) return;
-        presents++; if (ui) ui_pass++;
+        presents++; if (ui) ui_pass++; if (lay_up) lay++;
         const int b = tidus <= 2 ? 0 : tidus == 3 ? 1 : tidus == 4 ? 2 : 3;
         pres[b][hidden ? 1 : 0]++;
         if (hidden && (tidus == 3 || tidus == 4)) held = true;
         for (int i = 0; i < k_why_n; ++i) if (why & (1u << i)) why_n[i]++;
     }
 };
-/// The window's verdict (the four questions of the owner's test, in order). site: 1 the call still points at our stub, 0 rewritten
-/// by something else, -1 never patched.
-inline const char* verdict(int site, uint32_t calls34, uint32_t skipped34, uint32_t hidden34, uint32_t read34) {
-    if (site < 0) return "the call site was never patched: the game's bar stays (see the odb: patch line at launch)";
-    if (site == 0) return "the call site NO LONGER calls our stub (something rewrote it after launch): nothing of ours runs there";
-    if (read34 == 0) return "Tidus's states 3 and 4 were never read fresh at a Present: no decision was made";
-    if (calls34 == 0) return "the stub was NEVER called in Tidus's states 3 and 4: the battle UI did not reach 0x89B416 while the game's bar was up (it is drawn some other way)";
-    if (hidden34 == 0) return "the decision said SHOW at every Present of states 3 and 4 (the reasons above)";
-    if (skipped34 == 0) return "the decision said hide but the stub never skipped (the flag did not reach the game's thread in time)";
-    return "the stub skipped the game's bar: if it still showed, it is drawn by something other than 0x897240 (or the panel showed an older UI image)";
+/// The window's verdict (the questions of the owner's test, in order), into out (n bytes). site: 1 the call still points at our
+/// stub, 0 rewritten by something else, -1 never patched. Round 5 (review S-T1): proportions, not "any": a decision that hid only
+/// part of states 3 and 4 (k_most) is named as such, and "something else draws it" needs nearly every call skipped. forced: the
+/// Developer switch made the stub skip every call in 3 / 4 whatever the decision. Returns out.
+constexpr uint32_t k_most_num = 8, k_most_den = 10;   // "most": at least 80 %
+inline bool most(uint32_t part, uint32_t whole) { return whole > 0 && static_cast<uint64_t>(part) * k_most_den >= static_cast<uint64_t>(whole) * k_most_num; }
+inline const char* verdict(char* out, size_t n, int site, uint32_t calls34, uint32_t skipped34, uint32_t hidden34, uint32_t read34, bool forced = false) {
+    if (out == nullptr || n == 0) return "";
+    const unsigned c = calls34, k = skipped34, h = hidden34, r = read34;
+    if (site < 0) snprintf(out, n, "the call site was never patched: the game's bar stays (see the odb: patch line at launch)");
+    else if (site == 0) snprintf(out, n, "the call site NO LONGER calls our stub (something rewrote it after launch): nothing of ours runs there");
+    else if (c == 0) snprintf(out, n, "the stub was NEVER called in Tidus's states 3 and 4: the battle UI did not reach 0x89B416 while the game's bar was up (it is drawn some other way)");
+    else if (forced && most(k, c)) snprintf(out, n, "FORCED: the stub skipped %u of %u calls in states 3 and 4: if the game's bar still showed, it is not drawn by 0x897240", k, c);
+    else if (forced) snprintf(out, n, "FORCED, yet the stub skipped only %u of %u calls in states 3 and 4 (its own read of Tidus's state)", k, c);
+    else if (r == 0) snprintf(out, n, "Tidus's states 3 and 4 were never read fresh at a Present: no decision was made");
+    else if (h == 0) snprintf(out, n, "the decision said SHOW at every Present of states 3 and 4 (the reasons above)");
+    else if (!most(h, r)) snprintf(out, n, "the decision said SHOW at most Presents of states 3 and 4 (hidden %u of %u; the reasons above)", h, r);
+    else if (k == 0) snprintf(out, n, "the decision said hide (%u of %u Presents) but the stub never skipped (the flag did not reach the game's thread in time)", h, r);
+    else if (!most(k, c)) snprintf(out, n, "the decision hid %u of %u Presents but the stub skipped only %u of %u calls (the flag late on the game's thread)", h, r, k, c);
+    else snprintf(out, n, "the stub skipped %u of %u calls: if the game's bar still showed, it is drawn by something other than 0x897240 (or the panel showed an older UI image)", k, c);
+    return out;
+}
+/// The limit plates (round 5, review N-T2): hidden only while one of our bars is up: with the bar hidden in Tidus's state 3 or 4,
+/// or in the result (5-10) while our bar is still drawn (its fade; since_drawn: Presents since an art or layer bar was built).
+inline bool hide_plates(bool hide, int tidus, uint32_t since_drawn) {
+    if (!hide) return false;
+    if (tidus == 3 || tidus == 4) return true;
+    return tidus >= 5 && tidus <= 10 && since_drawn <= k_built_presents;
 }
 
 }  // namespace odb

@@ -6527,10 +6527,15 @@ static int odt_row_line(char* s, size_t n, int k) {
     k = odg::fmt_append(s, n, k, "; row: hook %s, detour calls %ld, hidden %ld, faults %ld, asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld",
                         odt_row_hook_name(hs), static_cast<long>(dc), static_cast<long>(dh), static_cast<long>(df),
                         static_cast<long>(q[1][0][0]), static_cast<long>(q[1][0][1]), static_cast<long>(q[1][1][0]), static_cast<long>(q[1][1][1]), static_cast<long>(q[1][2][0]), static_cast<long>(q[1][2][1]));
-    return odg::fmt_append(s, n, k, "; call-site patch %s, calls %ld, hidden %ld, asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld (answers 0/1)%s",
+    // od-bar-art round 5 (review S-T3): one verdict for the call-site patch (the mechanism the Swordplay bar's hide shares)
+    const char* rv = g_odt_patch_state != 1 ? "the call-site patch is not in (see the launch line)"
+                   : pc == 0 ? "the call-site stub was NEVER called (the battle UI did not reach 0x89B411 in this window)"
+                   : ph == 0 ? "the stub never skipped (the decision said show; the asked counts above)"
+                   : "the stub skipped some calls: if the row still showed at those times, it is drawn some other way";
+    return odg::fmt_append(s, n, k, "; call-site patch %s, calls %ld, hidden %ld, asked st3 %ld/%ld st4 %ld/%ld other %ld/%ld (answers 0/1)%s -> row: %s",
                            odt_row_patch_name(g_odt_patch_state), static_cast<long>(pc), static_cast<long>(ph),
                            static_cast<long>(q[0][0][0]), static_cast<long>(q[0][0][1]), static_cast<long>(q[0][1][0]), static_cast<long>(q[0][1][1]), static_cast<long>(q[0][2][0]), static_cast<long>(q[0][2][1]),
-                           dc + pc == 0 ? " (NEITHER RAN this window)" : "");
+                           dc + pc == 0 ? " (NEITHER RAN this window)" : "", rv);
 }
 // Overdrive visuals (ffxvr_odvis.h; ini od_visuals / od_visual_size, ffxvr_odv_set): the state here (render thread), the events
 // from od_gest_tick below, the geometry built once a Present in draw_markers_both and drawn with the markers in both eyes.
@@ -6566,6 +6571,11 @@ static int g_odb_bg_state = 0;                         // the plates' patch: 0 n
 static uintptr_t g_odb_bg_fn = 0, g_odb_bg_site = 0;   // 0x8A1CE0 and its call site (rebased)
 static odb::Win g_odb_win;                             // render thread: this Swordplay window as the hide saw it (ffxvr_odbar.h)
 static float g_odb_dist = 0.6f, g_odb_height = 0.f;    // ffxvr_odv_set (ABI 72): od_bar_dist, od_bar_height (render thread)
+// Round 5 (review S-T3, N-T2): the Developer switch od_bar_force_hide (ffxvr_odv_set flag 32): the stubs skip in Tidus's states 3-4
+// by their own read of his state, whatever the decision; the plates have their own flag (only while one of our bars is up).
+static volatile LONG g_odb_force = 0, g_odb_hidebg = 0;
+static uint32_t g_odb_any_frame = 0x80000000u;         // render thread: the Present that last built a bar of ours (art or the layer), any window, its fade included
+static uint32_t g_odb_lay_frame = 0x80000000u;         // render thread: the Present that last drew the bar's own layer (round 5, review S-T2)
 static char g_odb_verdict[200] = "no Swordplay window yet";
 static uint32_t g_odb_win_lines = 0;
 /// The patched call site's target (the game's main thread, from 0x89B416; cdecl, no arguments, as 0x897240, whose eax the battle
@@ -6574,7 +6584,7 @@ static void __cdecl odb_tidus_stub() {
     InterlockedIncrement(&g_odb_patch_calls);
     const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;   // (FFX.exe's own data: always mapped)
     const int b = w == 3 || w == 4 ? 0 : 1;
-    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_patch_hidden); InterlockedIncrement(&g_odb_sc[b][1]); return; }
+    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0) || (b == 0 && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_patch_hidden); InterlockedIncrement(&g_odb_sc[b][1]); return; }   // (round 5: or forced in 3-4)
     InterlockedIncrement(&g_odb_sc[b][0]);
     reinterpret_cast<void(__cdecl*)()>(g_odb_fn)();
 }
@@ -6582,7 +6592,8 @@ static void __cdecl odb_tidus_stub() {
 /// UI drops: it passes 1 to the sequence draw after it either way).
 static uint32_t __cdecl odb_bg_stub() {
     InterlockedIncrement(&g_odb_bg_calls);
-    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }
+    const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;
+    if (InterlockedCompareExchange(&g_odb_hidebg, 0, 0) || ((w == 3 || w == 4) && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }   // (round 5: its own flag, or forced in 3-4)
     return reinterpret_cast<uint32_t(__cdecl*)()>(g_odb_bg_fn)();
 }
 /// The hide decision, each Present (od_gest_tick, after the driver: this Present's window), from this Present's facts only (review
@@ -6616,7 +6627,10 @@ static void odb_win_snap() {
     g_odb_win.snap[0] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][0], 0, 0)); g_odb_win.snap[1] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][1], 0, 0));
     g_odb_win.snap[2] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][0], 0, 0)); g_odb_win.snap[3] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][1], 0, 0));
     g_odb_win.snap[4] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)); g_odb_win.snap[5] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0));
+    g_odb_win.snap[6] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_patch_calls, 0, 0)); g_odb_win.snap[7] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_patch_hidden, 0, 0));   // (round 5: the Bushido row's stub, 0x89B411)
 }
+/// A counter's growth since a snapshot (the Bushido row's are reset by Auron's window line: then the count since that reset).
+static uint32_t odb_since(volatile LONG* c, uint32_t snap) { const uint32_t v = static_cast<uint32_t>(InterlockedCompareExchange(c, 0, 0)); return v >= snap ? v - snap : v; }
 /// The window's odb: line at its close (render thread; 60 a session): the call site, the stub's calls by Tidus's word, the Presents'
 /// decisions by state, why the decision said show, the plates, the UI pass, and the verdict (also F8's).
 static void odb_win_line(double t) {
@@ -6626,17 +6640,19 @@ static void odb_win_line(double t) {
     const uint32_t bc = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)) - w.snap[4], bk = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0)) - w.snap[5];
     const int site = odb_site_now(g_odb_site, reinterpret_cast<uintptr_t>(&odb_tidus_stub)), bsite = odb_site_now(g_odb_bg_site, reinterpret_cast<uintptr_t>(&odb_bg_stub));
     const uint32_t hid34 = w.pres[1][1] + w.pres[2][1], read34 = w.pres[1][0] + w.pres[1][1] + w.pres[2][0] + w.pres[2][1];
-    snprintf(g_odb_verdict, sizeof(g_odb_verdict), "%s", odb::verdict(site, c34 + k34, k34, hid34, read34));
+    const uint32_t rc = odb_since(&g_odt_patch_calls, w.snap[6]), rk = odb_since(&g_odt_patch_hidden, w.snap[7]);   // (round 5, review S-T3: the row's stub, five bytes before ours)
+    const bool forced = InterlockedCompareExchange(&g_odb_force, 0, 0) != 0;
+    odb::verdict(g_odb_verdict, sizeof(g_odb_verdict), site, c34 + k34, k34, hid34, read34, forced);   // (round 5, review S-T1: proportions)
     if (g_odb_win_lines >= 60) return;
     char why[400] = ""; int k = 0;
     for (int i = 0; i < odb::k_why_n; ++i) if (w.why_n[i]) k = odg::fmt_append(why, sizeof(why), k, "%s%s %u", k ? ", " : "", odb::k_why_name[i], w.why_n[i]);
     if (k == 0) snprintf(why, sizeof(why), "none");
-    diag("odb: frame %u: Swordplay window %.1f s (Tidus's states 1-10): call site 0x89B416 %s | stub calls in states 3/4 %u (skipped %u), in other states %u (skipped %u) | "
+    diag("odb: frame %u: Swordplay window %.1f s (Tidus's states 1-10)%s: call site 0x89B416 %s | stub calls in states 3/4 %u (skipped %u), in other states %u (skipped %u) | "
          "Presents shown/hidden: states 1-2 %u/%u, 3 %u/%u, 4 %u/%u, 5-10 %u/%u, stale %u | shown in 3/4 because: %s | limit plates: %s, calls %u (skipped %u) | "
-         "a UI pass captured in %u of %u Presents -> %s%s",
-         g_frames, t - w.t0, site > 0 ? "calls our stub" : site == 0 ? "REWRITTEN (no longer our stub)" : "not patched",
+         "the Bushido row's stub (0x89B411, the drawer before ours) calls %u (skipped %u) | the bar's own layer in %u Presents | a UI pass captured in %u of %u Presents -> %s%s",
+         g_frames, t - w.t0, forced ? " FORCED HIDE (Developer)" : "", site > 0 ? "calls our stub" : site == 0 ? "REWRITTEN (no longer our stub)" : "not patched",
          c34 + k34, k34, co + ko, ko, w.pres[0][0], w.pres[0][1], w.pres[1][0], w.pres[1][1], w.pres[2][0], w.pres[2][1], w.pres[3][0], w.pres[3][1], w.unread, why,
-         bsite > 0 ? "patched" : bsite == 0 ? "REWRITTEN" : "not patched", bc, bk, w.ui_pass, w.presents, g_odb_verdict,
+         bsite > 0 ? "patched" : bsite == 0 ? "REWRITTEN" : "not patched", bc, bk, rc, rk, w.lay, w.ui_pass, w.presents, g_odb_verdict,
          ++g_odb_win_lines == 60 ? " (60 odb: window lines this session: no more)" : "");
 }
 static const char* odb_patch_name(int st) {
@@ -6834,7 +6850,8 @@ static void od_gest_tick() {
         const int ev = g_odb_win.step(in.battle, in.fresh && in.r.ok, in.r.tidus, in.t);   // (round 4: the window line)
         if (ev == 1) odb_win_snap();
         uint32_t why = 0; const LONG hd = odb_hide_decide(in, &why); if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
-        if (in.fresh && in.r.ok) g_odb_win.note(in.r.tidus, hd != 0, why, g_ui_last_frame_had_pass);
+        const LONG hb = odb::hide_plates(hd != 0, in.fresh && in.r.ok ? in.r.tidus : 0, g_frames - g_odb_any_frame) ? 1 : 0; if (g_odb_hidebg != hb) InterlockedExchange(&g_odb_hidebg, hb);   // (round 5, review N-T2)
+        if (in.fresh && in.r.ok) g_odb_win.note(in.r.tidus, hd != 0, why, g_ui_last_frame_had_pass, g_frames - g_odb_lay_frame <= odb::k_built_presents);
         if (ev == 2) odb_win_line(in.t);
     }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
@@ -6856,7 +6873,7 @@ static void od_gest_tick() {
         diag("odt: frame %u: Auron targets: STOPPED injecting this window (%s): the targets are grey, the buttons still work | our last value 0x%04X, the game's word 0x%04X", g_frames,
              g_odt.inj.stop_why == 1 ? "a reset right after our press: the map, or a button racing ours" : "the game missed a press twice", static_cast<unsigned>(g_odt.inj.ours_val), static_cast<unsigned>(in.game_press));
     if (to.line) {
-        char row[400] = ""; if (!g_odt.r.practice) odt_row_line(row, sizeof(row), 0);   // a window's line: the row's mechanisms and counts
+        char row[640] = ""; if (!g_odt.r.practice) odt_row_line(row, sizeof(row), 0);   // a window's line: the row's mechanisms and counts (round 5: 640, its verdict)
         snprintf(g_odt_line, sizeof(g_odt_line), "%s", g_odt.line_buf); if (g_odt.rounds <= 200) diag("odt: frame %u: %s%s", g_frames, g_odt.line_buf, row);
     }
     if (g_odv_on && o.inject != odg::OD_NONE && o.inject == w) {   // the visuals' events: a burst a gesture (green sent, grey refused), Tidus's mark
@@ -6995,11 +7012,14 @@ extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
 /// Overdrive visuals (ABI 49): ini od_visuals (on) and od_visual_size (0.5-2), every frame from managed's push (render thread).
 /// ABI 71 (od-bar-art): bar, the bar art's flags: 1 od_bar_art (the local pack when present), 2 od_bar_plate, 4 od_bar_hide2d (the
 /// game's Swordplay bar hidden while ours is up; its patch is made at launch, ffxvr_odb_patch). ABI 72 (round 4): bar 8 = od_bar_place
-/// 1 (above the hand, as before; 0 in front of the eyes), dist od_bar_dist (0.35-1.2 m), height od_bar_height (-0.4-0.4 m).
+/// 1 (above the hand, as before; 0 in front of the eyes), dist od_bar_dist (0.35-1.2 m), height od_bar_height (-0.4-0.4 m). Round 5
+/// (no shape change): bar 16 = od_bar_layer 0 (the bar in front drawn into the eye images, not its own layer), 32 = od_bar_force_hide
+/// (Developer: the stubs skip in Tidus's states 3-4 whatever the decision).
 /// Returns 1 while battle.dds is held (Lulu's spin count as digits; dots otherwise).
 extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size, int bar, float dist, float height) {
     g_odv_on = on != 0; g_odv_size = std::isfinite(size) ? odg::clampf(size, 0.5f, 2.f) : 1.f;
-    const LONG b = static_cast<LONG>(bar & 15); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
+    const LONG b = static_cast<LONG>(bar & 63); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
+    const LONG f = (bar & 32) != 0 ? 1 : 0; if (g_odb_force != f) InterlockedExchange(&g_odb_force, f);
     g_odb_dist = odb::front_dist(dist); g_odb_height = odb::front_height(height);
     return g_c3_srv ? 1 : 0;
 }
@@ -7027,6 +7047,7 @@ static int odb_patch_bg(uintptr_t base) {
         return -2;
     }
     const uintptr_t site = f0 + static_cast<uintptr_t>(at);
+    if (((site + 1) & 63u) > 60u) diag("odb: limit plates call-site patch: its rel32 at 0x%08X crosses a cache line (harmless: no thread runs the battle UI at launch, and the store is one locked exchange)", static_cast<unsigned>(site + 1));   // (review N-T1)
     DWORD old = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { diag("odb: limit plates call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
     g_odb_bg_fn = fn;
@@ -7068,6 +7089,7 @@ extern "C" __declspec(dllexport) int ffxvr_odb_patch(int on) {
     DWORD old = 0;
     if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { g_odb_patch_state = -3; diag("odb: Swordplay bar call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
     g_odb_fn = fn;
+    if (((site + 1) & 63u) > 60u) diag("odb: Swordplay bar call-site patch: its rel32 at 0x%08X crosses a cache line (harmless: no thread runs the battle UI at launch, and the store is one locked exchange)", static_cast<unsigned>(site + 1));   // (review N-T1)
     const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odb_tidus_stub) - (site + 5));
     InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store
     DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
@@ -12158,6 +12180,18 @@ extern "C" __declspec(dllexport) void ffxvr_dmg_status(uint32_t* u, int n) {
 // -- overdrive visuals (ffxvr_odvis.h): built once a Present, after the views (draw_markers_both), drawn after the markers ------
 static odv::Vtx g_odv_raw[odv::k_max_verts]; static MkVertex g_odv_mk[odv::k_max_verts]; static int g_odv_nv = 0;   // render thread only
 static odv::Vtx g_odb_raw[odv::k_bar_verts]; static MkVertex g_odb_mk[odv::k_bar_verts]; static int g_odb_nv = 0;   // od-bar-art: the bar art's sink (render thread only)
+// od-bar-art round 5 (review S-T2: the UI panel is a quad layer composited over the eye images, so it drew over our bar in front):
+// with od_bar_place 0 the bar (Tidus's, art or plain; Lulu's countdown) is built in its own plane (odv::Vis::build's `lay`), drawn
+// into g_odb_lay_tex (the marker pass's pst and premultiplied blend, an orthographic map of the plane) and submitted as its own
+// world-locked quad right after the UI panel (ffxvr_xr.cpp, XrUiPanel::otex). The swapchain is made at the first Swordplay or Fury
+// window in front (odb_layer_frame); without it, with od_bar_layer=0 or after a failed draw, the bar goes into the eye images as in
+// round 4. Above the hand (od_bar_place 1) it is always in the eye images, as before.
+static odv::Vtx g_odb_lay_raw[odv::k_bar_verts];       // the layer's sink (the bar's plane: x right, y up, metres)
+static bool g_odb_lay_ready = false, g_odb_lay_broken = false;
+static ID3D11Texture2D* g_odb_lay_tex = nullptr; static ID3D11RenderTargetView* g_odb_lay_rtv = nullptr; static unsigned g_odb_lay_w = 0, g_odb_lay_h = 0;
+static float g_odb_lay_q[4] = { 0.f, 0.f, 0.f, 1.f }, g_odb_lay_p[3] = {}, g_odb_lay_sw = 0.f, g_odb_lay_sh = 0.f;   // the quad: pose (the reference space), size (m)
+static ID3D11RasterizerState* g_odb_lay_rs = nullptr;  // no culling (the plane's winding under the orthographic map is not the eye pass's concern)
+static bool odb_layer_draw(const odv::Out& ol);        // (defined with the marker pass)
 static uint32_t g_odv_frames = 0, g_odv_verts_max = 0, g_odv_dropped = 0;
 /// The visuals' clock: the poses' time (the gesture driver's), else QPC.
 static double odv_now() {
@@ -12225,11 +12259,19 @@ static void odv_build() {
     if (g_od.timer_ok) { in.od_left = g_od.left; in.od_total = g_od.total; }   // Lulu's countdown: the game's shared timer
     odv::Out o; o.v = g_odv_raw; o.max = odv::k_max_verts;
     odv::Out oa; oa.v = g_odb_raw; oa.max = odv::k_bar_verts;
-    g_odv.build(in, o, in.bar_art ? &oa : nullptr);
+    odv::Out ol; ol.v = g_odb_lay_raw; ol.max = odv::k_bar_verts;   // round 5: the bar in front, for its own layer
+    const bool lay_ok = in.bar_place == 0 && (g_odb_flags & 16) == 0 && g_odb_lay_ready && !g_odb_lay_broken;
+    g_odv.build(in, o, in.bar_art ? &oa : nullptr, lay_ok ? &ol : nullptr);
     g_odv_dropped += static_cast<uint32_t>(o.dropped) + static_cast<uint32_t>(oa.dropped);
     g_odb_nv = 0;
     if (oa.n > 0) { odv_to_render(g_odb_raw, g_odb_mk, oa.n); g_odb_nv = oa.n; }
-    if (oa.n > 0 && in.win == odg::OD_TIDUS && in.inject) g_odb_built_frame = g_frames;   // (the hide's recency: a live Swordplay window's art bar; review B1)
+    if (ol.n > 0 && g_odv.lay_on) {   // round 5: the layer's image and pose (a failed draw: the eye images from the next build on)
+        if (odb_layer_draw(ol)) g_odb_lay_frame = g_frames;
+        else { g_odb_lay_broken = true; diag("odb: the overdrive bar's own layer could not be drawn: it goes into the eye images this session"); }
+    }
+    const bool lay_now = g_odb_lay_frame == g_frames;
+    if ((oa.n > 0 || lay_now) && in.win == odg::OD_TIDUS && in.inject) g_odb_built_frame = g_frames;   // (the hide's recency: a live Swordplay window's art bar; review B1; round 5: or its layer)
+    if (oa.n > 0 || lay_now) g_odb_any_frame = g_frames;   // (round 5: the plates' rule, any window's bar, its fade included)
     if (o.n == 0) return;
     odv_to_render(g_odv_raw, g_odv_mk, o.n);
     g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);
@@ -12566,6 +12608,100 @@ static int odt_emit(MkVertex* verts, int room) {
 // Sphere hands: the labels' quads (built once for both eyes in draw_markers_both, drawn last in each eye with their own texture).
 extern int g_sphl_nv; static bool sphl_wanted(); static void sphl_build(const float bb[12]); static int sphl_emit(MkVertex* verts, int room);
 extern ID3D11ShaderResourceView* g_sphl_srv;
+/// od-bar-art round 5: the bar layer's image: the bar's plane (ol, built by odv::Vis this Present) drawn into g_odb_lay_tex with the
+/// marker pass's pst and premultiplied blend over transparent black, its extent onto the whole image (orthographic); the quad's pose
+/// (the anchor, the plane's axes) and size with it. False: nothing usable (the caller sends the bar to the eye images instead).
+static bool odb_layer_draw(const odv::Out& ol) {
+    if (ol.n <= 0 || ol.n > odv::k_bar_verts || !marker_pass_init() || g_mk_pst == nullptr || g_mk_blend_pm == nullptr || g_mk_smp_art == nullptr || g_mk_vb == nullptr || g_mk_cb == nullptr) return false;
+    unsigned w = 0, h = 0; xr_bar_size(&w, &h);
+    if (w == 0 || h == 0) return false;
+    if (g_odb_lay_rs == nullptr) {
+        D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+        if (FAILED(g_device->CreateRasterizerState(&rd, &g_odb_lay_rs))) { g_odb_lay_rs = nullptr; return false; }
+    }
+    if (g_odb_lay_tex == nullptr || g_odb_lay_w != w || g_odb_lay_h != h) {
+        if (g_odb_lay_rtv) { g_odb_lay_rtv->Release(); g_odb_lay_rtv = nullptr; }
+        if (g_odb_lay_tex) { g_plain_srvs_forget(g_odb_lay_tex); g_odb_lay_tex->Release(); g_odb_lay_tex = nullptr; }
+        D3D11_TEXTURE2D_DESC td = {}; td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_odb_lay_tex)) || FAILED(g_device->CreateRenderTargetView(g_odb_lay_tex, nullptr, &g_odb_lay_rtv))) {
+            if (g_odb_lay_tex) { g_odb_lay_tex->Release(); g_odb_lay_tex = nullptr; }
+            g_odb_lay_rtv = nullptr; return false;
+        }
+        g_odb_lay_w = w; g_odb_lay_h = h;
+    }
+    float xm = 0.f, ym = 0.f;
+    if (!odv::lay_extent(ol.v, ol.n, &xm, &ym)) return false;
+    const float VP[16] = { 1.f / xm, 0.f, 0.f, 0.f,  0.f, 1.f / ym, 0.f, 0.f,  0.f, 0.f, 0.f, 0.f,  0.f, 0.f, 0.f, 1.f };   // row-major, clip = VP p: the plane onto the image (y up = the image's top)
+    D3D11_MAPPED_SUBRESOURCE ms = {};
+    if (FAILED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    memcpy(ms.pData, ol.v, sizeof(MkVertex) * ol.n); g_orig_unmap(g_ctx, g_mk_vb, 0);
+    if (FAILED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    memcpy(ms.pData, VP, 64); g_orig_unmap(g_ctx, g_mk_cb, 0);
+    // save, draw, restore (the subset draw_markers_eye touches)
+    ID3D11RenderTargetView* o_rtv[8] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(8, o_rtv, &o_dsv);
+    UINT nvp = 1; D3D11_VIEWPORT o_vp = {}; g_ctx->RSGetViewports(&nvp, &o_vp);
+    ID3D11VertexShader* o_vs = nullptr; ID3D11PixelShader* o_ps = nullptr; ID3D11GeometryShader* o_gs = nullptr;
+    g_ctx->VSGetShader(&o_vs, nullptr, nullptr); g_ctx->PSGetShader(&o_ps, nullptr, nullptr); g_ctx->GSGetShader(&o_gs, nullptr, nullptr);
+    ID3D11Buffer* o_cb = nullptr; g_ctx->VSGetConstantBuffers(0, 1, &o_cb);
+    ID3D11Buffer* o_vb = nullptr; UINT o_stride = 0, o_off = 0; g_ctx->IAGetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+    ID3D11InputLayout* o_il = nullptr; g_ctx->IAGetInputLayout(&o_il);
+    D3D11_PRIMITIVE_TOPOLOGY o_topo; g_ctx->IAGetPrimitiveTopology(&o_topo);
+    ID3D11BlendState* o_bs = nullptr; float o_bf[4]; UINT o_mask; g_ctx->OMGetBlendState(&o_bs, o_bf, &o_mask);
+    ID3D11DepthStencilState* o_ds = nullptr; UINT o_ref; g_ctx->OMGetDepthStencilState(&o_ds, &o_ref);
+    ID3D11RasterizerState* o_rs = nullptr; g_ctx->RSGetState(&o_rs);
+    ID3D11ShaderResourceView* o_srv[4] = {}; g_ctx->PSGetShaderResources(0, 4, o_srv);
+    ID3D11SamplerState* o_smp[2] = {}; g_ctx->PSGetSamplers(0, 2, o_smp);
+    {
+        InEye2 guard;
+        const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_odb_lay_rtv, clear);
+        ID3D11RenderTargetView* rt[1] = { g_odb_lay_rtv };
+        g_ctx->OMSetRenderTargetsAndUnorderedAccessViews(1, rt, nullptr, 1, D3D11_KEEP_UNORDERED_ACCESS_VIEWS, nullptr, nullptr);   // UAVs kept (R42)
+        D3D11_VIEWPORT vp = {}; vp.Width = static_cast<float>(w); vp.Height = static_cast<float>(h); vp.MaxDepth = 1.f;
+        g_ctx->RSSetViewports(1, &vp);
+        g_ctx->VSSetShader(g_mk_vs, nullptr, 0); g_ctx->PSSetShader(g_mk_pst, nullptr, 0); g_ctx->GSSetShader(nullptr, nullptr, 0);
+        g_orig_vssetcb(g_ctx, 0, 1, &g_mk_cb);
+        UINT stride = sizeof(MkVertex), off = 0; g_ctx->IASetVertexBuffers(0, 1, &g_mk_vb, &stride, &off);
+        g_ctx->IASetInputLayout(g_mk_il); g_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        g_ctx->OMSetBlendState(g_mk_blend_pm, nullptr, 0xFFFFFFFF); g_ctx->OMSetDepthStencilState(nullptr, 0); g_ctx->RSSetState(g_odb_lay_rs);
+        ID3D11ShaderResourceView* sv[4] = { nullptr, g_odb_art.srv, nullptr, nullptr };   // (the art in slot 1; null without the pack: the plain bar has no textured vertices)
+        g_ctx->PSSetShaderResources(0, 4, sv);
+        ID3D11SamplerState* sm[2] = { g_mk_smp, g_mk_smp_art }; g_ctx->PSSetSamplers(0, 2, sm);
+        g_ctx->Draw(static_cast<UINT>(ol.n), 0);
+    }
+    om_restore_keep(o_rtv, o_dsv);
+    if (nvp) g_ctx->RSSetViewports(1, &o_vp);
+    g_ctx->VSSetShader(o_vs, nullptr, 0); g_ctx->PSSetShader(o_ps, nullptr, 0); g_ctx->GSSetShader(o_gs, nullptr, 0);
+    g_orig_vssetcb(g_ctx, 0, 1, &o_cb);
+    g_ctx->IASetVertexBuffers(0, 1, &o_vb, &o_stride, &o_off);
+    g_ctx->IASetInputLayout(o_il); g_ctx->IASetPrimitiveTopology(o_topo);
+    g_ctx->OMSetBlendState(o_bs, o_bf, o_mask); g_ctx->OMSetDepthStencilState(o_ds, o_ref); g_ctx->RSSetState(o_rs);
+    g_ctx->PSSetShaderResources(0, 4, o_srv); g_ctx->PSSetSamplers(0, 2, o_smp);
+    for (auto* v : o_srv) if (v) v->Release();
+    for (auto* v : o_smp) if (v) v->Release();
+    for (auto* v : o_rtv) if (v) v->Release();
+    if (o_dsv) o_dsv->Release(); if (o_vs) o_vs->Release(); if (o_ps) o_ps->Release(); if (o_gs) o_gs->Release();
+    if (o_cb) o_cb->Release(); if (o_vb) o_vb->Release(); if (o_il) o_il->Release();
+    if (o_bs) o_bs->Release(); if (o_ds) o_ds->Release(); if (o_rs) o_rs->Release();
+    // the quad: at the anchor, the plane's axes (+Z toward the eyes), the extent's size
+    odv::basis_quat(g_odv.lay_R, g_odv.lay_U, g_odb_lay_q);
+    g_odb_lay_p[0] = g_odv.lay_c.x; g_odb_lay_p[1] = g_odv.lay_c.y; g_odb_lay_p[2] = g_odv.lay_c.z;
+    g_odb_lay_sw = 2.f * xm; g_odb_lay_sh = 2.f * ym;
+    return true;
+}
+/// od-bar-art round 5: before xr_frame (render thread): the bar's swapchain at the first Swordplay or Fury window with the bar in
+/// front (xr_bar_ensure; none otherwise), and this frame's layer into ui: the last image drawn, for at most k_built_presents
+/// Presents (a frame without the game's UI pass builds nothing), never over a screen.
+static void odb_layer_frame(XrUiPanel& ui, bool screen_on) {
+    const bool place_front = (g_odb_flags & 24) == 0;   // od_bar_place 0 and od_bar_layer 1
+    const bool want = g_odv_on && g_xr_active && place_front && !g_odb_lay_broken && g_odg.open && (g_odg.sess.od == odg::OD_TIDUS || g_odg.sess.od == odg::OD_LULU);
+    if (want && xr_bar_possible()) xr_bar_ensure();
+    unsigned w = 0, h = 0; xr_bar_size(&w, &h);
+    g_odb_lay_ready = w > 0 && h > 0 && !g_odb_lay_broken;
+    if (screen_on || !g_odb_lay_ready || !place_front || g_odb_lay_tex == nullptr || g_frames - g_odb_lay_frame > odb::k_built_presents) return;
+    ui.otex = g_odb_lay_tex;
+    memcpy(ui.oq, g_odb_lay_q, sizeof(ui.oq)); memcpy(ui.op, g_odb_lay_p, sizeof(ui.op)); ui.ow = g_odb_lay_sw; ui.oh = g_odb_lay_sh;
+}
 static void draw_markers_eye(ID3D11RenderTargetView* dst, UINT w, UINT h, const float V[16], const XrFovTan& f, const float bb[12], bool only_odt = false) {
     if ((only_odt ? g_odt_nv == 0 : (g_marker_n == 0 && g_dmg_nv == 0 && g_odv_nv == 0 && g_odb_nv == 0 && g_odt_nv == 0)) && g_sphl_nv == 0) return;
     if (dst == nullptr || !marker_pass_init()) return;
@@ -17506,6 +17642,7 @@ static void xr_tick() {
     }
     g_imgui_where = ui.tex2 == nullptr ? 0 : ui.im_world ? 2 : 1;
     vpanel_frame(ui);   // vr-menu S2: the F8 window's own panel (any base mode: 3D, screens, movies, the save screen)
+    odb_layer_frame(ui, screen.on);   // od-bar-art round 5: the overdrive bar in front, its own layer above the UI panel
     {   // saveui A.3: the ImGui layer, every 10 s while it drew (screen frames included: the boot menu used to leave no trace)
         static ULONGLONG next = 0; static uint32_t f_screen = 0, f_screen_shown = 0, f_3d_shown = 0, f_world = 0, draws_max = 0, f_draws = 0;
         if (g_imgui_draws_last > 0) f_draws++;

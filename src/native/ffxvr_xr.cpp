@@ -105,8 +105,11 @@ struct Eye {
     ID3D11Texture2D* mid = nullptr;                 // UNORM intermediate: shader copy here, then a bit copy into the (sRGB) image
     ID3D11RenderTargetView* mid_rtv = nullptr;
 };
-Eye g_eye[8];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye; 6: the menu panel (vr-menu S2)
+Eye g_eye[9];                                   // 0/1: the eyes; 2: the virtual screen (left eye when stereo); 3: the UI panel; 4: the ImGui layer; 5: the stereo screen's right eye; 6: the menu panel (vr-menu S2); 7: the beam; 8: the overdrive bar (od-bar-art round 5)
 constexpr int k_panel_sc = 6;
+constexpr int k_bar_sc = 8;                        // od-bar-art round 5: the overdrive bar's own layer (made at its first use, xr_bar_ensure)
+constexpr UINT k_bar_w = 768, k_bar_h = 192;       // its image: ~31 px a degree across a 22 cm bar at 0.6 m (the display shows ~25)
+bool g_bar_sc_failed = false;                      // ... making it failed this session (not tried again: the bar stays in the eye images)
 constexpr int k_beam_sc = 7;                       // vr-menu S3: the pointer's beam (16 x 128, written once, then only referenced)
 constexpr float k_beam_w = 0.004f;                 // its width (m)
 // vr-menu S2: this frame's crop origin for the panel's copy, set by xr_frame before the submit that uses it
@@ -124,6 +127,7 @@ struct HeldBase {
     XrCompositionLayerProjectionView pv[2] = {}; XrCompositionLayerQuad quad = {}, quad_r = {};
     bool have_ui = false, have_imgui = false; uint32_t ui_age = 0, imgui_age = 0; XrCompositionLayerQuad uiq = {}, imq = {};
     bool have_panel = false; uint32_t panel_age = 0; XrCompositionLayerQuad pq = {};   // vr-menu S2: the menu panel, held like the ImGui quad
+    bool have_bar = false; uint32_t bar_age = 0; XrCompositionLayerQuad obq = {};    // od-bar-art round 5: the overdrive bar, held the same way
     bool base_ui = false;                         // R8-1: the held base frame went out with a UI panel (only then may a held base bring one)
 };
 HeldBase g_held;
@@ -147,7 +151,8 @@ DXGI_FORMAT g_sc_format = DXGI_FORMAT_UNKNOWN;
 // display period, and a frame whose xrWaitFrame succeeded but whose xrBeginFrame failed (VDXR then blocks the next
 // xrWaitFrame until a Begin: the next call retries the Begin instead of waiting again).
 struct LastSent { bool base = false, have_ui = false, have_imgui = false, have_panel = false; XrCompositionLayerQuad uiq = {}, imq = {}, pq = {};
-                  int nbeam = 0; XrCompositionLayerQuad bq[2] = {}; };   // vr-menu S3: the pointer's beams
+                  int nbeam = 0; XrCompositionLayerQuad bq[2] = {};   // vr-menu S3: the pointer's beams
+                  bool have_bar = false; XrCompositionLayerQuad obq = {}; };   // od-bar-art round 5: the overdrive bar
 LastSent g_last_sent;
 bool g_waited_unbegun = false; XrFrameState g_unbegun_fs = { XR_TYPE_FRAME_STATE };
 XrTime g_last_begun_T = 0;                         // the display time of the last begun frame (skipped-slot count)
@@ -420,7 +425,7 @@ bool sc_create(int i, UINT w, UINT h, const char** what, XrResult* res) {
     if (FAILED(g_h.device->CreateTexture2D(&td, nullptr, &e.mid)) || FAILED(g_h.device->CreateRenderTargetView(e.mid, nullptr, &e.mid_rtv))) {
         *what = "intermediate texture"; return false;
     }
-    g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : i == 5 ? "screen right" : i == 6 ? "menu panel" : "beam", i, e.w, e.h, n);
+    g_h.diag("xr: %s %d swapchain %ux%u, %u images", i < 2 ? "eye" : i == 2 ? "screen" : i == 3 ? "ui" : i == 4 ? "imgui" : i == 5 ? "screen right" : i == 6 ? "menu panel" : i == 7 ? "beam" : "overdrive bar", i, e.w, e.h, n);
     return true;
 }
 /// vr-menu S2 review N6: the menu panel's swapchain (1:1 crops of the F8 window up to 1536 x 1536, ~9.4 MB an image) at its first
@@ -443,6 +448,21 @@ bool xr_panel_ensure() {
     return false;
 }
 bool xr_panel_ready() { return g_session != XR_NULL_HANDLE && g_running && g_eye[k_panel_sc].sc != XR_NULL_HANDLE; }
+/// od-bar-art round 5: the overdrive bar's swapchain (k_bar_w x k_bar_h, ~0.6 MB an image) at its first use in a session (render
+/// thread, before xr_frame, as xr_panel_ensure); none for a player who never sees an overdrive bar in front. A failure is logged once
+/// and not tried again this session (the bar is then drawn into the eye images as before).
+bool xr_bar_possible() { return g_session != XR_NULL_HANDLE && g_running && !g_bar_sc_failed && g_sc_format != DXGI_FORMAT_UNKNOWN; }
+bool xr_bar_ensure() {
+    if (g_eye[k_bar_sc].sc != XR_NULL_HANDLE) return true;
+    if (!xr_bar_possible() || g_h.device == nullptr || p_xrCreateSwapchain == nullptr) return false;
+    const char* what = nullptr; XrResult sr = XR_SUCCESS;
+    if (sc_create(k_bar_sc, k_bar_w, k_bar_h, &what, &sr)) return true;
+    destroy_eye(g_eye[k_bar_sc]);
+    g_bar_sc_failed = true;
+    g_h.diag("xr: overdrive bar swapchain failed (%s, %d): the bar is drawn into the eye images this session (the UI panel can cover it)", what ? what : "?", static_cast<int>(sr));
+    return false;
+}
+void xr_bar_size(unsigned* w, unsigned* h) { if (w) *w = g_eye[k_bar_sc].w; if (h) *h = g_eye[k_bar_sc].h; }
 bool xr_panel_possible() { return g_session != XR_NULL_HANDLE && g_running && !g_panel_sc_failed && g_sc_format != DXGI_FORMAT_UNKNOWN; }
 uint32_t xr_max_layers() { return g_max_layers; }
 bool xr_srgb() { return g_sc_format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; }
@@ -610,7 +630,7 @@ bool xr_start(const XrHost& host) {
     if (g_sc_format == DXGI_FORMAT_UNKNOWN && !fmts.empty()) g_sc_format = static_cast<DXGI_FORMAT>(fmts[0]);
     g_h.diag("xr: %u swapchain formats, using %d", nfmt, static_cast<int>(g_sc_format));
 
-    g_panel_sc_failed = false; g_beam_sc_failed = false;
+    g_panel_sc_failed = false; g_beam_sc_failed = false; g_bar_sc_failed = false;
     for (int i = 0; i < 7; ++i) {                      // (7, the beam, is made with the panel's)
         if (i == k_panel_sc) continue;                 // vr-menu S2 review N6: the menu panel's at its first use (xr_panel_ensure)
         UINT w, h;
@@ -743,7 +763,7 @@ void copy_release(int i, ID3D11Texture2D* src) {
     if (src != nullptr) {
         if (i == k_panel_sc) copied = g_h.copy_crop != nullptr && g_h.copy_crop(src, e.mid_rtv, e.w, e.h, g_panel_crop_x, g_panel_crop_y);   // vr-menu S2: 1:1 crop
         else if (i == k_beam_sc) copied = g_h.copy_crop != nullptr && g_h.copy_crop(src, e.mid_rtv, e.w, e.h, 0, 0);   // vr-menu S3: the beam, 1:1 (once)
-        else copied = g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : i == 4 ? 2 : 0);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui)
+        else copied = g_h.copy(src, e.mid_rtv, e.w, e.h, i == 3 ? 1 : (i == 4 || i == k_bar_sc) ? 2 : 0);   // 1 the UI panel (alpha kept), 2 the ImGui layer (premultiplied; saveui) and the overdrive bar (od-bar-art round 5)
     }
     if (copied) g_h.ctx->CopyResource(e.images[e.idx], e.mid);
     stage("release image");
@@ -1021,6 +1041,27 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
             have_ui = true; uiq = g_held.uiq; g_held.ui_age++; g_held_quads++;
         }
         if (ok) g_held.base_ui = have_ui;   // R8-1: what the held base frame went out with
+        // od-bar-art round 5 (review S-T2): the overdrive bar in front, world-locked, right after the UI panel so the panel never
+        // draws over it (the bar is nearer than the panel); premultiplied, as the ImGui layer. Over a projection base only.
+        XrCompositionLayerQuad obq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        bool have_bar = false;
+        const bool o_src = base && !use_screen && ui != nullptr && ui->otex != nullptr && g_eye[k_bar_sc].sc != XR_NULL_HANDLE && ui->ow > 0.f && ui->oh > 0.f
+                           && std::isfinite(ui->ow) && std::isfinite(ui->oh) && std::isfinite(ui->op[0]) && std::isfinite(ui->op[1]) && std::isfinite(ui->op[2]);
+        if (o_src && submit_eye(k_bar_sc, ui->otex)) {
+            have_bar = true;
+            obq.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;   // premultiplied
+            obq.space = g_space; obq.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            obq.subImage.swapchain = g_eye[k_bar_sc].sc;
+            obq.subImage.imageRect.offset = { 0, 0 };
+            obq.subImage.imageRect.extent = { static_cast<int32_t>(g_eye[k_bar_sc].w), static_cast<int32_t>(g_eye[k_bar_sc].h) };
+            obq.pose.orientation = { ui->oq[0], ui->oq[1], ui->oq[2], ui->oq[3] };
+            obq.pose.position = { ui->op[0], ui->op[1], ui->op[2] };
+            obq.size = { ui->ow, ui->oh };
+            g_held.have_bar = true; g_held.bar_age = 0; g_held.obq = obq;
+        }
+        else if (o_src && g_held.have_bar && g_held.bar_age < k_hold_max && g_eye[k_bar_sc].ever_released) {   // R8b: its own wait timed out
+            have_bar = true; obq = g_held.obq; g_held.bar_age++; g_held_quads++;
+        }
         XrCompositionLayerQuad imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_imgui = false;
         const bool im_src = base && ui != nullptr && ui->tex2 != nullptr;   // the ImGui image exists whenever the overlay draws (no-image frames included)
@@ -1101,6 +1142,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         uint32_t nl = 1;
         if (stereo_screen) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&quad_r);
         if (have_ui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiq);
+        if (have_bar) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&obq);   // od-bar-art round 5: over the UI panel (never with a screen base)
         if (have_imgui) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&imq);
         if (have_panel) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&pnq);
         for (int b = 0; b < nbm && nl < 8; ++b) layers[nl++] = reinterpret_cast<XrCompositionLayerBaseHeader*>(&bmq[b]);   // at most 7 layers
@@ -1119,6 +1161,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         if (have_ui) g_last_sent.uiq = uiq;
         if (have_imgui) g_last_sent.imq = imq;
         if (have_panel) g_last_sent.pq = pnq;
+        g_last_sent.have_bar = base && have_bar; if (have_bar) g_last_sent.obq = obq;   // od-bar-art round 5
         g_last_sent.nbeam = base ? nbm : 0; for (int b = 0; b < nbm; ++b) g_last_sent.bq[b] = bmq[b];   // vr-menu S3
         next->ended = true; next->base_fresh = ok; next->base_sent = base; next->end_ms = g_t_end_ms;
         if (g_sc_stuck >= 0) {   // B5-2: a swapchain that keeps failing hard (not timing out) never recovers by itself: restart the session
@@ -1218,6 +1261,7 @@ bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* ne
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD }, quad_r = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerQuad uiq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, imq = { XR_TYPE_COMPOSITION_LAYER_QUAD }, pnq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
     XrCompositionLayerQuad bmq[2] = { { XR_TYPE_COMPOSITION_LAYER_QUAD }, { XR_TYPE_COMPOSITION_LAYER_QUAD } };
+    XrCompositionLayerQuad obq = { XR_TYPE_COMPOSITION_LAYER_QUAD };   // od-bar-art round 5
     XrCompositionLayerProjection layer = { XR_TYPE_COMPOSITION_LAYER_PROJECTION };
     const XrCompositionLayerBaseHeader* layers[8] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
     uint32_t nl = 0;
@@ -1233,6 +1277,8 @@ bool xr_extra_frame(const XrExtraRot* rot, bool quads, bool zero, XrFrameOut* ne
             layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer);
         }
         if (quads && g_last_sent.have_ui && !g_held.use_screen && g_eye[3].ever_released) { uiq = g_last_sent.uiq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&uiq); }   // head-locked: unchanged
+        // od-bar-art round 5: the overdrive bar is world-locked: re-sent as it was, over a projection base, after the UI panel as in xr_frame
+        if (g_last_sent.have_bar && !g_held.use_screen && g_eye[k_bar_sc].ever_released) { obq = g_last_sent.obq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&obq); }
         // the ImGui quad: head-locked only within `quads`; on the screen (Fahrenheit's save screen, world-locked) always, so a save that
         // stalls the main thread does not make the menu vanish from the screen (SR-8)
         if (g_last_sent.have_imgui && g_eye[4].ever_released && (quads || g_last_sent.imq.space == g_space)) { imq = g_last_sent.imq; layers[nl++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&imq); }

@@ -1878,6 +1878,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             bv2_dev_ui();   // the battle camera's hide and fx_face_eyes: their detours' state (battle_vis2.cs)
             carry_dev_ui();   // carry: the carried sphere's palm offset, test mode and state (carry.cs)
             sfast_dev_ui();   // the fast sphere sequence: its detour's state (sphere_fast.cs)
+            odb_dev_ui();   // od-bar-art round 5: the overdrive bar's own layer, the Swordplay hide's test switch (od_gest.cs)
 
             if (ImGui.TreeNode("Pick a UI element (flat mode: hover it with the mouse, press F9)")) {
                 ImGui.TextWrapped("F9 logs every 2D UI draw under the mouse to ffxvr_diag.log (texture, index count, rectangle, constant buffer) and lists them here. F10 toggles slow motion so things that flash by (damage numbers) can be hovered.");
