@@ -6085,6 +6085,81 @@ own values.
   fade (30 to 20 cm from an eye) has faded it out, so with the right hand raised to the face during Swordplay neither bar is
   seen until the hand comes down; a rare pose, and the game's bar would then flash in and out with the hand.
 
+### Round 4 (the owner's headset test of 2fd2be3, 21 Nov 2026)
+
+The owner: "it looks decent, but it's a bit transparent and we still have the original UI behind it", "a bit off to the right
+and downward ... It should really appear straight out in front of us"; behind it, the game's Swordplay UI exactly as without the
+mod.
+
+- **What the game draws around Swordplay** (ffx-rust: `draw_btl_window` and the ports it calls). TODrawBtlWindow 0x89B360 draws,
+  in order:
+  1. the limit plates (`TODrawLimitBG` 0x8A1CE0: three plain boxes), whenever a limit word (0x133D6F4, 0x133D708, 0x133D734)
+     is non-zero;
+  2. the sequence layer 0 (`TOSeqDraw(2, 0, ...)`: every running scene of set 2). Among them are Tidus's "btidu" intro
+     (started in state 1, stopped in 6 or 8) and the "bgood" result;
+  3. the six drawers (`BTL_DRAWERS`). 0x897240, called at 0x89B416, draws only while 0x133D734 is 3 or 4: the gauge
+     (`TOMkpBtlLimitSpecialGauge` 0x901300, three pieces), two gradient boxes, the cursor (shape 400) and the caption 0x3010.
+     0x8955E0 draws the timer.
+
+  So 0x897240 is the bar itself: had the stub skipped it, the bar would have gone.
+- **Why it looked transparent.** The UI panel is its own head-locked quad layer, composited above the projection layer that
+  our bar is drawn into (ffxvr_xr.cpp, the layers' order). Wherever the game's bar lies behind ours on screen, it is drawn over
+  ours. The bar itself was nearly opaque already: 95 % of the frame fully opaque, and a 0.9 backing under the empty track's
+  ~0.5.
+- **Why the hide did nothing visible: not established from the code.** Read end to end:
+  - the patch's byte check passed (the log says patched), so 0x89B416 was a call of 0x897240 and now calls the stub;
+  - the stub reads the flag interlocked, and the flag is published at each Present from the decision;
+  - the hide bit is pushed every frame;
+  - every input of the decision held while the art bar was built.
+
+  That leaves three possibilities: the battle UI never reached 0x89B416 while the bar showed; something rewrote the call
+  site; or the decision said show for a reason the code does not show. The window line tells these apart.
+- **The window line**, `odb: frame N: Swordplay window ...`. One line per Tidus sequence, from the state leaving 0 to its
+  return (at most 60 a session). It gives:
+  - the call site re-read ("calls our stub" or "REWRITTEN");
+  - the stub's calls in states 3 / 4 and in other states, with the skips (the stub reads 0x133D734 itself, on the game's thread);
+  - the Presents shown and hidden by state (1-2, 3, 4, 5-10, stale);
+  - why the decision said show in 3 / 4 (each failing input, with its count);
+  - the plates' patch and calls;
+  - how many Presents had a captured UI pass;
+  - the verdict: the first of these that matches:
+    - never patched;
+    - the site rewritten;
+    - states 3 / 4 never read fresh;
+    - the stub never called in 3 / 4 (the bar is drawn some other way);
+    - the decision said show;
+    - the decision said hide but the stub never skipped;
+    - the stub skipped (if the bar still showed, something other than 0x897240 draws it, or the panel showed an older UI
+      image).
+
+  F8's bar art line ends with the last verdict.
+- **The plates, under the same flag.** A second call-site patch at launch, after the bar's. The battle UI's code
+  0x89B360..0x89B411 is read, and the one E8 whose target is 0x8A1CE0 is pointed at a stub. That call must come after the
+  scissor packet's call (0x8FDEE0) and before the first sequence draw's (0x8AE2F0), in the port's order. Anything else (no
+  such call, two, another order) is left alone, with a log line. The battle UI drops 0x8A1CE0's eax: it passes 1 to the
+  sequence draw either way.
+- **The hide over the whole sequence.**
+  - States 1-2 (the intro; 0x897240 draws nothing there) hide when our bar is coming. The UI draw of the first state-3 frame
+    reads the flag that the Present before left, so it finds the flag set.
+  - States 5-10 (the result) stay hidden if the hide was on in states 3 / 4 of this window.
+  - The plates show only in the intro's first frame: that frame's draw reads a state-0 Present's flag.
+- **Not hidden: the btidu and bgood scenes, and the timer.** `TOSeqDraw` draws every running scene of set 2 in one call (the
+  battle's own windows too), so no call site is Tidus's alone. The timer stays by design.
+- **Opaque.** The backing covers the track's full height at full alpha; only the fade at the window's ends lowers it. Every
+  textured piece is drawn at alpha 1; the zone's glow and the pointers' halos keep the art's own soft edges. No re-cut needed.
+- **In front.** `od_bar_place` 0 is the new default; 1 puts the bar above the hand, as before. In front:
+  - the bar is `od_bar_dist` (0.6 m; 0.35-1.2) out along the head's yaw. The yaw is the forward's horizontal part, so a roll
+    leaves it alone;
+  - its pitch is followed only within 20 degrees down and 10 up, and `od_bar_height` (0; +-0.4 m) raises it;
+  - it follows in 0.5 s, as the hand anchor did, facing the eyes;
+  - it applies to Tidus's bar (art and plain) and to Lulu's countdown. Lulu's ring stays at the hand;
+  - the guard is judged at `od_bar_dist` (1.2 m grows the opening x1.7);
+  - "coming" no longer needs the right grip, since the head anchors the bar.
+
+  The settings are in F8 > Overdrives > Gestures, after the bar art's boxes. ABI 72: `ffxvr_odv_set(on, size, bar, dist,
+  height)`, where bar | 8 = above the hand. odv::In's default stays "above the hand", so with `od_bar_place=1` the plain visuals
+  are byte-identical to fadbc15's (the trace).
+
 ### Not verified (nobody here can run the game)
 
 1. Tidus's and Lulu's drawers' call sites, 0x89B416 and 0x89B41B, are inferred from the port's call order and the Bushido
@@ -6095,6 +6170,10 @@ own values.
    the plate looks right behind the bar.
 4. The zone's values at the edges (the plain bar used zone_lo..zone_hi as edges the same way).
 5. The pack's file names and sizes on the owner's PC (bar_art.py writes them; the mod refuses any other size).
+6. Why the hide did nothing in the owner's test of 2fd2be3: the round-4 window line answers it.
+7. The plates' call site: found by the scan, and refused unless it is exactly where the port puts it. Also unverified: that
+   skipping 0x8A1CE0 has no side effect (its port only draws).
+8. That what stays on the panel during a hidden Swordplay is only the btidu and bgood scenes and the timer.
 
 ## The F8 menu reorganised (vr-menu S1, branch `vr-menu`, 8 Nov 2026)
 

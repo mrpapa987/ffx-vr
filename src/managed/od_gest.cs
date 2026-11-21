@@ -66,12 +66,14 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _od_always_ready;     // F8 > Overdrives, session only (never saved): Btl.debug.always_available_overdrive in every battle
     private bool  _od_always_wrote;     // we set the flag in this battle (cleared at its end)
     private delegate* unmanaged[Cdecl]<int, float, float, int, void> _fn_odg_set;   // ABI 47
-    private delegate* unmanaged[Cdecl]<int, float, int, int> _fn_odv_set;            // ABI 49: the overdrive visuals; ABI 71: + the bar art's flags
+    private delegate* unmanaged[Cdecl]<int, float, int, float, float, int> _fn_odv_set;   // ABI 49: the overdrive visuals; ABI 71: + the bar art's flags; ABI 72: + od_bar_dist, od_bar_height
     private delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void> _fn_odt_set; // ABI 52: strike the targets; 53: + time; 54: + spread; 55: + art; 56: (pitch, distance, height, size, time, spread, art, badge)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odt_practice;                   // ABI 52: Practice targets (1 random, 2 the last Bushido)
     private bool  _od_visuals = true;    // ini od_visuals: what the hands do, drawn near them in the headset while a gesture overdrive's window is open
     private float _od_visual_size = 1f;  // ini od_visual_size (0.5-2)
     private bool  _od_bar_art = true, _od_bar_plate = false, _od_bar_hide2d = true;   // ini od_bar_art / od_bar_plate / od_bar_hide2d (od-bar-art, ABI 71)
+    private int   _od_bar_place = 0;                                                  // ini od_bar_place: 0 in front of you, 1 above your hand (as before) (round 4, ABI 72)
+    private float _od_bar_dist = 0.6f, _od_bar_height = 0f;                            // ini od_bar_dist (0.35-1.2 m), od_bar_height (-0.4-0.4 m): in front
     private int   _odb_patch_state;      // the Swordplay bar's call-site patch (ffxvr_odb_patch at launch: 1 patched, 2 off, < 0 not patched)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odb_patch;                       // ABI 71: the call-site patch at 0x89B416 (native, at init)
     private delegate* unmanaged[Cdecl]<int, byte*, int, int> _fn_odg_text;
@@ -80,7 +82,7 @@ public sealed unsafe partial class FFXVRModule {
     private void odg_bind(Func<string, nint> req) {
         _fn_odg_set = (delegate* unmanaged[Cdecl]<int, float, float, int, void>)req("ffxvr_odg_set");
         _fn_odg_text = (delegate* unmanaged[Cdecl]<int, byte*, int, int>)req("ffxvr_odg_text");
-        _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int, int>)req("ffxvr_odv_set");   // ABI 71 (+ bar)
+        _fn_odv_set = (delegate* unmanaged[Cdecl]<int, float, int, float, float, int>)req("ffxvr_odv_set");   // ABI 72 (+ bar, + dist, + height)
         _fn_odb_patch = (delegate* unmanaged[Cdecl]<int, int>)req("ffxvr_odb_patch");   // ABI 71
         _fn_odt_set = (delegate* unmanaged[Cdecl]<float, float, float, float, float, float, int, int, void>)req("ffxvr_odt_set");   // ABI 56 (+ time, + spread, + art, + badge)
         _fn_odt_hide2d = (delegate* unmanaged[Cdecl]<int>)req("ffxvr_odt_hide2d");   // ABI 56
@@ -203,6 +205,9 @@ public sealed unsafe partial class FFXVRModule {
             case "od_bar_art":      pb(k, v, ref _od_bar_art); return true;
             case "od_bar_plate":    pb(k, v, ref _od_bar_plate); return true;
             case "od_bar_hide2d":   pb(k, v, ref _od_bar_hide2d); return true;
+            case "od_bar_place":    pe(k, v, ref _od_bar_place, 0, 1); return true;
+            case "od_bar_dist":     pf(k, v, ref _od_bar_dist, 0.35f, 1.2f); return true;
+            case "od_bar_height":   pf(k, v, ref _od_bar_height, -0.4f, 0.4f); return true;
             default: return false;
         }
     }
@@ -230,14 +235,17 @@ public sealed unsafe partial class FFXVRModule {
             $"od_visual_size={_od_visual_size.ToString("0.0#", ci)}\n" +
             $"od_bar_art={(_od_bar_art ? 1 : 0)}\n" +
             $"od_bar_plate={(_od_bar_plate ? 1 : 0)}\n" +
-            $"od_bar_hide2d={(_od_bar_hide2d ? 1 : 0)}\n";
+            $"od_bar_hide2d={(_od_bar_hide2d ? 1 : 0)}\n" +
+            $"od_bar_place={_od_bar_place.ToString(ci)}\n" +
+            $"od_bar_dist={_od_bar_dist.ToString("0.0#", ci)}\n" +
+            $"od_bar_height={_od_bar_height.ToString("0.0#", ci)}\n";
     }
     /// <summary>Every frame from push_all: the settings; "overdrives always ready".</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
-        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size, (_od_bar_art ? 1 : 0) | (_od_bar_plate ? 2 : 0) | (_od_bar_hide2d ? 4 : 0));
+        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size, (_od_bar_art ? 1 : 0) | (_od_bar_plate ? 2 : 0) | (_od_bar_hide2d ? 4 : 0) | (_od_bar_place == 1 ? 8 : 0), _od_bar_dist, _od_bar_height);
         if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0, _od_tgt_badge ? 1 : 0);
         if (_fn_odt_row_stat != null) _odt_patch_state = _fn_odt_row_stat(_odt_row_install, _odt_row_calls, _odt_row_hidden, _odt_row_faults);   // section 15: the window line's row part
         odg_always_tick();
@@ -302,7 +310,14 @@ public sealed unsafe partial class FFXVRModule {
                  "Tidus's Swordplay bar drawn from the art pack in the mod folder's art\\odbar (the optional download ffxvr-target-art, AI-generated, or a pack of your own: docs/design-notes.md in the repository; not in the mod's zip), and a countdown bar for Lulu's Fury above her ring. Without the pack, or off, the plain bar as before (and no countdown).");
         ImGui.SameLine(); ui_check("od_bar_plate", "ornate base plate##odb", ref _od_bar_plate, UiTag.None, "With the bar art: the pack's ornate plate behind the bar.");
         ImGui.SameLine(); ui_check("od_bar_hide2d", "Hide the game's Swordplay bar##odb", ref _od_bar_hide2d, UiTag.NextLaunch,
-                 "While the bar art's Swordplay bar is up in the headset (and from just before the window opens), the game's own Swordplay bar is left out of the UI panel; the timer stays. Lulu's window stays (it shows Fury's hit count). Turning it on takes effect at the next launch (the patch is made at launch; while patched it follows this box at once).");
+                 "While the bar art's Swordplay bar is up in the headset (and from just before the window opens, until the window's result is over), the game's own Swordplay bar and the limit window's background plates are left out of the UI panel; the timer stays. Lulu's window stays (it shows Fury's hit count). Turning it on takes effect at the next launch (the patch is made at launch; while patched it follows this box at once).");
+        ImGui.Text("Swordplay / Fury bar:"); ImGui.SameLine();
+        ui_radio("od_bar_place", "in front of you##odbp", ref _od_bar_place, 0, UiTag.None, "Tidus's bar (and Lulu's countdown) straight out in front of your eyes, following your head slowly. Lulu's ring stays at your hand."); ImGui.SameLine();
+        ui_radio("od_bar_place", "above your hand (as before)##odbp", ref _od_bar_place, 1, UiTag.None, "16 cm above the right hand (Lulu's countdown above her ring), as before.");
+        if (_od_bar_place == 0) {
+            ImGui.SameLine(); ui_slider("od_bar_dist", "distance (m)##odbp", ref _od_bar_dist, 0.35f, 1.2f, "%.2f", UiTag.None, "How far in front of your eyes the bar is.", 120f);
+            ImGui.SameLine(); ui_slider("od_bar_height", "height (m)##odbp", ref _od_bar_height, -0.4f, 0.4f, "%.2f", UiTag.None, "Up (+) or down (-) from eye level.", 120f);
+        }
         ImGui.TextDisabled(esc(odg_text(7)));
         if (!_od_visuals) ImGui.EndDisabled();
         if (!_od_gestures) ImGui.EndDisabled();

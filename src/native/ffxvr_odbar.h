@@ -157,6 +157,20 @@ constexpr float k_min_deg = 0.9f, k_max_grow = 3.f;
 /// The distance the guard is judged at (review N8): a fixed arm's length, not the hand's distance now, so the bar's size never
 /// follows the hand (Tidus's 22 cm needs nothing there; Lulu's 16 cm countdown is drawn x1.13, as if 18 cm).
 constexpr float k_guard_dist = 0.6f;
+/// The bar's place (round 4, the owner: "it should really appear straight out in front of us"): ini od_bar_place 0 in front of
+/// you (the default), 1 above your hand (as before). In front: od_bar_dist metres out along the head's yaw (the default 0.6 m,
+/// the guard's own arm's length), its pitch followed only within k_front_down below and k_front_up above the horizon, raised by
+/// od_bar_height; the guard is then judged at that distance.
+constexpr float k_front_dmin = 0.35f, k_front_dmax = 1.2f, k_front_hmax = 0.4f;
+constexpr float k_front_down = 20.f * 0.0174532925f, k_front_up = 10.f * 0.0174532925f;
+inline float front_dist(float d) { return std::isfinite(d) ? (d < k_front_dmin ? k_front_dmin : d > k_front_dmax ? k_front_dmax : d) : k_guard_dist; }
+inline float front_height(float h) { return std::isfinite(h) ? (h < -k_front_hmax ? -k_front_hmax : h > k_front_hmax ? k_front_hmax : h) : 0.f; }
+/// The head's pitch (radians, up positive) from its forward's y, clamped to the front band.
+inline float front_pitch(float fw_y) {
+    const float y = std::isfinite(fw_y) ? (fw_y < -1.f ? -1.f : fw_y > 1.f ? 1.f : fw_y) : 0.f;
+    const float p = std::asin(y);
+    return p < -k_front_down ? -k_front_down : p > k_front_up ? k_front_up : p;
+}
 /// A factor >= 1 on the bar's width so its opening (hi metres tall at d metres from the eye) is at least k_min_deg tall
 /// (at most k_max_grow); 1 when it already is, or for odd inputs.
 inline float readable_scale(float hi, float d) {
@@ -175,17 +189,29 @@ inline float readable_scale(float hi, float d) {
 /// overdrive; then state 3 (the window pending; the game's state 3 lasts one logic frame) when our bar is coming (the visuals on,
 /// the art loaded, Tidus's swing gesture on, the right grip tracked); state 4 while our bar is up, and its first k_open_s while it is coming (review S1:
 /// the visuals are built before the gesture window opens in the same Present, so the first state-4 Presents have no art bar yet).
+/// Round 4: the same flag also skips the limit plates (TODrawLimitBG 0x8A1CE0, drawn by the battle UI whenever a limit word is
+/// non-zero). States 1 and 2 (the "btidu" intro scene; 0x897240 draws nothing there) hide too when our bar is coming, so the UI
+/// draw of the first state-3 frame, which reads the flag decided at the Present before, finds it set; states 5-10 (the result:
+/// the game's bar is gone, our bar fades) keep it while it was on in this window's state 3 or 4 (held), until Tidus's state
+/// returns to 0.
 struct HideIn {
     bool on = false, drawn = false, coming = false, opening = false;   // the setting; our art bar up now; coming; state 4 younger than k_open_s
     bool battle = false, fresh = false, gate = false, view = false;
     int auron = 0, lulu = 0, tidus = 0, wakka = 0;
+    bool held = false;   // the hide was on in this window's state 3 or 4 (Win::held)
 };
 inline bool hide_tidus(const HideIn& x) {
     if (!x.on || !x.battle || !x.fresh || !x.gate || !x.view || x.auron != 0 || x.lulu != 0 || x.wakka != 0) return false;
-    if (x.tidus == 3) return x.coming;
+    if (x.tidus >= 1 && x.tidus <= 3) return x.coming;
     if (x.tidus == 4) return x.drawn || (x.coming && x.opening);
+    if (x.tidus >= 5 && x.tidus <= 10) return x.held;
     return false;
 }
+/// The parts of HideIn's drawn and coming (round 4: the window line names the part that failed).
+struct Parts {
+    bool ready = false, wanted = false, window = false; uint32_t since = 0xFFFFFFFFu;   // drawn: art_bar_up's inputs
+    bool vis = false, cfg = false, grip = false;                                        // coming: the visuals on, Tidus's swing gesture on, the right grip tracked or the bar in front (and ready)
+};
 /// Our art bar of a Swordplay window is up at this Present (review B1): the art drawable, the visuals wanted now (odv_wanted:
 /// the headset's 3D view, not the virtual screen the slow-GPU guard forces), a Swordplay window open with its gestures injecting,
 /// and the art sink built at one of the last k_built_presents Presents (a 3D frame without the game's UI pass builds nothing).
@@ -202,5 +228,76 @@ struct Opening {
         return tidus == 4 && t - t4 >= 0.0 && t - t4 < k_open_s;
     }
 };
+inline bool part_drawn(const Parts& p) { return art_bar_up(p.ready, p.wanted, p.window, p.since); }
+inline bool part_coming(const Parts& p) { return p.vis && p.ready && p.cfg && p.grip; }
+
+// -- the window line (round 4: the owner saw the game's Swordplay UI exactly as without the mod) ---------------------------
+/// Why a Present in state 3 or 4 showed the game's bar: bits, named in k_why_name (the gates first, then drawn's and coming's parts).
+enum : uint32_t { W_OFF = 1u, W_BATTLE = 2u, W_FRESH = 4u, W_GATE = 8u, W_VIEW = 16u, W_OTHER = 32u, W_READY = 64u, W_WANTED = 128u,
+                  W_WINDOW = 256u, W_RECENT = 512u, W_VIS = 1024u, W_CFG = 2048u, W_GRIP = 4096u, W_LATE = 8192u };
+constexpr int k_why_n = 14;
+constexpr const char* k_why_name[k_why_n] = { "hide off", "no battle", "od block stale", "headset or VR pad not live", "not the 3D view",
+    "another overdrive", "art not loaded", "visuals not wanted", "no injecting Swordplay window", "art bar not built in 3 Presents",
+    "visuals off", "Swordplay gestures off", "right grip untracked (bar above the hand)", "past the 0.25 s opening" };
+/// The failing inputs of a show (0 when the decision hides, or outside states 3 and 4).
+inline uint32_t why_shown(const HideIn& x, const Parts& p) {
+    if (hide_tidus(x) || (x.tidus != 3 && x.tidus != 4)) return 0u;
+    uint32_t w = 0u;
+    if (!x.on) w |= W_OFF;
+    if (!x.battle) w |= W_BATTLE;
+    if (!x.fresh) w |= W_FRESH;
+    if (!x.gate) w |= W_GATE;
+    if (!x.view) w |= W_VIEW;
+    if (x.auron != 0 || x.lulu != 0 || x.wakka != 0) w |= W_OTHER;
+    if (w != 0u) return w;
+    uint32_t c = 0u;   // coming's failing parts
+    if (!p.vis) c |= W_VIS;
+    if (!p.ready) c |= W_READY;
+    if (!p.cfg) c |= W_CFG;
+    if (!p.grip) c |= W_GRIP;
+    if (x.tidus == 3) return c;
+    uint32_t d = 0u;   // drawn's
+    if (!p.ready) d |= W_READY;
+    if (!p.wanted) d |= W_WANTED;
+    if (!p.window) d |= W_WINDOW;
+    if (!(p.since <= k_built_presents)) d |= W_RECENT;
+    return d | (c != 0u ? c : (x.opening ? 0u : W_LATE));
+}
+/// One Swordplay window as the hide saw it, from Tidus's state leaving 0 to its return (render thread, one step a Present).
+/// Presents by state: [0] 1-2, [1] 3, [2] 4, [3] 5-10, each [shown, hidden]; the stub's counts are the glue's snapshots.
+struct Win {
+    bool open = false, held = false; double t0 = 0.0;
+    uint32_t pres[4][2] = {}, unread = 0, presents = 0, ui_pass = 0, why_n[k_why_n] = {};
+    uint32_t snap[6] = {};   // the glue's counters at the open (the stub's [3/4 through, 3/4 skipped, other through, other skipped], the plates' [calls, skipped])
+    /// Opens or closes: 1 opened (snapshot now), 2 closed (write the line), 0 neither. A stale read neither opens nor closes.
+    int step(bool battle, bool fresh, int tidus, double t) {
+        if (open && !battle) { open = false; return 2; }
+        if (!fresh) { if (open) { unread++; presents++; } return 0; }
+        const bool in = tidus >= 1 && tidus <= 10;
+        if (!open && battle && in) { *this = Win{}; open = true; t0 = t; return 1; }
+        if (open && !in) { open = false; return 2; }
+        return 0;
+    }
+    /// This Present's decision (after step, while open and fresh).
+    void note(int tidus, bool hidden, uint32_t why, bool ui) {
+        if (!open) return;
+        presents++; if (ui) ui_pass++;
+        const int b = tidus <= 2 ? 0 : tidus == 3 ? 1 : tidus == 4 ? 2 : 3;
+        pres[b][hidden ? 1 : 0]++;
+        if (hidden && (tidus == 3 || tidus == 4)) held = true;
+        for (int i = 0; i < k_why_n; ++i) if (why & (1u << i)) why_n[i]++;
+    }
+};
+/// The window's verdict (the four questions of the owner's test, in order). site: 1 the call still points at our stub, 0 rewritten
+/// by something else, -1 never patched.
+inline const char* verdict(int site, uint32_t calls34, uint32_t skipped34, uint32_t hidden34, uint32_t read34) {
+    if (site < 0) return "the call site was never patched: the game's bar stays (see the odb: patch line at launch)";
+    if (site == 0) return "the call site NO LONGER calls our stub (something rewrote it after launch): nothing of ours runs there";
+    if (read34 == 0) return "Tidus's states 3 and 4 were never read fresh at a Present: no decision was made";
+    if (calls34 == 0) return "the stub was NEVER called in Tidus's states 3 and 4: the battle UI did not reach 0x89B416 while the game's bar was up (it is drawn some other way)";
+    if (hidden34 == 0) return "the decision said SHOW at every Present of states 3 and 4 (the reasons above)";
+    if (skipped34 == 0) return "the decision said hide but the stub never skipped (the flag did not reach the game's thread in time)";
+    return "the stub skipped the game's bar: if it still showed, it is drawn by something other than 0x897240 (or the panel showed an older UI image)";
+}
 
 }  // namespace odb

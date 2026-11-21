@@ -136,12 +136,18 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
 - For the real thing, "Auron's Bushido:" is on "strike the targets" for a fresh install; "Overdrives always ready"
   lets you use an overdrive in any battle (while it is ticked the gauge is not spent, so a save made then keeps a full gauge).
 - Lulu's Fury: draw circles with a controller ("Lulu: circles for Fury"). With the optional art zip installed, a
-  countdown bar sits above the ring: does it run down with the game's timer, and can you read it?
-- Tidus's Swordplay: tick "Tidus: swing for Swordplay" first (it is off by default, and the bar near your hand exists only
-  with it). With the art zip, the bar above your right hand is the ornate one (golden zone, two pointers pinching the
-  cursor) and the game's own Swordplay bar is hidden while it is up ("Hide the game's Swordplay bar", on by default). Can
-  you time a swing by it? Untick the swing: the game's own bar must be back. F8 > Overdrives shows under "Overdrive bar art
-  (local pack)" whether the art loaded.
+  countdown bar sits in front of you (above the ring with "above your hand (as before)"): does it run down with the game's
+  timer, and can you read it?
+- Tidus's Swordplay: tick "Tidus: swing for Swordplay" first (it is off by default, and our bar exists only with it).
+  - The bar is straight out in front of you, at eye level, and follows your head slowly. F8 > Overdrives, "Swordplay /
+    Fury bar:", has "in front of you" and "above your hand (as before)", with the distance and the height.
+  - With the art zip, it is the ornate bar (golden zone, two pointers pinching the cursor). It should look solid: nothing
+    shows through it.
+  - The game's own Swordplay bar and its background plates are hidden from the intro to the result ("Hide the game's
+    Swordplay bar", on by default). Only the game's timer and its intro and result animations stay.
+  - Can you time a swing by it? Untick the swing: the game's own bar must be back.
+  - F8 > Overdrives shows, under "Overdrive bar art (local pack)", whether the art loaded and the last window's verdict.
+    Send the log's `odb:` lines (one per Swordplay).
 
 ### 8. Without the headset, and uninstalling (5 minutes)
 

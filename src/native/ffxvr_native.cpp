@@ -5537,7 +5537,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 71;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer); 71: ffxvr_odv_set(on, size, bar), + ffxvr_odb_patch, ffxvr_odg_text 7 (od-bar-art: the overdrive bar art from a local pack, the game's Swordplay bar's call-site patch)
+constexpr int FFXVR_ABI = 72;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer); 71: ffxvr_odv_set(on, size, bar), + ffxvr_odb_patch, ffxvr_odg_text 7 (od-bar-art: the overdrive bar art from a local pack, the game's Swordplay bar's call-site patch); 72: ffxvr_odv_set(on, size, bar, dist, height), bar | 8 = od_bar_place 1 (od-bar-art round 4: the bar straight out in front, od_bar_dist, od_bar_height)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6550,29 +6550,94 @@ static odb::Opening g_odb_open;         // render thread: the age of Tidus's sta
 static void odb_art_frame(bool wanted_now);   // (defined with the marker pass)
 static bool odb_art_ready();                  // (the same)
 static bool odv_wanted(); static double odv_now();   // (the same)
-static volatile LONG g_odb_hide2d = 0;  // the stub skips 0x897240 while 1 (published interlocked each Present)
+static volatile LONG g_odb_hide2d = 0;  // the stubs skip 0x897240 and 0x8A1CE0 while 1 (published interlocked each Present)
 static volatile LONG g_odb_patch_calls = 0, g_odb_patch_hidden = 0;
 static int g_odb_patch_state = 0;       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
 static uintptr_t g_odb_fn = 0;          // 0x897240 (rebased), the stub's call
+// Round 4 (the owner, 2fd2be3: the game's Swordplay UI showed exactly as without the mod): the stub counts its calls by the Tidus
+// word it reads itself ([3 or 4, other][called through, skipped]), each window's odb: line compares them with the Presents'
+// decisions and re-reads the call site. The limit plates (TODrawLimitBG 0x8A1CE0, the battle UI's call found by a byte scan at
+// launch) are skipped under the same flag.
+static volatile LONG g_odb_sc[2][2] = {};
+static const volatile int16_t* g_odb_word = nullptr;   // 0x133D734 (rebased: Tidus's state), set with the patch
+static uintptr_t g_odb_site = 0;                       // 0x89B416 (rebased) once patched
+static volatile LONG g_odb_bg_calls = 0, g_odb_bg_hidden = 0;
+static int g_odb_bg_state = 0;                         // the plates' patch: 0 not asked, 1 patched, -2 the call not found as expected, -3 VirtualProtect
+static uintptr_t g_odb_bg_fn = 0, g_odb_bg_site = 0;   // 0x8A1CE0 and its call site (rebased)
+static odb::Win g_odb_win;                             // render thread: this Swordplay window as the hide saw it (ffxvr_odbar.h)
+static float g_odb_dist = 0.6f, g_odb_height = 0.f;    // ffxvr_odv_set (ABI 72): od_bar_dist, od_bar_height (render thread)
+static char g_odb_verdict[200] = "no Swordplay window yet";
+static uint32_t g_odb_win_lines = 0;
 /// The patched call site's target (the game's main thread, from 0x89B416; cdecl, no arguments, as 0x897240, whose eax the battle
 /// UI drops).
 static void __cdecl odb_tidus_stub() {
     InterlockedIncrement(&g_odb_patch_calls);
-    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_patch_hidden); return; }
+    const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;   // (FFX.exe's own data: always mapped)
+    const int b = w == 3 || w == 4 ? 0 : 1;
+    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_patch_hidden); InterlockedIncrement(&g_odb_sc[b][1]); return; }
+    InterlockedIncrement(&g_odb_sc[b][0]);
     reinterpret_cast<void(__cdecl*)()>(g_odb_fn)();
 }
+/// The limit plates' patched call (the game's main thread, inside 0x89B360; cdecl, no arguments, as 0x8A1CE0, whose eax the battle
+/// UI drops: it passes 1 to the sequence draw after it either way).
+static uint32_t __cdecl odb_bg_stub() {
+    InterlockedIncrement(&g_odb_bg_calls);
+    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0)) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }
+    return reinterpret_cast<uint32_t(__cdecl*)()>(g_odb_bg_fn)();
+}
 /// The hide decision, each Present (od_gest_tick, after the driver: this Present's window), from this Present's facts only (review
-/// B1: ffxvr_odbar.h hide_tidus, art_bar_up). xr_tick (the visuals' build) runs before od_gest_tick, so a build of this Present
-/// counts (since 0).
-static LONG odb_hide_decide(const odg::FrameIn& in) {
+/// B1: ffxvr_odbar.h hide_tidus, art_bar_up); why: the failing inputs of a show in state 3 or 4 (round 4). xr_tick (the visuals'
+/// build) runs before od_gest_tick, so a build of this Present counts (since 0).
+static LONG odb_hide_decide(const odg::FrameIn& in, uint32_t* why) {
+    odb::Parts p; p.ready = odb_art_ready(); p.wanted = odv_wanted();
+    p.window = g_odg.open && g_odg.inject_now == odg::OD_TIDUS && g_odg.sess.od == odg::OD_TIDUS; p.since = g_frames - g_odb_built_frame;
+    p.vis = g_odv_on; p.cfg = g_odg.cfg.on && g_odg.cfg.tidus;
+    p.grip = in.valid[1] || (g_odb_flags & 8) == 0;   // (review N-R1: above the hand, its tracked grip is our bar's anchor; in front the head is)
     odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0;
-    const bool ready = odb_art_ready();
-    hi.drawn = odb::art_bar_up(ready, odv_wanted(), g_odg.open && g_odg.inject_now == odg::OD_TIDUS && g_odg.sess.od == odg::OD_TIDUS, g_frames - g_odb_built_frame);
-    hi.coming = g_odv_on && ready && g_odg.cfg.on && g_odg.cfg.tidus && in.valid[1];   // (review N-R1: the right grip tracked, or our bar gets no anchor)
+    hi.drawn = odb::part_drawn(p);
+    hi.coming = odb::part_coming(p);
     hi.opening = g_odb_open.step(in.r.ok ? in.r.tidus : 0, in.fresh && in.r.ok, odv_now());
     hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
     hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
+    hi.held = g_odb_win.held;
+    *why = odb::why_shown(hi, p);
     return odb::hide_tidus(hi) ? 1 : 0;
+}
+/// A patched call site now: 1 still a call of `stub`, 0 something else, -1 never patched.
+static int odb_site_now(uintptr_t site, uintptr_t stub) {
+    if (site == 0) return -1;
+    uint8_t b[5] = {};
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(site), b, 5)) return 0;
+    LONG rel = 0; memcpy(&rel, b + 1, 4);
+    return b[0] == 0xE8 && site + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) == stub ? 1 : 0;
+}
+/// The window's counters at its open (render thread).
+static void odb_win_snap() {
+    g_odb_win.snap[0] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][0], 0, 0)); g_odb_win.snap[1] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][1], 0, 0));
+    g_odb_win.snap[2] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][0], 0, 0)); g_odb_win.snap[3] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][1], 0, 0));
+    g_odb_win.snap[4] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)); g_odb_win.snap[5] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0));
+}
+/// The window's odb: line at its close (render thread; 60 a session): the call site, the stub's calls by Tidus's word, the Presents'
+/// decisions by state, why the decision said show, the plates, the UI pass, and the verdict (also F8's).
+static void odb_win_line(double t) {
+    const odb::Win& w = g_odb_win;
+    const uint32_t c34 = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][0], 0, 0)) - w.snap[0], k34 = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[0][1], 0, 0)) - w.snap[1];
+    const uint32_t co = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][0], 0, 0)) - w.snap[2], ko = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][1], 0, 0)) - w.snap[3];
+    const uint32_t bc = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)) - w.snap[4], bk = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0)) - w.snap[5];
+    const int site = odb_site_now(g_odb_site, reinterpret_cast<uintptr_t>(&odb_tidus_stub)), bsite = odb_site_now(g_odb_bg_site, reinterpret_cast<uintptr_t>(&odb_bg_stub));
+    const uint32_t hid34 = w.pres[1][1] + w.pres[2][1], read34 = w.pres[1][0] + w.pres[1][1] + w.pres[2][0] + w.pres[2][1];
+    snprintf(g_odb_verdict, sizeof(g_odb_verdict), "%s", odb::verdict(site, c34 + k34, k34, hid34, read34));
+    if (g_odb_win_lines >= 60) return;
+    char why[400] = ""; int k = 0;
+    for (int i = 0; i < odb::k_why_n; ++i) if (w.why_n[i]) k = odg::fmt_append(why, sizeof(why), k, "%s%s %u", k ? ", " : "", odb::k_why_name[i], w.why_n[i]);
+    if (k == 0) snprintf(why, sizeof(why), "none");
+    diag("odb: frame %u: Swordplay window %.1f s (Tidus's states 1-10): call site 0x89B416 %s | stub calls in states 3/4 %u (skipped %u), in other states %u (skipped %u) | "
+         "Presents shown/hidden: states 1-2 %u/%u, 3 %u/%u, 4 %u/%u, 5-10 %u/%u, stale %u | shown in 3/4 because: %s | limit plates: %s, calls %u (skipped %u) | "
+         "a UI pass captured in %u of %u Presents -> %s%s",
+         g_frames, t - w.t0, site > 0 ? "calls our stub" : site == 0 ? "REWRITTEN (no longer our stub)" : "not patched",
+         c34 + k34, k34, co + ko, ko, w.pres[0][0], w.pres[0][1], w.pres[1][0], w.pres[1][1], w.pres[2][0], w.pres[2][1], w.pres[3][0], w.pres[3][1], w.unread, why,
+         bsite > 0 ? "patched" : bsite == 0 ? "REWRITTEN" : "not patched", bc, bk, w.ui_pass, w.presents, g_odb_verdict,
+         ++g_odb_win_lines == 60 ? " (60 odb: window lines this session: no more)" : "");
 }
 static const char* odb_patch_name(int st) {
     switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
@@ -6764,9 +6829,13 @@ static void od_gest_tick() {
         const LONG hd = odt::hide_row(ri) ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd);
         const LONG st = in.fresh && in.r.ok ? in.r.auron : 0; if (g_odt_row_st != st) InterlockedExchange(&g_odt_row_st, st);   // the questions' bucket
     }
-    {   // od-bar-art: the game's Swordplay bar (its call-site patch): while our art bar is drawn, and from Tidus's state 3 when it is coming
+    {   // od-bar-art: the game's Swordplay bar and the limit plates (their call-site patches): while our art bar is drawn, from Tidus's state 3 when it is coming, through the result states while it was on (round 4)
         odb_art_frame(false);   // the F8 box (off: released) and F8's request to load
-        const LONG hd = odb_hide_decide(in); if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
+        const int ev = g_odb_win.step(in.battle, in.fresh && in.r.ok, in.r.tidus, in.t);   // (round 4: the window line)
+        if (ev == 1) odb_win_snap();
+        uint32_t why = 0; const LONG hd = odb_hide_decide(in, &why); if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
+        if (in.fresh && in.r.ok) g_odb_win.note(in.r.tidus, hd != 0, why, g_ui_last_frame_had_pass);
+        if (ev == 2) odb_win_line(in.t);
     }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
     for (int i = 0; i < to.nh; ++i) xr_haptic(to.hap[i].hand, to.hap[i].amp, to.hap[i].sec);
@@ -6925,12 +6994,50 @@ extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
 }
 /// Overdrive visuals (ABI 49): ini od_visuals (on) and od_visual_size (0.5-2), every frame from managed's push (render thread).
 /// ABI 71 (od-bar-art): bar, the bar art's flags: 1 od_bar_art (the local pack when present), 2 od_bar_plate, 4 od_bar_hide2d (the
-/// game's Swordplay bar hidden while ours is up; its patch is made at launch, ffxvr_odb_patch).
+/// game's Swordplay bar hidden while ours is up; its patch is made at launch, ffxvr_odb_patch). ABI 72 (round 4): bar 8 = od_bar_place
+/// 1 (above the hand, as before; 0 in front of the eyes), dist od_bar_dist (0.35-1.2 m), height od_bar_height (-0.4-0.4 m).
 /// Returns 1 while battle.dds is held (Lulu's spin count as digits; dots otherwise).
-extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size, int bar) {
+extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size, int bar, float dist, float height) {
     g_odv_on = on != 0; g_odv_size = std::isfinite(size) ? odg::clampf(size, 0.5f, 2.f) : 1.f;
-    const LONG b = static_cast<LONG>(bar & 7); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
+    const LONG b = static_cast<LONG>(bar & 15); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
+    g_odb_dist = odb::front_dist(dist); g_odb_height = odb::front_height(height);
     return g_c3_srv ? 1 : 0;
+}
+/// Round 4: the limit plates' call (TODrawLimitBG 0x8A1CE0) inside the battle UI 0x89B360, before the Bushido row's call at 0x89B411:
+/// exactly one E8 there whose target is 0x8A1CE0, after the scissor packet's call (0x8FDEE0) and before the first sequence draw's
+/// (0x8AE2F0), as ffx-rust's port orders them (draw_btl_window). Pointed at odb_bg_stub like 0x89B416 (the same moment and checks:
+/// ffxvr_odb_patch calls it after its own patch, the DLL pinned, the battle UI not alive). Anything else: not patched, logged.
+static int odb_patch_bg(uintptr_t base) {
+    const uintptr_t f0 = base + (0x89B360u - 0x400000u), fn = base + (0x8A1CE0u - 0x400000u);
+    const uintptr_t sc = base + (0x8FDEE0u - 0x400000u), sq = base + (0x8AE2F0u - 0x400000u);
+    uint8_t b[0x89B411u - 0x89B360u] = {};
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(f0), b, sizeof(b))) { diag("odb: limit plates call-site patch: the battle UI's code unreadable: not patched (the plates stay)"); return -2; }
+    int hits = 0, at = -1, i_sc = -1, i_sq = -1;
+    for (int i = 0; i + 5 <= static_cast<int>(sizeof(b)); ++i) {
+        if (b[i] != 0xE8) continue;
+        LONG rel = 0; memcpy(&rel, b + i + 1, 4);
+        const uintptr_t to = f0 + static_cast<uintptr_t>(i) + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel));
+        if (to == fn) { hits++; at = i; }
+        else if (to == sc && i_sc < 0) i_sc = i;
+        else if (to == sq && i_sq < 0) i_sq = i;
+    }
+    if (hits != 1 || i_sc < 0 || i_sq < 0 || !(i_sc < at && at < i_sq)) {
+        diag("odb: limit plates call-site patch: calls of 0x8A1CE0 in 0x89B360..0x89B411 %d (at +0x%X), the scissor's at +0x%X, the sequence draw's at +0x%X: not as expected, not patched (the plates stay)",
+             hits, static_cast<unsigned>(at), static_cast<unsigned>(i_sc), static_cast<unsigned>(i_sq));
+        return -2;
+    }
+    const uintptr_t site = f0 + static_cast<uintptr_t>(at);
+    DWORD old = 0;
+    if (!VirtualProtect(reinterpret_cast<void*>(site), 5, PAGE_EXECUTE_READWRITE, &old)) { diag("odb: limit plates call-site patch: VirtualProtect failed (%lu): not patched", GetLastError()); return -3; }
+    g_odb_bg_fn = fn;
+    const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odb_bg_stub) - (site + 5));
+    InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store
+    DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
+    FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
+    g_odb_bg_site = site;
+    diag("odb: limit plates call-site patch: 0x%08X (at 0x%08X; the battle UI's call of TODrawLimitBG 0x8A1CE0) now calls our stub, which skips it while the game's Swordplay bar is hidden",
+         static_cast<unsigned>(site - base + 0x400000u), static_cast<unsigned>(site));
+    return 1;
 }
 /// ABI 71 (od-bar-art; managed, at init, with od_bar_hide2d): on = 1 points the battle UI's call of 0x897240 (Tidus's Swordplay
 /// window, at 0x89B416) at odb_tidus_stub after checking its bytes, exactly as ffxvr_odt_row_patch does the Bushido row's at
@@ -6965,8 +7072,10 @@ extern "C" __declspec(dllexport) int ffxvr_odb_patch(int on) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store
     DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
-    g_odb_patch_state = 1;
+    g_odb_patch_state = 1; g_odb_site = site;
+    g_odb_word = reinterpret_cast<const volatile int16_t*>(base + (0x133D734u - 0x400000u));   // (round 4: the stub's own read of Tidus's state)
     diag("odb: Swordplay bar call-site patch: 0x89B416 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x897240 while our art bar is up", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    g_odb_bg_state = odb_patch_bg(base);   // round 4: the limit plates, under the same flag
     return 1;
 }
 /// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
@@ -7001,8 +7110,10 @@ extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n)
     else if (which == 6) k = snprintf(out, n, "%s", g_odt_art_why);   // ABI 55: the target art's status
     else if (which == 7) {   // ABI 71 (od-bar-art): the bar art's status (shown: the pack is loaded at the next Present) and the Swordplay bar's patch
         InterlockedExchange(&g_odb_req, 1);
-        k = snprintf(out, n, "%s; the game's Swordplay bar: %s, hidden %ld of %ld frames", g_odb_why, odb_patch_name(g_odb_patch_state),
-                     static_cast<long>(InterlockedCompareExchange(&g_odb_patch_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_patch_calls, 0, 0)));
+        k = snprintf(out, n, "%s; the game's Swordplay bar: %s, hidden %ld of %ld frames; the limit plates: %s, hidden %ld of %ld; the last window: %s", g_odb_why, odb_patch_name(g_odb_patch_state),
+                     static_cast<long>(InterlockedCompareExchange(&g_odb_patch_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_patch_calls, 0, 0)),
+                     g_odb_bg_state == 1 ? "patched" : g_odb_bg_state == 0 ? "not asked" : "not patched (see the log)",
+                     static_cast<long>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)), g_odb_verdict);
     }
     else if (which == 5) {
         out[0] = 0;
@@ -12110,6 +12221,7 @@ static void odv_build() {
     // od-bar-art: the pack is asked for at the first Swordplay or Fury window; the art bar while it is made and the shader is ready
     odb_art_frame(in.win == odg::OD_TIDUS || in.win == odg::OD_LULU);
     in.bar_art = odb_art_ready(); in.bar_plate = (g_odb_flags & 2) != 0;
+    in.bar_place = (g_odb_flags & 8) != 0 ? 1 : 0; in.bar_dist = g_odb_dist; in.bar_height = g_odb_height;   // (round 4: in front unless od_bar_place=1)
     if (g_od.timer_ok) { in.od_left = g_od.left; in.od_total = g_od.total; }   // Lulu's countdown: the game's shared timer
     odv::Out o; o.v = g_odv_raw; o.max = odv::k_max_verts;
     odv::Out oa; oa.v = g_odb_raw; oa.max = odv::k_bar_verts;

@@ -21,6 +21,8 @@
 // from the pack's pieces instead (the same place, opening 22 cm x size, the same zone, cursor and marks), and Lulu gets a
 // countdown bar above her ring (16 cm x size; the game's time left); both into a second sink (build's `art`), which the glue
 // draws with the targets' shader and the atlas. Without the art everything above is exactly as it was.
+// The bar's place (round 4, In::bar_place, ini od_bar_place): 0 (the glue's default) Tidus's bar, art or plain, and Lulu's
+// countdown out in front of the eyes at od_bar_dist along the head's yaw (+ od_bar_height), following in 0.5 s; 1 as above.
 #pragma once
 #include <cmath>
 #include <cstdint>
@@ -181,6 +183,8 @@ struct In {
     int cursor = 0, zone_lo = 0, zone_hi = 0, start = 0, blen = 0;
     // the bar art (ffxvr_odbar.h): drawn into build's `art` sink; with the ornate plate; Lulu's countdown (the shared timer)
     bool bar_art = false, bar_plate = false; float od_left = 0.f, od_total = 0.f;
+    // the bar's place (round 4; ffxvr_odbar.h front_*): 1 above the hand (this default keeps the plain visuals as they were), 0 in front
+    int bar_place = 1; float bar_dist = 0.6f, bar_height = 0.f;
     // Auron
     uint16_t seq[odg::k_seq_max] = {}; int seq_n = 0; int prog = 0; odg::AuronMap map = odg::k_auron_map;
 };
@@ -204,6 +208,15 @@ inline V3 head_yaw(const float* q) {
     V3 h = v3(fw.x, 0.f, fw.z) - v3(up.x, 0.f, up.z) * fw.y;
     if (!finite3(h) || len(h) < 1e-3f) return v3(0.f, 0.f, -1.f);
     return norm(h);
+}
+/// The bar's spot in front of the eyes (od_bar_place 0; ffxvr_odbar.h): front_dist out along the head's yaw (never its roll: the
+/// forward's horizontal part, which a roll leaves alone; head_yaw only within about 6 degrees of straight up or down), its pitch
+/// followed only within the front band, raised by front_height.
+inline V3 front_point(V3 eye, const float* head_q, float dist, float height) {
+    const V3 fw = qrot(head_q, v3(0.f, 0.f, -1.f)), fh = v3(fw.x, 0.f, fw.z);
+    const V3 yaw = finite3(fh) && len(fh) > 0.1f ? norm(fh) : head_yaw(head_q);
+    const float p = odb::front_pitch(fw.y), d = odb::front_dist(dist);
+    return eye + yaw * (d * std::cos(p)) + v3(0.f, d * std::sin(p) + odb::front_height(height), 0.f);
 }
 /// The Tidus bar's 0..1 position of a game value v (the bar spans [start, start + len]).
 inline float bar_x(int v, int start, int blen) { return blen > 0 ? clamp01(static_cast<float>(v - start) / static_cast<float>(blen)) : 0.f; }
@@ -316,9 +329,10 @@ struct Vis {
             const Col c = col(0.6f + 0.4f * hot, 0.9f + 0.1f * hot, 1.f, 0.85f * k);
             glow_line(o, p + f * 0.05f, p + f * (0.05f + 0.55f * S), 0.008f * S, c, fade(c, 0.6f), s.eye);
         }
-        // the bar: 16 cm above the right hand, following it slowly (0.5 s), facing the eye
-        if (hd.ok && live) {
-            const V3 want = hd.p + v3(0.f, 0.16f * S, 0.f);
+        // the bar: 16 cm above the right hand (od_bar_place 1), or out in front of the eyes (0), following slowly (0.5 s), facing the eye
+        const bool front = s.bar_place == 0;
+        if ((hd.ok || front) && live) {
+            const V3 want = front ? front_point(s.eye, s.head_q, s.bar_dist, s.bar_height) : hd.p + v3(0.f, 0.16f * S, 0.f);
             if (!bar_have) { bar_anchor = want; bar_have = true; }
             else { const float a = static_cast<float>(1.0 - std::exp(-(s.t - bar_t > 0.0 ? s.t - bar_t : 0.0) / 0.5)); bar_anchor = bar_anchor + (want - bar_anchor) * a; }
             bar_t = s.t;
@@ -356,19 +370,19 @@ struct Vis {
         for (int i = 0; i < n; ++i) tex_rect(o, c, R, U, sg[i].x0, y0, sg[i].x1, y1, piece, sg[i].p0, sg[i].p1, k, add);
     }
     /// The bar art (ffxvr_odbar.h): a bar whose opening is W wide (grown by the readable-size guard only when it would show under
-    /// 0.9 degrees at arm's length) at c on the plane (R, U), into `a`, drawn by the glue with the targets' shader and the atlas in slot 1. From
-    /// the back: the ornate plate (In::bar_plate), a dark backing in the opening (the sheet's black, so the light pieces look as
-    /// drawn), the empty track; Tidus: the golden zone over the game's zone (blended as a light piece: drawn additively it washed
+    /// 0.9 degrees at arm's length, or at od_bar_dist in front) at c on the plane (R, U), into `a`, drawn by the glue with the targets' shader and the atlas in slot 1. From
+    /// the back: the ornate plate (In::bar_plate), an opaque dark backing over the track's height (the sheet's black, so the light
+    /// pieces look as drawn and nothing behind shows through the track; round 4), the empty track; Tidus: the golden zone over the game's zone (blended as a light piece: drawn additively it washed
     /// out to white over the track in the mock-up), the frame, the cursor's pinch pair and the
     /// swing marks (plain colour, as before); Lulu: the lit track over the time left, then the frame. k: the fade.
     void draw_bar_art(Out& a, V3 c, V3 R, V3 U, float W, const In& s, float k, bool tidus) const {
         odb::Layout L = odb::layout(W);
-        const float g = odb::readable_scale(L.hi, odb::k_guard_dist);   // (review N8: at a fixed arm's length, so the size never pumps with the hand)
+        const float g = odb::readable_scale(L.hi, s.bar_place == 0 ? odb::front_dist(s.bar_dist) : odb::k_guard_dist);   // (review N8: at a fixed arm's length, so the size never pumps with the hand; in front: that distance)
         if (g > 1.f) L = odb::layout(W * g);
         if (!(L.W > 0.f)) return;
         const Col wk = col(1.f, 1.f, 1.f, k);
         if (s.bar_plate) tex_rect(a, c, R, U, -0.5f * L.pw, L.pcy - 0.5f * L.ph, 0.5f * L.pw, L.pcy + 0.5f * L.ph, odb::P_PLATE, 0.f, static_cast<float>(odb::cell(odb::P_PLATE).w), wk, false);
-        rect(a, c, R, U, -0.5f * L.W, -0.5f * L.hi, 0.5f * L.W, 0.5f * L.hi, col(0.01f, 0.015f, 0.03f, 0.9f * k));
+        rect(a, c, R, U, -0.5f * L.W, -0.5f * L.th, 0.5f * L.W, 0.5f * L.th, col(0.01f, 0.015f, 0.03f, k));   // (round 4: opaque, the track's height: nothing behind shows through)
         odb::Seg sg[5];
         int n = odb::empty_segs(L, sg);
         tex_segs(a, c, R, U, sg, n, -0.5f * L.th, 0.5f * L.th, odb::P_EMPTY, tidus ? wk : col(0.6f, 0.6f, 0.6f, k), false);   // (Lulu: dimmed, so the time left stands out)
@@ -399,9 +413,10 @@ struct Vis {
         const bool ring = s.ring_ok && finite3(s.c) && len(s.n) >= 0.5f;
         const float W = 0.16f * S;
         const odb::Layout L = odb::layout(W);
-        if (live && (ring || s.hand[h].ok)) {
+        const bool front = s.bar_place == 0;   // (round 4: in front of the eyes, as Tidus's; the ring stays where it is)
+        if (live && (front || ring || s.hand[h].ok)) {
             const float r = odg::clampf(s.radius, 0.04f, 0.3f);
-            const V3 want = ring ? s.c + v3(0.f, r + 0.03f * S + 0.5f * L.fh, 0.f) : s.hand[h].p + v3(0.f, 0.16f * S, 0.f);
+            const V3 want = front ? front_point(s.eye, s.head_q, s.bar_dist, s.bar_height) : ring ? s.c + v3(0.f, r + 0.03f * S + 0.5f * L.fh, 0.f) : s.hand[h].p + v3(0.f, 0.16f * S, 0.f);
             if (!bar_have) { bar_anchor = want; bar_have = true; }
             else { const float al = static_cast<float>(1.0 - std::exp(-(s.t - bar_t > 0.0 ? s.t - bar_t : 0.0) / 0.5)); bar_anchor = bar_anchor + (want - bar_anchor) * al; }
             bar_t = s.t;
