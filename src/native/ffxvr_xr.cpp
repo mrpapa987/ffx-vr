@@ -1062,6 +1062,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         else if (o_src && g_held.have_bar && g_held.bar_age < k_hold_max && g_eye[k_bar_sc].ever_released) {   // R8b: its own wait timed out
             have_bar = true; obq = g_held.obq; g_held.bar_age++; g_held_quads++;
         }
+        if (ui == nullptr || ui->otex == nullptr) g_held.have_bar = false;   // (od-bar-art round 6, review N-F2: a frame without the bar ends its hold: never an earlier window's image)
         XrCompositionLayerQuad imq = { XR_TYPE_COMPOSITION_LAYER_QUAD };
         bool have_imgui = false;
         const bool im_src = base && ui != nullptr && ui->tex2 != nullptr;   // the ImGui image exists whenever the overlay draws (no-image frames included)

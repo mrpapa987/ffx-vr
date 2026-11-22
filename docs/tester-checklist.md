@@ -145,10 +145,14 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
   - With the art zip, it is the ornate bar (golden zone, two pointers pinching the cursor). It should look solid: nothing
     shows through it.
   - The game's own Swordplay bar and its background plates are hidden from the intro to the result ("Hide the game's
-    Swordplay bar", on by default). Only the game's timer and its intro and result animations stay.
+    Swordplay bar", on by default). Once the intro has played, its frame scene goes too ("and the window's frame scene").
+    Only the game's timer and the intro and result animations stay.
+  - Auron's Bushido with "strike the targets": the game's Bushido row and, after the intro, its frame scene are hidden
+    ("Hide the game's Bushido row").
   - Can you time a swing by it? Untick the swing: the game's own bar must be back.
   - F8 > Overdrives shows, under "Overdrive bar art (local pack)", whether the art loaded and the last window's verdict.
-    Send the log's `odb:` lines (one per Swordplay).
+    Send the log's `odb:` lines (one per Swordplay) and `odt:` lines (one per Bushido), with the launch lines
+    starting `odb:` and `odt:`.
 
 ### 8. Without the headset, and uninstalling (5 minutes)
 

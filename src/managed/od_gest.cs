@@ -74,6 +74,7 @@ public sealed unsafe partial class FFXVRModule {
     private bool  _od_bar_art = true, _od_bar_plate = false, _od_bar_hide2d = true;   // ini od_bar_art / od_bar_plate / od_bar_hide2d (od-bar-art, ABI 71)
     private int   _od_bar_place = 0;                                                  // ini od_bar_place: 0 in front of you, 1 above your hand (as before) (round 4, ABI 72)
     private float _od_bar_dist = 0.6f, _od_bar_height = 0f;                            // ini od_bar_dist (0.35-1.2 m), od_bar_height (-0.4-0.4 m): in front
+    private bool  _od_hide2d_scenes = true;                                            // ini od_hide2d_scenes: the held window scenes (btidu, bauro / bauro2) left out too (round 6)
     private bool  _od_bar_layer = true, _od_bar_force_hide = false;                    // ini od_bar_layer (the bar in front on its own layer over the UI panel), od_bar_force_hide (Developer test) (round 5)
     private int   _odb_patch_state;      // the Swordplay bar's call-site patch (ffxvr_odb_patch at launch: 1 patched, 2 off, < 0 not patched)
     private delegate* unmanaged[Cdecl]<int, int> _fn_odb_patch;                       // ABI 71: the call-site patch at 0x89B416 (native, at init)
@@ -210,6 +211,7 @@ public sealed unsafe partial class FFXVRModule {
             case "od_bar_dist":     pf(k, v, ref _od_bar_dist, 0.35f, 1.2f); return true;
             case "od_bar_height":   pf(k, v, ref _od_bar_height, -0.4f, 0.4f); return true;
             case "od_bar_layer":    pb(k, v, ref _od_bar_layer); return true;
+            case "od_hide2d_scenes": pb(k, v, ref _od_hide2d_scenes); return true;
             case "od_bar_force_hide": pb(k, v, ref _od_bar_force_hide); return true;
             default: return false;
         }
@@ -243,21 +245,22 @@ public sealed unsafe partial class FFXVRModule {
             $"od_bar_dist={_od_bar_dist.ToString("0.0#", ci)}\n" +
             $"od_bar_height={_od_bar_height.ToString("0.0#", ci)}\n" +
             $"od_bar_layer={(_od_bar_layer ? 1 : 0)}\n" +
+            $"od_hide2d_scenes={(_od_hide2d_scenes ? 1 : 0)}\n" +
             $"od_bar_force_hide={(_od_bar_force_hide ? 1 : 0)}\n";
     }
     /// <summary>F8 > Developer > Inspect (od-bar-art round 5): the overdrive bar's own layer and the Swordplay hide's test switch.</summary>
     private void odb_dev_ui() {
         ui_check("od_bar_layer", "Overdrive bar in front on its own layer##odbd", ref _od_bar_layer, UiTag.Dev,
                  "On: with the bar in front of you, Tidus's bar and Lulu's countdown are their own layer in the headset, over the game's UI panel (which would otherwise draw over them). Off: drawn into the 3D image as in the round-4 build.");
-        ui_check("od_bar_force_hide", "Force-hide the game's Swordplay bar in Tidus's states 3-4 (test)##odbd", ref _od_bar_force_hide, UiTag.Dev,
-                 "A test: the game's Swordplay bar and its plates are skipped whenever Tidus's state is 3 or 4, whatever the hide decides (needs \"Hide the game's Swordplay bar\" on at launch: the patch). If the game's bar still shows with this on, 0x897240 is not what draws it. The window's odb: line says FORCED HIDE.");
+        ui_check("od_bar_force_hide", "Force-hide the game's Swordplay bar and Bushido row in states 3-4 (test)##odbd", ref _od_bar_force_hide, UiTag.Dev,
+                 "A test: the game's Swordplay bar, its plates and Auron's Bushido row (and their window scenes) are skipped whenever that character's state is 3 or 4, whatever the hide decides (needs \"Hide the game's Swordplay bar\" / od_targets_hide2d on at launch: the patches). If the game's UI still shows with this on, these drawers are not what draws it. The window's odb: / odt: line says FORCED HIDE.");
     }
     /// <summary>Every frame from push_all: the settings; "overdrives always ready".</summary>
     private void odg_push() {
         if (_fn_odg_set != null)
             _fn_odg_set((_od_gestures ? 1 : 0) | (_od_gest_lulu ? 2 : 0) | (_od_gest_auron != 0 ? 4 : 0) | (_od_gest_tidus ? 8 : 0) | (_od_gest_haptics ? 16 : 0) | (_od_gest_auron == 2 ? 32 : 0),
                         _od_circle_cm, _od_slash_speed, _od_lulu_stick);
-        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size, (_od_bar_art ? 1 : 0) | (_od_bar_plate ? 2 : 0) | (_od_bar_hide2d ? 4 : 0) | (_od_bar_place == 1 ? 8 : 0) | (_od_bar_layer ? 0 : 16) | (_od_bar_force_hide ? 32 : 0), _od_bar_dist, _od_bar_height);
+        if (_fn_odv_set != null) _fn_odv_set(_od_visuals ? 1 : 0, _od_visual_size, (_od_bar_art ? 1 : 0) | (_od_bar_plate ? 2 : 0) | (_od_bar_hide2d ? 4 : 0) | (_od_bar_place == 1 ? 8 : 0) | (_od_bar_layer ? 0 : 16) | (_od_bar_force_hide ? 32 : 0) | (_od_hide2d_scenes ? 0 : 64), _od_bar_dist, _od_bar_height);
         if (_fn_odt_set != null) _fn_odt_set(_od_tgt_pitch, _od_tgt_dist, _od_tgt_height, _od_tgt_size, _od_tgt_time, _od_tgt_spread, _od_tgt_art ? 1 : 0, _od_tgt_badge ? 1 : 0);
         if (_fn_odt_row_stat != null) _odt_patch_state = _fn_odt_row_stat(_odt_row_install, _odt_row_calls, _odt_row_hidden, _odt_row_faults);   // section 15: the window line's row part
         odg_always_tick();
@@ -282,8 +285,8 @@ public sealed unsafe partial class FFXVRModule {
     }
     private string odg_text(int which) {
         if (_fn_odg_text == null) return "";
-        byte* b = stackalloc byte[768];
-        int n = _fn_odg_text(which, b, 768);
+        byte* b = stackalloc byte[1536];   // (od-bar-art round 6: text 7 carries two window verdicts)
+        int n = _fn_odg_text(which, b, 1536);
         if (n <= 0) return "";
         return (which == 6 || which == 7 ? Marshal.PtrToStringUTF8((nint)b) : Marshal.PtrToStringAnsi((nint)b)) ?? "";   // 6 / 7 carry a folder, written as UTF-8 (review N6)
     }
@@ -322,7 +325,9 @@ public sealed unsafe partial class FFXVRModule {
                  "Tidus's Swordplay bar drawn from the art pack in the mod folder's art\\odbar (the optional download ffxvr-target-art, AI-generated, or a pack of your own: docs/design-notes.md in the repository; not in the mod's zip), and a countdown bar for Lulu's Fury. Without the pack, or off, the plain bar (where \"Swordplay / Fury bar\" below puts it) and no countdown.");
         ImGui.SameLine(); ui_check("od_bar_plate", "ornate base plate##odb", ref _od_bar_plate, UiTag.None, "With the bar art: the pack's ornate plate behind the bar.");
         ImGui.SameLine(); ui_check("od_bar_hide2d", "Hide the game's Swordplay bar##odb", ref _od_bar_hide2d, UiTag.NextLaunch,
-                 "While the bar art's Swordplay bar is up in the headset (and from just before the window opens, until the window's result is over), the game's own Swordplay bar and the limit window's background plates are left out of the UI panel; the timer stays. Lulu's window stays (it shows Fury's hit count). Turning it on takes effect at the next launch (the patch is made at launch; while patched it follows this box at once).");
+                 "In the headset's 3D view, with Tidus's swing on and our bar placeable (in front, or above a tracked right hand), the game's own Swordplay bar and the limit window's background plates are left out of the UI panel for the whole Swordplay window; the timer stays. Lulu's window stays (it shows Fury's hit count). Turning it on takes effect at the next launch (the patch is made at launch; while patched it follows this box at once).");
+        ImGui.SameLine(); ui_check("od_hide2d_scenes", "and the window's frame scene##odb", ref _od_hide2d_scenes, UiTag.None,
+                 "With the game's Swordplay bar (or Auron's Bushido row, with \"strike the targets\") hidden: the window's held frame scene (the game's \"btidu\", \"bauro\" / \"bauro2\") is left out too, from the moment its intro has played. Only those scenes; the battle's own windows stay.");
         ImGui.Text("Swordplay / Fury bar:"); ImGui.SameLine();
         ui_radio("od_bar_place", "in front of you##odbp", ref _od_bar_place, 0, UiTag.None, "Tidus's bar (and Lulu's countdown) straight out in front of your eyes, following your head slowly, drawn over the game's UI panel. Lulu's ring stays at your hand."); ImGui.SameLine();
         ui_radio("od_bar_place", "above your hand (as before)##odbp", ref _od_bar_place, 1, UiTag.None, "16 cm above the right hand (Lulu's countdown above her ring), as before.");

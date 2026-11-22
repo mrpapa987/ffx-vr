@@ -6497,6 +6497,13 @@ static volatile LONG g_odt_row_m[4] = {};               // managed (ffxvr_odt_ro
 static volatile LONG g_odt_patch_calls = 0, g_odt_patch_hidden = 0;
 static int g_odt_patch_state = 0;                       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
 static uintptr_t g_odt_row_fn = 0;   // 0x892740 (rebased), the stub's call
+// od-bar-art round 6 (the owner: no hide ever worked; the root-cause report's fix 1): the row's stub decides by its own read of
+// Auron's state (0x133D6F4) and the "enabled" flag the render thread publishes from settled facts (odb::Gate, odt_gate_row); the
+// Developer switch od_bar_force_hide skips it in Auron's states 3-4 too. Counted by that word ([3 or 4, other][through, skipped]).
+static volatile LONG g_odt_enable = 0, g_odb_force = 0;
+static const volatile int16_t* g_odt_word = nullptr;   // 0x133D6F4 (rebased: Auron's state), set with the row's patch
+static uintptr_t g_odt_site = 0;                       // 0x89B411 (rebased) once patched
+static volatile LONG g_odt_sc[2][2] = {};
 static int odt_row_ask(int who) {   // who: 0 the stub, 1 the detour (ffxvr_odt_hide2d)
     const LONG h = InterlockedCompareExchange(&g_odt_hide2d, 0, 0);
     const LONG st = g_odt_row_st;
@@ -6506,7 +6513,11 @@ static int odt_row_ask(int who) {   // who: 0 the stub, 1 the detour (ffxvr_odt_
 /// The patched call site's target (the game's main thread, from 0x89B411; cdecl void(), as 0x892740).
 static void __cdecl odt_row_stub() {
     InterlockedIncrement(&g_odt_patch_calls);
-    if (odt_row_ask(0)) { InterlockedIncrement(&g_odt_patch_hidden); return; }
+    const int16_t w = g_odt_word != nullptr ? *g_odt_word : 0;   // (FFX.exe's own data: always mapped)
+    const int b = w == 3 || w == 4 ? 0 : 1;
+    const bool own = odb::stub_hides(InterlockedCompareExchange(&g_odt_enable, 0, 0) != 0, w) || (b == 0 && InterlockedCompareExchange(&g_odb_force, 0, 0) != 0);   // (round 6)
+    if (odt_row_ask(0) || own) { InterlockedIncrement(&g_odt_patch_hidden); InterlockedIncrement(&g_odt_sc[b][1]); return; }
+    InterlockedIncrement(&g_odt_sc[b][0]);
     reinterpret_cast<void(__cdecl*)()>(g_odt_row_fn)();
 }
 static const char* odt_row_hook_name(LONG st) {
@@ -6546,16 +6557,15 @@ static odv::Vis g_odv; static bool g_odv_on = true; static float g_odv_size = 1.
 // at the first Swordplay or Fury window drawn, or when F8 > Overdrives shows its line (ffxvr_odg_text 7 asks). ffxvr_odv_set's
 // flags: 1 od_bar_art, 2 od_bar_plate, 4 od_bar_hide2d. The game's Swordplay window (0x897240, called by the battle UI at
 // 0x89B416, right after the Bushido row's call at 0x89B411) is skipped through a call-site patch of the same kind as the
-// row's (ffxvr_odb_patch, at launch with od_bar_hide2d) while odb::hide_tidus says so (decided each Present in od_gest_tick).
+// row's (ffxvr_odb_patch, at launch with od_bar_hide2d) in Tidus's states 1-10 while our bar is enabled (round 6: odb::stub_hides;
+// the enable published each Present in od_gest_tick from odb_gate_tidus).
 static volatile LONG g_odb_flags = 1;   // ffxvr_odv_set's bar flags (render thread writes; the F8 line reads)
 static volatile LONG g_odb_req = 0;     // F8 showed the line: load the pack at the next Present (render thread)
 static char g_odb_why[320] = "bar art: not loaded yet (it loads at the first Swordplay or Fury window, or when this line is shown)";
-static uint32_t g_odb_built_frame = 0x80000000u;   // render thread: the Present (g_frames) that last built a Swordplay window's art bar (review B1: only a recency, never a remembered "drawn")
-static odb::Opening g_odb_open;         // render thread: the age of Tidus's state 4 (review S1)
 static void odb_art_frame(bool wanted_now);   // (defined with the marker pass)
 static bool odb_art_ready();                  // (the same)
 static bool odv_wanted(); static double odv_now();   // (the same)
-static volatile LONG g_odb_hide2d = 0;  // the stubs skip 0x897240 and 0x8A1CE0 while 1 (published interlocked each Present)
+static volatile LONG g_odb_enable = 0;  // round 6: our Swordplay bar is enabled (odb::Gate, published each Present): the stubs then skip 0x897240 and 0x8A1CE0 while Tidus's state, their own read, is 1-10
 static volatile LONG g_odb_patch_calls = 0, g_odb_patch_hidden = 0;
 static int g_odb_patch_state = 0;       // 0 not asked, 1 patched, 2 off (ini), -1 FFX.exe, -2 the bytes differ, -3 VirtualProtect, -4 a battle is on, -5 the DLL could not be pinned
 static uintptr_t g_odb_fn = 0;          // 0x897240 (rebased), the stub's call
@@ -6571,10 +6581,18 @@ static int g_odb_bg_state = 0;                         // the plates' patch: 0 n
 static uintptr_t g_odb_bg_fn = 0, g_odb_bg_site = 0;   // 0x8A1CE0 and its call site (rebased)
 static odb::Win g_odb_win;                             // render thread: this Swordplay window as the hide saw it (ffxvr_odbar.h)
 static float g_odb_dist = 0.6f, g_odb_height = 0.f;    // ffxvr_odv_set (ABI 72): od_bar_dist, od_bar_height (render thread)
-// Round 5 (review S-T3, N-T2): the Developer switch od_bar_force_hide (ffxvr_odv_set flag 32): the stubs skip in Tidus's states 3-4
-// by their own read of his state, whatever the decision; the plates have their own flag (only while one of our bars is up).
-static volatile LONG g_odb_force = 0, g_odb_hidebg = 0;
-static uint32_t g_odb_any_frame = 0x80000000u;         // render thread: the Present that last built a bar of ours (art or the layer), any window, its fade included
+// Round 5 (review S-T3): the Developer switch od_bar_force_hide (ffxvr_odv_set flag 32, g_odb_force above): the stubs skip in the
+// states 3-4 their own read of the state gives, whatever the decision.
+// Round 6 (case B of the root-cause report): the held window scenes ("btidu"; "bauro", "bauro2") left out of the battle UI's
+// scene draws (TOSeqDraw 0x8AE2F0, called at 0x89B3C3 for layer 0 and 0x89B513 for layer 1) from the window's state 3 on, while
+// the character's hide is enabled: for that one call the slot's state (g_TOSeqSlots 0x1865F20, set 2) reads 0, then it is put
+// back. Nothing moves and nothing stays changed. od_hide2d_scenes (ffxvr_odv_set flag 64 = off).
+static volatile LONG g_odb_scene_on = 1, g_odb_seq_calls = 0, g_odb_seq_hid[2] = {};   // [Tidus's btidu, Auron's bauro / bauro2]: draws with the scene left out
+static uintptr_t g_odb_seq_fn = 0, g_odb_slots = 0, g_odb_seq_site[2] = {};          // TOSeqDraw, g_TOSeqSlots, the two call sites (rebased)
+static int g_odb_seq_state = 0;                       // 0 not asked, 1 patched, -2 the bytes differ (nothing patched), -3 VirtualProtect
+static int g_odb_entry_state = 0;                     // round 6 (case C): 0x89B360's entry at launch: 1 as expected, -1 not (something replaces it), 0 not read
+static odb::Win g_odt_win;                            // render thread: this Bushido window (Auron's states 1-10)
+static char g_odt_verdict[200] = "no Bushido window yet";
 static uint32_t g_odb_lay_frame = 0x80000000u;         // render thread: the Present that last drew the bar's own layer (round 5, review S-T2)
 static char g_odb_verdict[200] = "no Swordplay window yet";
 static uint32_t g_odb_win_lines = 0;
@@ -6584,7 +6602,7 @@ static void __cdecl odb_tidus_stub() {
     InterlockedIncrement(&g_odb_patch_calls);
     const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;   // (FFX.exe's own data: always mapped)
     const int b = w == 3 || w == 4 ? 0 : 1;
-    if (InterlockedCompareExchange(&g_odb_hide2d, 0, 0) || (b == 0 && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_patch_hidden); InterlockedIncrement(&g_odb_sc[b][1]); return; }   // (round 5: or forced in 3-4)
+    if (odb::stub_hides(InterlockedCompareExchange(&g_odb_enable, 0, 0) != 0, w) || (b == 0 && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_patch_hidden); InterlockedIncrement(&g_odb_sc[b][1]); return; }   // (round 6: enabled and states 1-10; or forced in 3-4)
     InterlockedIncrement(&g_odb_sc[b][0]);
     reinterpret_cast<void(__cdecl*)()>(g_odb_fn)();
 }
@@ -6593,26 +6611,55 @@ static void __cdecl odb_tidus_stub() {
 static uint32_t __cdecl odb_bg_stub() {
     InterlockedIncrement(&g_odb_bg_calls);
     const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;
-    if (InterlockedCompareExchange(&g_odb_hidebg, 0, 0) || ((w == 3 || w == 4) && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }   // (round 5: its own flag, or forced in 3-4)
+    if (odb::stub_hides(InterlockedCompareExchange(&g_odb_enable, 0, 0) != 0, w) || ((w == 3 || w == 4) && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }   // (round 6: as the bar)
     return reinterpret_cast<uint32_t(__cdecl*)()>(g_odb_bg_fn)();
 }
-/// The hide decision, each Present (od_gest_tick, after the driver: this Present's window), from this Present's facts only (review
-/// B1: ffxvr_odbar.h hide_tidus, art_bar_up); why: the failing inputs of a show in state 3 or 4 (round 4). xr_tick (the visuals'
-/// build) runs before od_gest_tick, so a build of this Present counts (since 0).
-static LONG odb_hide_decide(const odg::FrameIn& in, uint32_t* why) {
-    odb::Parts p; p.ready = odb_art_ready(); p.wanted = odv_wanted();
-    p.window = g_odg.open && g_odg.inject_now == odg::OD_TIDUS && g_odg.sess.od == odg::OD_TIDUS; p.since = g_frames - g_odb_built_frame;
-    p.vis = g_odv_on; p.cfg = g_odg.cfg.on && g_odg.cfg.tidus;
-    p.grip = in.valid[1] || (g_odb_flags & 8) == 0;   // (review N-R1: above the hand, its tracked grip is our bar's anchor; in front the head is)
-    odb::HideIn hi; hi.on = (g_odb_flags & 4) != 0;
-    hi.drawn = odb::part_drawn(p);
-    hi.coming = odb::part_coming(p);
-    hi.opening = g_odb_open.step(in.r.ok ? in.r.tidus : 0, in.fresh && in.r.ok, odv_now());
-    hi.battle = in.battle; hi.fresh = in.fresh && in.r.ok; hi.gate = in.headset && in.vrpad; hi.view = odt_view();
-    hi.auron = in.r.auron; hi.lulu = in.r.lulu; hi.tidus = in.r.tidus; hi.wakka = in.r.wakka;
-    hi.held = g_odb_win.held;
-    *why = odb::why_shown(hi, p);
-    return odb::hide_tidus(hi) ? 1 : 0;
+/// Round 6: the battle UI's scene draws (the game's main thread, from 0x89B3C3 and 0x89B513; cdecl(i, layer, flag) as TOSeqDraw,
+/// whose eax the battle UI drops). From the window's state 3 on, while that character's hide is enabled (or forced in 3-4) and
+/// od_hide2d_scenes is on, the slots of scene set 2 named exactly "btidu" (Tidus) or "bauro" / "bauro2" (Auron) that would be drawn
+/// (state 2 or 3) read state 0 for this one call, and get their state back right after it. TOSeqDraw only reads the states;
+/// the slot stepping (TOSeqCtrl) and the window's logic run elsewhere on this thread, never inside this call. A skipped scene's
+/// clock does not step (its draw steps it), so states 1-2 are never touched: Tidus's state 2 waits for btidu's end.
+static uint32_t __cdecl odb_seq_stub(int i, uint32_t a, uint32_t b) {
+    InterlockedIncrement(&g_odb_seq_calls);
+    volatile uint16_t* st[3] = {}; uint16_t old[3] = {}; int n = 0, who = 0;
+    if (i == 2 && g_odb_slots != 0 && InterlockedCompareExchange(&g_odb_scene_on, 0, 0) != 0) {
+        const bool force = InterlockedCompareExchange(&g_odb_force, 0, 0) != 0;
+        const int tw = g_odb_word != nullptr ? *g_odb_word : 0, aw = g_odt_word != nullptr ? *g_odt_word : 0;
+        const bool tid = odb::scene_hides(InterlockedCompareExchange(&g_odb_enable, 0, 0) != 0 || (force && (tw == 3 || tw == 4)), tw);
+        const bool aur = odb::scene_hides(InterlockedCompareExchange(&g_odt_enable, 0, 0) != 0 || (force && (aw == 3 || aw == 4)), aw);
+        if (tid || aur) {
+            for (int j = 0; j < 8 && n < 3; ++j) {
+                const uintptr_t sl = g_odb_slots + 0x200u + static_cast<uintptr_t>(j) * 0x20u;   // scene set 2, slot j (0x20 bytes: +0 state, +8 name)
+                volatile uint16_t* ps = reinterpret_cast<volatile uint16_t*>(sl);
+                const uint16_t v = *ps;
+                if (v != 2 && v != 3) continue;
+                const volatile char* nm = reinterpret_cast<const volatile char*>(sl + 8u);
+                const bool t = tid && odb::name_is(nm, "btidu"), au = aur && (odb::name_is(nm, "bauro") || odb::name_is(nm, "bauro2"));
+                if (!t && !au) continue;
+                st[n] = ps; old[n] = v; *ps = 0; ++n; who = t ? 0 : 1;
+            }
+        }
+    }
+    const uint32_t r = reinterpret_cast<uint32_t(__cdecl*)(int, uint32_t, uint32_t)>(g_odb_seq_fn)(i, a, b);
+    for (int k = 0; k < n; ++k) *st[k] = old[k];   // put back at once
+    if (n > 0) InterlockedIncrement(&g_odb_seq_hid[who]);
+    return r;
+}
+/// Round 6: the facts that enable our Swordplay bar's hide (odb::Gate), each Present (od_gest_tick, after the driver). Settled
+/// facts only: the setting, a battle, the headset's 3D view, the session and the VR pad live, Tidus's swing gesture on, the visuals
+/// on, and the bar placeable (in front; above the hand, the right grip tracked now). Nothing about our art having been built.
+static odb::Gate odb_gate_tidus(const odg::FrameIn& in) {
+    odb::Gate g; g.on = (g_odb_flags & 4) != 0; g.battle = in.battle; g.view = odt_view(); g.live = in.headset && in.vrpad;
+    g.cfg = g_odg.cfg.on && g_odg.cfg.tidus; g.vis = g_odv_on; g.anchor = in.valid[1] || (g_odb_flags & 8) == 0;
+    return g;
+}
+/// ... and Auron's Bushido row's: the row's patch (od_targets_hide2d at launch) or its detour in, a battle, the 3D view, the
+/// session and the VR pad live, "strike the targets" on, not a Practice round.
+static odb::Gate odt_gate_row(const odg::FrameIn& in) {
+    odb::Gate g; g.on = g_odt_patch_state == 1 || g_odt_row_m[0] == 2 || g_odt_row_m[0] == 3; g.battle = in.battle; g.view = odt_view(); g.live = in.headset && in.vrpad;
+    g.cfg = g_odg.cfg.on && (g_odg.open ? g_odg.sess.targets : g_odg.targets_now()); g.vis = !(g_odt.r.on && g_odt.r.practice); g.anchor = true;
+    return g;
 }
 /// A patched call site now: 1 still a call of `stub`, 0 something else, -1 never patched.
 static int odb_site_now(uintptr_t site, uintptr_t stub) {
@@ -6628,7 +6675,26 @@ static void odb_win_snap() {
     g_odb_win.snap[2] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][0], 0, 0)); g_odb_win.snap[3] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_sc[1][1], 0, 0));
     g_odb_win.snap[4] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)); g_odb_win.snap[5] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0));
     g_odb_win.snap[6] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_patch_calls, 0, 0)); g_odb_win.snap[7] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_patch_hidden, 0, 0));   // (round 5: the Bushido row's stub, 0x89B411)
+    g_odb_win.snap[8] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_seq_calls, 0, 0)); g_odb_win.snap[9] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_seq_hid[0], 0, 0));   // (round 6: the scene draws)
 }
+/// Round 6: the Bushido window's counters at its open (render thread): the row stub's by Auron's word, the Swordplay stub's (the
+/// drawer after it), the scene draws.
+static void odt_win_snap() {
+    g_odt_win.snap[0] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_sc[0][0], 0, 0)); g_odt_win.snap[1] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_sc[0][1], 0, 0));
+    g_odt_win.snap[2] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_sc[1][0], 0, 0)); g_odt_win.snap[3] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odt_sc[1][1], 0, 0));
+    g_odt_win.snap[4] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_patch_calls, 0, 0));
+    g_odt_win.snap[8] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_seq_calls, 0, 0)); g_odt_win.snap[9] = static_cast<uint32_t>(InterlockedCompareExchange(&g_odb_seq_hid[1], 0, 0));
+}
+/// Round 6 (case C): 0x89B360's entry, `cmp dword [0x133C948], 0` (83 3D, the relocated address, 00) then `je` (0F 84): 1 as in this
+/// exe, 0 something else (a hook replacing the battle UI: the patches inside it would never run), -1 unreadable.
+static int odb_entry_now() {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uint8_t b[9] = {};
+    if (base == 0 || !ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x89B360u - 0x400000u)), b, 9)) return -1;
+    uint32_t abs = 0; memcpy(&abs, b + 2, 4);
+    return b[0] == 0x83 && b[1] == 0x3D && abs == static_cast<uint32_t>(base + (0x133C948u - 0x400000u)) && b[6] == 0x00 && b[7] == 0x0F && b[8] == 0x84 ? 1 : 0;
+}
+static const char* odb_entry_name(int e) { return e > 0 ? "as expected" : e == 0 ? "NOT AS EXPECTED (something replaces the battle UI: the patches inside it never run)" : "unreadable"; }
 /// A counter's growth since a snapshot (the Bushido row's are reset by Auron's window line: then the count since that reset).
 static uint32_t odb_since(volatile LONG* c, uint32_t snap) { const uint32_t v = static_cast<uint32_t>(InterlockedCompareExchange(c, 0, 0)); return v >= snap ? v - snap : v; }
 /// The window's odb: line at its close (render thread; 60 a session): the call site, the stub's calls by Tidus's word, the Presents'
@@ -6649,11 +6715,36 @@ static void odb_win_line(double t) {
     if (k == 0) snprintf(why, sizeof(why), "none");
     diag("odb: frame %u: Swordplay window %.1f s (Tidus's states 1-10)%s: call site 0x89B416 %s | stub calls in states 3/4 %u (skipped %u), in other states %u (skipped %u) | "
          "Presents shown/hidden: states 1-2 %u/%u, 3 %u/%u, 4 %u/%u, 5-10 %u/%u, stale %u | shown in 3/4 because: %s | limit plates: %s, calls %u (skipped %u) | "
-         "the Bushido row's stub (0x89B411, the drawer before ours) calls %u (skipped %u) | the bar's own layer in %u Presents | a UI pass captured in %u of %u Presents -> %s%s",
+         "the Bushido row's stub (0x89B411, the drawer before ours) calls %u (skipped %u) | the btidu scene left out of %u of %u scene draws (%s) | battle UI entry %s | "
+         "the bar's own layer in %u Presents | a UI pass captured in %u of %u Presents -> %s%s",
          g_frames, t - w.t0, forced ? " FORCED HIDE (Developer)" : "", site > 0 ? "calls our stub" : site == 0 ? "REWRITTEN (no longer our stub)" : "not patched",
          c34 + k34, k34, co + ko, ko, w.pres[0][0], w.pres[0][1], w.pres[1][0], w.pres[1][1], w.pres[2][0], w.pres[2][1], w.pres[3][0], w.pres[3][1], w.unread, why,
-         bsite > 0 ? "patched" : bsite == 0 ? "REWRITTEN" : "not patched", bc, bk, rc, rk, w.lay, w.ui_pass, w.presents, g_odb_verdict,
+         bsite > 0 ? "patched" : bsite == 0 ? "REWRITTEN" : "not patched", bc, bk, rc, rk,
+         odb_since(&g_odb_seq_hid[0], w.snap[9]), odb_since(&g_odb_seq_calls, w.snap[8]), g_odb_seq_state != 1 ? "not patched" : InterlockedCompareExchange(&g_odb_scene_on, 0, 0) ? "on" : "off",
+         odb_entry_name(odb_entry_now()), w.lay, w.ui_pass, w.presents, g_odb_verdict,
          ++g_odb_win_lines == 60 ? " (60 odb: window lines this session: no more)" : "");
+}
+/// Round 6: the Bushido window's odt: line at its close (render thread; shares the 60 a session): as the Swordplay one, for the
+/// row (0x892740 at 0x89B411) and the bauro / bauro2 scenes.
+static void odt_win_line(double t) {
+    const odb::Win& w = g_odt_win;
+    const uint32_t c34 = odb_since(&g_odt_sc[0][0], w.snap[0]), k34 = odb_since(&g_odt_sc[0][1], w.snap[1]), co = odb_since(&g_odt_sc[1][0], w.snap[2]), ko = odb_since(&g_odt_sc[1][1], w.snap[3]);
+    const int site = odb_site_now(g_odt_site, reinterpret_cast<uintptr_t>(&odt_row_stub));
+    const uint32_t hid34 = w.pres[1][1] + w.pres[2][1], read34 = w.pres[1][0] + w.pres[1][1] + w.pres[2][0] + w.pres[2][1];
+    const bool forced = InterlockedCompareExchange(&g_odb_force, 0, 0) != 0;
+    odb::verdict(g_odt_verdict, sizeof(g_odt_verdict), site, c34 + k34, k34, hid34, read34, forced, true);
+    if (g_odb_win_lines >= 60) return;
+    char why[400] = ""; int k = 0;
+    for (int i = 0; i < odb::k_why_n; ++i) if (w.why_n[i]) k = odg::fmt_append(why, sizeof(why), k, "%s%s %u", k ? ", " : "", odb::k_why_name[i], w.why_n[i]);
+    if (k == 0) snprintf(why, sizeof(why), "none");
+    diag("odt: frame %u: Bushido window %.1f s (Auron's states 1-10)%s: call site 0x89B411 %s | stub calls in states 3/4 %u (skipped %u), in other states %u (skipped %u) | "
+         "Presents shown/hidden: states 1-2 %u/%u, 3 %u/%u, 4 %u/%u, 5-10 %u/%u, stale %u | shown in 3/4 because: %s | the Swordplay bar's stub (0x89B416, the drawer after it) calls %u | "
+         "the bauro scenes left out of %u of %u scene draws (%s) | battle UI entry %s | a UI pass captured in %u of %u Presents -> %s%s",
+         g_frames, t - w.t0, forced ? " FORCED HIDE (Developer)" : "", site > 0 ? "calls our stub" : site == 0 ? "REWRITTEN (no longer our stub)" : "not patched",
+         c34 + k34, k34, co + ko, ko, w.pres[0][0], w.pres[0][1], w.pres[1][0], w.pres[1][1], w.pres[2][0], w.pres[2][1], w.pres[3][0], w.pres[3][1], w.unread, why,
+         odb_since(&g_odb_patch_calls, w.snap[4]), odb_since(&g_odb_seq_hid[1], w.snap[9]), odb_since(&g_odb_seq_calls, w.snap[8]),
+         g_odb_seq_state != 1 ? "not patched" : InterlockedCompareExchange(&g_odb_scene_on, 0, 0) ? "on" : "off", odb_entry_name(odb_entry_now()), w.ui_pass, w.presents, g_odt_verdict,
+         ++g_odb_win_lines == 60 ? " (60 window lines this session: no more)" : "");
 }
 static const char* odb_patch_name(int st) {
     switch (st) { case 1: return "patched"; case 2: return "off"; case -1: return "FAILED (FFX.exe)"; case -2: return "not patched (the call site's bytes differ)";
@@ -6837,21 +6928,27 @@ static void od_gest_tick() {
     { const LONG ht = odt::hold_triggers(o.inject, g_odt.holding()) ? 1 : 0; if (g_odg_hold_trig != ht) InterlockedExchange(&g_odg_hold_trig, ht); }   // the triggers (above odg_input; a targets round too)
     { const LONG ar = o.inject == odg::OD_AURON && g_odt.r.on && !g_odt.r.practice ? 1 : 0; if (g_odt_arb != ar) InterlockedExchange(&g_odt_arb, ar); }   // the arbitration (odg_input)
     { const LONG gh = g_odt.holding() ? 1 : 0; if (g_odt_grip_hold != gh) InterlockedExchange(&g_odt_grip_hold, gh); }   // the grips (vrpad_apply)
-    {   // the game's Bushido row (its detour): an open round's, and from Auron's state 3 when a targets round is coming (R9-N3)
-        odt::RowIn ri; ri.round_on = g_odt.r.on; ri.practice = g_odt.r.practice; ri.drawn = odt_wanted();
-        ri.targets_mode = g_odg.cfg.on && (g_odg.open ? g_odg.sess.targets : g_odg.targets_now());   // (as odt_tick's)
-        ri.battle = in.battle; ri.fresh = in.fresh && in.r.ok; ri.gate = in.headset && in.vrpad; ri.view = odt_view();
-        ri.auron = in.r.auron; ri.lulu = in.r.lulu; ri.tidus = in.r.tidus; ri.wakka = in.r.wakka;
-        const LONG hd = odt::hide_row(ri) ? 1 : 0; if (g_odt_hide2d != hd) InterlockedExchange(&g_odt_hide2d, hd);
-        const LONG st = in.fresh && in.r.ok ? in.r.auron : 0; if (g_odt_row_st != st) InterlockedExchange(&g_odt_row_st, st);   // the questions' bucket
+    {   // the game's Bushido row (its call-site stub and its detour) and the bauro scenes: od-bar-art round 6, state-based: enabled from settled facts (odt_gate_row), then Auron's state 1-10 (the stub's own read)
+        const odb::Gate g = odt_gate_row(in);
+        const bool fr = in.fresh && in.r.ok, other = in.r.lulu != 0 || in.r.tidus != 0 || in.r.wakka != 0;
+        const LONG en = odb::enabled(g) ? 1 : 0; if (g_odt_enable != en) InterlockedExchange(&g_odt_enable, en);
+        const int ev = g_odt_win.step(in.battle, fr, in.r.auron, in.t);
+        if (ev == 1) odt_win_snap();
+        const bool hd = odb::hide_now(g, fr, in.r.auron, other);   // (the window line's; and the detour's answer, ffxvr_odt_hide2d)
+        if (g_odt_hide2d != (hd ? 1 : 0)) InterlockedExchange(&g_odt_hide2d, hd ? 1 : 0);
+        const LONG st = fr ? in.r.auron : 0; if (g_odt_row_st != st) InterlockedExchange(&g_odt_row_st, st);   // the questions' bucket
+        if (fr) g_odt_win.note(in.r.auron, hd, odb::why_shown(g, fr, in.r.auron, other), g_ui_last_frame_had_pass);
+        if (ev == 2) odt_win_line(in.t);
     }
-    {   // od-bar-art: the game's Swordplay bar and the limit plates (their call-site patches): while our art bar is drawn, from Tidus's state 3 when it is coming, through the result states while it was on (round 4)
+    {   // od-bar-art: the game's Swordplay bar, the limit plates and the btidu scene (their call-site stubs): round 6, state-based: enabled from settled facts (odb_gate_tidus), then Tidus's state 1-10 (the stubs' own read)
         odb_art_frame(false);   // the F8 box (off: released) and F8's request to load
-        const int ev = g_odb_win.step(in.battle, in.fresh && in.r.ok, in.r.tidus, in.t);   // (round 4: the window line)
+        const odb::Gate g = odb_gate_tidus(in);
+        const bool fr = in.fresh && in.r.ok, other = in.r.auron != 0 || in.r.lulu != 0 || in.r.wakka != 0;
+        const LONG en = odb::enabled(g) ? 1 : 0; if (g_odb_enable != en) InterlockedExchange(&g_odb_enable, en);
+        const int ev = g_odb_win.step(in.battle, fr, in.r.tidus, in.t);   // (round 4: the window line)
         if (ev == 1) odb_win_snap();
-        uint32_t why = 0; const LONG hd = odb_hide_decide(in, &why); if (g_odb_hide2d != hd) InterlockedExchange(&g_odb_hide2d, hd);
-        const LONG hb = odb::hide_plates(hd != 0, in.fresh && in.r.ok ? in.r.tidus : 0, g_frames - g_odb_any_frame) ? 1 : 0; if (g_odb_hidebg != hb) InterlockedExchange(&g_odb_hidebg, hb);   // (round 5, review N-T2)
-        if (in.fresh && in.r.ok) g_odb_win.note(in.r.tidus, hd != 0, why, g_ui_last_frame_had_pass, g_frames - g_odb_lay_frame <= odb::k_built_presents);
+        const bool hd = odb::hide_now(g, fr, in.r.tidus, other);
+        if (fr) g_odb_win.note(in.r.tidus, hd, odb::why_shown(g, fr, in.r.tidus, other), g_ui_last_frame_had_pass, g_frames - g_odb_lay_frame <= odb::k_built_presents);
         if (ev == 2) odb_win_line(in.t);
     }
     for (int i = 0; i < o.nh; ++i) xr_haptic(o.hap[i].hand, o.hap[i].amp, o.hap[i].sec);
@@ -6957,11 +7054,58 @@ extern "C" __declspec(dllexport) void ffxvr_odt_set(float pitch_deg, float dist,
 extern "C" __declspec(dllexport) int ffxvr_odt_hide2d() { return odt_row_ask(1); }   // (counted by Auron's state and answer: section 15)
 /// ABI 57 (managed, at init, with od_targets_hide2d): on = 1 points the battle UI's call of 0x892740 (at 0x89B411) at our stub,
 /// after checking its bytes; 0 records "off". Returns the patch state (1 patched; < 0 why not). Once a session.
+/// od-bar-art round 6 (case B): the held window scenes. TOSeqDraw (0x8AE2F0) is checked first: its first bytes as in this exe and
+/// its `add esi, g_TOSeqSlots` (81 C6, then the relocated 0x1865F20) at +0xE, which also gives the slot table the stub reads.
+/// Then both of the battle UI's calls of it (0x89B3C3, 0x89B513: E8 and a target of 0x8AE2F0) are pointed at odb_seq_stub,
+/// as the other call sites are: at launch, before any battle (the caller checked [0x133C948]), with the DLL pinned (the
+/// caller did that too). Anything not as expected: nothing is patched, logged once. Called by the Swordplay bar's patch and by
+/// the Bushido row's; the first to get here does it.
+static void odb_patch_seq(uintptr_t base) {
+    if (g_odb_seq_state != 0) return;
+    const uintptr_t fn = base + (0x8AE2F0u - 0x400000u), slots = base + (0x1865F20u - 0x400000u);
+    static const uint8_t head[16] = { 0x55, 0x8B, 0xEC, 0x53, 0x8B, 0x5D, 0x08, 0x56, 0x8B, 0xF3, 0xC1, 0xE6, 0x08, 0x57, 0x81, 0xC6 };
+    uint8_t b[20] = {};
+    uint32_t tab = 0;
+    if (!ffxvr_safe_read(reinterpret_cast<const void*>(fn), b, 20) || memcmp(b, head, 16) != 0 || (memcpy(&tab, b + 16, 4), tab != static_cast<uint32_t>(slots))) {
+        g_odb_seq_state = -2; diag("odb: scene draw patch: TOSeqDraw 0x8AE2F0 is not as expected (its slot table): not patched (the window scenes stay)"); return;
+    }
+    const uintptr_t sites[2] = { base + (0x89B3C3u - 0x400000u), base + (0x89B513u - 0x400000u) };
+    for (int k = 0; k < 2; ++k) {
+        uint8_t c[5] = {}; LONG rel = 0;
+        if (!ffxvr_safe_read(reinterpret_cast<const void*>(sites[k]), c, 5)) { g_odb_seq_state = -2; diag("odb: scene draw patch: its call sites unreadable: not patched"); return; }
+        memcpy(&rel, c + 1, 4);
+        if (c[0] != 0xE8 || sites[k] + 5 + static_cast<uintptr_t>(static_cast<intptr_t>(rel)) != fn) {
+            g_odb_seq_state = -2; diag("odb: scene draw patch: 0x%08X reads %02X %02X %02X %02X %02X, not a call of 0x8AE2F0: not patched (the window scenes stay)", k ? 0x89B513u : 0x89B3C3u, c[0], c[1], c[2], c[3], c[4]); return;
+        }
+    }
+    g_odb_seq_fn = fn; g_odb_slots = slots;
+    // both state words, whichever patch got here (Auron's row may be hidden by its detour instead of its patch): FFX.exe's own data
+    if (g_odb_word == nullptr) g_odb_word = reinterpret_cast<const volatile int16_t*>(base + (0x133D734u - 0x400000u));
+    if (g_odt_word == nullptr) g_odt_word = reinterpret_cast<const volatile int16_t*>(base + (0x133D6F4u - 0x400000u));
+    for (int k = 0; k < 2; ++k) {
+        DWORD old = 0;
+        if (!VirtualProtect(reinterpret_cast<void*>(sites[k]), 5, PAGE_EXECUTE_READWRITE, &old)) { g_odb_seq_state = -3; diag("odb: scene draw patch: VirtualProtect failed (%lu) at the %s call", GetLastError(), k ? "second" : "first"); return; }
+        const LONG nrel = static_cast<LONG>(reinterpret_cast<uintptr_t>(&odb_seq_stub) - (sites[k] + 5));
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(sites[k] + 1), nrel);   // the E8 stays; the rel32 in one locked store (nothing runs the battle UI at launch)
+        DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(sites[k]), 5, old, &tmp);
+        FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(sites[k]), 5);
+        g_odb_seq_site[k] = sites[k];
+    }
+    g_odb_seq_state = 1;
+    diag("odb: scene draw patch: 0x89B3C3 and 0x89B513 (the battle UI's TOSeqDraw calls) now call our stub, which leaves the held \"btidu\" / \"bauro\" / \"bauro2\" scenes out of the draw from the window's state 3 while that hide is on");
+}
+/// Round 6 (case C): 0x89B360's entry, logged once at launch.
+static void odb_entry_log() {
+    static bool done = false; if (done) return; done = true;
+    g_odb_entry_state = odb_entry_now() > 0 ? 1 : -1;
+    diag("odb: the battle UI 0x89B360's entry (cmp [0x133C948], 0; je): %s", odb_entry_name(g_odb_entry_state > 0 ? 1 : odb_entry_now()));
+}
 extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
     if (g_odt_patch_state != 0) return g_odt_patch_state;
     if (!on) { g_odt_patch_state = 2; return 2; }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (base == 0) { g_odt_patch_state = -1; return -1; }
+    odb_entry_log();   // round 6 (case C): the battle UI's entry, logged once whatever this patch then finds
     const uintptr_t site = base + (0x89B411u - 0x400000u), fn = base + (0x892740u - 0x400000u);
     // R10-N2: the patch is race-free only because no battle has started: 0x89B411 is inside the battle UI draw 0x89B360, which
     // returns at once while its "battle UI alive" word [0x133C948] is 0 (set at battle init 0x89B660, cleared at its end
@@ -6992,8 +7136,10 @@ extern "C" __declspec(dllexport) int ffxvr_odt_row_patch(int on) {
     InterlockedExchange(reinterpret_cast<volatile LONG*>(site + 1), nrel);   // the E8 stays; the rel32 in one store (inside one cache line)
     DWORD tmp = 0; VirtualProtect(reinterpret_cast<void*>(site), 5, old, &tmp);
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
-    g_odt_patch_state = 1;
-    diag("odt: Bushido row call-site patch: 0x89B411 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x892740 while the targets are up", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    g_odt_patch_state = 1; g_odt_site = site;
+    g_odt_word = reinterpret_cast<const volatile int16_t*>(base + (0x133D6F4u - 0x400000u));   // (round 6: the stub's own read of Auron's state)
+    diag("odt: Bushido row call-site patch: 0x89B411 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x892740 in Auron's states 1-10 while the targets scheme is on", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    odb_patch_seq(base);   // round 6: the held scenes (bauro / bauro2), once for both hides
     return 1;
 }
 /// ABI 57 (managed, each frame): the detour's install state (0 off, 1 queued, 2 inserted, 3 late-inserted, 4 not inserted,
@@ -7014,12 +7160,14 @@ extern "C" __declspec(dllexport) int ffxvr_odt_practice(int which) {
 /// game's Swordplay bar hidden while ours is up; its patch is made at launch, ffxvr_odb_patch). ABI 72 (round 4): bar 8 = od_bar_place
 /// 1 (above the hand, as before; 0 in front of the eyes), dist od_bar_dist (0.35-1.2 m), height od_bar_height (-0.4-0.4 m). Round 5
 /// (no shape change): bar 16 = od_bar_layer 0 (the bar in front drawn into the eye images, not its own layer), 32 = od_bar_force_hide
-/// (Developer: the stubs skip in Tidus's states 3-4 whatever the decision).
+/// (Developer: the stubs skip in Tidus's states 3-4 whatever the decision). Round 6: 64 = od_hide2d_scenes 0 (the held window
+/// scenes stay); force-hide covers Auron's row too.
 /// Returns 1 while battle.dds is held (Lulu's spin count as digits; dots otherwise).
 extern "C" __declspec(dllexport) int ffxvr_odv_set(int on, float size, int bar, float dist, float height) {
     g_odv_on = on != 0; g_odv_size = std::isfinite(size) ? odg::clampf(size, 0.5f, 2.f) : 1.f;
-    const LONG b = static_cast<LONG>(bar & 63); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
+    const LONG b = static_cast<LONG>(bar & 127); if (g_odb_flags != b) InterlockedExchange(&g_odb_flags, b);
     const LONG f = (bar & 32) != 0 ? 1 : 0; if (g_odb_force != f) InterlockedExchange(&g_odb_force, f);
+    const LONG sc = (bar & 64) != 0 ? 0 : 1; if (g_odb_scene_on != sc) InterlockedExchange(&g_odb_scene_on, sc);   // (round 6: od_hide2d_scenes 0)
     g_odb_dist = odb::front_dist(dist); g_odb_height = odb::front_height(height);
     return g_c3_srv ? 1 : 0;
 }
@@ -7069,6 +7217,7 @@ extern "C" __declspec(dllexport) int ffxvr_odb_patch(int on) {
     if (!on) { g_odb_patch_state = 2; return 2; }
     const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     if (base == 0) { g_odb_patch_state = -1; return -1; }
+    odb_entry_log();   // round 6 (case C): the battle UI's entry, logged once whatever this patch then finds
     const uintptr_t site = base + (0x89B416u - 0x400000u), fn = base + (0x897240u - 0x400000u);
     uint32_t alive = 0;   // (as the row's patch, R10-N2: only while the battle UI 0x89B360 returns at once, [0x133C948] == 0)
     if (!ffxvr_safe_read(reinterpret_cast<const void*>(base + (0x133C948u - 0x400000u)), &alive, 4) || alive != 0) {
@@ -7096,8 +7245,9 @@ extern "C" __declspec(dllexport) int ffxvr_odb_patch(int on) {
     FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(site), 5);
     g_odb_patch_state = 1; g_odb_site = site;
     g_odb_word = reinterpret_cast<const volatile int16_t*>(base + (0x133D734u - 0x400000u));   // (round 4: the stub's own read of Tidus's state)
-    diag("odb: Swordplay bar call-site patch: 0x89B416 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x897240 while our art bar is up", static_cast<unsigned>(site), static_cast<unsigned>(base));
+    diag("odb: Swordplay bar call-site patch: 0x89B416 (at 0x%08X, FFX.exe at 0x%08X) now calls our stub, which skips 0x897240 in Tidus's states 1-10 while our bar is enabled", static_cast<unsigned>(site), static_cast<unsigned>(base));
     g_odb_bg_state = odb_patch_bg(base);   // round 4: the limit plates, under the same flag
+    odb_patch_seq(base);   // round 6: the held scenes (btidu), once for both hides
     return 1;
 }
 /// Overdrive gestures (ABI 47): F8's text (render thread). which 0: the live line; 1: the last window's summary; 2: Auron's
@@ -7132,10 +7282,11 @@ extern "C" __declspec(dllexport) int ffxvr_odg_text(int which, char* out, int n)
     else if (which == 6) k = snprintf(out, n, "%s", g_odt_art_why);   // ABI 55: the target art's status
     else if (which == 7) {   // ABI 71 (od-bar-art): the bar art's status (shown: the pack is loaded at the next Present) and the Swordplay bar's patch
         InterlockedExchange(&g_odb_req, 1);
-        k = snprintf(out, n, "%s; the game's Swordplay bar: %s, hidden %ld of %ld frames; the limit plates: %s, hidden %ld of %ld; the last window: %s", g_odb_why, odb_patch_name(g_odb_patch_state),
+        k = snprintf(out, n, "%s; the game's Swordplay bar: %s, hidden %ld of %ld frames; the limit plates: %s, hidden %ld of %ld; the window scenes: %s; the last Swordplay window: %s; the last Bushido window: %s", g_odb_why, odb_patch_name(g_odb_patch_state),
                      static_cast<long>(InterlockedCompareExchange(&g_odb_patch_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_patch_calls, 0, 0)),
                      g_odb_bg_state == 1 ? "patched" : g_odb_bg_state == 0 ? "not asked" : "not patched (see the log)",
-                     static_cast<long>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)), g_odb_verdict);
+                     static_cast<long>(InterlockedCompareExchange(&g_odb_bg_hidden, 0, 0)), static_cast<long>(InterlockedCompareExchange(&g_odb_bg_calls, 0, 0)),
+                     g_odb_seq_state == 1 ? (InterlockedCompareExchange(&g_odb_scene_on, 0, 0) ? "patched, on" : "patched, off") : g_odb_seq_state == 0 ? "not asked" : "not patched (see the log)", g_odb_verdict, g_odt_verdict);
     }
     else if (which == 5) {
         out[0] = 0;
@@ -12191,7 +12342,7 @@ static bool g_odb_lay_ready = false, g_odb_lay_broken = false;
 static ID3D11Texture2D* g_odb_lay_tex = nullptr; static ID3D11RenderTargetView* g_odb_lay_rtv = nullptr; static unsigned g_odb_lay_w = 0, g_odb_lay_h = 0;
 static float g_odb_lay_q[4] = { 0.f, 0.f, 0.f, 1.f }, g_odb_lay_p[3] = {}, g_odb_lay_sw = 0.f, g_odb_lay_sh = 0.f;   // the quad: pose (the reference space), size (m)
 static ID3D11RasterizerState* g_odb_lay_rs = nullptr;  // no culling (the plane's winding under the orthographic map is not the eye pass's concern)
-static bool odb_layer_draw(const odv::Out& ol);        // (defined with the marker pass)
+static int odb_layer_draw(const odv::Out& ol);         // (defined with the marker pass; 1 drawn, 0 no swapchain now, -1 failed)
 static uint32_t g_odv_frames = 0, g_odv_verts_max = 0, g_odv_dropped = 0;
 /// The visuals' clock: the poses' time (the gesture driver's), else QPC.
 static double odv_now() {
@@ -12265,13 +12416,11 @@ static void odv_build() {
     g_odv_dropped += static_cast<uint32_t>(o.dropped) + static_cast<uint32_t>(oa.dropped);
     g_odb_nv = 0;
     if (oa.n > 0) { odv_to_render(g_odb_raw, g_odb_mk, oa.n); g_odb_nv = oa.n; }
-    if (ol.n > 0 && g_odv.lay_on) {   // round 5: the layer's image and pose (a failed draw: the eye images from the next build on)
-        if (odb_layer_draw(ol)) g_odb_lay_frame = g_frames;
-        else { g_odb_lay_broken = true; diag("odb: the overdrive bar's own layer could not be drawn: it goes into the eye images this session"); }
+    if (ol.n > 0 && g_odv.lay_on) {   // round 5: the layer's image and pose (a failed draw: the eye images until the next headset session)
+        const int r = odb_layer_draw(ol);   // (round 6, review N-F1: 0 = no swapchain now, e.g. the session just stopped: no failure)
+        if (r > 0) g_odb_lay_frame = g_frames;
+        else if (r < 0) { g_odb_lay_broken = true; diag("odb: the overdrive bar's own layer could not be drawn: it goes into the eye images until the next headset session"); }
     }
-    const bool lay_now = g_odb_lay_frame == g_frames;
-    if ((oa.n > 0 || lay_now) && in.win == odg::OD_TIDUS && in.inject) g_odb_built_frame = g_frames;   // (the hide's recency: a live Swordplay window's art bar; review B1; round 5: or its layer)
-    if (oa.n > 0 || lay_now) g_odb_any_frame = g_frames;   // (round 5: the plates' rule, any window's bar, its fade included)
     if (o.n == 0) return;
     odv_to_render(g_odv_raw, g_odv_mk, o.n);
     g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);
@@ -12611,13 +12760,13 @@ extern ID3D11ShaderResourceView* g_sphl_srv;
 /// od-bar-art round 5: the bar layer's image: the bar's plane (ol, built by odv::Vis this Present) drawn into g_odb_lay_tex with the
 /// marker pass's pst and premultiplied blend over transparent black, its extent onto the whole image (orthographic); the quad's pose
 /// (the anchor, the plane's axes) and size with it. False: nothing usable (the caller sends the bar to the eye images instead).
-static bool odb_layer_draw(const odv::Out& ol) {
-    if (ol.n <= 0 || ol.n > odv::k_bar_verts || !marker_pass_init() || g_mk_pst == nullptr || g_mk_blend_pm == nullptr || g_mk_smp_art == nullptr || g_mk_vb == nullptr || g_mk_cb == nullptr) return false;
+static int odb_layer_draw(const odv::Out& ol) {
     unsigned w = 0, h = 0; xr_bar_size(&w, &h);
-    if (w == 0 || h == 0) return false;
+    if (w == 0 || h == 0) return 0;   // (review N-F1: the swapchain went with a session stop between odb_layer_frame and this build: skip, not fail)
+    if (ol.n <= 0 || ol.n > odv::k_bar_verts || !marker_pass_init() || g_mk_pst == nullptr || g_mk_blend_pm == nullptr || g_mk_smp_art == nullptr || g_mk_vb == nullptr || g_mk_cb == nullptr) return -1;
     if (g_odb_lay_rs == nullptr) {
         D3D11_RASTERIZER_DESC rd = {}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
-        if (FAILED(g_device->CreateRasterizerState(&rd, &g_odb_lay_rs))) { g_odb_lay_rs = nullptr; return false; }
+        if (FAILED(g_device->CreateRasterizerState(&rd, &g_odb_lay_rs))) { g_odb_lay_rs = nullptr; return -1; }
     }
     if (g_odb_lay_tex == nullptr || g_odb_lay_w != w || g_odb_lay_h != h) {
         if (g_odb_lay_rtv) { g_odb_lay_rtv->Release(); g_odb_lay_rtv = nullptr; }
@@ -12626,17 +12775,17 @@ static bool odb_layer_draw(const odv::Out& ol) {
         td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         if (FAILED(g_device->CreateTexture2D(&td, nullptr, &g_odb_lay_tex)) || FAILED(g_device->CreateRenderTargetView(g_odb_lay_tex, nullptr, &g_odb_lay_rtv))) {
             if (g_odb_lay_tex) { g_odb_lay_tex->Release(); g_odb_lay_tex = nullptr; }
-            g_odb_lay_rtv = nullptr; return false;
+            g_odb_lay_rtv = nullptr; return -1;
         }
         g_odb_lay_w = w; g_odb_lay_h = h;
     }
     float xm = 0.f, ym = 0.f;
-    if (!odv::lay_extent(ol.v, ol.n, &xm, &ym)) return false;
+    if (!odv::lay_extent(ol.v, ol.n, &xm, &ym)) return 0;   // (nothing finite to show this build)
     const float VP[16] = { 1.f / xm, 0.f, 0.f, 0.f,  0.f, 1.f / ym, 0.f, 0.f,  0.f, 0.f, 0.f, 0.f,  0.f, 0.f, 0.f, 1.f };   // row-major, clip = VP p: the plane onto the image (y up = the image's top)
     D3D11_MAPPED_SUBRESOURCE ms = {};
-    if (FAILED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    if (FAILED(g_orig_map(g_ctx, g_mk_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return 0;
     memcpy(ms.pData, ol.v, sizeof(MkVertex) * ol.n); g_orig_unmap(g_ctx, g_mk_vb, 0);
-    if (FAILED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return false;
+    if (FAILED(g_orig_map(g_ctx, g_mk_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return 0;
     memcpy(ms.pData, VP, 64); g_orig_unmap(g_ctx, g_mk_cb, 0);
     // save, draw, restore (the subset draw_markers_eye touches)
     ID3D11RenderTargetView* o_rtv[8] = {}; ID3D11DepthStencilView* o_dsv = nullptr; g_ctx->OMGetRenderTargets(8, o_rtv, &o_dsv);
@@ -12687,12 +12836,14 @@ static bool odb_layer_draw(const odv::Out& ol) {
     odv::basis_quat(g_odv.lay_R, g_odv.lay_U, g_odb_lay_q);
     g_odb_lay_p[0] = g_odv.lay_c.x; g_odb_lay_p[1] = g_odv.lay_c.y; g_odb_lay_p[2] = g_odv.lay_c.z;
     g_odb_lay_sw = 2.f * xm; g_odb_lay_sh = 2.f * ym;
-    return true;
+    return 1;
 }
 /// od-bar-art round 5: before xr_frame (render thread): the bar's swapchain at the first Swordplay or Fury window with the bar in
 /// front (xr_bar_ensure; none otherwise), and this frame's layer into ui: the last image drawn, for at most k_built_presents
-/// Presents (a frame without the game's UI pass builds nothing), never over a screen.
+/// Presents (a frame without the game's UI pass builds nothing), never over a screen. Round 6 (review N-F3): screen_on also
+/// stands for a frame whose eye images were blacked (a cut's blink, the save screen's black): the bar goes black with the world.
 static void odb_layer_frame(XrUiPanel& ui, bool screen_on) {
+    { static bool was = false; const bool run = xr_running(); if (run && !was) g_odb_lay_broken = false; was = run; }   // (round 6, review N-F1: a new headset session tries the layer again)
     const bool place_front = (g_odb_flags & 24) == 0;   // od_bar_place 0 and od_bar_layer 1
     const bool want = g_odv_on && g_xr_active && place_front && !g_odb_lay_broken && g_odg.open && (g_odg.sess.od == odg::OD_TIDUS || g_odg.sess.od == odg::OD_LULU);
     if (want && xr_bar_possible()) xr_bar_ensure();
@@ -17554,8 +17705,9 @@ static void xr_tick() {
     // R15: no early return without an eye image. xr_frame still runs (events, wait, begin, locate) and re-sends the
     // last frame for up to 30 frames; the session never stalls because one Present had nothing to show.
     if (g_screen3d_now || g_ovr_suspend) g_blink_frames = 0;   // the screen shows the game's cuts as cuts (S4: the virtual screen too; g_ovr_suspend is still the finished frame's decision)
+    bool odb_black = false;                         // od-bar-art round 6 (review N-F3): the eye images blacked this frame: no bar layer either
     if (g_blink_frames > 0) {                       // a cut: a few black frames
-        g_blink_frames--;
+        g_blink_frames--; odb_black = true;
         if (g_bb_copy_rtv && e1 == g_bb_copy) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(g_bb_copy_rtv, black); e2 = g_bb_copy; }
         // eye jumps (4.1): a frame with a UI pass (all of battle, a field frame with a text box) blinks too. ui.tex is left
         // alone, so the UI panel stays through the blink; the markers drawn into the finals go black with the world.
@@ -17563,7 +17715,7 @@ static void xr_tick() {
     }
     if (menu_black && e1 != nullptr) {              // SU-1: latched without a menu image (see above): eye 1 black, as the blink does
         ID3D11RenderTargetView* const brtv = e1 == g_bb_copy ? g_bb_copy_rtv : e1 == g_eye1_final ? g_eye1_final_rtv : nullptr;   // our own copies only
-        if (brtv) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(brtv, black); e2 = e1; g_imgui_menu_black_10s++; }
+        if (brtv) { InEye2 guard; const float black[4] = { 0, 0, 0, 1 }; g_ctx->ClearRenderTargetView(brtv, black); e2 = e1; g_imgui_menu_black_10s++; odb_black = true; }
     }
     if (e1 && g_seq_left > 0) {
         wchar_t n1[64], n2[64];
@@ -17642,7 +17794,7 @@ static void xr_tick() {
     }
     g_imgui_where = ui.tex2 == nullptr ? 0 : ui.im_world ? 2 : 1;
     vpanel_frame(ui);   // vr-menu S2: the F8 window's own panel (any base mode: 3D, screens, movies, the save screen)
-    odb_layer_frame(ui, screen.on);   // od-bar-art round 5: the overdrive bar in front, its own layer above the UI panel
+    odb_layer_frame(ui, screen.on || odb_black);   // od-bar-art round 5: the overdrive bar in front, its own layer above the UI panel (round 6: not over a blacked frame)
     {   // saveui A.3: the ImGui layer, every 10 s while it drew (screen frames included: the boot menu used to leave no trace)
         static ULONGLONG next = 0; static uint32_t f_screen = 0, f_screen_shown = 0, f_3d_shown = 0, f_world = 0, draws_max = 0, f_draws = 0;
         if (g_imgui_draws_last > 0) f_draws++;
@@ -17670,7 +17822,7 @@ static void xr_tick() {
     // fmv-relief (S3): an FMV with its depth goes out as a projection layer of our own two eye images (the relief), not the
     // screen quad; anything else leaves the inputs as they are (relief_present above)
     ID3D11Texture2D* xe1 = e1; ID3D11Texture2D* xe2 = g_stereo ? e2 : nullptr; XrFovTan xused[2] = { used[0], used[1] };
-    if (relief_present(e1, frame2d, menu, screen, &xe1, &xe2, xused)) { screen.on = false; ui.tex = nullptr; }
+    if (relief_present(e1, frame2d, menu, screen, &xe1, &xe2, xused)) { screen.on = false; ui.tex = nullptr; ui.otex = nullptr; }   // (od-bar-art round 6, N-F3: no bar layer over an FMV's relief)
     {
         // The runtime composites on the game's own device context inside
         // these calls (Virtual Desktop binds its 2496x2688 eye textures and

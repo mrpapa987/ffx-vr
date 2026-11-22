@@ -182,141 +182,114 @@ inline float readable_scale(float hi, float d) {
     return s > k_max_grow ? k_max_grow : s;
 }
 
-// -- the game's Swordplay window ----------------------------------------------------------------------------------------
-/// The game's own Swordplay bar (0x897240, drawn by the battle UI at 0x89B416 while Tidus's state 0x133D734 is 3 or 4) hidden
-/// with F8 "hide the game's Swordplay bar" (ini od_bar_hide2d, the call-site patch made at launch), decided afresh each Present
-/// from that Present's facts only (review B1: a remembered "drawn" kept the game's bar hidden in later Swordplays the mod did not
-/// draw): always a battle, a fresh read, the headset's 3D view, the gestures able to inject (the headset, the VR pad), no other
-/// overdrive; then state 3 (the window pending; the game's state 3 lasts one logic frame) when our bar is coming (the visuals on,
-/// the art loaded, Tidus's swing gesture on, the right grip tracked); state 4 while our bar is up, and its first k_open_s while it is coming (review S1:
-/// the visuals are built before the gesture window opens in the same Present, so the first state-4 Presents have no art bar yet).
-/// Round 4: the same flag also skips the limit plates (TODrawLimitBG 0x8A1CE0, drawn by the battle UI whenever a limit word is
-/// non-zero). States 1 and 2 (the "btidu" intro scene; 0x897240 draws nothing there) hide too when our bar is coming, so the UI
-/// draw of the first state-3 frame, which reads the flag decided at the Present before, finds it set; states 5-10 (the result:
-/// the game's bar is gone, our bar fades) keep it while it was on in this window's state 3 or 4 (held), until Tidus's state
-/// returns to 0.
-struct HideIn {
-    bool on = false, drawn = false, coming = false, opening = false;   // the setting; our art bar up now; coming; state 4 younger than k_open_s
-    bool battle = false, fresh = false, gate = false, view = false;
-    int auron = 0, lulu = 0, tidus = 0, wakka = 0;
-    bool held = false;   // the hide was on in this window's state 3 or 4 (Win::held)
+// -- the game's own limit UI (round 6: a state-based rule) ----------------------------------------------------------------
+/// The game's Swordplay bar (0x897240, called at 0x89B416), the limit plates (0x8A1CE0 at 0x89B3B8) and Auron's Bushido row
+/// (0x892740 at 0x89B411) are skipped by our call-site stubs, and the held window scenes ("btidu"; "bauro", "bauro2") are left
+/// out of the scene draw (0x8AE2F0 at 0x89B3C3 and 0x89B513), whenever our replacement for that character is enabled. The
+/// "enabled" flag is published each Present from settled facts (Gate). The character's own state word decides the rest, and each
+/// stub reads it itself on the game's thread, so there is no frame of lag.
+/// Round 6 (the root-cause report's fix 1; the owner: no hide ever worked): the earlier rule needed our art built in the last 3
+/// Presents, a 0.25 s grace and the gestures injecting now, and any of those failing showed the game's bar. Now only settings and
+/// standing facts count; the one fact about our bar being placeable is a robust, current one (the right grip tracked, when the
+/// bar sits above the hand).
+struct Gate {
+    bool on = false;      // the setting (od_bar_hide2d; the row: od_targets_hide2d, its patch made at launch)
+    bool battle = false;  // a battle is running
+    bool view = false;    // the headset shows the 3D view (not a screen, not suspended)
+    bool live = false;    // the headset session runs and the VR pad is merged (our bar and the targets are drawn only then)
+    bool cfg = false;     // our replacement is on: Tidus's swing gesture (gestures on), or Auron's "strike the targets"
+    bool vis = false;     // Tidus: the overdrive visuals on (our bar is one of them); Auron: not a Practice round
+    bool anchor = false;  // Tidus: our bar can be placed (in front, or above a tracked right grip); Auron: always
 };
-inline bool hide_tidus(const HideIn& x) {
-    if (!x.on || !x.battle || !x.fresh || !x.gate || !x.view || x.auron != 0 || x.lulu != 0 || x.wakka != 0) return false;
-    if (x.tidus >= 1 && x.tidus <= 3) return x.coming;
-    if (x.tidus == 4) return x.drawn || (x.coming && x.opening);
-    if (x.tidus >= 5 && x.tidus <= 10) return x.held;
+/// Why the game's UI showed: bits, named in k_why_name.
+enum : uint32_t { W_OFF = 1u, W_BATTLE = 2u, W_VIEW = 4u, W_LIVE = 8u, W_CFG = 16u, W_VIS = 32u, W_ANCHOR = 64u, W_FRESH = 128u, W_OTHER = 256u };
+constexpr int k_why_n = 9;
+constexpr const char* k_why_name[k_why_n] = { "hide off", "no battle", "not the 3D view", "headset session or VR pad not live",
+    "our replacement off (Tidus's swing / Auron's targets mode)", "Tidus: the visuals off / Auron: a Practice round",
+    "right grip untracked (bar above the hand)", "the state not read fresh", "another overdrive" };
+inline uint32_t gate_miss(const Gate& g) {
+    uint32_t w = 0u;
+    if (!g.on) w |= W_OFF;
+    if (!g.battle) w |= W_BATTLE;
+    if (!g.view) w |= W_VIEW;
+    if (!g.live) w |= W_LIVE;
+    if (!g.cfg) w |= W_CFG;
+    if (!g.vis) w |= W_VIS;
+    if (!g.anchor) w |= W_ANCHOR;
+    return w;
+}
+inline bool enabled(const Gate& g) { return gate_miss(g) == 0u; }
+/// A limit window's states: 1-10 (0 none).
+inline bool active(int s) { return s >= 1 && s <= 10; }
+/// The stubs' own rule (the game's thread): the flag and the word the stub reads (the bar, the plates, the row).
+inline bool stub_hides(bool enabled_now, int word) { return enabled_now && active(word); }
+/// The held scenes: from state 3 on only. A scene's draw also steps its clock, and the window's state 2 waits for the intro's
+/// end, so skipping it in states 1-2 would stall the window. From state 3 on the intro has ended (btidu, bauro), or nothing
+/// waits for the scene (bauro2), until states 6 / 8 stop them.
+inline bool scene_hides(bool enabled_now, int word) { return enabled_now && word >= 3 && word <= 10; }
+/// The Present's decision (the window line's; the stubs decide by their own read): enabled, the state read fresh and active, no
+/// other overdrive.
+inline bool hide_now(const Gate& g, bool fresh, int own, bool other) { return enabled(g) && fresh && active(own) && !other; }
+/// Why a Present in state 3 or 4 showed the game's UI (0 when hidden or outside 3 and 4).
+inline uint32_t why_shown(const Gate& g, bool fresh, int own, bool other) {
+    if (hide_now(g, fresh, own, other) || (own != 3 && own != 4)) return 0u;
+    return gate_miss(g) | (fresh ? 0u : W_FRESH) | (other ? W_OTHER : 0u);
+}
+/// A scene slot's name (char[20] at slot +8, as TOSeqStartScene copies it) equals want, terminator included.
+inline bool name_is(const volatile char* nm, const char* want) {
+    for (int i = 0; i < 20; ++i) { if (nm[i] != want[i]) return false; if (want[i] == 0) return true; }
     return false;
 }
-/// The parts of HideIn's drawn and coming (round 4: the window line names the part that failed).
-struct Parts {
-    bool ready = false, wanted = false, window = false; uint32_t since = 0xFFFFFFFFu;   // drawn: art_bar_up's inputs
-    bool vis = false, cfg = false, grip = false;                                        // coming: the visuals on, Tidus's swing gesture on, the right grip tracked or the bar in front (and ready)
-};
-/// Our art bar of a Swordplay window is up at this Present (review B1): the art drawable, the visuals wanted now (odv_wanted:
-/// the headset's 3D view, not the virtual screen the slow-GPU guard forces), a Swordplay window open with its gestures injecting,
-/// and the art sink built at one of the last k_built_presents Presents (a 3D frame without the game's UI pass builds nothing).
+/// Frames a drawn bar's image (the layer) stays valid without a new build (a 3D frame without the game's UI pass builds nothing).
 constexpr uint32_t k_built_presents = 3;
-inline bool art_bar_up(bool ready, bool wanted, bool tidus_window, uint32_t since_built) { return ready && wanted && tidus_window && since_built <= k_built_presents; }
-/// State 4's age (review S1): true while Tidus's state has been 4 for less than k_open_s (a stale read changes nothing).
-constexpr double k_open_s = 0.25;
-struct Opening {
-    int last = 0; double t4 = -1e300;
-    bool step(int tidus, bool fresh, double t) {
-        if (!fresh) return false;
-        if (tidus == 4 && last != 4) t4 = t;
-        last = tidus;
-        return tidus == 4 && t - t4 >= 0.0 && t - t4 < k_open_s;
-    }
-};
-inline bool part_drawn(const Parts& p) { return art_bar_up(p.ready, p.wanted, p.window, p.since); }
-inline bool part_coming(const Parts& p) { return p.vis && p.ready && p.cfg && p.grip; }
 
-// -- the window line (round 4: the owner saw the game's Swordplay UI exactly as without the mod) ---------------------------
-/// Why a Present in state 3 or 4 showed the game's bar: bits, named in k_why_name (the gates first, then drawn's and coming's parts).
-enum : uint32_t { W_OFF = 1u, W_BATTLE = 2u, W_FRESH = 4u, W_GATE = 8u, W_VIEW = 16u, W_OTHER = 32u, W_READY = 64u, W_WANTED = 128u,
-                  W_WINDOW = 256u, W_RECENT = 512u, W_VIS = 1024u, W_CFG = 2048u, W_GRIP = 4096u, W_LATE = 8192u };
-constexpr int k_why_n = 14;
-constexpr const char* k_why_name[k_why_n] = { "hide off", "no battle", "od block stale", "headset or VR pad not live", "not the 3D view",
-    "another overdrive", "art not loaded", "visuals not wanted", "no injecting Swordplay window", "art bar not built in 3 Presents",
-    "visuals off", "Swordplay gestures off", "right grip untracked (bar above the hand)", "past the 0.25 s opening" };
-/// The failing inputs of a show (0 when the decision hides, or outside states 3 and 4).
-inline uint32_t why_shown(const HideIn& x, const Parts& p) {
-    if (hide_tidus(x) || (x.tidus != 3 && x.tidus != 4)) return 0u;
-    uint32_t w = 0u;
-    if (!x.on) w |= W_OFF;
-    if (!x.battle) w |= W_BATTLE;
-    if (!x.fresh) w |= W_FRESH;
-    if (!x.gate) w |= W_GATE;
-    if (!x.view) w |= W_VIEW;
-    if (x.auron != 0 || x.lulu != 0 || x.wakka != 0) w |= W_OTHER;
-    if (w != 0u) return w;
-    uint32_t c = 0u;   // coming's failing parts
-    if (!p.vis) c |= W_VIS;
-    if (!p.ready) c |= W_READY;
-    if (!p.cfg) c |= W_CFG;
-    if (!p.grip) c |= W_GRIP;
-    if (x.tidus == 3) return c;
-    uint32_t d = 0u;   // drawn's
-    if (!p.ready) d |= W_READY;
-    if (!p.wanted) d |= W_WANTED;
-    if (!p.window) d |= W_WINDOW;
-    if (!(p.since <= k_built_presents)) d |= W_RECENT;
-    return d | (c != 0u ? c : (x.opening ? 0u : W_LATE));
-}
-/// One Swordplay window as the hide saw it, from Tidus's state leaving 0 to its return (render thread, one step a Present).
-/// Presents by state: [0] 1-2, [1] 3, [2] 4, [3] 5-10, each [shown, hidden]; the stub's counts are the glue's snapshots.
+// -- the window lines (round 4: the owner saw the game's Swordplay UI exactly as without the mod) -----------------------------
+/// One limit window as the hide saw it, from the character's state leaving 0 to its return (render thread, one step a Present).
+/// Presents by state: [0] 1-2, [1] 3, [2] 4, [3] 5-10, each [shown, hidden]; the stubs' counts are the glue's snapshots.
 struct Win {
-    bool open = false, held = false; double t0 = 0.0;
+    bool open = false; double t0 = 0.0;
     uint32_t pres[4][2] = {}, unread = 0, presents = 0, ui_pass = 0, why_n[k_why_n] = {}, lay = 0;   // lay: Presents with the bar's own layer up (round 5)
-    uint32_t snap[8] = {};   // the glue's counters at the open (the stub's [3/4 through, 3/4 skipped, other through, other skipped], the plates' [calls, skipped], the Bushido row stub's [calls, skipped])
+    uint32_t snap[12] = {};   // the glue's counters at the open
     /// Opens or closes: 1 opened (snapshot now), 2 closed (write the line), 0 neither. A stale read neither opens nor closes.
-    int step(bool battle, bool fresh, int tidus, double t) {
+    int step(bool battle, bool fresh, int state, double t) {
         if (open && !battle) { open = false; return 2; }
         if (!fresh) { if (open) { unread++; presents++; } return 0; }
-        const bool in = tidus >= 1 && tidus <= 10;
+        const bool in = active(state);
         if (!open && battle && in) { *this = Win{}; open = true; t0 = t; return 1; }
         if (open && !in) { open = false; return 2; }
         return 0;
     }
     /// This Present's decision (after step, while open and fresh).
-    void note(int tidus, bool hidden, uint32_t why, bool ui, bool lay_up = false) {
+    void note(int state, bool hidden, uint32_t why, bool ui, bool lay_up = false) {
         if (!open) return;
         presents++; if (ui) ui_pass++; if (lay_up) lay++;
-        const int b = tidus <= 2 ? 0 : tidus == 3 ? 1 : tidus == 4 ? 2 : 3;
+        const int b = state <= 2 ? 0 : state == 3 ? 1 : state == 4 ? 2 : 3;
         pres[b][hidden ? 1 : 0]++;
-        if (hidden && (tidus == 3 || tidus == 4)) held = true;
         for (int i = 0; i < k_why_n; ++i) if (why & (1u << i)) why_n[i]++;
     }
 };
 /// The window's verdict (the questions of the owner's test, in order), into out (n bytes). site: 1 the call still points at our
-/// stub, 0 rewritten by something else, -1 never patched. Round 5 (review S-T1): proportions, not "any": a decision that hid only
-/// part of states 3 and 4 (k_most) is named as such, and "something else draws it" needs nearly every call skipped. forced: the
-/// Developer switch made the stub skip every call in 3 / 4 whatever the decision. Returns out.
+/// stub, 0 rewritten by something else, -1 never patched. Round 5 (review S-T1): proportions, not "any". forced: the Developer
+/// switch made the stub skip every call in 3 / 4 whatever the decision. row: Auron's Bushido row (0x892740 at 0x89B411) instead
+/// of Tidus's bar (0x897240 at 0x89B416). Returns out.
 constexpr uint32_t k_most_num = 8, k_most_den = 10;   // "most": at least 80 %
 inline bool most(uint32_t part, uint32_t whole) { return whole > 0 && static_cast<uint64_t>(part) * k_most_den >= static_cast<uint64_t>(whole) * k_most_num; }
-inline const char* verdict(char* out, size_t n, int site, uint32_t calls34, uint32_t skipped34, uint32_t hidden34, uint32_t read34, bool forced = false) {
+inline const char* verdict(char* out, size_t n, int site, uint32_t calls34, uint32_t skipped34, uint32_t hidden34, uint32_t read34, bool forced = false, bool row = false) {
     if (out == nullptr || n == 0) return "";
     const unsigned c = calls34, k = skipped34, h = hidden34, r = read34;
-    if (site < 0) snprintf(out, n, "the call site was never patched: the game's bar stays (see the odb: patch line at launch)");
+    const char* who = row ? "Auron's" : "Tidus's"; const char* what = row ? "row" : "bar"; const char* at = row ? "0x89B411" : "0x89B416"; const char* fn = row ? "0x892740" : "0x897240";
+    if (site < 0) snprintf(out, n, "the call site was never patched: the game's %s stays (see the patch line at launch)", what);
     else if (site == 0) snprintf(out, n, "the call site NO LONGER calls our stub (something rewrote it after launch): nothing of ours runs there");
-    else if (c == 0) snprintf(out, n, "the stub was NEVER called in Tidus's states 3 and 4: the battle UI did not reach 0x89B416 while the game's bar was up (it is drawn some other way)");
-    else if (forced && most(k, c)) snprintf(out, n, "FORCED: the stub skipped %u of %u calls in states 3 and 4: if the game's bar still showed, it is not drawn by 0x897240", k, c);
-    else if (forced) snprintf(out, n, "FORCED, yet the stub skipped only %u of %u calls in states 3 and 4 (its own read of Tidus's state)", k, c);
-    else if (r == 0) snprintf(out, n, "Tidus's states 3 and 4 were never read fresh at a Present: no decision was made");
+    else if (c == 0) snprintf(out, n, "the stub was NEVER called in %s states 3 and 4: the battle UI did not reach %s while the game's %s was up (it is drawn some other way)", who, at, what);
+    else if (forced && most(k, c)) snprintf(out, n, "FORCED: the stub skipped %u of %u calls in states 3 and 4: if the game's %s still showed, it is not drawn by %s", k, c, what, fn);
+    else if (forced) snprintf(out, n, "FORCED, yet the stub skipped only %u of %u calls in states 3 and 4 (its own read of %s state)", k, c, who);
+    else if (r == 0) snprintf(out, n, "%s states 3 and 4 were never read fresh at a Present: no decision was made", who);
     else if (h == 0) snprintf(out, n, "the decision said SHOW at every Present of states 3 and 4 (the reasons above)");
     else if (!most(h, r)) snprintf(out, n, "the decision said SHOW at most Presents of states 3 and 4 (hidden %u of %u; the reasons above)", h, r);
     else if (k == 0) snprintf(out, n, "the decision said hide (%u of %u Presents) but the stub never skipped (the flag did not reach the game's thread in time)", h, r);
     else if (!most(k, c)) snprintf(out, n, "the decision hid %u of %u Presents but the stub skipped only %u of %u calls (the flag late on the game's thread)", h, r, k, c);
-    else snprintf(out, n, "the stub skipped %u of %u calls: if the game's bar still showed, it is drawn by something other than 0x897240 (or the panel showed an older UI image)", k, c);
+    else snprintf(out, n, "the stub skipped %u of %u calls: if the game's %s still showed, it is drawn by something other than %s (or the panel showed an older UI image)", k, c, what, fn);
     return out;
-}
-/// The limit plates (round 5, review N-T2): hidden only while one of our bars is up: with the bar hidden in Tidus's state 3 or 4,
-/// or in the result (5-10) while our bar is still drawn (its fade; since_drawn: Presents since an art or layer bar was built).
-inline bool hide_plates(bool hide, int tidus, uint32_t since_drawn) {
-    if (!hide) return false;
-    if (tidus == 3 || tidus == 4) return true;
-    return tidus >= 5 && tidus <= 10 && since_drawn <= k_built_presents;
 }
 
 }  // namespace odb

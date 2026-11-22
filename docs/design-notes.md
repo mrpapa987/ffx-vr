@@ -6199,6 +6199,52 @@ mod.
   the row is marked unverified (N-T4).
 - ABI stays 72. The new switches ride `ffxvr_odv_set`'s bar flags (16 = the layer off, 32 = force-hide); no export changed.
 
+### Round 6 (the fourth review pass and the hide's root cause, 22 Nov 2026)
+
+The owner's test of 3dc72fe: with `od_bar_hide2d` and `od_targets_hide2d` on, neither the game's Swordplay UI nor the
+Bushido row was ever hidden. The call-site patches are sound; what failed was the decision (it needed our art built in the
+last few Presents, or a 0.25 s grace, or injecting) and, on top of it, the window's held scenes, which no patch touched.
+
+- **The rule is now state-based.** Each Present the render thread publishes one "enabled" flag per character from
+  settled facts (`odb::Gate`):
+  - the setting is on (`od_bar_hide2d`; for Auron the row's patch or its detour is in);
+  - a battle is running, the headset shows the 3D view, the session and the VR pad are live;
+  - our replacement is on (Tidus: "swing for Swordplay" and the visuals; Auron: "strike the targets", not a Practice round);
+  - our bar can be placed (in front; above the hand only while the right grip is tracked).
+
+  Each stub then reads the character's own state word on the game's thread and skips in states 1-10
+  (`odb::stub_hides`). Nothing depends on our bar having been built, on a grace period or on injecting. When one fact is
+  missing the game's UI draws, and the window line names the fact. The plates follow the bar.
+- **The held scenes** (case B). The battle UI draws its scene layers with TOSeqDraw (0x8AE2F0), called at 0x89B3C3
+  (layer 0) and 0x89B513 (layer 1). The window's frame scene ("btidu" for Tidus; "bauro", then "bauro2" for Auron) runs
+  in scene set 2.
+  - Both calls now go to `odb_seq_stub`, after TOSeqDraw's first bytes and its slot table (0x1865F20) are checked.
+  - From the window's state 3, while that character's hide is enabled, the stub sets the state of a slot named exactly
+    "btidu", "bauro" or "bauro2" in set 2 to 0 for that one call, then puts it back. Only slots in state 2 or 3 are touched.
+  - States 1-2 are never touched, because the draw also steps a scene's clock and Tidus's and Auron's state 2 wait for
+    their scene's end. Nothing is moved and nothing stays changed. Every other scene, including the battle's own windows,
+    is drawn as before.
+  - `od_hide2d_scenes` (1; F8 "and the window's frame scene") turns this off at once (flag 64).
+  - Confidence: high that it cannot hide the battle's windows (exact names, set 2 only), leave a scene displaced (the
+    state is restored after the one call) or stall a window (states 3-10 only). Not known: whether these scenes are
+    everything that remains on the panel.
+- **The entry check** (case C). Launch logs whether 0x89B360 still starts with `cmp [0x133C948], 0; je`. If not, something
+  replaces the battle UI and no patch inside it can run. Both window lines repeat it.
+- **Auron's window line.** `odt: frame N: Bushido window` has the same shape as `odb:`. It carries:
+  - the row stub's calls by Auron's state;
+  - the Presents' decisions and why the decision said show;
+  - the Swordplay stub's calls (the drawer after it);
+  - how many scene draws left bauro out;
+  - the entry check and a verdict.
+
+  Both lines now say whether the scene hide acted.
+- **The bar's layer** (review N-F1, N-F2, N-F3):
+  - a new headset session tries the layer again, and only a real draw failure marks it broken;
+  - the held bar image is dropped as soon as the bar is gone;
+  - no bar layer goes over a blacked or relieved frame.
+- `od_bar_force_hide` now also covers Auron's row and both windows' scenes in states 3-4.
+- ABI stays 72: the new switch rides `ffxvr_odv_set`'s bar flags (64 = the scenes kept); no export changed.
+
 ### Not verified (nobody here can run the game)
 
 1. Tidus's and Lulu's drawers' call sites, 0x89B416 and 0x89B41B, are inferred from the port's call order and the Bushido
@@ -6216,6 +6262,10 @@ mod.
 9. The bar's layer in the headset: its pose (the anchor and the plane's yaw as a quaternion, +Z toward the eyes), its
    orientation (the image's top is the bar's top), the premultiplied copy into the sRGB swapchain, and that Virtual Desktop
    composites one more quad without cost. None of the D3D or OpenXR code was compiled here.
+10. That "btidu", "bauro" and "bauro2" are what remains of the game's limit UI on the panel, that TOSeqDraw's first argument
+    is the scene set (2 for the window's scenes), and that a slot reading state 0 for one draw has no side effect. These are
+    taken from the port and the exe's bytes, and the scene patch refuses any byte it does not expect.
+11. That Auron's row draws nothing in his states 1-2, where the row stub now also skips.
 
 ## The F8 menu reorganised (vr-menu S1, branch `vr-menu`, 8 Nov 2026)
 
