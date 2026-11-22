@@ -513,6 +513,9 @@ bool xr_start(const XrHost& host) {
     if (xr_active()) return true;
     xr_fail_reset();                                        // each attempt logs its failures afresh (the previous one may have been muted)
     g_h = host;
+    // crash-1440: a breadcrumb before each step that runs code not ours (the host writes them even when the log is busy), so a
+    // fail-fast inside the loader, the runtime or an API layer leaves the step it died in as the log's last line.
+    g_h.diag("xr: start: step 1, %s", g_loader == nullptr ? "loading openxr_loader.dll" : "openxr_loader.dll already loaded");
     if (g_loader == nullptr) {
         wchar_t path[MAX_PATH];
         _snwprintf_s(path, _TRUNCATE, L"%s\\openxr_loader.dll", g_h.dir);
@@ -527,6 +530,7 @@ bool xr_start(const XrHost& host) {
     // "runtime refresh", VD's SSW half rate) and QPC <-> XrTime (the photon latency on the sr: line). Without them the
     // diagnostics infer or leave out those numbers; nothing else depends on them.
     const char* exts[3] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, nullptr, nullptr }; uint32_t next_ext = 1;
+    g_h.diag("xr: start: step 2, the runtime's extension list (the loader reads the active runtime and the implicit API layers)");   // crash-1440
     {
         PFN_xrVoidFunction f = nullptr;
         if (XR_SUCCEEDED(p_gipa(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", &f)) && f) {
@@ -549,6 +553,7 @@ bool xr_start(const XrHost& host) {
     strncpy_s(ici.applicationInfo.engineName, "ffxvr", _TRUNCATE);
     ici.applicationInfo.apiVersion = XR_CURRENT_API_VERSION;
     ici.enabledExtensionCount = next_ext; ici.enabledExtensionNames = exts;
+    g_h.diag("xr: start: step 3, xrCreateInstance with %u extension(s)", next_ext);   // crash-1440
     XrResult r = p_xrCreateInstance(&ici, &g_instance);
     if (XR_FAILED(r) && next_ext > 1) {   // an optional extension refused: retry with D3D11 alone (the configuration of every build before)
         g_h.diag("xr: xrCreateInstance with %u optional extension(s) failed (%s): retrying with D3D11 alone", next_ext - 1, res_str(r));

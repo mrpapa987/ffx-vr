@@ -67,6 +67,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
+#include <csignal>     // crash-1440: SIGABRT (crash_hooks_install)
+#include <exception>   // crash-1440: std::set_terminate
 #include <share.h>     // _SH_DENYNO (the census log, opened shared)
 #include <limits>
 #include <map>
@@ -5937,6 +5939,7 @@ extern "C" __declspec(dllexport) void ffxvr_diag_keepalive(int frames) {
     if (u > g_diag_until) g_diag_until = u;
 }
 
+static void crash_hooks_install();   // crash-1440, with the session log below
 extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_context) {
     if (g_installed) return 0;
     if (game_context == nullptr) return -1;
@@ -5955,6 +5958,7 @@ extern "C" __declspec(dllexport) int ffxvr_init(void* game_device, void* game_co
     install_xinput_hook();
     install_xinput_set_hook();   // build 7's log and the rumble to haptics (only if either is on)
     dll_notify_install();        // od-guard (b): DLL loads / unloads from now on (dll: lines)
+    crash_hooks_install();       // crash-1440: a fatal CRT path in this DLL logs before the process ends
 
     bool ok = true;
     ok &= patch(vt, VT_VSSETCONSTANTBUFFERS, reinterpret_cast<void*>(&hk_VSSetConstantBuffers), reinterpret_cast<void**>(&g_orig_vssetcb), "VSSetConstantBuffers");
@@ -9857,6 +9861,56 @@ static bool diag_try(const char* text) {
     diag_put_lines(f, text, stamp);
     diag_close(f);
     return true;
+}
+// crash-1440: the last words. The owner's 2560x1440 / 4x session exited with 0xC0000409 and no dump at the headset start.
+// Fahrenheit's stage 0 dumps every first-chance exception above 0xC0000000 (an access violation, a C++ throw 0xE06D7363),
+// so "no dump" means a fail-fast that raises none: the CRT's invalid-parameter handler, abort() (std::terminate), a /GS
+// cookie, a pure call, or .NET's FailFast. crash_line writes even from the render thread (it retries the busy log instead of
+// dropping the line, as a crash or a breadcrumb before a risky step must not be lost); the handlers below cover this DLL's
+// own static CRT (/MT), not the game's, the OpenXR loader's or the runtime's (a /GS failure cannot be hooked at all).
+static void crash_line(const char* fmt, ...) {
+    char buf[1536]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
+    SYSTEMTIME t; GetLocalTime(&t);
+    char stamp[16]; snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
+    for (int k = 0; k < 50; ++k) {   // at most ~50 ms
+        bool drop = false; FILE* f = diag_open_ex(&drop);
+        if (f != nullptr) { diag_put_lines(f, buf, stamp); diag_close(f); return; }
+        if (drop && g_log_state != 1) return;   // the session cap: nothing is written any more
+        Sleep(1);
+    }
+}
+/// The calling thread's return addresses as module+offset (the module's file name), for a crash line.
+static void crash_stack(const char* what) {
+    void* fr[20] = {}; const USHORT n = RtlCaptureStackBackTrace(1, 20, fr, nullptr);
+    char line[1200]; int p = snprintf(line, sizeof(line), "crash: %s: thread %lu, stack", what, static_cast<unsigned long>(GetCurrentThreadId()));
+    for (USHORT i = 0; i < n && p > 0 && p < static_cast<int>(sizeof(line)) - 64; ++i) {
+        HMODULE m = nullptr; char name[32] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(fr[i]), &m) && m) {
+            char path[MAX_PATH] = ""; const DWORD l = GetModuleFileNameA(m, path, MAX_PATH); const char* b = path;
+            for (DWORD j = 0; j < l && j < MAX_PATH; ++j) if (path[j] == '\\' || path[j] == '/') b = path + j + 1;
+            strncpy_s(name, b, _TRUNCATE);
+        }
+        p += snprintf(line + p, sizeof(line) - static_cast<size_t>(p), " %s+0x%X", name, static_cast<unsigned>(reinterpret_cast<uintptr_t>(fr[i]) - reinterpret_cast<uintptr_t>(m)));
+    }
+    crash_line("%s", line);
+}
+static volatile LONG g_crash_said = 0;   // the first fatal path logs; abort() after std::terminate does not repeat it
+static void crash_say(const char* what) { if (InterlockedExchange(&g_crash_said, 1) == 0) crash_stack(what); }
+static void __cdecl crash_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+    crash_say("a CRT call in ffxvr_native.dll got an invalid parameter (a *_s buffer too small, a bad handle or format string); the process ends with 0xC0000409 as before");
+    __fastfail(FAST_FAIL_INVALID_ARG);   // what the CRT does without a handler
+}
+static void __cdecl crash_terminate() { crash_say("std::terminate in ffxvr_native.dll (an exception left a noexcept function or a thread)"); abort(); }
+static void __cdecl crash_purecall() { crash_say("a pure virtual call in ffxvr_native.dll"); abort(); }
+static void __cdecl crash_sigabrt(int) { crash_say("abort() in ffxvr_native.dll"); }   // returns: abort goes on (0xC0000409)
+/// At ffxvr_init, once. A one-time line says they are in.
+static void crash_hooks_install() {
+    static bool done = false; if (done) return; done = true;
+    _set_invalid_parameter_handler(crash_invalid_parameter);
+    std::set_terminate(crash_terminate);
+    _set_purecall_handler(crash_purecall);
+    signal(SIGABRT, crash_sigabrt);
+    diag("crash: this DLL's fatal CRT paths (invalid parameter, terminate, abort, pure call) now log a crash: line with the stack before the process ends");
 }
 /// Release prep (ABI 26): diag_verbose (the periodic lines, the camera trace, Ctrl+F9) and the session cap in MB (1..1024).
 /// Managed calls it right after the ABI check, before ffxvr_init, and again whenever the setting changes. Raising the cap
@@ -15135,7 +15189,8 @@ uint32_t g_e2_begin_fail_prev = 0;
 // failure count is only cleared once a session has lived 5 s.
 static ULONGLONG g_xr_retry_at = 0, g_xr_started_at = 0; static uint32_t g_xr_fails = 0; static bool g_xr_quiet = false;
 constexpr ULONGLONG k_xr_short_life_ms = 5000;
-static void xr_diag(const char* fmt, ...) { if (g_xr_quiet) return; va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); diag("%s", b); }
+static bool g_xr_in_start = false;   // crash-1440: inside xr_start: its lines are written even when the log is busy (crash_line)
+static void xr_diag(const char* fmt, ...) { if (g_xr_quiet) return; va_list a; va_start(a, fmt); char b[512]; vsnprintf(b, sizeof(b), fmt, a); va_end(a); if (g_xr_in_start) crash_line("%s", b); else diag("%s", b); }
 
 extern "C" __declspec(dllexport) void ffxvr_xr_screen_set(int mode, float width, float dist) { g_xr_screen_mode = mode; g_xr_screen_width = width; g_xr_screen_dist = dist; }
 extern "C" __declspec(dllexport) void ffxvr_backdrop_set(int mode) { g_backdrop_mode = mode; }
@@ -15447,6 +15502,58 @@ static void leave_xr_state() {
     g_bt_phase = BT_IDLE; g_bt_want_freeze = g_bt_frozen = g_bt_hold = g_bt_freeze_wait = false; g_bt_recentre = false; g_bt_cap_tex = nullptr;   // xr_stop dropped the pin
     diag("xr: headset off, VR-only state reset");
 }
+// crash-1440: the state the headset start begins from, on each start attempt that logs (the first two). GameSetting.ini's
+// SM_FULLSCREEN is a display mode change (ChangeDisplaySettings, CDS_FULLSCREEN, at the window's creation and again at every
+// WM_ACTIVATE with focus) over a windowed swap chain; for a size the display does not list that change fails and the game
+// runs as a WxH window over the desktop. The owner's crash: 2560x1440 (not a mode of his 4K monitor) at the headset start.
+// One line per attempt, plus a resolution: line once a session when the game's size is not in its display's mode list.
+static BOOL CALLBACK sr_find_window_cb(HWND h, LPARAM lp);   // stickrep's rule for the game's window (below)
+static bool g_xr_mode_said = false;
+/// The game's own settings object (g_Settings, its pointer at VA 0x022FB504): ScreenMode +8 (0 SM_WINDOW, 1 SM_FULLSCREEN,
+/// 2 SM_BORDERLESS), Resolution +4 (W << 16 | H). False when it cannot be read (no access violation: range_readable first).
+static bool xr_game_screen(int* mode, unsigned* w, unsigned* h) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    const void* pp = reinterpret_cast<const void*>(base + (0x022FB504u - 0x400000u));
+    if (!range_readable(pp, 4)) return false;
+    const uint8_t* s = *reinterpret_cast<const uint8_t* const*>(pp);
+    if (s == nullptr || !range_readable(s, 12)) return false;
+    const uint32_t r = *reinterpret_cast<const uint32_t*>(s + 4);
+    *mode = *reinterpret_cast<const int*>(s + 8); *w = r >> 16; *h = r & 0xFFFFu;
+    return true;
+}
+static void xr_start_note() {
+    D3D11_TEXTURE2D_DESC bd = {}; g_backbuffer->GetDesc(&bd);
+    int sm = -1; unsigned sw = 0, sh = 0; const bool have_sm = xr_game_screen(&sm, &sw, &sh);
+    std::pair<HWND, LONG> best(nullptr, 0); EnumWindows(sr_find_window_cb, reinterpret_cast<LPARAM>(&best));
+    const HWND hw = best.first;
+    RECT wr = {}, cr = {}; if (hw) { GetWindowRect(hw, &wr); GetClientRect(hw, &cr); }
+    MONITORINFOEXW mi = {}; mi.cbSize = sizeof(mi);
+    const HMONITOR mon = MonitorFromWindow(hw, MONITOR_DEFAULTTOPRIMARY);
+    const bool have_mon = mon != nullptr && GetMonitorInfoW(mon, &mi);
+    DEVMODEW cur = {}; cur.dmSize = sizeof(cur);
+    const bool have_cur = have_mon && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &cur);
+    unsigned modes = 0; bool listed = false;   // the game's size at 32 bits per pixel, as its mode change asks for it
+    if (have_mon) {
+        DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
+        for (DWORD i = 0; i < 4096 && EnumDisplaySettingsW(mi.szDevice, i, &dm); ++i, ++modes)
+            if (dm.dmPelsWidth == bd.Width && dm.dmPelsHeight == bd.Height && dm.dmBitsPerPel == 32) listed = true;
+    }
+    static const char* const k_sm[3] = { "SM_WINDOW", "SM_FULLSCREEN", "SM_BORDERLESS" };
+    crash_line("xr: start attempt %u: the game renders %ux%u fmt %u, scene MSAA %ux (last targets %ux%u, %u made); GameSetting %s %ux%u; window %ldx%ld at (%ld,%ld), client %ldx%ld, %s; display %ls %lux%lu @ %lu Hz (%u modes, %ux%u %s)",
+               g_xr_fails + 1, bd.Width, bd.Height, static_cast<unsigned>(bd.Format), g_msaa_last_n, g_msaa_last_w, g_msaa_last_h, g_msaa_seen,
+               !have_sm ? "unread" : (sm >= 0 && sm <= 2) ? k_sm[sm] : "ScreenMode ?", sw, sh,
+               wr.right - wr.left, wr.bottom - wr.top, wr.left, wr.top, cr.right - cr.left, cr.bottom - cr.top,
+               !hw ? "not found" : GetForegroundWindow() == hw ? "in the foreground" : "NOT in the foreground",
+               have_mon ? mi.szDevice : L"?", have_cur ? cur.dmPelsWidth : 0ul, have_cur ? cur.dmPelsHeight : 0ul, have_cur ? cur.dmDisplayFrequency : 0ul,
+               modes, bd.Width, bd.Height, !have_mon ? "not checked" : listed ? "listed" : "NOT listed");
+    if (have_mon && !listed && !g_xr_mode_said) {
+        g_xr_mode_said = true;
+        crash_line("resolution: the game's %ux%u is not a mode of %ls (desktop %lux%lu)%s; crash-1440: the headset start crashed (0xC0000409) at 2560x1440 on a 4K monitor in this state. "
+                   "Use a listed size, or ScreenMode=SM_BORDERLESS for any size (tools\\game-settings.ps1 -Profile vr does that)",
+                   bd.Width, bd.Height, mi.szDevice, have_cur ? cur.dmPelsWidth : 0ul, have_cur ? cur.dmPelsHeight : 0ul,
+                   have_sm && sm == 1 ? ": with SM_FULLSCREEN the game's display mode change fails and it runs as a window over the desktop" : "");
+    }
+}
 extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotate, int translate, int use_fov, int seat) {
     g_xr_user_on = on != 0;
     g_xr_scale = scale; g_xr_rotate = rotate != 0; g_xr_translate = translate != 0; g_xr_use_fov = use_fov != 0; g_xr_seat = seat != 0;
@@ -15455,7 +15562,9 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
     XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop, perf_before_end };
-    g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
+    g_xr_quiet = g_xr_fails >= 2;   // the first two failed attempts log in full
+    if (!g_xr_quiet) xr_start_note();   // crash-1440: the display state, written before the loader is touched
+    g_xr_in_start = true; g_xr_want = xr_start(h); g_xr_in_start = false; g_xr_quiet = false;
     if (g_xr_want) {
         if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
         copy_pass_init();   // SU-8: the copy shaders compile at headset start, not inside the first frame's submit (tried once; a later call is a no-op)

@@ -350,6 +350,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
 
     public override bool init(FhModContext mod_context, FileStream global_state_file) {
         _logger.Info($"FFX VR {s_mod_version} module initialized (Fahrenheit {s_fh_version}).");
+        crash_log_install();   // crash-1440: unhandled and first-chance managed exceptions logged (crash_log.cs)
         menu_defaults_capture();   // vr-menu S1: every key's code default, before the file is read (menu.cs)
         settings_load();
         menu_launch_snapshot();    // vr-menu S1: the launch-only keys as the hooks below will see them ("next launch" tags; menu.cs)
