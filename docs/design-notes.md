@@ -8058,26 +8058,39 @@ in `ffxvr_native.cpp`) is compiled by `perf_chk` against a mock D3D11 context, n
   Why it is safe, and what it takes (it reuses the slow guard's screen-item skip, `g_slow_no_e2`, at the same line):
   - **The UI, ImGui and dream re-issues are untouched**: they return from `ffxvr_on_draw` before the eye-2 decision.
   - **The scene target is still found.** `g_scene_live_tex` (the UI pass, its resolves, the hands, late3d) is counted
-    in `ffxvr_eye2_begin`, which a skipped draw never reaches; `pt_count_scene` makes the same count in `ffxvr_on_draw`.
-    Without it the UI pass would not be recognised and the UI would land in the eye image.
+    in `ffxvr_eye2_begin`, which a skipped draw never reaches; `pt_count_scene` does in `ffxvr_on_draw` what eye2_begin
+    would have done first: from the real bindings, the target's twin (`twin_of`, so a scene target the game recreates in the
+    off window, an area change, still gets one and its resolve is still seen), then the count, under eye2_begin's own
+    conditions (a twin with a view, a depth target bound). Without it the UI pass would not be recognised and the UI would
+    land in the eye image.
   - **The hand parts' split draws keep their passes** (pass 0 draws the right hand into eye 1).
-  - **Both eyes get eye 1** for a frame rendered without eye 2 (`xr_tick`, as the blink does); eye 2's mirrored MSAA
-    resolves are skipped too (the twin is not shown); mirrored clears and copies stay (cheap).
+  - **Both eyes get eye 1's image and eye 1's field of view** for a frame rendered without eye 2 (`xr_tick`: `e2 = e1`,
+    `used[1] = used[0]`; eye 2 keeps its own pose). With eye 2's FOV the same image would sit some 15-20 degrees apart in
+    the two eyes (the Quest's per-eye FOVs are mirror-asymmetric): double vision. With eye 1's FOV the disparity is zero:
+    the view is flat at infinity. Eye 2's mirrored MSAA resolves are skipped too (the twin is not shown); mirrored clears
+    and copies stay (cheap).
   - **Only the 3D headset view**: not a screen, the stereo screen or a battle transition window; a frame that is not
     3D keeps eye 2 and is left out of all three windows. It does not start, or stops at once, without a running
     session or during a slow-guard episode, and its frames are excluded from the slow guard's evidence.
-  - Left as is: after the test, eye 2's history-blend targets hold 5 s old content for a frame or two.
+  - Left as is: after the test, eye 2's history-blend targets hold 5 s old content until the game's temporal blend
+    converges (an exponential decay; usually well under a second). Clearing them would need the history targets named.
 - **The busy-GPU gate** (`sr_skip_busy`: 0 off, 1 log only, 2 on; **1** in this test build so the owner's next log
-  answers the question). `XrHost::before_end` also issues a `D3D11_QUERY_EVENT` at the fresh frame's end. In
+  answers the question; the release default, 0 or 1 or 2, is decided after his data, native and managed together).
+  Only stick-reprojection extras between flowing frames ask (`stick_reproject` on, a Present within the last 150 ms,
+  `k_sr_quad_ms`); a keepalive extra in a hold (a load) always goes: feeding the headset is its whole job, and the GPU
+  is idle in a load anyway. Predictive extras ask too: skipping one only lets the waiting list start sooner. `XrHost::before_end` also issues a `D3D11_QUERY_EVENT` at the fresh frame's end. In
   `sr_extra_inner`, once the game's lock is taken (the context is ours), `GetData(DONOTFLUSH)` asks whether the GPU has
-  finished that frame. Why it matters (perf-investigation section 3): VDXR's xrEndFrame waits for its async submission
+  finished that frame. Why it matters (the 22 Nov investigation): VDXR's xrEndFrame waits for its async submission
   thread, which waits on a fence signalled on the game's context, so an extra sent while the GPU still has the last
   frame queued blocks the render thread in xrEndFrame until the queue drains. 1 sends every extra and adds to the `sr:`
   line the extras checked, the would-skip count, and the xrEndFrame time and the following list start delay split by the
   answer; 2 skips that slot (`sr_extra_inner` returns 2, the ring wait moves to the next slot; the runtime repeats the
   last frame there) and counts it. If the explanation holds, extras sent with the GPU busy show End times near the
   5.8-9.6 ms of the 22 Nov log and the others well under 1 ms. Trade-off of 2: in GPU-saturated scenes fewer extras, so
-  stick turns show the old ghosting there instead of late fresh frames.
+  stick turns show the old ghosting there instead of late fresh frames. A mode-2 skip is counted in the `sr:` line's
+  "by us" breakdown as "busy GPU". The event sits right before our xrEndFrame, so "done" does not cover VDXR's own work
+  for the fresh frame, Fahrenheit's ImGui or the Present: an extra in the "done" bucket can still wait briefly behind
+  those, which blurs the "well under 1 ms" a little (there is no later point to issue it without taking the lock).
 - **Not in this build: the launch script's VR resolution** (the investigation's code item 3, `run-ffx.ps1` applying
   `game-settings.ps1 -Profile vr` for each run). The owner's game crashed to the desktop (0xC0000409) as the mod switched
   to VR with that profile's 2560x1440, twice, while 4K / 8x works; his launcher lists only 1920x1080 and 3840x2160, so

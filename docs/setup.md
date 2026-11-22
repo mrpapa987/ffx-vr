@@ -203,10 +203,12 @@ the busy-GPU gate"):
   says what it spans. Every phase holds both eyes (eye 2 is re-issued draw by draw); eye 2's own
   cost is the next item's. Off (`diag_verbose=0`) the timers make no query at all.
 - **"Measure: eye 2 off for 5 s"** (Developer > Rendering > GPU timing, the eye-2 test and the
-  busy-GPU gate): 3 s with eye 2, 5 s without its re-issue (both eyes see eye 1, so the view goes
-  flat), 3 s with it again, then one `perf: eye-2 test ...` line: the GPU span (and, in developer
-  mode, every phase) with and without eye 2. In the 3D headset view only; it turns eye 2 back on
-  by itself and stops early if the view leaves 3D.
+  busy-GPU gate): 3 s with eye 2, 5 s without its re-issue (both eyes see eye 1's image, so the
+  view goes flat), 3 s with it again, then one `perf: eye-2 test ...` line: the GPU span (and, in
+  developer mode, every phase) with and without eye 2. It starts only in the 3D headset view;
+  frames that are not 3D (a screen, a battle transition) keep eye 2 and are left out of the
+  measurement; it turns eye 2 back on by itself, and stops early if the session ends or the
+  slow-GPU guard starts an episode.
 - **`sr_skip_busy`** (Developer tab, same group; 0 off, 1 log only, 2 on; default **1** in this
   test build): before a stick-reprojection extra frame the mod asks, without waiting, whether the
   GPU has finished the last game frame. 1 sends every extra and adds the counts to the `sr:` line

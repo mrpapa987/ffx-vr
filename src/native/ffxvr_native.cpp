@@ -6293,7 +6293,7 @@ static int g_ph_cur = -1;                                      // the slot of th
 static pgpu::Window g_ph_win; static ULONGLONG g_ph_win_t0 = 0; // the perf: line's window
 static uint64_t g_ph_prev_end = 0; static bool g_ph_prev_ok = false;   // the last frame read: its end (the next frame's gap)
 static pgpu::E2Test g_pt;                                      // the eye-2 test
-bool g_perf_no_e2 = false;                                     // the frame being rendered skips eye 2's re-issue (ffxvr_on_draw, ffxvr_on_resolve)
+static bool g_perf_no_e2 = false;                              // the frame being rendered skips eye 2's re-issue (ffxvr_on_draw, ffxvr_on_resolve)
 static uint8_t g_pt_tag_next = 0, g_pt_tag_cur = 0;            // the test's tag of the frame about to render / being rendered
 static volatile LONG g_pt_req = 0;                             // the Developer button (ffxvr_perf_set): start at the next Present
 static int g_srb_mode = 1;                                     // ini sr_skip_busy: 0 off, 1 log only (this test build's default), 2 skip a busy slot
@@ -6406,13 +6406,23 @@ static void pt_frame(bool view_ok, const char* abort) {
     g_perf_no_e2 = pgpu::E2Test::tag_off(g_pt_tag_next);
     if (g_pt.take_done()) diag("perf: %s", g_pt.text);
 }
-/// ffxvr_on_draw, a draw the test keeps from eye 2: eye2_begin's count of draws per target with depth (the frame's scene target,
-/// g_scene_live_tex: the UI pass, its resolves, the hands and late3d follow it), which this draw no longer reaches.
+/// ffxvr_on_draw, a draw the test keeps from eye 2: what eye2_begin would have done for it before its re-issue, which this draw
+/// no longer reaches. From the real bindings, as eye2_begin: the target's twin (twin_of: made now for a target the game created
+/// during the off window, an area change, so ffxvr_on_resolve still finds it: the UI pass, the post marker; review S2), then, only
+/// when that twin has a view and a depth target is bound (eye2_begin's own conditions; review N4), its count of draws per target
+/// (the frame's scene target, g_scene_live_tex: the UI pass, its resolves, the hands and late3d follow it).
+static Twin* twin_of(ID3D11Texture2D* game);   // twins, below
 static void pt_count_scene() {
-    ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? g_cur_rtv0_tex : nullptr;
-    if (gt == nullptr || g_cur_dsv == nullptr) return;
-    const uint32_t c = ++g_draws_per_target[gt];
-    if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+    ID3D11RenderTargetView* rv = nullptr; ID3D11DepthStencilView* dv = nullptr;
+    g_ctx->OMGetRenderTargets(1, &rv, &dv);   // AddRefs (released below)
+    ID3D11Texture2D* gt = rv != nullptr ? (rv == g_cur_rtv[0] ? g_cur_rtv0_tex : texture_of(rv)) : nullptr;
+    const Twin* tw = gt != nullptr ? twin_of(gt) : nullptr;
+    if (tw != nullptr && tw->rtv != nullptr && dv != nullptr) {
+        const uint32_t c = ++g_draws_per_target[gt];
+        if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+    }
+    if (rv) rv->Release();
+    if (dv) dv->Release();
 }
 // GPU time per frame: a ring of timestamp-disjoint queries spanning Present to
 // Present, read back a few frames late so the readback never stalls.
@@ -17862,7 +17872,7 @@ static void xr_tick() {
     XrFrameOut out = {};
     g_xr_fov_applied = false;
     auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
-    if (g_perf_no_e2 && e1 != nullptr) e2 = e1;    // perf-gpu: the eye-2 test's off window: rendered without eye 2's re-issue, both eyes get eye 1
+    if (g_perf_no_e2 && e1 != nullptr) { e2 = e1; used[1] = used[0]; }   // perf-gpu: the eye-2 test's off window: rendered without eye 2's re-issue, both eyes get eye 1's image and field of view (eye 2 keeps its pose: zero disparity, flat at infinity; review S1)
     if (g_xr_drop_image) e1 = nullptr;              // Debug test: as if this frame had no eye image
     const char* bt_e1src = e1 == nullptr ? "none" : ui_frame ? "finals" : "bb";
     if (g_bt_hold && e1 != nullptr) { e1 = nullptr; bt_e1src = "held"; }   // frozen world, after the shards: the pinned last frame is re-sent over the load black
@@ -19199,9 +19209,13 @@ static int sr_extra_inner(double t0) {
     L->count = L->count + 1;                                       // 0 -> 1 (only the owner writes it)
     g_sr_lock_held = true; g_sr_lock_t0 = sr_ms();
     // perf-gpu (sr_skip_busy): has the GPU finished the last fresh frame's work (its event query, asked with the game's lock held
-    // and never waited for)? VDXR orders this extra's xrEndFrame behind it (perf-investigation.md 3): 2 skips the slot instead.
-    const int busy = srb_busy();
-    pgpu::gate_count(g_srb_s, g_srb_mode, busy);
+    // and never waited for)? VDXR's xrEndFrame waits for its submission thread, which waits on a fence signalled on the game's
+    // context, so an extra sent while the GPU is busy blocks here until the queue drains: 2 skips the slot instead. Asked only for
+    // stick-reprojection extras between flowing frames (review N2): a keepalive extra in a hold (a load, over k_sr_quad_ms
+    // without a Present) always goes, since keeping the headset fed is its whole job and the GPU is idle then anyway.
+    const bool gate_on = g_sr_mode > 0 && t0 - g_sr_present_ms < k_sr_quad_ms;
+    const int busy = gate_on ? srb_busy() : -1;
+    if (gate_on) pgpu::gate_count(g_srb_s, g_srb_mode, busy);
     if (pgpu::gate_decide(g_srb_mode, busy) == pgpu::G_SKIP) { g_ril_rel(L); g_sr_lock_held = false; return 2; }
     const bool gate_over = g_sr_gate != 0;
     if (g_sr_mode > 0 && g_sr_pace.skip_k > 0 && g_sr_pace.P > 0.5)   // slots were skipped: this extra is shown that many periods after its frame's display time
@@ -19442,11 +19456,11 @@ static void sr_present() {
         if (why_changed) strncpy_s(s_sr_why, why, _TRUNCATE);
         const bool log_it = g_log_verbose || ++s_sr_windows == 2 || why_changed;
         char gate[512]; pgpu::gate_text(gate, sizeof(gate), g_srb_s, g_srb_mode);   // perf-gpu: the busy-GPU gate's counts (sr_skip_busy)
-        if (log_it) diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
+        if (log_it) diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u, busy GPU %u) | "
              "yaw per extra avg %.2f max %.2f deg (rotating %u%%, clamped %u) | extra cpu avg %.2f max %.2f ms (end %.2f, wait %.2f, begin+locate %.2f), lock busy %u, re-acquire max %.1f ms, gate skips %u (overridden %u) | "
              "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s%s",
              secs, g_sr_mode, g_sr_keepalive ? " + keepalive" : "", *why ? " (NOT ACTIVE)" : "", pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? ", half rate: VD spacewarp (SSW) active" : "",
-             S.fresh + S.extras + S.skipped, S.fresh, S.late, S.extras, S.extras / secs, S.predictive, S.zero, S.fails, S.skipped, S.skip_ours, S.mid_skips,
+             S.fresh + S.extras + S.skipped, S.fresh, S.late, S.extras, S.extras / secs, S.predictive, S.zero, S.fails, S.skipped, S.skip_ours, S.mid_skips, g_srb_s.skipped,
              S.rot ? S.yaw_sum / S.rot : 0.0, S.yaw_max, S.extras ? (100u * S.rot) / S.extras : 0u, S.clamped,
              S.cpu_sum / ne, S.cpu_max, S.end_sum / ne, S.wait_sum / ne, S.loc_sum / ne, S.lock_busy, S.reacq_max, S.gate_skips, S.gate_over,
              S.delay_n ? S.delay_sum / S.delay_n : 0.0, S.delay_max, S.delay_n, S.pw_n ? S.pw_sum / S.pw_n : 0.0, S.pw_max, S.hold_sum / ne, S.hold_max,
