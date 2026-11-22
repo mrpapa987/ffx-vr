@@ -6585,8 +6585,8 @@ static float g_odb_dist = 0.6f, g_odb_height = 0.f;    // ffxvr_odv_set (ABI 72)
 // states 3-4 their own read of the state gives, whatever the decision.
 // Round 6 (case B of the root-cause report): the held window scenes ("btidu"; "bauro", "bauro2") left out of the battle UI's
 // scene draws (TOSeqDraw 0x8AE2F0, called at 0x89B3C3 for layer 0 and 0x89B513 for layer 1) from the window's state 3 on, while
-// the character's hide is enabled: for that one call the slot's state (g_TOSeqSlots 0x1865F20, set 2) reads 0, then it is put
-// back. Nothing moves and nothing stays changed. od_hide2d_scenes (ffxvr_odv_set flag 64 = off).
+// the character's hide is enabled: for that one call the slot's state (g_TOSeqSlots 0x1865F20, set 2) reads odb::k_seq_mark (0x7FFF:
+// neither drawn nor free), then it is put back. Nothing moves and nothing stays changed. od_hide2d_scenes (ffxvr_odv_set flag 64 = off).
 static volatile LONG g_odb_scene_on = 1, g_odb_seq_calls = 0, g_odb_seq_hid[2] = {};   // [Tidus's btidu, Auron's bauro / bauro2]: draws with the scene left out
 static uintptr_t g_odb_seq_fn = 0, g_odb_slots = 0, g_odb_seq_site[2] = {};          // TOSeqDraw, g_TOSeqSlots, the two call sites (rebased)
 static int g_odb_seq_state = 0;                       // 0 not asked, 1 patched, -2 the bytes differ (nothing patched), -3 VirtualProtect
@@ -6594,6 +6594,8 @@ static int g_odb_entry_state = 0;                     // round 6 (case C): 0x89B
 static odb::Win g_odt_win;                            // render thread: this Bushido window (Auron's states 1-10)
 static char g_odt_verdict[200] = "no Bushido window yet";
 static uint32_t g_odb_lay_frame = 0x80000000u;         // render thread: the Present that last drew the bar's own layer (round 5, review S-T2)
+static uint32_t g_odb_any_frame = 0x80000000u;         // render thread: the Present that last drew our Swordplay bar (the art, or its layer)
+static volatile LONG g_odb_barup = 0;                  // round 6 (review N-G2): our bar drawn in the last k_built_presents Presents (its fade): the plates stay hidden in 5-10
 static char g_odb_verdict[200] = "no Swordplay window yet";
 static uint32_t g_odb_win_lines = 0;
 /// The patched call site's target (the game's main thread, from 0x89B416; cdecl, no arguments, as 0x897240, whose eax the battle
@@ -6611,13 +6613,14 @@ static void __cdecl odb_tidus_stub() {
 static uint32_t __cdecl odb_bg_stub() {
     InterlockedIncrement(&g_odb_bg_calls);
     const int16_t w = g_odb_word != nullptr ? *g_odb_word : 0;
-    if (odb::stub_hides(InterlockedCompareExchange(&g_odb_enable, 0, 0) != 0, w) || ((w == 3 || w == 4) && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }   // (round 6: as the bar)
+    if (odb::plates_hide(InterlockedCompareExchange(&g_odb_enable, 0, 0) != 0, w, InterlockedCompareExchange(&g_odb_barup, 0, 0) != 0) || ((w == 3 || w == 4) && InterlockedCompareExchange(&g_odb_force, 0, 0))) { InterlockedIncrement(&g_odb_bg_hidden); return 0; }   // (review N-G2: shown in the intro)
     return reinterpret_cast<uint32_t(__cdecl*)()>(g_odb_bg_fn)();
 }
 /// Round 6: the battle UI's scene draws (the game's main thread, from 0x89B3C3 and 0x89B513; cdecl(i, layer, flag) as TOSeqDraw,
 /// whose eax the battle UI drops). From the window's state 3 on, while that character's hide is enabled (or forced in 3-4) and
 /// od_hide2d_scenes is on, the slots of scene set 2 named exactly "btidu" (Tidus) or "bauro" / "bauro2" (Auron) that would be drawn
-/// (state 2 or 3) read state 0 for this one call, and get their state back right after it. TOSeqDraw only reads the states;
+/// (state 2 or 3) read odb::k_seq_mark for this one call (review N-G3: not 0, which the scene start's search takes as free), and
+/// get their state back right after it. TOSeqDraw only reads the states;
 /// the slot stepping (TOSeqCtrl) and the window's logic run elsewhere on this thread, never inside this call. A skipped scene's
 /// clock does not step (its draw steps it), so states 1-2 are never touched: Tidus's state 2 waits for btidu's end.
 static uint32_t __cdecl odb_seq_stub(int i, uint32_t a, uint32_t b) {
@@ -6637,7 +6640,7 @@ static uint32_t __cdecl odb_seq_stub(int i, uint32_t a, uint32_t b) {
                 const volatile char* nm = reinterpret_cast<const volatile char*>(sl + 8u);
                 const bool t = tid && odb::name_is(nm, "btidu"), au = aur && (odb::name_is(nm, "bauro") || odb::name_is(nm, "bauro2"));
                 if (!t && !au) continue;
-                st[n] = ps; old[n] = v; *ps = 0; ++n; who = t ? 0 : 1;
+                st[n] = ps; old[n] = v; *ps = odb::k_seq_mark; ++n; who = t ? 0 : 1;
             }
         }
     }
@@ -6655,10 +6658,11 @@ static odb::Gate odb_gate_tidus(const odg::FrameIn& in) {
     return g;
 }
 /// ... and Auron's Bushido row's: the row's patch (od_targets_hide2d at launch) or its detour in, a battle, the 3D view, the
-/// session and the VR pad live, "strike the targets" on, not a Practice round.
+/// session and the VR pad live, "strike the targets" on, not a Practice round, and not his input window with the button sequence
+/// unread (review N-G1: a targets round needs it; in.seq is set only in that window).
 static odb::Gate odt_gate_row(const odg::FrameIn& in) {
     odb::Gate g; g.on = g_odt_patch_state == 1 || g_odt_row_m[0] == 2 || g_odt_row_m[0] == 3; g.battle = in.battle; g.view = odt_view(); g.live = in.headset && in.vrpad;
-    g.cfg = g_odg.cfg.on && (g_odg.open ? g_odg.sess.targets : g_odg.targets_now()); g.vis = !(g_odt.r.on && g_odt.r.practice); g.anchor = true;
+    g.cfg = g_odg.cfg.on && (g_odg.open ? g_odg.sess.targets : g_odg.targets_now()); g.vis = !(g_odt.r.on && g_odt.r.practice) && !(in.seq != nullptr && in.seq_n < 1); g.anchor = true;   // (review N-G1: the sequence's read failed: no targets, so the row)
     return g;
 }
 /// A patched call site now: 1 still a call of `stub`, 0 something else, -1 never patched.
@@ -6945,6 +6949,7 @@ static void od_gest_tick() {
         const odb::Gate g = odb_gate_tidus(in);
         const bool fr = in.fresh && in.r.ok, other = in.r.auron != 0 || in.r.lulu != 0 || in.r.wakka != 0;
         const LONG en = odb::enabled(g) ? 1 : 0; if (g_odb_enable != en) InterlockedExchange(&g_odb_enable, en);
+        const LONG bu = g_frames - g_odb_any_frame <= odb::k_built_presents ? 1 : 0; if (g_odb_barup != bu) InterlockedExchange(&g_odb_barup, bu);   // (review N-G2: the plates in the fade)
         const int ev = g_odb_win.step(in.battle, fr, in.r.tidus, in.t);   // (round 4: the window line)
         if (ev == 1) odb_win_snap();
         const bool hd = odb::hide_now(g, fr, in.r.tidus, other);
@@ -12416,11 +12421,13 @@ static void odv_build() {
     g_odv_dropped += static_cast<uint32_t>(o.dropped) + static_cast<uint32_t>(oa.dropped);
     g_odb_nv = 0;
     if (oa.n > 0) { odv_to_render(g_odb_raw, g_odb_mk, oa.n); g_odb_nv = oa.n; }
+    bool lay_now = false;
     if (ol.n > 0 && g_odv.lay_on) {   // round 5: the layer's image and pose (a failed draw: the eye images until the next headset session)
         const int r = odb_layer_draw(ol);   // (round 6, review N-F1: 0 = no swapchain now, e.g. the session just stopped: no failure)
-        if (r > 0) g_odb_lay_frame = g_frames;
+        if (r > 0) { g_odb_lay_frame = g_frames; lay_now = true; }
         else if (r < 0) { g_odb_lay_broken = true; diag("odb: the overdrive bar's own layer could not be drawn: it goes into the eye images until the next headset session"); }
     }
+    if (oa.n > 0 || lay_now) g_odb_any_frame = g_frames;   // (review N-G2: our bar drawn, for the plates in its fade)
     if (o.n == 0) return;
     odv_to_render(g_odv_raw, g_odv_mk, o.n);
     g_odv_nv = o.n; g_odv_frames++; if (static_cast<uint32_t>(o.n) > g_odv_verts_max) g_odv_verts_max = static_cast<uint32_t>(o.n);

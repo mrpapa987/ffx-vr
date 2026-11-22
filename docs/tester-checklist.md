@@ -144,8 +144,8 @@ In first person, with VR hands on (F8 > Hands > "Grab spheres with your hands (C
     "Swordplay / Fury bar:", has "in front of you" and "above your hand (as before)", with the distance and the height.
   - With the art zip, it is the ornate bar (golden zone, two pointers pinching the cursor). It should look solid: nothing
     shows through it.
-  - The game's own Swordplay bar and its background plates are hidden from the intro to the result ("Hide the game's
-    Swordplay bar", on by default). Once the intro has played, its frame scene goes too ("and the window's frame scene").
+  - The game's own Swordplay bar is hidden from the intro to the result ("Hide the game's Swordplay bar", on by default).
+    Once the intro has played, its background plates and frame scene go too ("and the window's frame scene").
     Only the game's timer and the intro and result animations stay.
   - Auron's Bushido with "strike the targets": the game's Bushido row and, after the intro, its frame scene are hidden
     ("Hide the game's Bushido row").

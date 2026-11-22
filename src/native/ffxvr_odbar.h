@@ -198,14 +198,14 @@ struct Gate {
     bool view = false;    // the headset shows the 3D view (not a screen, not suspended)
     bool live = false;    // the headset session runs and the VR pad is merged (our bar and the targets are drawn only then)
     bool cfg = false;     // our replacement is on: Tidus's swing gesture (gestures on), or Auron's "strike the targets"
-    bool vis = false;     // Tidus: the overdrive visuals on (our bar is one of them); Auron: not a Practice round
+    bool vis = false;     // Tidus: the overdrive visuals on (our bar is one of them); Auron: not a Practice round, nor his sequence unread
     bool anchor = false;  // Tidus: our bar can be placed (in front, or above a tracked right grip); Auron: always
 };
 /// Why the game's UI showed: bits, named in k_why_name.
 enum : uint32_t { W_OFF = 1u, W_BATTLE = 2u, W_VIEW = 4u, W_LIVE = 8u, W_CFG = 16u, W_VIS = 32u, W_ANCHOR = 64u, W_FRESH = 128u, W_OTHER = 256u };
 constexpr int k_why_n = 9;
 constexpr const char* k_why_name[k_why_n] = { "hide off", "no battle", "not the 3D view", "headset session or VR pad not live",
-    "our replacement off (Tidus's swing / Auron's targets mode)", "Tidus: the visuals off / Auron: a Practice round",
+    "our replacement off (Tidus's swing / Auron's targets mode)", "Tidus: the visuals off / Auron: a Practice round or his sequence unread",
     "right grip untracked (bar above the hand)", "the state not read fresh", "another overdrive" };
 inline uint32_t gate_miss(const Gate& g) {
     uint32_t w = 0u;
@@ -227,6 +227,12 @@ inline bool stub_hides(bool enabled_now, int word) { return enabled_now && activ
 /// end, so skipping it in states 1-2 would stall the window. From state 3 on the intro has ended (btidu, bauro), or nothing
 /// waits for the scene (bauro2), until states 6 / 8 stop them.
 inline bool scene_hides(bool enabled_now, int word) { return enabled_now && word >= 3 && word <= 10; }
+/// The limit plates (review N-G2, round 5's N-T2 again): shown in the intro (states 1-2, while the game's intro plays and our bar
+/// is not up yet), hidden in 3-4, and in 5-10 only while our bar is still drawn (bar_up: its fade).
+inline bool plates_hide(bool enabled_now, int word, bool bar_up) { return enabled_now && (word == 3 || word == 4 || (word >= 5 && word <= 10 && bar_up)); }
+/// The value a hidden scene's slot reads for its one draw (review N-G3): TOSeqDraw draws only 2 and 3, and the scene start's search
+/// takes 0 as a free slot, so neither.
+constexpr uint16_t k_seq_mark = 0x7FFF;
 /// The Present's decision (the window line's; the stubs decide by their own read): enabled, the state read fresh and active, no
 /// other overdrive.
 inline bool hide_now(const Gate& g, bool fresh, int own, bool other) { return enabled(g) && fresh && active(own) && !other; }

@@ -857,7 +857,7 @@ offers smooth turning), `hide_list`, `markers_game_art`, `hands_cal`, `hands_px_
 | `od_visual_size` | 1 | "size" (0.5..2) |
 | `od_bar_art` | 1 | "Overdrive bar art (local pack)": Tidus's Swordplay bar from the art pack in `art\odbar` and a countdown bar above Lulu's ring; without the pack, or 0, the plain bar (and no countdown) |
 | `od_bar_plate` | 0 | "ornate base plate" (with the bar art) |
-| `od_bar_hide2d` | 1 | "Hide the game's Swordplay bar": the game's bar and the limit window's plates, in Tidus's states 1-10 (the intro to the result), while our bar can show: a battle in the headset's 3D view, "Tidus: swing for Swordplay" and the guides on, and (above the hand) the right controller tracked. It is patched at launch, so turning it on waits for the next launch. |
+| `od_bar_hide2d` | 1 | "Hide the game's Swordplay bar": the game's bar in Tidus's states 1-10 (the intro to the result), and the limit window's plates from the end of the intro until our bar has faded, while our bar can show: a battle in the headset's 3D view, "Tidus: swing for Swordplay" and the guides on, and (above the hand) the right controller tracked. It is patched at launch, so turning it on waits for the next launch. |
 | `od_hide2d_scenes` | 1 | "and the window's frame scene": with the game's Swordplay bar (or Auron's Bushido row) hidden, its held frame scene is left out too, once its intro has played. Only that scene; the battle's own windows stay. |
 | `od_bar_place` | 0 | "Swordplay / Fury bar": "in front of you" (0) or "above your hand (as before)" (1). It moves Tidus's bar and Lulu's countdown; Lulu's ring stays at your hand. |
 | `od_bar_dist` | 0.6 | "distance (m)" of the bar in front of your eyes (0.35..1.2) |

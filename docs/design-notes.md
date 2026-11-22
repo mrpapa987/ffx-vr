@@ -6214,13 +6214,18 @@ last few Presents, or a 0.25 s grace, or injecting) and, on top of it, the windo
 
   Each stub then reads the character's own state word on the game's thread and skips in states 1-10
   (`odb::stub_hides`). Nothing depends on our bar having been built, on a grace period or on injecting. When one fact is
-  missing the game's UI draws, and the window line names the fact. The plates follow the bar.
+  missing the game's UI draws, and the window line names the fact.
+  - The plates (`odb::plates_hide`, review N-G2) show in the intro, as in round 5. They are hidden in states 3-4, and in
+    5-10 only while our bar is still drawn (its fade). That one fact may lag; if it does, the plates show, which is safe.
+  - Auron's gate also needs his button sequence read once his input window opens (review N-G1). A targets round needs the
+    sequence, so if the read fails the row shows.
 - **The held scenes** (case B). The battle UI draws its scene layers with TOSeqDraw (0x8AE2F0), called at 0x89B3C3
   (layer 0) and 0x89B513 (layer 1). The window's frame scene ("btidu" for Tidus; "bauro", then "bauro2" for Auron) runs
   in scene set 2.
   - Both calls now go to `odb_seq_stub`, after TOSeqDraw's first bytes and its slot table (0x1865F20) are checked.
   - From the window's state 3, while that character's hide is enabled, the stub sets the state of a slot named exactly
-    "btidu", "bauro" or "bauro2" in set 2 to 0 for that one call, then puts it back. Only slots in state 2 or 3 are touched.
+    "btidu", "bauro" or "bauro2" in set 2 to 0x7FFF for that one call, then puts it back. TOSeqDraw draws only states 2 and
+    3, and the value is not 0, which the scene start's search treats as a free slot (review N-G3). Only slots in state 2 or 3 are touched.
   - States 1-2 are never touched, because the draw also steps a scene's clock and Tidus's and Auron's state 2 wait for
     their scene's end. Nothing is moved and nothing stays changed. Every other scene, including the battle's own windows,
     is drawn as before.
