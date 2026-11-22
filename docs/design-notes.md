@@ -119,8 +119,13 @@ game's 45x26 deg window (~85 px/deg) now covers ~100x100 deg: ~38 px/deg
 horizontally (above the Quest 3's ~25) but ~22 px/deg vertically (below
 it). The 16:9 target is the limit, not the GPU.
 
-1. DONE in code: eye swapchains at the full 3840x2160 (no mod-side
-   downscale to 2496x1404 before the runtime's own resample).
+1. Tried, not kept: eye swapchains at the full 3840x2160. The code sizes
+   them at the headset's recommended width at 16:9 (`xr_start`, "the
+   configuration of the long stable run"): 2496x1404 with Virtual Desktop's
+   2496-wide recommendation, so the mod's copy takes the game's 3840x2160 down
+   to 2496x1404 (a single bilinear tap) before the runtime's own resample.
+   (Corrected 22 Nov 2026, perf-gpu; this line used to say the swapchains
+   were 3840x2160.)
 2. NEXT TEST: render taller. Everything we do is independent of the
    target's shape (our projection maps whatever rectangle the game renders
    onto the headset FOV), so a taller game resolution fixes it directly.
@@ -8019,3 +8024,67 @@ compiler, no PowerShell; every PowerShell line added copies an idiom already in 
 - Docs: the saves step (`import-steam-saves.ps1`) is on the tester's path; the FFX VR window is open at a first start
   (`overlay_at_start` 1), so "press F8" became "F8 hides and shows it"; how to extract the art zip so that it merges;
   the release procedure packages and smoke-tests before the tag is pushed; written for a public repository.
+
+## GPU phase timers, the eye-2 test and the busy-GPU gate (branch `perf-gpu`, 22 Nov 2026; ABI 73)
+
+Follows the performance investigation of 22 Nov (the owner's 4K / 8x log: GPU span 15.0 ms, extras' xrEndFrame 5.8-9.6
+ms, list start delay 5-8.6 ms). Three measurements; nothing changes what a frame draws unless a Developer control asks.
+Not built or run here: the rules are in `ffxvr_perf.h` (pure, unit-tested by `perf_chk`), the glue (the block "perf-gpu"
+in `ffxvr_native.cpp`) is compiled by `perf_chk` against a mock D3D11 context, not against Windows.
+
+- **GPU phases on the `perf:` line** (diag_verbose only). Six timestamps a frame, each at most once, inside the frame's own
+  disjoint query: the game's first clear (the span's start), the first bind of the scene target with depth (multisampled,
+  or last frame's scene target), the first resolve of the scene target (in `ffxvr_on_resolve`, after both eyes' resolves),
+  the UI pass's start (`ui_pass_begin`, before its eye-image copies), our Present hook (the span's end) and, through a new
+  `XrHost::before_end` callback, the moment right before the fresh frame's xrEndFrame (after our eye copies, the UI panel,
+  the ImGui layer and the plates). A ring of 4 frames (`pgpu::k_ring`); a frame is read when its slot is about to be
+  reused, 3 frames late, with `D3D11_ASYNC_GETDATA_DONOTFLUSH`, and skipped (counted "not ready") if its results are not
+  there: never a stall. The line gets avg / max over its own window (the 30 s since the last `perf:` line; not the span's
+  last 60 frames) for: shadows+pre, scene, post, ui, ours after Present, the whole frame, and the gap from our
+  xrEndFrame to the next first clear (the runtime's own work inside its calls, Fahrenheit's ImGui, and idle). A marker out
+  of order is left out (counted); without an MSAA resolve (msaa off) scene and post are not split.
+  - **Eye 2 is not a phase.** It is re-issued draw by draw right after each eye-1 draw (`ffxvr_on_draw` returns the pass
+    count, managed draws again), so no pair of timestamps can bracket it without a query per draw; every phase holds
+    both eyes. HDAO / SMAA / unsharp are not split either: telling them apart needs their shaders identified, which no
+    existing hook does reliably; "post" is the whole chain as the game orders it.
+  - **Off costs nothing**: with diag_verbose 0 no query is made or issued; each marker site tests one bool
+    (`g_ph_live`, set only by `ph_tick` at Present). The queries are made the first time diag_verbose is on.
+  - A timestamp is when the GPU reaches it, so a phase includes any idle bubble inside it. In a GPU-bound frame (the
+    case being measured) there is none; with spare GPU time the "between frames" gap shows the idle.
+- **"Measure: eye 2 off for 5 s"** (Developer > Rendering; `ffxvr_perf_set`'s `test`). 3 s with eye 2, 5 s without, 3 s
+  with, 10 frames for the late results, then one `perf: eye-2 test` line: the GPU span (always timed) and, in developer
+  mode, every phase, with and without eye 2, and eye 2's render-thread CPU. Each frame carries a tag (the run's generation
+  and its window) through both query rings, so a late result never lands in the wrong window or the next run.
+  Why it is safe, and what it takes (it reuses the slow guard's screen-item skip, `g_slow_no_e2`, at the same line):
+  - **The UI, ImGui and dream re-issues are untouched**: they return from `ffxvr_on_draw` before the eye-2 decision.
+  - **The scene target is still found.** `g_scene_live_tex` (the UI pass, its resolves, the hands, late3d) is counted
+    in `ffxvr_eye2_begin`, which a skipped draw never reaches; `pt_count_scene` makes the same count in `ffxvr_on_draw`.
+    Without it the UI pass would not be recognised and the UI would land in the eye image.
+  - **The hand parts' split draws keep their passes** (pass 0 draws the right hand into eye 1).
+  - **Both eyes get eye 1** for a frame rendered without eye 2 (`xr_tick`, as the blink does); eye 2's mirrored MSAA
+    resolves are skipped too (the twin is not shown); mirrored clears and copies stay (cheap).
+  - **Only the 3D headset view**: not a screen, the stereo screen or a battle transition window; a frame that is not
+    3D keeps eye 2 and is left out of all three windows. It does not start, or stops at once, without a running
+    session or during a slow-guard episode, and its frames are excluded from the slow guard's evidence.
+  - Left as is: after the test, eye 2's history-blend targets hold 5 s old content for a frame or two.
+- **The busy-GPU gate** (`sr_skip_busy`: 0 off, 1 log only, 2 on; **1** in this test build so the owner's next log
+  answers the question). `XrHost::before_end` also issues a `D3D11_QUERY_EVENT` at the fresh frame's end. In
+  `sr_extra_inner`, once the game's lock is taken (the context is ours), `GetData(DONOTFLUSH)` asks whether the GPU has
+  finished that frame. Why it matters (perf-investigation section 3): VDXR's xrEndFrame waits for its async submission
+  thread, which waits on a fence signalled on the game's context, so an extra sent while the GPU still has the last
+  frame queued blocks the render thread in xrEndFrame until the queue drains. 1 sends every extra and adds to the `sr:`
+  line the extras checked, the would-skip count, and the xrEndFrame time and the following list start delay split by the
+  answer; 2 skips that slot (`sr_extra_inner` returns 2, the ring wait moves to the next slot; the runtime repeats the
+  last frame there) and counts it. If the explanation holds, extras sent with the GPU busy show End times near the
+  5.8-9.6 ms of the 22 Nov log and the others well under 1 ms. Trade-off of 2: in GPU-saturated scenes fewer extras, so
+  stick turns show the old ghosting there instead of late fresh frames.
+- **Not in this build: the launch script's VR resolution** (the investigation's code item 3, `run-ffx.ps1` applying
+  `game-settings.ps1 -Profile vr` for each run). The owner's game crashed to the desktop (0xC0000409) as the mod switched
+  to VR with that profile's 2560x1440, twice, while 4K / 8x works; his launcher lists only 1920x1080 and 3840x2160, so
+  2560x1440 is likely not a mode his display offers in exclusive fullscreen. The profile is being fixed separately;
+  `run-ffx.ps1` and `game-settings.ps1` are unchanged here, and the settings comparison uses 4K with the mod's `msaa`.
+- **ABI 73**: + `ffxvr_perf_set(sr_skip_busy, test)` (returns the test's state), `ffxvr_perf_text(buf, n)`; managed
+  `perf_gpu.cs` binds both. `XrHost` gained `before_end` (an internal struct, no export).
+- **Not verified**: anything on Windows: the build, the queries on the owner's driver, the test's look in the headset,
+  the PowerShell on 5.1. Unverified assumption: VDXR's xrBeginFrame / xrEndFrame do not reorder our timestamps (they
+  are on the same immediate context, in submission order).

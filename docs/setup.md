@@ -192,6 +192,33 @@ djyt0100, kino0300 near the bridge. The `perf:` and `sr:` lines in
 `ffxvr_diag.log` carry the same numbers. Expected with 2560x1440: a span of
 about 6-9 ms in the field (perf-plan S1).
 
+### Measuring the GPU: phases, the eye-2 test, the busy-GPU gate (perf-gpu, 22 Nov 2026)
+
+Three measurements for the GPU-bound case (design-notes "GPU phase timers, the eye-2 test and
+the busy-GPU gate"):
+
+- **GPU phases** (developer mode, `diag_verbose=1`, nothing to set): every `perf:` line ends with
+  `gpu phases (...)`: avg/max ms over the line's window for shadows+pre, scene, post, ui, the
+  mod's work after Present, the whole frame, and the gap to the next frame. Each label in the line
+  says what it spans. Every phase holds both eyes (eye 2 is re-issued draw by draw); eye 2's own
+  cost is the next item's. Off (`diag_verbose=0`) the timers make no query at all.
+- **"Measure: eye 2 off for 5 s"** (Developer > Rendering > GPU timing, the eye-2 test and the
+  busy-GPU gate): 3 s with eye 2, 5 s without its re-issue (both eyes see eye 1, so the view goes
+  flat), 3 s with it again, then one `perf: eye-2 test ...` line: the GPU span (and, in developer
+  mode, every phase) with and without eye 2. In the 3D headset view only; it turns eye 2 back on
+  by itself and stops early if the view leaves 3D.
+- **`sr_skip_busy`** (Developer tab, same group; 0 off, 1 log only, 2 on; default **1** in this
+  test build): before a stick-reprojection extra frame the mod asks, without waiting, whether the
+  GPU has finished the last game frame. 1 sends every extra and adds the counts to the `sr:` line
+  (`busy-GPU gate`: would skip, skipped, and the xrEndFrame time of extras sent with the GPU busy
+  against those sent with it done); 2 skips that slot instead of blocking the render thread in
+  xrEndFrame (the runtime repeats the last frame there).
+
+For a settings comparison stay at 3840x2160 and change the mod's anti-aliasing (F8 > View >
+Graphics & performance > Anti-aliasing 4x, then 2x; `msaa`): on 22 Nov the game crashed to the
+desktop (0xC0000409) as the mod switched to VR at 2560x1440 on a PC whose launcher lists only
+1920x1080 and 3840x2160. Until the `-Profile vr` resolution is fixed, step 1 above is not safe there.
+
 ## Settings (ffxvr.ini)
 
 `fahrenheit\mods\ffxvr\ffxvr.ini` holds every overlay setting; the overlay

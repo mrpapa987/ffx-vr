@@ -21,6 +21,9 @@ struct XrHost {
     // vr-menu S2 (null = no menu panel): the panel's crop copy, 1:1 from (x0, y0) of src into dst (w x h), premultiplied, linear-light
     // for an sRGB swapchain
     bool (*copy_crop)(ID3D11Texture2D* src, ID3D11RenderTargetView* dst, UINT w, UINT h, int x0, int y0);
+    // perf-gpu (null = none): right before a fresh frame's xrEndFrame in xr_frame, after every copy into the swapchains (never for
+    // an extra frame): the GPU phase timers' last marker and the busy-GPU gate's event query
+    void (*before_end)();
 };
 
 struct XrPoseOut { float q[4]; float p[3]; };               // orientation (x,y,z,w), position (m), in the reference space

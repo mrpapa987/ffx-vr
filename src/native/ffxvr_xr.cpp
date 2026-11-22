@@ -1151,6 +1151,7 @@ void xr_frame(ID3D11Texture2D* eye1, ID3D11Texture2D* eye2, const XrFovTan used[
         XrFrameEndInfo end = { XR_TYPE_FRAME_END_INFO };
         end.displayTime = g_render_time; end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
         end.layerCount = base ? nl : 0u; end.layers = base ? layers : nullptr;
+        if (g_h.before_end != nullptr) g_h.before_end();   // perf-gpu: our copies are all queued; the runtime's work follows
         stage("xrEndFrame");
         const double t_end0 = qpc_ms();
         XrResult r = p_xrEndFrame(g_session, &end);

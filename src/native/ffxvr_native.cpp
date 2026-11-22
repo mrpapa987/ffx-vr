@@ -54,6 +54,7 @@
 #include "ffxvr_fxface.h"   // battle-vis build 2: fx_face_eyes, the effect code's matrices around one part run (pure logic)
 #include "ffxvr_late3d.h"   // late3d: a late 3D layer (Holy's target drawn after the post-processing) is not the UI pass (pure logic)
 #include "ffxvr_dioanchor.h" // dio-anchor: the battle diorama's view at a battle's start and end (pure logic)
+#include "ffxvr_perf.h"     // perf-gpu: the GPU phase timers, the eye-2 test, the busy-GPU gate's counts (pure logic)
 #include <intrin.h>        // _ReturnAddress (od-guard f: the texture log leaves our own creations out)
 #include <pdh.h>           // od-guard g: PDH types only (the functions are looked up at run time)
 #include <pdhmsg.h>
@@ -122,6 +123,8 @@ static void g_plain_srvs_forget(ID3D11Texture2D* t);   // SRV cache, defined bel
 static uint32_t g_plain_srvs_count();
 
 static void gpu_timing_start_span();   // GPU-time span starts at the game's first clear (defined with perf_tick)
+static void ph_stamp(int m);           // perf-gpu: a GPU phase marker (pgpu::Mark; defined before the GPU span's ring)
+static bool g_ph_live = false;         // perf-gpu: the phase timers time the frame being rendered (diag_verbose; ph_tick)
 static void dll_notify_install();      // od-guard (b): the DLL load notification (defined with the slow guard)
 static void rt_log_create(const D3D11_TEXTURE2D_DESC* d, const void* ra);   // od-guard (f): the render-target log (likewise)
 static void gpu_timing_end_span();     // ... and closes at Present, before the runtime wait
@@ -3527,6 +3530,8 @@ extern "C" __declspec(dllexport) void ffxvr_on_rendertargets(unsigned n, void* c
     g_cur_rtv_n = n < 4 ? n : 4;
     for (UINT i = 0; i < 4; ++i) g_cur_rtv[i] = (i < g_cur_rtv_n && rtvs) ? static_cast<ID3D11RenderTargetView*>(rtvs[i]) : nullptr;
     g_cur_dsv = static_cast<ID3D11DepthStencilView*>(dsv);
+    if (g_ph_live && !g_overlay_phase && dsv != nullptr && g_cur_rtv0_tex != nullptr && g_cur_rtv0_tex != g_backbuffer && (g_cur_rtv0_samples > 1 || g_cur_rtv0_tex == g_scene_tex))
+        ph_stamp(pgpu::M_SCENE);   // perf-gpu: the scene target (multisampled, or last frame's) bound with depth: the scene phase starts
     if (!g_frame_live) return;
     char a[96], b[96];
     describe_view(n > 0 && rtvs ? static_cast<ID3D11View*>(rtvs[0]) : nullptr, a, sizeof(a));
@@ -3553,7 +3558,7 @@ extern "C" __declspec(dllexport) void ffxvr_on_viewport(float w, float h, float 
 }
 
 extern "C" __declspec(dllexport) void ffxvr_on_clear(void* view, int depth) {
-    if (!g_in_eye2) { if (g_overlay_phase) gpu_timing_start_span(); g_overlay_phase = false; g_sr_clears++; }
+    if (!g_in_eye2) { if (g_overlay_phase) { gpu_timing_start_span(); ph_stamp(pgpu::M_START); } g_overlay_phase = false; g_sr_clears++; }   // (perf-gpu: the phases' first marker)
     if (!g_frame_live) return;
     char a[96]; describe_view(static_cast<ID3D11View*>(view), a, sizeof(a));
     char t[160];
@@ -5537,7 +5542,7 @@ static void opaque_release(int slot);   // frees one preview copy (g_opaque), de
 
 // The export set's version. ffxvr.dll requires every export it binds and this exact number (module.cs k_abi):
 // bump it whenever an export is added, removed or changes its signature, in the same commit as the managed side.
-constexpr int FFXVR_ABI = 72;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer); 71: ffxvr_odv_set(on, size, bar), + ffxvr_odb_patch, ffxvr_odg_text 7 (od-bar-art: the overdrive bar art from a local pack, the game's Swordplay bar's call-site patch); 72: ffxvr_odv_set(on, size, bar, dist, height), bar | 8 = od_bar_place 1 (od-bar-art round 4: the bar straight out in front, od_bar_dist, od_bar_height)
+constexpr int FFXVR_ABI = 73;   // 2: + ffxvr_diag_keepalive, ffxvr_eye2_same_inputs; 3: + ffxvr_view_smooth_set, ffxvr_lowres_status, - ffxvr_anchor_set; 4: + ffxvr_xr_debug; 5: + ffxvr_draw_skip_ranges (ffxvr_draw_skip kept as a shim); 6: + ffxvr_diag7_set, ffxvr_diag_line, ffxvr_main_note, ffxvr_motion_cols; 7: + ffxvr_bb_resized; 8: ffxvr_bb_resized(w, h, phase); 9 (branch cursors, merged): + ffxvr_cursor_game, ffxvr_cursor_skip; 10 (C3, merged): + ffxvr_cursor_look, ffxvr_markers_kinds, ffxvr_cursor_atlas_dump (the branch numbered those 7 and 8); 11: + ffxvr_game_callers, ffxvr_va_stats (load diagnostics); 12: + ffxvr_haptics_set; 13: + ffxvr_va_watch, ffxvr_va_report; 14: + ffxvr_va_regions (HD cluster cache build); 15: + ffxvr_bt_set, ffxvr_bt_status (battle transition build); 16: ffxvr_bt_set's mode | 0x100 = a user view action; 17: + ffxvr_prof_set, ffxvr_prof_mark, ffxvr_prof_phase, ffxvr_prof_report, ffxvr_lock_release_set, ffxvr_lock_release_status (load lock build); 18: + ffxvr_dream_set, ffxvr_dream_status (dream overlay build); 19: + ffxvr_shadow_set, ffxvr_shadow_status (shadow camera build); 20: + ffxvr_uidepth_set, ffxvr_uidepth_status (adaptive UI panel build); 21: ffxvr_imgui_layer_set(on, force_show, min_draws, menu), + ffxvr_imgui_status (save UI build); 22: + ffxvr_haze_set, ffxvr_haze_status (heat haze build); 23: + ffxvr_load_info (loads build: the lock release on every load, the load: lines); 24: load_lock_release 0/1/2, ffxvr_load_info 60 values (holders per load kind), ffxvr_prof_mark bit 2 = the main thread's wait-all (loads review); 25: + ffxvr_sr_set, ffxvr_sr_gate, ffxvr_sr_status, ffxvr_turn_keys (stickrep: display-rate stick reprojection, the loading keepalive); 26: + ffxvr_log_config, ffxvr_build_info (release prep: the session log, diag_verbose, the version); 27: + ffxvr_pre_resolve, ffxvr_hands2_set, ffxvr_hands2_status, ffxvr_hands2_cal (VR hands v2, S1); 28: + ffxvr_hands2_pack, VrHandsCfg + rest_curl, scale (views used), ffxvr_hands2_status 17 values (VR hands v2, S2); 29: VrHandsPackDesc + stamp (88 B), ffxvr_hands2_status 21 values, + ffxvr_hands2_pack_error (VR hands v2, S3: user packs); 30: + ffxvr_hands2_tap_set, ffxvr_hands2_tap_status (VR hands: the tap gesture); 31: tap flags 8 / 16, ffxvr_hands2_tap_status 18 values (the grip-armed push); 32: + ffxvr_ride_set (chocobo riding: the rider / mount roots for the body hide); 33: + ffxvr_ride_stats, ffxvr_ride_set's cap is the fixed riding hide radius, the tap gate's game bit 32 = riding; 34: + ffxvr_shadow_guard_install, ffxvr_shadow_budget_set, ffxvr_shadow_pool_status (the ShadowManager pool guard and distance budget); 35: the budget in casters per pass, the pool status 7 values (review 2); 36: + ffxvr_slow_set, ffxvr_slow_status (the slow-GPU guard, od-guard); 37: + ffxvr_fp_self_set, ffxvr_fp_others_set (the body hide's nearest-root ownership on foot, the step margin capped and reset on a re-pick: NPCs vanishing in first-person cutscenes); 38: + ffxvr_cpu_report (cpu-lean: managed's per-frame Stopwatch sections and GC counts for the cpu: line), ffxvr_hands2_set returns whether the coming frame can draw the hands, ffxvr_fp_self_set whether it uses the other actors' roots, tap game bits 0x200 (nothing read) / 0x400 (only the battle bit); 39: ffxvr_fp_others_set(xyz, heads, n): the other actors' head sub-positions for the shared-anchor ties (npc-anchor: a draw tied with another actor's root is resolved by model identity); 40: + ffxvr_fp_ib_set (npc-anchor round 2: the exact owner of a matched draw by its index buffer and offset); 41: + ffxvr_fmv3d_set, ffxvr_fmv3d_text (fmv-relief S3: FMVs in 3D); 42: ffxvr_fmv3d_set(on, amount, flags, offset, range, pop, smooth) (the "3D movie" mapping); 43: + its edge band (the window rule: only pop-out is feathered); 44: + ffxvr_eye_jump_set, ffxvr_eye_event (eye jumps: the blink on a one-step eye move, the battle heading toward the enemies; 45: + ffxvr_move_gate_set, ffxvr_grip_set, ffxvr_imgui_pad_find, ffxvr_imgui_pad_set, ffxvr_imgui_xstate, ffxvr_imgui_xcaps, ffxvr_ctl_text (Quest-only controls: the walk gate, quick-squeeze grips, the ImGui feed, merged on top of 44); 46: + ffxvr_bt_tag_step, ffxvr_bt_tag_hold (battle tag: a swap hands the eyes on where the two cross); 47: + ffxvr_dmg_walk, ffxvr_dmg_queue, ffxvr_dmg_set, ffxvr_dmg_cfg, ffxvr_dmg_skip, ffxvr_dmg_status (3D damage numbers; 48: + ffxvr_odg_set, ffxvr_odg_text (overdrive gestures, roadmap 4.3, merged on top of 47); 49: + ffxvr_odv_set (overdrive visuals); 50: + ffxvr_dmg_anchor (the 0x794AB0 damage anchor port); 51: + ffxvr_fp_event (fix-eye: the first-person event hold) (merged on top of 50); 52: + ffxvr_odt_set, ffxvr_odt_practice, ffxvr_odg_set flag 32 (od_gest_auron = 2), ffxvr_odg_text 4 / 5 (strike the targets, Practice targets); 53: ffxvr_odt_set(pitch, dist, height, size, time_mult) (od_targets_time: the countdown's stretch); 54: ffxvr_odt_set(..., time_mult, spread) (od_targets_spread: the two spots); 55: ffxvr_odt_set(..., spread, art), ffxvr_odg_text 6 (od_targets_art: the local target art pack); 56: ffxvr_odt_set(..., art, badge), + ffxvr_odt_hide2d (arrows only with an optional letter badge; the game's Bushido row hidden during a targets window); 57: + ffxvr_odt_row_patch, ffxvr_odt_row_stat (the row's call-site patch and its diagnostics); 58: + ffxvr_panel_set, ffxvr_panel_state, ffxvr_panel_place (vr-menu S2: the F8 window's own panel fixed in the room, its grab and resize; XrHost copy_crop / clear_rect); 59: + ffxvr_panel_pointer (vr-menu S3: the laser pointer, ImGui's mouse from the controllers); 60: ffxvr_panel_pointer(mode, in, nin, out, n) (S3 review B1: ImGui's mouse handed back after pointing, vptr::Feed); 61: + ffxvr_menu_hold (vr-menu S4: the left menu button held opens / closes the F8 window); 62: ffxvr_menu_hold -> ffxvr_menu_chord(on) (S4 after the owner's test: Virtual Desktop takes the button's long press, so the left grip + the left menu button instead); 63: + ffxvr_sph_hands (the sphere-hands capture: the drawn hands' positions for the research log); 64: + ffxvr_sph_set, ffxvr_sph_status (sphere hands stages 1 + 2: the labels, the grab, the press sequence); 65: + ffxvr_wpn_probe, ffxvr_wpn_report, ffxvr_wpn_hands, ffxvr_wpn_phase (the weapon-hands capture: the weapon models' draws, the VR hands' frames and the battle motion classes for the research log); 66: + ffxvr_carry_set, ffxvr_carry_status (carry: a game model's own draws moved to a VR hand; the carried cloister sphere in the palm); 67: + ffxvr_sph_fast_set, ffxvr_sph_fast_exec (the fast sphere sequence: the game's exec-frames answer multiplied while a grab sequence of ours runs; the sphere in the palm through the sequence); 68: + ffxvr_fp_battle_due, ffxvr_fp_battle_set, ffxvr_bvis_frame, ffxvr_bvis_cmd, ffxvr_bvis_status (battle-vis: the battle research log, cmd: / vis: / fx: lines; the first-person battle body hide by the followed model's index-buffer keys; after the review, before 68 was ever delivered: ffxvr_fp_battle_set(q, n, gen, flags, roots, owners, n_roots, pick, who), the owners' table slots and "attached to the followed actor" flags; review round 2: flag 16 of that call, no shape change); 69: + ffxvr_bch_frame, ffxvr_bch_decide, ffxvr_fxf_frame, ffxvr_fxf_begin, ffxvr_fxf_end (battle-vis build 2: the battle camera's hide skipped while the mod draws a battle in VR, battle_cam_hide; the effect sprites aimed at the eyes, fx_face_eyes; after the review, before 69 was ever delivered: ffxvr_bch_decide(i, k, v, queue_bits, fx_cam), + ffxvr_fxf_camcopy, ffxvr_fxf_frame's hook | 16 and tenth value); 70: + ffxvr_late3d_set (late3d: a late 3D layer, Holy's target drawn alone after the post-processing, is not the UI pass; late_3d_layer); 71: ffxvr_odv_set(on, size, bar), + ffxvr_odb_patch, ffxvr_odg_text 7 (od-bar-art: the overdrive bar art from a local pack, the game's Swordplay bar's call-site patch); 72: ffxvr_odv_set(on, size, bar, dist, height), bar | 8 = od_bar_place 1 (od-bar-art round 4: the bar straight out in front, od_bar_dist, od_bar_height); 73: + ffxvr_perf_set, ffxvr_perf_text (perf-gpu: sr_skip_busy, the busy-GPU gate for the extra frames; the 5 s eye-2 test; XrHost::before_end)
 extern "C" __declspec(dllexport) int ffxvr_abi() { return FFXVR_ABI; }
 
 /// Load diagnostics: the return addresses on the calling thread's stack that lie inside FFX.exe, outermost last, as Ghidra
@@ -6268,6 +6273,147 @@ static void cpu_log_line() {
     g_cpu_frames = g_cpu_late_n = g_cpu_late_slot = g_cpu_skip_ours = g_cpu_rings = 0;
     g_cpu_win_t0 = now;
 }
+// ---------------------------------------------------------------- perf-gpu (22 Nov 2026; design-notes "GPU phase timers, the eye-2 test and the busy-GPU gate")
+// Three measurements, the rules in ffxvr_perf.h (pure logic, perf_chk), the glue here. Render thread unless said otherwise.
+//  1. The phase timers (diag_verbose only): a timestamp at each of six markers (pgpu::Mark) inside a per-frame disjoint query,
+//     a ring of pgpu::k_ring frames read k_ring - 1 frames late with DONOTFLUSH (never a stall; not ready = skipped and
+//     counted); the perf: line gets their avg / max per phase. Off (diag_verbose 0): no query is made or issued, and every
+//     marker site costs one test of g_ph_live.
+//  2. The eye-2 test (Developer button, ffxvr_perf_set): 3 s with eye 2, 5 s without its re-issue (both eyes sent eye 1), 3 s
+//     with; the span (always timed) and, with 1, the phases per window; one perf: line with the difference.
+//  3. The busy-GPU gate for the stick-reprojection extras (ini sr_skip_busy): an event query at the fresh frame's end, right
+//     before its xrEndFrame (XrHost::before_end); an extra asks it without waiting before its own xrEndFrame (sr_extra_inner).
+static bool g_ph_failed = false;                               // making the phase ring's queries failed (g_ph_live: at the top of the file)
+static ID3D11Query* g_ph_dj[pgpu::k_ring] = {};                // per slot: the disjoint query ...
+static ID3D11Query* g_ph_ts[pgpu::k_ring][pgpu::M_N] = {};     // ... and one timestamp per marker
+static unsigned g_ph_have[pgpu::k_ring] = {};                  // the markers stamped in each slot (bit per pgpu::Mark)
+static bool g_ph_closed[pgpu::k_ring] = {};                    // the slot holds a closed frame (its disjoint ended) not read yet
+static uint8_t g_ph_tag[pgpu::k_ring] = {};                    // the eye-2 test's tag of each slot's frame
+static int g_ph_cur = -1;                                      // the slot of the frame being rendered
+static pgpu::Window g_ph_win; static ULONGLONG g_ph_win_t0 = 0; // the perf: line's window
+static uint64_t g_ph_prev_end = 0; static bool g_ph_prev_ok = false;   // the last frame read: its end (the next frame's gap)
+static pgpu::E2Test g_pt;                                      // the eye-2 test
+bool g_perf_no_e2 = false;                                     // the frame being rendered skips eye 2's re-issue (ffxvr_on_draw, ffxvr_on_resolve)
+static uint8_t g_pt_tag_next = 0, g_pt_tag_cur = 0;            // the test's tag of the frame about to render / being rendered
+static volatile LONG g_pt_req = 0;                             // the Developer button (ffxvr_perf_set): start at the next Present
+static int g_srb_mode = 1;                                     // ini sr_skip_busy: 0 off, 1 log only (this test build's default), 2 skip a busy slot
+static ID3D11Query* g_srb_q = nullptr; static bool g_srb_failed = false, g_srb_issued = false;
+static pgpu::GateStats g_srb_s;                                // the sr: line's gate counts (10 s)
+static int g_sr_x_busy = -1;                                   // the gate's answer before the last extra sent (rw_list's delay split)
+
+/// A marker into the frame being rendered (the thread that is inside the game's context call: the render thread, or the main
+/// thread during a full flush, which owns the context then). Once per marker per frame; nothing while the timers are off.
+static void ph_stamp(int m) {
+    if (!g_ph_live || g_ph_cur < 0 || m < 0 || m >= pgpu::M_N) return;
+    const unsigned bit = 1u << m;
+    if (g_ph_have[g_ph_cur] & bit) return;
+    g_ph_have[g_ph_cur] |= bit;
+    g_ctx->End(g_ph_ts[g_ph_cur][m]);
+}
+/// A closed slot's results (k_ring - 1 frames old): read without a flush or a wait; not ready = the frame is skipped.
+static void ph_read(int s) {
+    D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj = {};
+    if (g_ctx->GetData(g_ph_dj[s], &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { g_ph_win.not_ready++; g_ph_prev_ok = false; return; }
+    if (dj.Disjoint || dj.Frequency == 0) { g_ph_win.disjoint++; g_ph_prev_ok = false; return; }
+    pgpu::Stamps st;
+    for (int m = 0; m < pgpu::M_N; ++m) {
+        if (!(g_ph_have[s] & (1u << m))) continue;
+        UINT64 v = 0;
+        if (g_ctx->GetData(g_ph_ts[s][m], &v, sizeof(v), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { g_ph_win.not_ready++; g_ph_prev_ok = false; return; }
+        st.t[m] = v; st.have |= 1u << m;
+    }
+    const double freq = static_cast<double>(dj.Frequency);
+    double v[pgpu::P_N]; bool unordered = false;
+    unsigned mask = pgpu::phases(st, freq, v, &unordered);
+    if (unordered) g_ph_win.unordered++;
+    if (mask == 0) { g_ph_win.incomplete++; g_ph_prev_ok = false; return; }
+    const double gap = pgpu::gap_ms(g_ph_prev_ok, g_ph_prev_end, st, freq);
+    if (gap >= 0.0) { v[pgpu::P_GAP] = gap; mask |= 1u << pgpu::P_GAP; }
+    g_ph_prev_end = pgpu::frame_end(st); g_ph_prev_ok = true;
+    g_ph_win.add(v, mask);
+    g_pt.add_phases(g_ph_tag[s], v, mask);
+}
+/// perf_tick, every Present after xr_tick (so after the frame's last marker): closes the frame just timed, reads the slot about
+/// to be reused, opens the next frame's. The queries are made the first time diag_verbose is on; off, nothing is issued.
+static void ph_tick() {
+    if (g_ph_live) { g_ctx->End(g_ph_dj[g_ph_cur]); g_ph_closed[g_ph_cur] = true; }
+    const bool want = g_log_verbose != 0 && !g_ph_failed && g_device != nullptr && g_ctx != nullptr;
+    if (!want) {
+        if (g_ph_live) { g_ph_live = false; g_ph_cur = -1; g_ph_prev_ok = false; for (bool& c : g_ph_closed) c = false; }
+        return;
+    }
+    if (g_ph_dj[0] == nullptr) {
+        D3D11_QUERY_DESC dd = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 }, td = { D3D11_QUERY_TIMESTAMP, 0 };
+        bool ok = true;
+        for (int i = 0; i < pgpu::k_ring && ok; ++i) {
+            ok = SUCCEEDED(g_device->CreateQuery(&dd, &g_ph_dj[i])) && g_ph_dj[i] != nullptr;
+            for (int m = 0; m < pgpu::M_N && ok; ++m) ok = SUCCEEDED(g_device->CreateQuery(&td, &g_ph_ts[i][m])) && g_ph_ts[i][m] != nullptr;
+        }
+        if (!ok) {
+            for (int i = 0; i < pgpu::k_ring; ++i) {
+                if (g_ph_dj[i]) { g_ph_dj[i]->Release(); g_ph_dj[i] = nullptr; }
+                for (int m = 0; m < pgpu::M_N; ++m) { if (g_ph_ts[i][m]) g_ph_ts[i][m]->Release(); g_ph_ts[i][m] = nullptr; }
+            }
+            g_ph_failed = true; diag("perf: the GPU phase timers are off for this session (CreateQuery failed)");
+            return;
+        }
+    }
+    const int next = (g_ph_cur + 1) % pgpu::k_ring;
+    if (g_ph_closed[next]) ph_read(next);
+    g_ph_closed[next] = false; g_ph_have[next] = 0; g_ph_tag[next] = g_pt_tag_next;
+    g_ph_cur = next; g_ph_live = true;
+    g_ctx->Begin(g_ph_dj[next]);
+    if (g_ph_win_t0 == 0) g_ph_win_t0 = GetTickCount64();
+}
+/// The perf: line's part (empty while the timers were off the whole window); the window starts again.
+static void ph_line_part(char* buf, size_t n) {
+    buf[0] = 0;
+    const ULONGLONG t = GetTickCount64();
+    if (g_ph_live || g_ph_win.frames > 0 || g_ph_win.not_ready > 0) pgpu::window_text(buf, n, g_ph_win, g_ph_win_t0 ? (t - g_ph_win_t0) / 1000.0 : 0.0);
+    g_ph_win.reset(); g_ph_win_t0 = g_ph_live ? t : 0;
+}
+/// XrHost::before_end (ffxvr_xr.cpp xr_frame): right before a fresh frame's xrEndFrame, after our copies into the swapchains
+/// (render thread, inside xr_tick). The phases' last marker; the gate's event (sr_skip_busy 1 / 2).
+static void perf_before_end() {
+    ph_stamp(pgpu::M_OURS);
+    if (g_srb_mode == 0 || g_srb_failed || g_device == nullptr || g_ctx == nullptr) return;
+    if (g_srb_q == nullptr) {
+        D3D11_QUERY_DESC d = { D3D11_QUERY_EVENT, 0 };
+        if (FAILED(g_device->CreateQuery(&d, &g_srb_q)) || g_srb_q == nullptr) { g_srb_q = nullptr; g_srb_failed = true; diag("sr: the busy-GPU gate is off for this session (CreateQuery failed)"); return; }
+    }
+    g_ctx->End(g_srb_q); g_srb_issued = true;
+}
+/// The gate's question (render thread, sr_extra_inner, the game's lock held): has the GPU finished the last fresh frame's work?
+/// -1 unknown (off, no fresh frame yet, an error), 0 finished, 1 busy. DONOTFLUSH: never a wait (the Present flushed the queue).
+static int srb_busy() {
+    if (g_srb_mode == 0 || g_srb_q == nullptr || !g_srb_issued || g_ctx == nullptr) return -1;
+    BOOL done = FALSE;
+    const HRESULT hr = g_ctx->GetData(g_srb_q, &done, sizeof(done), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    if (hr == S_OK) return done ? 0 : 1;
+    return hr == S_FALSE ? 1 : -1;
+}
+/// The eye-2 test, once per Present (xr_tick after the view decision; perf_tick while the headset is off): a start asked by
+/// the Developer button, the tag and the skip of the frame about to render, the result line.
+static void pt_frame(bool view_ok, const char* abort) {
+    const double now = static_cast<double>(GetTickCount64());
+    if (InterlockedExchange(&g_pt_req, 0) != 0) {
+        if (g_pt.active()) diag("perf: eye-2 test: already running");
+        else if (abort != nullptr) { snprintf(g_pt.text, sizeof(g_pt.text), "eye-2 test: not started (%s)", abort); diag("perf: %s", g_pt.text); }
+        else if (!view_ok) { snprintf(g_pt.text, sizeof(g_pt.text), "eye-2 test: not started (not the 3D headset view: a screen, the stereo screen or a battle transition)"); diag("perf: %s", g_pt.text); }
+        else { g_pt.start(now); diag("perf: eye-2 test: started (3 s with eye 2, 5 s without its re-issue: both eyes show eye 1, 3 s with)"); }
+    }
+    g_pt_tag_next = g_pt.step(now, view_ok, abort);
+    g_perf_no_e2 = pgpu::E2Test::tag_off(g_pt_tag_next);
+    if (g_pt.take_done()) diag("perf: %s", g_pt.text);
+}
+/// ffxvr_on_draw, a draw the test keeps from eye 2: eye2_begin's count of draws per target with depth (the frame's scene target,
+/// g_scene_live_tex: the UI pass, its resolves, the hands and late3d follow it), which this draw no longer reaches.
+static void pt_count_scene() {
+    ID3D11Texture2D* gt = g_cur_rtv_n > 0 ? g_cur_rtv0_tex : nullptr;
+    if (gt == nullptr || g_cur_dsv == nullptr) return;
+    const uint32_t c = ++g_draws_per_target[gt];
+    if (c > g_scene_live_draws) { g_scene_live_draws = c; g_scene_live_tex = gt; }
+}
 // GPU time per frame: a ring of timestamp-disjoint queries spanning Present to
 // Present, read back a few frames late so the readback never stalls.
 constexpr int k_gpuq_ring = 6;
@@ -6278,6 +6424,7 @@ static double g_acc_gpu = 0, g_acc_gpu_max = 0; static int g_acc_gpu_n = 0;
 static double g_gpu_last_ms = 0; static bool g_gpu_last_ok = false;
 static uint8_t g_gpuq_mode[k_gpuq_ring] = {}; static uint8_t g_gpu_last_mode = 0;   // (review N8) the view of each slot's frame
 static bool g_gpuq_excl[k_gpuq_ring] = {}; static bool g_gpu_last_excl = false;     // (review 2 N2) ... and whether it was excluded
+static uint8_t g_gpuq_tag[k_gpuq_ring] = {};                                        // perf-gpu: ... and the eye-2 test's tag of its frame
 // od-guard (e), the GPU canary: two timestamps back to back at the very start of the Present hook, in the same disjoint
 // query as the span, read with it (non-blocking, k_gpuq_ring - 1 frames late). WEAK evidence, a raw number (review SF3):
 // they sit in the same command stream with no flush between them, so another process's GPU work shows up only when the
@@ -6334,6 +6481,7 @@ static void gpu_timing_tick() {
             const double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
             g_acc_gpu += ms; if (ms > g_acc_gpu_max) g_acc_gpu_max = ms; g_acc_gpu_n++;
             g_gpu_last_ms = ms; g_gpu_last_ok = true; g_gpu_last_mode = g_gpuq_mode[next]; g_gpu_last_excl = g_gpuq_excl[next];
+            g_pt.add_span(g_gpuq_tag[next], ms);   // perf-gpu: the eye-2 test's windows
         }
         UINT64 c0 = 0, c1 = 0;
         if (dj_ok && g_gpuq_c_set[next] && g_ctx->GetData(g_gpuq_c0[next], &c0, sizeof(c0), D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
@@ -6344,7 +6492,7 @@ static void gpu_timing_tick() {
         }
     }
     g_gpuq_c_set[next] = false;   // the slot is reused from here: its canary is stamped at the next Present hook's start
-    g_gpuq_cur = next;
+    g_gpuq_cur = next; g_gpuq_tag[next] = g_pt_tag_next;   // (perf-gpu: the tag of the frame this slot will time)
     g_ctx->Begin(g_gpuq_disjoint[g_gpuq_cur]); g_gpuq_t0_pending = true;
 }
 // ---------------------------------------------------------------- the slow-GPU guard and its diagnostics (od-guard, 3 Nov 2026)
@@ -8014,7 +8162,7 @@ static void slow_frame(double fm, double wait_ms, double end_ms) {
     // not counted: a battle transition window, a load phase, the pick tool's slow motion, and a session that is not FOCUSED
     // (VISIBLE: the Quest or Virtual Desktop menu is over the game and the runtime throttles it by design; the 10-26 case)
     const bool focused = g_xr_want && xr_running() && xr_focused();
-    const bool excluded = g_bt_phase != BT_IDLE || pf_phase_live() || g_slowmo_ms > 0 || (g_xr_want && xr_running() && !focused);
+    const bool excluded = g_bt_phase != BT_IDLE || pf_phase_live() || g_slowmo_ms > 0 || (g_xr_want && xr_running() && !focused) || g_pt.active();   // (perf-gpu: nor the eye-2 test)
     if (g_gpuq_cur >= 0) {   // (N8) the view of the frame the slot just begun will time; (review 2 N2) excluded at its start or its end
         g_gpuq_mode[g_gpuq_cur] = mode; g_gpuq_excl[g_gpuq_cur] = excluded;
         g_gpuq_excl[(g_gpuq_cur + k_gpuq_ring - 1) % k_gpuq_ring] |= excluded;
@@ -8105,8 +8253,11 @@ static void perf_tick() {
         g_acc_frame += fm; if (fm > g_acc_max) g_acc_max = fm; g_acc_xr += g_xr_ms_this_frame; g_acc_e2 += g_e2_ms_this_frame; g_acc_n++;
         xr_timing(&w, &e); g_acc_wait += w; g_acc_end += e;
     }
+    if (!g_xr_want && (g_pt.active() || g_pt_req != 0)) pt_frame(false, "the headset is off");   // perf-gpu: xr_tick did not run the eye-2 test this Present
+    g_pt.add_cpu(g_pt_tag_cur, g_e2_ms_this_frame); g_pt_tag_cur = g_pt_tag_next;   // perf-gpu: the frame just finished (its eye-2 CPU), the next one's tag
     g_t_frame_prev = now; g_xr_ms_this_frame = 0; g_e2_ms_this_frame = 0;
     gpu_timing_tick();
+    ph_tick();                      // perf-gpu: the GPU phase timers (diag_verbose only; after xr_tick's last marker)
     { const LONGLONG cs0 = cpu_q(); slow_frame(fm, w, e); g_cpu_slow_acc += cpu_q() - cs0; }   // od-guard: the frame ring, the DLL lines, the slow-GPU guard (every Present, before the 60-frame return); cpu-lean: timed
     if (g_acc_n < 60) return;
     g_perf.frame_ms = g_acc_frame / g_acc_n; g_perf.xr_ms = g_acc_xr / g_acc_n; g_perf.frame_max_ms = g_acc_max;
@@ -8139,11 +8290,12 @@ static void perf_tick() {
         char lc_extra[96] = "";   // shadow camera: only what is not zero
         if (g_lc_tilted_total || g_lc_self_hidden_report)
             snprintf(lc_extra, sizeof(lc_extra), ", not straight down %u this session, own shadow hidden %u", g_lc_tilted_total, g_lc_self_hidden_report);
-        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; canary %.2f max %.1f, over 2 ms %u; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u | sr extras %.0f/s",
+        char ph[1600]; ph_line_part(ph, sizeof(ph));   // perf-gpu: the GPU phases over this line's window (empty with diag_verbose off)
+        diag("perf: frame %.1f ms (max %.0f; gpu %.1f max %.0f; canary %.2f max %.1f, over 2 ms %u; xr %.1f = wait %.1f + end %.1f; eye2 re-issue %.1f) | twins %u (srvs %u, swept %u) buffers %u (pruned %u) | private %llu MB, vram %llu / %llu MB | draws %u eye2 %u (same-input %u, upper bound) hidden %u hist %u | light cams %u (%s)%s | ui verts read %u, truncated %u, start!=0 %u (not read %u), base!=0 %u, skip overflow %u | sr extras %.0f/s%s",
              g_perf.frame_ms, g_perf.frame_max_ms, g_perf.gpu_ms, g_perf.gpu_max_ms, g_perf.can_ms, g_perf.can_max_ms, g_perf.can_over, g_perf.xr_ms, g_perf.wait_ms, g_perf.end_ms, g_perf.e2_ms, g_perf.twins, g_perf.twin_srvs, g_twins_swept, g_perf.buffers, g_buffers_pruned,
              (unsigned long long)g_perf.private_mb, (unsigned long long)g_perf.vram_mb, (unsigned long long)g_perf.vram_budget_mb, g_draw_in_frame_last, g_eye2_draws_report, g_e2_same_inputs_report, g_fp_hidden_draws, g_hist_draws,
              g_lc_report, g_shadow_cam == 1 ? "the game's" : "shadow_cam 0: overridden", lc_extra,
-             g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras);
+             g_ui_verts_read, g_ui_trunc, g_ui_start_nonzero, g_ui_start_bail, g_ui_base_nonzero, g_skip_overflow, g_sr_rate_extras, ph);
         if (g_end_t0 != 0 && g_end_last >= 0.0)   // fix-render (perf finding 3): the runtime's End trend, with every perf: line
             diag("xr: End trend: headset session %.1f min, extra frames' End %.2f ms (last 10 s; first 5 min %.2f ms, max this session %.2f ms)",
                  (GetTickCount64() - g_end_t0) / 60000.0, g_end_last, g_end_trend.base(), g_end_trend.max_ms);
@@ -8211,6 +8363,7 @@ extern "C" __declspec(dllexport) void ffxvr_begin_frame() {
     sweep_caches();
     twin_srv_trim();                // R12: oversized twin SRV caches are trimmed here, where none of our views is mid-bind
     bb_dead_twin_release();         // R11b: the backbuffer's sentinel / 0x599210 signals; a dead backbuffer's twin 2 frames on
+    ph_stamp(pgpu::M_PRESENT);      // perf-gpu: the phases' Present marker (the span's end)
     gpu_timing_end_span();          // GPU span of the frame just finished, closed before the runtime wait
     const LONGLONG cq2 = cpu_q(); g_cpu_wait_acc = 0;
     xr_tick();                      // submit the frame just finished, locate the head for the next one
@@ -9507,6 +9660,7 @@ extern "C" __declspec(dllexport) int ffxvr_on_draw(int which) {
     if (g_stereo_scope == 1 && (g_eye2_cur == nullptr || g_eye2_cur->kind != 1)) eye2 = false;
     if (g_stereo_scope == 2 &&  g_eye2_cur == nullptr) eye2 = false;
     if (g_slow_no_e2) eye2 = false;         // od-guard: the slow guard's screen item (this frame goes to the mono screen)
+    if (g_perf_no_e2 && eye2 && !split_ok(g_eye2_cur)) { eye2 = false; pt_count_scene(); }   // perf-gpu: the eye-2 test's off window (the hand parts' split draws keep theirs)
     if (!g_stereo) g_e2_no_stereo++;
     else if (g_eye2_cur == nullptr) g_e2_no_image++;   // UI and the like: drawn identically for eye 2
     else g_e2_ok++;
@@ -9921,6 +10075,7 @@ static void ui_pass_begin() {
     if (g_scene_resolved == nullptr || g_device == nullptr) return;
     D3D11_TEXTURE2D_DESC d; g_scene_resolved->GetDesc(&d);
     if (!ensure_copy(g_eye1_final, g_eye1_final_rtv, d) || !ensure_copy(g_eye2_final, g_eye2_final_rtv, d) || !ensure_copy(g_ui_tex, g_ui_rtv, d)) return;
+    ph_stamp(pgpu::M_UI);   // perf-gpu: the UI phase starts with the copies below
     ensure_ui_blend();   // saveui A (eye2_begin refuses a UI re-issue without it)
     ID3D11Texture2D* twin = nullptr;
     { auto it = g_twins.find(g_scene_resolved); if (it != g_twins.end()) twin = it->second.tex; }
@@ -10173,12 +10328,13 @@ extern "C" __declspec(dllexport) void ffxvr_on_resolve(void* dst_res, unsigned d
         if (g_stereo && sit != g_twins.end() && sit->second.tex != nullptr) {
             Twin* dt = twin_of(dst);
             if (dt && dt->tex) {
-                { InEye2 guard; g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt)); }
+                if (!g_perf_no_e2) { InEye2 guard; g_ctx->ResolveSubresource(dt->tex, dst_sub, sit->second.tex, src_sub, static_cast<DXGI_FORMAT>(fmt)); }   // (perf-gpu: not in the eye-2 test's off window)
                 g_resolves_mirrored++;
                 // The first resolve of the scene pass is the finished scene, in a
                 // plain (non-multisampled) texture: that is the eye image.
                 if (snap_wanted() && src == g_scene_live_tex && g_scene_live_draws >= 60 && g_snap_frame != g_frames) { snapshot_scene(dst); g_snap_by = 2; }
                 if (src == g_scene_live_tex && g_scene_live_draws >= 20) {
+                    ph_stamp(pgpu::M_POST);   // perf-gpu: the first scene resolve (after both eyes' resolves) starts the post phase
                     g_ui_resolves_frame++;
                     g_l3d.scene_resolve();   // late3d: a late 3D layer's draws end here (this resolve is the new base: the last branch below)
                     // The UI pass ends at the resolve AFTER its draws. Some areas
@@ -15288,7 +15444,7 @@ extern "C" __declspec(dllexport) int ffxvr_xr_set(int on, float scale, int rotat
     if (g_xr_want) return 1;
     if (!g_cam_valid || g_backbuffer == nullptr) return 0;   // not until the game has rendered a 3D frame (the intro is not safe); waiting is not a failure
     const ULONGLONG now = GetTickCount64(); if (now < g_xr_retry_at) return 0;   // backing off: nothing loaded, nothing logged
-    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop };
+    XrHost h = { g_device, g_ctx, g_dir, xr_diag, ffxvr_copy_pass, lr_wait_begin, lr_wait_end, sr_extra_wait_begin, sr_extra_wait_end, sr_extra_abort, vpanel_copy_crop, perf_before_end };
     g_xr_quiet = g_xr_fails >= 2; g_xr_want = xr_start(h); g_xr_quiet = false;   // the first two failed attempts log in full
     if (g_xr_want) {
         if (g_xr_fails) diag("xr: started after %u failed attempts", g_xr_fails); g_xr_started_at = now; g_xr_retry_at = 0; g_xr_recenter_pending = true;
@@ -17706,6 +17862,7 @@ static void xr_tick() {
     XrFrameOut out = {};
     g_xr_fov_applied = false;
     auto clear_imgui = [&]() { if (g_imgui_rtv) { InEye2 guard; const float clear[4] = { 0.f, 0.f, 0.f, 0.f }; g_ctx->ClearRenderTargetView(g_imgui_rtv, clear); } };
+    if (g_perf_no_e2 && e1 != nullptr) e2 = e1;    // perf-gpu: the eye-2 test's off window: rendered without eye 2's re-issue, both eyes get eye 1
     if (g_xr_drop_image) e1 = nullptr;              // Debug test: as if this frame had no eye image
     const char* bt_e1src = e1 == nullptr ? "none" : ui_frame ? "finals" : "bb";
     if (g_bt_hold && e1 != nullptr) { e1 = nullptr; bt_e1src = "held"; }   // frozen world, after the shards: the pinned last frame is re-sent over the load black
@@ -17784,6 +17941,8 @@ static void xr_tick() {
         g_screen3d_now = s3;
     }
     g_slow_no_e2 = slow_scr && screen_next && !g_screen3d_now && !bt_no_split();   // od-guard: the frame about to render goes to the mono screen: no eye 2
+    pt_frame(!screen_next && !g_screen3d_now && !bt_no_split() && xr_running(),   // perf-gpu: the eye-2 test: the frame about to render (the 3D headset view only)
+             !xr_running() ? "the OpenXR session is not running" : g_slow_active != 0 ? "the slow-GPU guard started an episode" : nullptr);
     // The stick remap angle is refreshed by the override; whenever first person is not in effect it must be
     // zero, or a stale angle from outside keeps rotating the stick (a hut after a 150-degree doorway: "no control").
     if (g_ovr_suspend || g_backdrop_room || g_fp_mode == 0 || !g_xr_active) g_move_delta = 0.f;
@@ -18766,6 +18925,24 @@ extern "C" __declspec(dllexport) void ffxvr_sr_set(int mode, float margin_ms, in
     g_sr_keepalive = keepalive != 0; g_sr_mt_want = mt_protect != 0; g_sr_gate_hooks = gate_hooks != 0;
     g_sr_inject_deg = std::isfinite(inject_deg) ? fmaxf(-10.f, fminf(10.f, inject_deg)) : 0.f;
 }
+/// perf-gpu (ABI 73): every frame from managed push_all (render thread): ini sr_skip_busy (0 off, 1 log only, 2 skip a slot while
+/// the GPU is busy) and test = 1 once when the Developer button "Measure: eye 2 off for 5 s" was pressed (the start waits for
+/// the next Present). Returns the eye-2 test's state: 0 idle, 1 before (eye 2 on), 2 eye 2 off, 3 after, 4 collecting results.
+extern "C" __declspec(dllexport) int ffxvr_perf_set(int sr_skip_busy, int test) {
+    const int m = sr_skip_busy < 0 ? 0 : sr_skip_busy > 2 ? 2 : sr_skip_busy;
+    if (m != g_srb_mode) {
+        diag("sr: sr_skip_busy=%d (%s)", m, m == 2 ? "an extra frame's slot is skipped while the GPU has not finished the last fresh frame" : m == 1 ? "log only: the sr: line counts the extras the rule would skip" : "off");
+        g_srb_mode = m; g_srb_issued = false;   // a new answer only after the next fresh frame's event
+    }
+    if (test != 0) InterlockedExchange(&g_pt_req, 1);
+    return g_pt.st;
+}
+/// perf-gpu (ABI 73): the eye-2 test's last result, refusal or state, for the Developer tab (render thread). Returns its length.
+extern "C" __declspec(dllexport) int ffxvr_perf_text(char* buf, int n) {
+    if (buf == nullptr || n <= 0) return 0;   // a 0 size would hit the CRT's invalid-parameter handler
+    _snprintf_s(buf, static_cast<size_t>(n), _TRUNCATE, "%s", g_pt.text);
+    return static_cast<int>(strlen(buf));
+}
 /// Numpad 1 / 3, every frame from managed (-1 left, 0, +1 right): integrated natively like the stick (turn_tick / turn_advance).
 extern "C" __declspec(dllexport) void ffxvr_turn_keys(int dir) {
     g_turn_key = dir < 0 ? -1.f : dir > 0 ? 1.f : 0.f;
@@ -19013,13 +19190,19 @@ static void sr_extra_wait_end(int token) {
     g_ril_acq(g_ril); g_sr_lock_held = true;
     const double ra = sr_ms() - t0; if (ra > g_sr_s.reacq_max) g_sr_s.reacq_max = ra;
 }
-/// One extra frame (render thread, the ring wait). 1 sent, 0 the game's lock is busy (retry), -1 nothing could be sent.
+/// One extra frame (render thread, the ring wait). 1 sent, 0 the game's lock is busy (retry), -1 nothing could be sent, 2 the
+/// slot is skipped because the GPU has not finished the last fresh frame (perf-gpu: sr_skip_busy=2).
 static int sr_extra_inner(double t0) {
     PhyreRil* L = g_ril; const DWORD me = GetCurrentThreadId();
     if (L->owner == me) return -1;                                 // never expected between lists
     if (InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&L->owner), static_cast<LONG>(me), 0) != 0) return 0;   // the game's protocol (0x431850): owner 0 -> us, then the count
     L->count = L->count + 1;                                       // 0 -> 1 (only the owner writes it)
     g_sr_lock_held = true; g_sr_lock_t0 = sr_ms();
+    // perf-gpu (sr_skip_busy): has the GPU finished the last fresh frame's work (its event query, asked with the game's lock held
+    // and never waited for)? VDXR orders this extra's xrEndFrame behind it (perf-investigation.md 3): 2 skips the slot instead.
+    const int busy = srb_busy();
+    pgpu::gate_count(g_srb_s, g_srb_mode, busy);
+    if (pgpu::gate_decide(g_srb_mode, busy) == pgpu::G_SKIP) { g_ril_rel(L); g_sr_lock_held = false; return 2; }
     const bool gate_over = g_sr_gate != 0;
     if (g_sr_mode > 0 && g_sr_pace.skip_k > 0 && g_sr_pace.P > 0.5)   // slots were skipped: this extra is shown that many periods after its frame's display time
         turn_advance(g_sr_pace.T + static_cast<int64_t>(g_sr_pace.skip_k * g_sr_pace.P * 1e6), true);
@@ -19035,7 +19218,7 @@ static int sr_extra_inner(double t0) {
         const double hold = (t1 - g_sr_lock_t0) - out.wait_ms;
         if (hold >= 0.0) { g_sr_s.hold_sum += hold; if (hold > g_sr_s.hold_max) g_sr_s.hold_max = hold; }
     }
-    g_sr_x_t0 = t0; g_sr_x_t1 = t1;
+    g_sr_x_t0 = t0; g_sr_x_t1 = t1; g_sr_x_busy = busy;   // (perf-gpu: the list start delay split by the gate's answer)
     if (!ran) return -1;
     g_sr_episode = true;
     sr_note_begin(out);
@@ -19050,6 +19233,7 @@ static int sr_extra_inner(double t0) {
     const double cpu = (t1 - t0) - out.wait_ms;
     S.cpu_sum += cpu; if (cpu > S.cpu_max) S.cpu_max = cpu;
     S.end_sum += out.end_ms; S.wait_sum += out.wait_ms; S.loc_sum += out.locate_ms; g_sr_last_end_ms = out.end_ms; g_sr_last_wait_ms = out.wait_ms;
+    pgpu::gate_end(g_srb_s, busy, out.end_ms);   // perf-gpu: this extra's xrEndFrame by the gate's answer before it
     if (rot.on) { const double a = fabs(deg); S.yaw_sum += a; if (a > S.yaw_max) S.yaw_max = a; if (a > 0.01) S.rot++; if (a > g_sr_ep_yaw_max) g_sr_ep_yaw_max = a; }
     if (clamped || g_turn_frozen) { if (clamped) S.clamped++; g_sr_ep_frozen = true; }
     if (gate_over) S.gate_over++;
@@ -19081,7 +19265,7 @@ static void rw_list(double now) {
         const double km = sr_qpc_to_ms(kq);
         if (km <= g_sr_x_t1) {
             const double dl = now - fmax(km, g_sr_x_t0);
-            if (dl >= 0.0 && dl < 1000.0) { g_sr_s.delay_sum += dl; g_sr_s.delay_n++; if (dl > g_sr_s.delay_max) g_sr_s.delay_max = dl; }
+            if (dl >= 0.0 && dl < 1000.0) { g_sr_s.delay_sum += dl; g_sr_s.delay_n++; if (dl > g_sr_s.delay_max) g_sr_s.delay_max = dl; pgpu::gate_delay(g_srb_s, g_sr_x_busy, dl); }
         }
     }
     g_sr_x_t1 = 0.0;
@@ -19160,6 +19344,7 @@ static int __fastcall rt_ring_wait(void* ev) {
                 const int r = sr_extra(now);
                 if (r == 0) { blocked = 3; due = now + 0.5; }                                              // the game's lock is busy (a try, never a wait): again shortly
                 else if (r < 0) break;                                                                       // nothing could be sent
+                else if (r == 2) { blocked = 0; g_sr_pace.skip_k++; continue; }                              // perf-gpu: the GPU is still busy (sr_skip_busy=2): the slot is the runtime's
                 else {                                                                                       // sent: on to the next slot
                     // SR-R-1: an extra waits (its xrWaitFrame, the lock re-take), so it ends a spin run; the cap only bounds
                     // the skip and mid-frame paths, the only ones that loop without waiting. A slow extra is logged on its own.
@@ -19256,18 +19441,19 @@ static void sr_present() {
         const bool why_changed = strcmp(why, s_sr_why) != 0;
         if (why_changed) strncpy_s(s_sr_why, why, _TRUNCATE);
         const bool log_it = g_log_verbose || ++s_sr_windows == 2 || why_changed;
+        char gate[512]; pgpu::gate_text(gate, sizeof(gate), g_srb_s, g_srb_mode);   // perf-gpu: the busy-GPU gate's counts (sr_skip_busy)
         if (log_it) diag("sr: %.0f s | mode %d%s%s | period %.2f ms (%.1f Hz)%s | slots %u: fresh %u (late %u), extras %u = %.1f/s (predictive %u, zero-layer %u, failed %u), skipped %u (by us %u: past the deadline, mid-frame %u) | "
              "yaw per extra avg %.2f max %.2f deg (rotating %u%%, clamped %u) | extra cpu avg %.2f max %.2f ms (end %.2f, wait %.2f, begin+locate %.2f), lock busy %u, re-acquire max %.1f ms, gate skips %u (overridden %u) | "
-             "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s",
+             "list start delay avg %.2f max %.2f ms (%u lists) | Present wait avg %.2f max %.1f ms (lock held), extra lock hold avg %.2f max %.2f ms | c_est %.1f ms (first list; last list %.1f) | phase jitter %.2f ms | photon latency %.1f ms | spins %u, slow extras %u (max %.1f ms) | copies 0%s%s%s",
              secs, g_sr_mode, g_sr_keepalive ? " + keepalive" : "", *why ? " (NOT ACTIVE)" : "", pm, pm > 0.0 ? 1000.0 / pm : 0.0, half ? ", half rate: VD spacewarp (SSW) active" : "",
              S.fresh + S.extras + S.skipped, S.fresh, S.late, S.extras, S.extras / secs, S.predictive, S.zero, S.fails, S.skipped, S.skip_ours, S.mid_skips,
              S.rot ? S.yaw_sum / S.rot : 0.0, S.yaw_max, S.extras ? (100u * S.rot) / S.extras : 0u, S.clamped,
              S.cpu_sum / ne, S.cpu_max, S.end_sum / ne, S.wait_sum / ne, S.loc_sum / ne, S.lock_busy, S.reacq_max, S.gate_skips, S.gate_over,
              S.delay_n ? S.delay_sum / S.delay_n : 0.0, S.delay_max, S.delay_n, S.pw_n ? S.pw_sum / S.pw_n : 0.0, S.pw_max, S.hold_sum / ne, S.hold_max,
              g_sr_c_est, g_sr_c_last, S.jit_n ? S.jit_sum / S.jit_n : 0.0, S.lat_n ? S.lat_sum / S.lat_n : 0.0, S.spins, S.slow, S.slow_max,
-             *why ? " | not active: " : "", why);
+             *why ? " | not active: " : "", why, gate);
     }
-    g_sr_s = SrStats{};
+    g_sr_s = SrStats{}; g_srb_s = pgpu::GateStats{};   // (perf-gpu: the gate's counts too)
 }
 /// The overlay's line (render thread): 1 while the extra frames run.
 extern "C" __declspec(dllexport) int ffxvr_sr_status(char* buf, int n) {
