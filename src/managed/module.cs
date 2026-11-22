@@ -2018,6 +2018,7 @@ public sealed unsafe partial class FFXVRModule : FhModule {   // partial: the bu
             _xr_want_prev = _xr_want;
         }
         if (_xr_want) { _ovr_enabled = true; _stereo_on = true; }
+        crash_fce_window(_xr_want && !_xr_on);   // crash-1440 (review S2): the first-chance log's own budget around the headset start (crash_log.cs)
         // xr_set first: on the untick frame native clears g_xr_want before the override and eye 2 are pushed (it ORs
         // g_xr_want into both), so the next frame is already flat; and _xr_on is current for the hide rules below.
         if (_fn_xr_set != null) _xr_on = _fn_xr_set(_xr_want ? 1 : 0, _xr_scale, _xr_rotate ? 1 : 0, _xr_translate ? 1 : 0, _xr_fov ? 1 : 0, _xr_seat ? 1 : 0) != 0;

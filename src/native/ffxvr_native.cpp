@@ -9872,14 +9872,23 @@ static void crash_line(const char* fmt, ...) {
     char buf[1536]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     SYSTEMTIME t; GetLocalTime(&t);
     char stamp[16]; snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03u ", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-    for (int k = 0; k < 50; ++k) {   // at most ~50 ms
+    // Bounded by elapsed time, not by tries (review N2: Sleep(1) is 15.6 ms at the default timer resolution, and diag_open_ex
+    // waits a little itself off the render thread): about 50 ms, plus at most one last try.
+    LARGE_INTEGER qf, q0, q1; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+    for (;;) {
         bool drop = false; FILE* f = diag_open_ex(&drop);
         if (f != nullptr) { diag_put_lines(f, buf, stamp); diag_close(f); return; }
         if (drop && g_log_state != 1) return;   // the session cap: nothing is written any more
+        QueryPerformanceCounter(&q1);
+        if (qf.QuadPart <= 0 || (q1.QuadPart - q0.QuadPart) * 1000 >= 50 * qf.QuadPart) return;
         Sleep(1);
     }
 }
-/// The calling thread's return addresses as module+offset (the module's file name), for a crash line.
+/// The calling thread's return addresses as module+offset (the module's file name), for a crash line. On x86 the walk
+/// follows the EBP chain (bounds-checked: it cannot fault) and can be PARTIAL: frames built without a frame pointer (the game,
+/// parts of the CRT, the loader) may be skipped or end it early, so a short stack is not evidence of a short call chain
+/// (review N4). The module lookup takes the loader's lock: a fatal path while another thread holds it and waits on this one
+/// would hang instead of ending (review N3; rare, accepted: raw addresses alone would be much harder to read).
 static void crash_stack(const char* what) {
     void* fr[20] = {}; const USHORT n = RtlCaptureStackBackTrace(1, 20, fr, nullptr);
     char line[1200]; int p = snprintf(line, sizeof(line), "crash: %s: thread %lu, stack", what, static_cast<unsigned long>(GetCurrentThreadId()));
@@ -9894,7 +9903,9 @@ static void crash_stack(const char* what) {
     }
     crash_line("%s", line);
 }
-static volatile LONG g_crash_said = 0;   // the first fatal path logs; abort() after std::terminate does not repeat it
+static volatile LONG g_crash_said = 0;   // the first fatal path logs; abort() after std::terminate does not repeat it. Two fatal
+                                         // paths at once on two threads: the second skips the line and ends the process, possibly
+                                         // while the first is still writing (review N5: accepted)
 static void crash_say(const char* what) { if (InterlockedExchange(&g_crash_said, 1) == 0) crash_stack(what); }
 static void __cdecl crash_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
     crash_say("a CRT call in ffxvr_native.dll got an invalid parameter (a *_s buffer too small, a bad handle or format string); the process ends with 0xC0000409 as before");
@@ -9907,7 +9918,8 @@ static void __cdecl crash_sigabrt(int) { crash_say("abort() in ffxvr_native.dll"
 static void crash_hooks_install() {
     static bool done = false; if (done) return; done = true;
     _set_invalid_parameter_handler(crash_invalid_parameter);
-    std::set_terminate(crash_terminate);
+    std::set_terminate(crash_terminate);   // review N1: per thread in this CRT (this one, ffxvr_init's); elsewhere terminate reaches
+                                           // abort() and the SIGABRT hook logs it as "abort()" instead: nothing is lost
     _set_purecall_handler(crash_purecall);
     signal(SIGABRT, crash_sigabrt);
     diag("crash: this DLL's fatal CRT paths (invalid parameter, terminate, abort, pure call) now log a crash: line with the stack before the process ends");
@@ -15532,12 +15544,25 @@ static void xr_start_note() {
     const bool have_mon = mon != nullptr && GetMonitorInfoW(mon, &mi);
     DEVMODEW cur = {}; cur.dmSize = sizeof(cur);
     const bool have_cur = have_mon && EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &cur);
-    unsigned modes = 0; bool listed = false;   // the game's size at 32 bits per pixel, as its mode change asks for it
+    // The game's size at 32 bits per pixel, as its mode change asks for it. The mode list once a session per display and size
+    // (review N6: EnumDisplaySettings(0) makes the driver rebuild its list, tens of ms on the render thread).
+    static wchar_t s_dev[32] = L""; static unsigned s_w = 0, s_h = 0, s_modes = 0; static bool s_listed = false, s_have = false;
+    unsigned modes = 0; bool listed = false;
     if (have_mon) {
-        DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
-        for (DWORD i = 0; i < 4096 && EnumDisplaySettingsW(mi.szDevice, i, &dm); ++i, ++modes)
-            if (dm.dmPelsWidth == bd.Width && dm.dmPelsHeight == bd.Height && dm.dmBitsPerPel == 32) listed = true;
+        if (!s_have || s_w != bd.Width || s_h != bd.Height || wcsncmp(s_dev, mi.szDevice, 32) != 0) {
+            DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
+            s_modes = 0; s_listed = false;
+            for (DWORD i = 0; i < 4096 && EnumDisplaySettingsW(mi.szDevice, i, &dm); ++i, ++s_modes)
+                if (dm.dmPelsWidth == bd.Width && dm.dmPelsHeight == bd.Height && dm.dmBitsPerPel == 32) s_listed = true;
+            s_w = bd.Width; s_h = bd.Height; wcsncpy_s(s_dev, mi.szDevice, _TRUNCATE); s_have = true;
+        }
+        modes = s_modes; listed = s_listed;
     }
+    // Only SM_FULLSCREEN changes the display mode (review S1): borderless and window show any size up to the desktop's, so an
+    // unlisted size is no warning there (the profile tools\game-settings.ps1 -Profile vr writes on purpose).
+    const bool mode_change = !have_sm || sm == 1;
+    const char* lst = !have_mon ? "not checked" : listed ? "listed" : mode_change ? "NOT listed"
+                    : sm == 2 ? "not listed; no mode change needed: borderless" : "not listed; no mode change needed: window";
     static const char* const k_sm[3] = { "SM_WINDOW", "SM_FULLSCREEN", "SM_BORDERLESS" };
     crash_line("xr: start attempt %u: the game renders %ux%u fmt %u, scene MSAA %ux (last targets %ux%u, %u made); GameSetting %s %ux%u; window %ldx%ld at (%ld,%ld), client %ldx%ld, %s; display %ls %lux%lu @ %lu Hz (%u modes, %ux%u %s)",
                g_xr_fails + 1, bd.Width, bd.Height, static_cast<unsigned>(bd.Format), g_msaa_last_n, g_msaa_last_w, g_msaa_last_h, g_msaa_seen,
@@ -15545,8 +15570,8 @@ static void xr_start_note() {
                wr.right - wr.left, wr.bottom - wr.top, wr.left, wr.top, cr.right - cr.left, cr.bottom - cr.top,
                !hw ? "not found" : GetForegroundWindow() == hw ? "in the foreground" : "NOT in the foreground",
                have_mon ? mi.szDevice : L"?", have_cur ? cur.dmPelsWidth : 0ul, have_cur ? cur.dmPelsHeight : 0ul, have_cur ? cur.dmDisplayFrequency : 0ul,
-               modes, bd.Width, bd.Height, !have_mon ? "not checked" : listed ? "listed" : "NOT listed");
-    if (have_mon && !listed && !g_xr_mode_said) {
+               modes, bd.Width, bd.Height, lst);
+    if (have_mon && !listed && mode_change && !g_xr_mode_said) {
         g_xr_mode_said = true;
         crash_line("resolution: the game's %ux%u is not a mode of %ls (desktop %lux%lu)%s; crash-1440: the headset start crashed (0xC0000409) at 2560x1440 on a 4K monitor in this state. "
                    "Use a listed size, or ScreenMode=SM_BORDERLESS for any size (tools\\game-settings.ps1 -Profile vr does that)",

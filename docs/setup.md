@@ -168,7 +168,18 @@ settings to try, in this order, one at a time:
        powershell -ExecutionPolicy Bypass -File .\tools\game-settings.ps1 -Profile vr
 
    It edits `GameSetting.ini` in Documents (a backup is made the first time;
-   `-Profile flat` restores it). If you miss the 4K sharpness, use
+   `-Profile flat` restores it, ScreenMode included). **On a monitor larger than
+   2560x1440 it also writes `ScreenMode=SM_BORDERLESS`** (crash-1440): the game is
+   then a 2560x1440 window in the top-left corner of the desktop, not full screen,
+   and the display mode never changes. That is expected; the headset is unaffected.
+   SM_FULLSCREEN is a display mode change to exactly that size, and a size the
+   monitor does not list crashed the headset start (0xC0000409, 22 Nov, a 4K monitor
+   whose launcher lists only 1920x1080 and 3840x2160). The script prints the 16:9
+   fullscreen sizes your display lists and the ScreenMode it chose; `-ScreenMode
+   auto|fullscreen|borderless|window` picks it (default `auto`: the desktop's own size
+   keeps yours, any other size is borderless), and `-ScreenMode fullscreen` is refused
+   for an unlisted size unless `-Force`. A size larger than the desktop is refused for
+   borderless or window. A refusal writes nothing. If you miss the 4K sharpness, use
    `-Width 2880 -Height 1620` (or 3200x1800). Check in F8 (hover the frame / GPU
    line at the top) that the text says `game renders 2560x1440`: if it still says 3840x2160, this launch path does
    not read `Resolution=` (as it ignores `MSAA=`), so set it in the game's
@@ -216,10 +227,9 @@ the busy-GPU gate"):
   against those sent with it done); 2 skips that slot instead of blocking the render thread in
   xrEndFrame (the runtime repeats the last frame there).
 
-For a settings comparison stay at 3840x2160 and change the mod's anti-aliasing (F8 > View >
-Graphics & performance > Anti-aliasing 4x, then 2x; `msaa`): on 22 Nov the game crashed to the
-desktop (0xC0000409) as the mod switched to VR at 2560x1440 on a PC whose launcher lists only
-1920x1080 and 3840x2160. Until the `-Profile vr` resolution is fixed, step 1 above is not safe there.
+For a settings comparison at 4K, change the mod's anti-aliasing (F8 > View > Graphics &
+performance > Anti-aliasing 4x, then 2x; `msaa`) and run the eye-2 test once at each. The game's
+render size is step 1 above (borderless 2560x1440 on a larger monitor).
 
 ## Settings (ffxvr.ini)
 

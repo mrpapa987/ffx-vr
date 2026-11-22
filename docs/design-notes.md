@@ -8091,13 +8091,51 @@ in `ffxvr_native.cpp`) is compiled by `perf_chk` against a mock D3D11 context, n
   "by us" breakdown as "busy GPU". The event sits right before our xrEndFrame, so "done" does not cover VDXR's own work
   for the fresh frame, Fahrenheit's ImGui or the Present: an extra in the "done" bucket can still wait briefly behind
   those, which blurs the "well under 1 ms" a little (there is no later point to issue it without taking the lock).
-- **Not in this build: the launch script's VR resolution** (the investigation's code item 3, `run-ffx.ps1` applying
-  `game-settings.ps1 -Profile vr` for each run). The owner's game crashed to the desktop (0xC0000409) as the mod switched
-  to VR with that profile's 2560x1440, twice, while 4K / 8x works; his launcher lists only 1920x1080 and 3840x2160, so
-  2560x1440 is likely not a mode his display offers in exclusive fullscreen. The profile is being fixed separately;
-  `run-ffx.ps1` and `game-settings.ps1` are unchanged here, and the settings comparison uses 4K with the mod's `msaa`.
+- **The launch script's VR resolution** (the investigation's code item 3, `run-ffx.ps1` applying `game-settings.ps1
+  -Profile vr` per run) is not built: `run-ffx.ps1` is unchanged. The owner's game crashed (0xC0000409) at the headset
+  start with that profile's 2560x1440 in SM_FULLSCREEN, a size his 4K monitor does not list; `-Profile vr` now writes
+  SM_BORDERLESS for such a size (crash-1440, the next section), and the owner applies it by hand for now.
 - **ABI 73**: + `ffxvr_perf_set(sr_skip_busy, test)` (returns the test's state), `ffxvr_perf_text(buf, n)`; managed
   `perf_gpu.cs` binds both. `XrHost` gained `before_end` (an internal struct, no export).
 - **Not verified**: anything on Windows: the build, the queries on the owner's driver, the test's look in the headset,
   the PowerShell on 5.1. Unverified assumption: VDXR's xrBeginFrame / xrEndFrame do not reorder our timestamps (they
   are on the same immediate context, in submission order).
+
+## The headset-start crash at 2560x1440: last words, the start note, a borderless VR profile (branch `crash-1440`, 22 Nov 2026; ABI 73 kept)
+
+The owner's game exited with 0xC0000409 and no dump the moment the mod started the headset, twice, with
+`game-settings.ps1 -Profile vr` (2560x1440, SM_FULLSCREEN, 4x); 4K / 8x works. His 4K monitor (the launcher lists only
+1920x1080 and 3840x2160) has no 2560x1440 mode. The game's SM_FULLSCREEN is `ChangeDisplaySettings(CDS_FULLSCREEN)` to
+exactly that size, at window creation and at every `WM_ACTIVATE`, over a windowed swap chain, its result ignored; so the
+game ran as a 2560x1440 popup over a 4K desktop with a failed mode change. Fahrenheit's stage 0 dumps every first-chance
+exception above 0xC0000000, so "no dump" means a fail-fast that raises none (the CRT's invalid-parameter handler, abort,
+/GS, a pure call, .NET FailFast). The cause is not proven; the top suspect is a fail-fast in third-party code (the OpenXR
+loader, the runtime, an API layer, a focus change) in that display state. Not MSAA. Merged into `perf-crash` on top of
+perf-gpu; nothing here changes how the game renders.
+
+- **Last words** (`ffxvr_native.cpp`, `crash_hooks_install` at `ffxvr_init`): the invalid-parameter, terminate, pure-call
+  and SIGABRT handlers of this DLL's static CRT each write one `crash: ... stack <module+offset>` line, then end the
+  process as before. `crash_line` writes even while the log is busy, retrying for about 50 ms (by elapsed time). The x86
+  stack walk is bounds-checked but can be partial; `std::set_terminate` holds for `ffxvr_init`'s thread (elsewhere the
+  SIGABRT hook logs it as abort); the module lookup takes the loader's lock (a fatal path while another thread holds it
+  would hang: rare, accepted); two fatal paths at once log only the first.
+- **The start note** (`xr_start_note`, before each `xr_start` attempt that logs): `xr: start attempt N:` the game's render
+  size and format, the scene MSAA, GameSetting's ScreenMode and Resolution (read from the game's `g_Settings` after
+  `range_readable`), the window, the foreground, the display and whether the size is in its mode list (enumerated once a
+  session per display and size). The one-time `resolution: ... is not a mode of ...` line only for SM_FULLSCREEN (or an
+  unreadable ScreenMode): borderless and window need no mode change, and the note says so. `ffxvr_xr.cpp` writes
+  breadcrumbs `xr: start: step 1/2/3` (the loader, the extension list, `xrCreateInstance`): the last one in a log is
+  where it died.
+- **Managed** (`crash_log.cs`): `AppDomain.UnhandledException` and first-chance exceptions. First-chance has two budgets:
+  20 distinct sites a session, and 20 more in each headset start window (from the frame the headset is asked for until
+  30 s after the session runs), so harmless exceptions earlier cannot use up the lines the start needs. Outside a window a
+  (type, HResult) pair seen 8 times returns before anything is formatted. Whether .NET raises UnhandledException for an
+  exception escaping an UnmanagedCallersOnly callback is not verified; the first-chance line covers that case. The module
+  log gets multi-line text unstamped, `ffxvr_diag.log` stamps every line.
+- **`game-settings.ps1 -Profile vr`**: `-ScreenMode auto|fullscreen|borderless|window` (default auto: the desktop's own size
+  keeps the ScreenMode, any other size is SM_BORDERLESS), `-Force`. It reads the primary display's 32-bit modes
+  (`EnumDisplaySettings`); SM_FULLSCREEN at an unlisted size is refused without `-Force`, a size over the desktop's is
+  refused for borderless and window; a refusal writes nothing, not even the backup. Borderless puts the game's WxH
+  window at the desktop's top left (the game is DPI-aware: physical pixels), no mode change ever, and the swap chain
+  follows the client area; the headset is unaffected.
+- **Not verified**: the cause itself; the hooks on Windows; the script on PowerShell 5.1 (read only).

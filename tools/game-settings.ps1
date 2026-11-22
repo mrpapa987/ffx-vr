@@ -115,7 +115,7 @@ else {
         Write-Warning "$size is larger than the desktop ($($disp.Width)x$($disp.Height)): the game's window would run off the screen. Nothing written."
         exit 1
     }
-    if ($ScreenMode -eq 'auto' -and $want -ne $have) { Write-Host "ScreenMode: $size is not the desktop's size, so SM_BORDERLESS (no display mode change; the game's window at the top left of the desktop)" }
+    if ($ScreenMode -eq 'auto' -and $want -ne $have -and -not $atDesktop) { Write-Host "ScreenMode: $size is not the desktop's size, so SM_BORDERLESS (no display mode change; the game's window at the top left of the desktop)" }
 
     if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $ini -Destination $bak; Write-Host "Backed up original to $bak" }
     # A key that is not in the file is not added (its format is the game's); say so, so a missing key cannot pass silently

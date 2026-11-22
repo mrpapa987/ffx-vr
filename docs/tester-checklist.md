@@ -173,8 +173,11 @@ frames N/s`, `dropped (slots repeated) N/s` and `fresh frames late N%`, in three
 
 With each: the view you were in, and the headset refresh rate. If the header shows an amber "Over the knee" warning,
 or the picture is blurry and the header says "Game renders at ..., below the headset's per-eye ...", note that too.
-If it struggles, try `powershell -ExecutionPolicy Bypass -File .\tools\game-settings.ps1 -Profile vr` (2560x1440
-instead of 4K; `-Profile flat` puts your own setting back) and record the same three lines again.
+If it struggles, try `powershell -ExecutionPolicy Bypass -File .\tools\game-settings.ps1 -Profile vr` with the game
+and its launcher closed (2560x1440 instead of 4K; `-Profile flat` puts your own settings back) and record the same three
+lines again. On a monitor bigger than 2560x1440 that profile runs the game **borderless**: on the monitor the game is a
+2560x1440 window in the top-left corner of the desktop, not full screen. That is expected (the headset is unaffected);
+the script prints the ScreenMode it chose, and it refuses a fullscreen size your monitor does not list.
 
 ## What to send back, and how
 
